@@ -15,47 +15,69 @@ pub struct FragSample {
     pub is_sync: bool,
 }
 
-/// Build one complete `moof` + `mdat` fragment.
-pub fn fragment(sequence: u32, base_decode_time: u64, samples: &[FragSample]) -> Vec<u8> {
-    // The trun data_offset (moof start → first mdat payload byte) depends on
-    // the moof's own size, so build the moof once with a placeholder, then
-    // rebuild with the real value — its size doesn't change.
-    let moof = build_moof(sequence, base_decode_time, samples, 0);
-    let data_offset = (moof.len() + 8) as i32; // + mdat header
-    let moof = build_moof(sequence, base_decode_time, samples, data_offset);
+/// One track's slice of a fragment.
+#[derive(Debug)]
+pub struct TrackRun<'a> {
+    pub track_id: u32,
+    /// In this track's timescale ticks.
+    pub base_decode_time: u64,
+    pub samples: &'a [FragSample],
+}
+
+/// One `moof` with a `traf` per run, plus one shared `mdat` holding all
+/// runs' samples in run order.
+pub fn fragment_multi(sequence: u32, runs: &[TrackRun<'_>]) -> Vec<u8> {
+    // Two-pass: data offsets depend on the moof's size, which is stable.
+    let zeros = vec![0i32; runs.len()];
+    let moof = build_moof_multi(sequence, runs, &zeros);
+    let mut offsets = Vec::with_capacity(runs.len());
+    let mut acc = (moof.len() + 8) as i32; // + mdat header
+    for r in runs {
+        offsets.push(acc);
+        acc += r.samples.iter().map(|s| s.data.len()).sum::<usize>() as i32;
+    }
+    let moof = build_moof_multi(sequence, runs, &offsets);
 
     let mut mdat_payload = Vec::new();
-    for s in samples {
-        mdat_payload.extend_from_slice(&s.data);
+    for r in runs {
+        for s in r.samples {
+            mdat_payload.extend_from_slice(&s.data);
+        }
     }
     let mut out = moof;
     out.extend(mp4_box(*b"mdat", mdat_payload));
     out
 }
 
-fn build_moof(
-    sequence: u32,
-    base_decode_time: u64,
-    samples: &[FragSample],
-    data_offset: i32,
-) -> Vec<u8> {
+/// Single-track fragment (track 1) — the original API.
+pub fn fragment(sequence: u32, base_decode_time: u64, samples: &[FragSample]) -> Vec<u8> {
+    fragment_multi(sequence, &[TrackRun { track_id: 1, base_decode_time, samples }])
+}
+
+fn build_moof_multi(sequence: u32, runs: &[TrackRun<'_>], data_offsets: &[i32]) -> Vec<u8> {
     let mut mfhd_p = Payload::new();
     mfhd_p.u32(sequence);
-    let mfhd = full_box(*b"mfhd", 0, 0, mfhd_p.into_vec());
+    let mut moof = full_box(*b"mfhd", 0, 0, mfhd_p.into_vec());
+    for (run, &off) in runs.iter().zip(data_offsets) {
+        moof.extend(traf(run, off));
+    }
+    mp4_box(*b"moof", moof)
+}
 
+fn traf(run: &TrackRun<'_>, data_offset: i32) -> Vec<u8> {
     let mut tfhd_p = Payload::new();
-    tfhd_p.u32(1); // track_ID
+    tfhd_p.u32(run.track_id);
     let tfhd = full_box(*b"tfhd", 0, 0x020000, tfhd_p.into_vec()); // default-base-is-moof
 
     let mut tfdt_p = Payload::new();
-    tfdt_p.u64(base_decode_time);
+    tfdt_p.u64(run.base_decode_time);
     let tfdt = full_box(*b"tfdt", 1, 0, tfdt_p.into_vec());
 
     // flags: data-offset(0x1) | sample-duration(0x100) | sample-size(0x200)
     //        | sample-flags(0x400)
     let mut trun_p = Payload::new();
-    trun_p.u32(samples.len() as u32).i32(data_offset);
-    for s in samples {
+    trun_p.u32(run.samples.len() as u32).i32(data_offset);
+    for s in run.samples {
         trun_p.u32(s.duration).u32(s.data.len() as u32).u32(if s.is_sync {
             FLAG_SYNC
         } else {
@@ -64,14 +86,10 @@ fn build_moof(
     }
     let trun = full_box(*b"trun", 0, 0x000701, trun_p.into_vec());
 
-    let mut traf = tfhd;
-    traf.extend(tfdt);
-    traf.extend(trun);
-    let traf = mp4_box(*b"traf", traf);
-
-    let mut moof = mfhd;
-    moof.extend(traf);
-    mp4_box(*b"moof", moof)
+    let mut t = tfhd;
+    t.extend(tfdt);
+    t.extend(trun);
+    mp4_box(*b"traf", t)
 }
 
 #[cfg(test)]
@@ -112,6 +130,34 @@ mod tests {
             i32::from_be_bytes(buf[p + 8..p + 12].try_into().unwrap()) as u64;
         // default-base-is-moof: offset is relative to moof start (= 0 here).
         assert_eq!(&buf[data_offset as usize..data_offset as usize + 8], b"KEYFRAME");
+    }
+
+    #[test]
+    fn multi_track_fragment_has_one_traf_per_track() {
+        let video = samples();
+        let audio =
+            vec![FragSample { data: b"OPUSPKT1".to_vec(), duration: 960, is_sync: true }];
+        let runs = [
+            TrackRun { track_id: 1, base_decode_time: 0, samples: &video },
+            TrackRun { track_id: 2, base_decode_time: 0, samples: &audio },
+        ];
+        let buf = fragment_multi(9, &runs);
+        let boxes = walk(&buf);
+        let kids = children(&buf, &boxes[0]);
+        let trafs: Vec<_> = kids.iter().filter(|b| &b.fourcc == b"traf").collect();
+        assert_eq!(trafs.len(), 2);
+
+        // Each traf's trun data_offset points at that track's first byte
+        // within the shared mdat.
+        for (traf, expected) in
+            trafs.iter().zip([b"KEYFRAME".as_slice(), b"OPUSPKT1".as_slice()])
+        {
+            let tk = children(&buf, traf);
+            let trun = find(&tk, b"trun").unwrap();
+            let p = trun.payload_offset as usize;
+            let off = i32::from_be_bytes(buf[p + 8..p + 12].try_into().unwrap()) as usize;
+            assert_eq!(&buf[off..off + expected.len()], expected);
+        }
     }
 
     #[test]
