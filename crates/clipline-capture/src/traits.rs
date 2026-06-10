@@ -1,4 +1,4 @@
-use clipline_mp4::VideoTrackConfig;
+use clipline_mp4::{AudioTrackConfig, VideoTrackConfig};
 
 /// One captured video frame. Platform implementations keep pixels on the
 /// GPU (ddoc §3: frames stay as GPU textures); the pipeline only needs
@@ -48,4 +48,22 @@ pub trait Encoder {
     fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError>;
     /// Track parameters for muxing the produced stream.
     fn track_config(&self) -> VideoTrackConfig;
+}
+
+/// One encoded audio packet (e.g. a 20 ms Opus frame).
+#[derive(Debug, Clone)]
+pub struct AudioPacket {
+    pub data: Vec<u8>,
+    /// Seconds since capture start, same timebase as video frames.
+    pub pts_s: f64,
+    pub duration_s: f64,
+}
+
+/// An encoded-audio producer (ddoc §10: WASAPI loopback / per-process /
+/// mic, each composed with an Opus encoder behind this trait). Drain
+/// model: return every packet that ends at or before `until_pts_s`.
+pub trait AudioSource {
+    fn poll_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError>;
+    /// Track parameters for muxing this source's stream.
+    fn track_config(&self) -> AudioTrackConfig;
 }

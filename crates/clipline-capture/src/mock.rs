@@ -1,7 +1,8 @@
-use clipline_mp4::VideoTrackConfig;
+use clipline_mp4::{AudioTrackConfig, VideoTrackConfig};
 
 use crate::traits::{
-    CaptureEngine, CaptureError, EncodeError, EncodedPacket, Encoder, Frame, FrameData,
+    AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket,
+    Encoder, Frame, FrameData,
 };
 
 /// Deterministic frame source: `total` frames at `fps`.
@@ -68,6 +69,41 @@ impl Encoder for MockEncoder {
     }
 }
 
+/// Deterministic audio source: fixed-size packets every `packet_ms`.
+pub struct MockAudioSource {
+    sample_rate: u32,
+    packet_ms: u32,
+    next_index: u64,
+}
+
+impl MockAudioSource {
+    pub fn new(sample_rate: u32, packet_ms: u32) -> Self {
+        Self { sample_rate, packet_ms, next_index: 0 }
+    }
+}
+
+impl AudioSource for MockAudioSource {
+    fn poll_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
+        let dur = self.packet_ms as f64 / 1000.0;
+        let mut out = Vec::new();
+        loop {
+            let pts = self.next_index as f64 * dur;
+            if pts + dur > until_pts_s + 1e-9 {
+                break;
+            }
+            let mut data = format!("P{:05}", self.next_index).into_bytes();
+            data.resize(40, 0xAA);
+            out.push(AudioPacket { data, pts_s: pts, duration_s: dur });
+            self.next_index += 1;
+        }
+        Ok(out)
+    }
+
+    fn track_config(&self) -> AudioTrackConfig {
+        AudioTrackConfig { channels: 2, sample_rate: self.sample_rate, pre_skip: 312 }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +151,31 @@ mod tests {
         assert!(cfg.timescale > 0);
         assert!(!cfg.sps.is_empty());
         assert!(!cfg.pps.is_empty());
+    }
+
+    #[test]
+    fn mock_audio_source_drains_packets_up_to_pts() {
+        use crate::traits::AudioSource;
+        let mut src = MockAudioSource::new(48_000, 20);
+        // Packets are 20 ms; "up to 0.05 s" = the two ending at 0.02/0.04.
+        let batch = src.poll_packets(0.05).unwrap();
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].pts_s, 0.0);
+        assert!((batch[1].pts_s - 0.02).abs() < 1e-9);
+        assert!((batch[0].duration_s - 0.02).abs() < 1e-9);
+        // Next drain continues where the last left off; packet at 0.04
+        // (ending 0.06) arrives once 0.06 is reachable.
+        let batch2 = src.poll_packets(0.06).unwrap();
+        assert_eq!(batch2.len(), 1);
+        assert!((batch2[0].pts_s - 0.04).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mock_audio_source_has_a_muxable_config() {
+        use crate::traits::AudioSource;
+        let src = MockAudioSource::new(48_000, 20);
+        let cfg = src.track_config();
+        assert_eq!(cfg.sample_rate, 48_000);
+        assert_eq!(cfg.channels, 2);
     }
 }
