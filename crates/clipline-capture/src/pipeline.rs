@@ -1,9 +1,11 @@
 use std::io::{self, Seek, Write};
 
-use clipline_buffer::{ReplayRing, SampleInfo, Segment};
-use clipline_mp4::{FragSample, HybridMp4Writer};
+use clipline_buffer::{ReplayRing, SampleInfo, Segment, TrackSamples};
+use clipline_mp4::{FragSample, HybridMp4Writer, TrackConfig};
 
-use crate::traits::{CaptureEngine, CaptureError, EncodeError, EncodedPacket, Encoder};
+use crate::traits::{
+    AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket, Encoder,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
@@ -21,6 +23,8 @@ pub struct Recorder<C: CaptureEngine, E: Encoder> {
     encoder: E,
     ring: ReplayRing,
     pending: Vec<EncodedPacket>,
+    audio_sources: Vec<Box<dyn AudioSource>>,
+    pending_audio: Vec<Vec<AudioPacket>>,
 }
 
 impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
@@ -30,22 +34,43 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             encoder,
             ring: ReplayRing::new(max_buffer_bytes),
             pending: Vec::new(),
+            audio_sources: Vec::new(),
+            pending_audio: Vec::new(),
         }
     }
 
+    /// Attach an audio source as the next audio track (ddoc §10:
+    /// game / mic / system).
+    pub fn with_audio(mut self, source: Box<dyn AudioSource>) -> Self {
+        self.audio_sources.push(source);
+        self.pending_audio.push(Vec::new());
+        self
+    }
+
     /// Drive the loop until the capture source ends, sealing a segment at
-    /// every GOP boundary (a keyframe closes the previous GOP).
+    /// every GOP boundary (a keyframe closes the previous GOP). Audio
+    /// sources are drained per frame; packets ride in the segment whose
+    /// GOP interval contains them.
     pub fn run_to_end(&mut self) -> Result<(), PipelineError> {
         while let Some(frame) = self.capture.next_frame()? {
+            for (src, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
+                pending.extend(src.poll_packets(frame.pts_s)?);
+            }
             for pkt in self.encoder.encode(&frame)? {
                 if pkt.is_keyframe && !self.pending.is_empty() {
-                    self.seal_pending();
+                    self.seal_pending(pkt.pts_s);
                 }
                 self.pending.push(pkt);
             }
         }
         if !self.pending.is_empty() {
-            self.seal_pending();
+            // Drain any audio still buffered in the sources to the end of
+            // the final GOP, then seal everything.
+            let end = self.pending.last().map(|p| p.pts_s + p.duration_s).unwrap_or(0.0);
+            for (src, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
+                pending.extend(src.poll_packets(end)?);
+            }
+            self.seal_pending(f64::INFINITY);
         }
         Ok(())
     }
@@ -94,7 +119,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         Ok((writer.finalize()?, end_pts))
     }
 
-    fn seal_pending(&mut self) {
+    fn seal_pending(&mut self, boundary_pts_s: f64) {
         let packets = std::mem::take(&mut self.pending);
         let pts_start_s = packets[0].pts_s;
         let duration_s: f64 = packets.iter().map(|p| p.duration_s).sum();
@@ -109,13 +134,33 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             });
             data.extend_from_slice(&p.data);
         }
+
+        // Audio packets ending at or before the boundary belong to this GOP.
+        let mut audio = Vec::with_capacity(self.pending_audio.len());
+        for pending in &mut self.pending_audio {
+            let split = pending
+                .iter()
+                .position(|p| p.pts_s + p.duration_s > boundary_pts_s + 1e-9)
+                .unwrap_or(pending.len());
+            let mut track = TrackSamples::default();
+            for p in pending.drain(..split) {
+                track.samples.push(SampleInfo {
+                    size: p.data.len() as u32,
+                    duration_s: p.duration_s,
+                    is_sync: true, // every Opus packet is independently decodable
+                });
+                track.data.extend_from_slice(&p.data);
+            }
+            audio.push(track);
+        }
+
         self.ring.push(Segment {
             starts_with_keyframe,
             pts_start_s,
             duration_s,
             data,
             samples,
-            audio: Vec::new(),
+            audio,
         });
     }
 }
@@ -157,6 +202,28 @@ mod tests {
         assert_eq!(ring.len(), 2);
         let first = ring.segments().next().unwrap();
         assert!((first.pts_start_s - 1.0).abs() < 1e-6, "GOP at t=0 evicted");
+    }
+
+    #[test]
+    fn audio_packets_land_in_their_gop_segments() {
+        use crate::mock::MockAudioSource;
+        let mut rec = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        )
+        .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+        rec.run_to_end().unwrap();
+        let ring = rec.ring();
+        assert_eq!(ring.len(), 3);
+        for (i, seg) in ring.segments().enumerate() {
+            assert_eq!(seg.audio.len(), 1, "one audio track");
+            // 1 s GOP at 20 ms packets = 50 packets per segment.
+            assert_eq!(seg.audio[0].samples.len(), 50, "segment {i}");
+        }
+        // First packet of the second segment starts at its GOP boundary.
+        let seg2 = ring.segments().nth(1).unwrap();
+        assert_eq!(&seg2.audio[0].data[..6], b"P00050");
     }
 
     #[test]
