@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/clipline-events",
+    "crates/clipline-lol",
+    "crates/clipline-buffer",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+httpmock = "0.7"

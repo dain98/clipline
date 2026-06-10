@@ -1,0 +1,142 @@
+- generic [ref=e1]:
+  - dialog "Cookie Consent Banner" [ref=e2]:
+    - button "Close this dialog" [active] [ref=e3] [cursor=pointer]:
+      - img "Close this dialog" [ref=e4]
+    - generic [ref=e5]:
+      - generic [ref=e6]: "This website utilizes technologies such as cookies to enable essential site functionality, as well as for analytics, personalization, and targeted advertising. To learn more, view the following link:"
+      - link "Privacy Notice" [ref=e7] [cursor=pointer]:
+        - /url: https://web.archive.org/web/20251012011945/https://www.riotgames.com/en/privacy-notice
+    - button "Manage Preferences" [ref=e9] [cursor=pointer]
+  - link "Skip to main content" [ref=e11] [cursor=pointer]:
+    - /url: "#main-content"
+  - main [ref=e12]:
+    - generic [ref=e14]:
+      - navigation [ref=e15]:
+        - navigation "Current location" [ref=e16]:
+          - list [ref=e17]:
+            - listitem [ref=e18]:
+              - link "Developer Relations" [ref=e19] [cursor=pointer]:
+                - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us
+            - listitem [ref=e20]:
+              - text: ">"
+              - link "Frequently Asked Questions" [ref=e21] [cursor=pointer]:
+                - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/sections/22779401670803-Frequently-Asked-Questions
+        - generic [ref=e22]:
+          - img
+          - search [ref=e23]:
+            - searchbox "Search" [ref=e24]
+      - generic [ref=e25]:
+        - complementary "Articles in this section" [ref=e26]:
+          - generic [ref=e27]:
+            - text: Articles in this section
+            - list [ref=e29]:
+              - listitem [ref=e30]:
+                - 'link "FAQs: The Basics" [ref=e31] [cursor=pointer]':
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/articles/22801164172051-FAQs-The-Basics
+              - listitem [ref=e32]:
+                - link "Response Times" [ref=e33] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/articles/22801270481427-Response-Times
+              - listitem [ref=e34]:
+                - link "Using Multiple Applications" [ref=e35] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/articles/22801284198035-Using-Multiple-Applications
+              - listitem [ref=e36]:
+                - link "RSO (Riot Sign On)" [ref=e37] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/articles/22801670382739-RSO-Riot-Sign-On
+              - listitem [ref=e38]:
+                - link "Production Key Applications" [ref=e39] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/articles/22801383038867-Production-Key-Applications
+              - listitem [ref=e40]:
+                - link "Verification for Production Applications" [ref=e41] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/articles/22801461443091-Verification-for-Production-Applications
+              - listitem [ref=e42]:
+                - link "Reporting Issues" [ref=e43] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/articles/22801519716883-Reporting-Issues
+              - listitem [ref=e44]:
+                - link "Summoner Name to Riot ID" [ref=e45] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/articles/22698983117587-Summoner-Name-to-Riot-ID
+              - listitem [ref=e46]:
+                - link "Vanguard" [ref=e47] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/articles/28021427366163-Vanguard
+              - listitem [ref=e48]:
+                - link "App Messaging Deprecation" [ref=e49] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/articles/28593035600531-App-Messaging-Deprecation
+        - article [ref=e50]:
+          - generic [ref=e51]:
+            - heading "Production Key Applications" [level=1] [ref=e52]
+            - generic [ref=e55]:
+              - generic [ref=e56]:
+                - time [ref=e57]: 1 year ago
+                - text: ·
+              - text: Updated
+          - generic [ref=e60]:
+            - heading "Why do I need a website for a production key?" [level=3] [ref=e61]
+            - paragraph [ref=e62]: Production keys are reserved for fully functioning applications that can clearly demonstrate their user flows. We need to see a website to understand what your app does, view your Terms of Service and Privacy Policy, and to make sure your app is in a good state for a production key.
+            - heading "Can I have a production key if I don’t have a website?" [level=3] [ref=e63]
+            - paragraph [ref=e64]: In most cases, no. Production keys are for applications that are in a completed or near-complete state. If you’re very early in the development process, we recommend applying for a personal key to get you started.
+            - heading "Can I submit my Github for a production key?" [level=3] [ref=e65]
+            - paragraph [ref=e66]: No. Unfortunately, we are unable to accept Github repositories and source code in lieu of a functioning application/site.
+            - heading "I have a functioning mobile app, but no website, can I still have a production key?" [level=3] [ref=e67]
+            - paragraph [ref=e68]: In most cases, we still require you to host your native app on a domain you own. This is so that users can easily see what your product does, where to download it, where you list your Terms of Service and Privacy Policy, and so we can verify that you’re the owner of the app. If you plan to host your app, ToS and Privacy Policy on an app store instead, it must first be in a verified state and approved by us in the developer portal.
+            - heading "My product is a Discord bot, do I still need a website?" [level=3] [ref=e69]
+            - paragraph [ref=e70]: Yes. Discord bots still need a website so users can easily see what your product does, where to access it, and where you list your Terms of Service and Privacy Policy, and so we can verify your app.
+            - heading "How can I show you what I’m going to develop without an API key?" [level=3] [ref=e71]
+            - paragraph [ref=e72]:
+              - text: There are a lot of ways. If you are developing for League of Legends, Teamfight Tactics, or Legends of Runeterra, you can request a personal key to help get you started. We don’t offer personal keys for VALORANT, but you can create the framework of your site using placeholder data or a developer key. Other ways are video demos, screenshots, or Figma files that clearly demonstrate your user flow. Try reaching out to the
+              - link "community Discord" [ref=e73] [cursor=pointer]:
+                - /url: https://web.archive.org/web/20251012013734/https://discord.gg/riotgamesdevrel
+              - text: if you need more tips!
+          - generic [ref=e74]:
+            - generic [ref=e76]:
+              - text: Was this article helpful?
+              - group "Was this article helpful?" [ref=e77]:
+                - button "This article was helpful" [ref=e78] [cursor=pointer]: "Yes"
+                - button "This article was not helpful" [ref=e79] [cursor=pointer]: "No"
+              - generic [ref=e80]: 1 out of 3 found this helpful
+            - generic [ref=e81]:
+              - text: Have more questions?
+              - link "Submit a request" [ref=e82] [cursor=pointer]:
+                - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/requests/new
+          - generic [ref=e84]:
+            - heading "Related articles" [level=2] [ref=e85]
+            - list [ref=e86]:
+              - listitem [ref=e87]:
+                - link "RSO (Riot Sign On)" [ref=e88] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/related/click?data=BAh7CjobZGVzdGluYXRpb25fYXJ0aWNsZV9pZGwrCJOkdu28FDoYcmVmZXJyZXJfYXJ0aWNsZV9pZGwrCJMfVty8FDoLbG9jYWxlSSIKZW4tdXMGOgZFVDoIdXJsSSI3L2hjL2VuLXVzL2FydGljbGVzLzIyODAxNjcwMzgyNzM5LVJTTy1SaW90LVNpZ24tT24GOwhUOglyYW5raQY%3D--1f3ea4a9feb0f96f306125d496477e8c2d901df0
+              - listitem [ref=e89]:
+                - link "Verification for Production Applications" [ref=e90] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/related/click?data=BAh7CjobZGVzdGluYXRpb25fYXJ0aWNsZV9pZGwrCBN6AuG8FDoYcmVmZXJyZXJfYXJ0aWNsZV9pZGwrCJMfVty8FDoLbG9jYWxlSSIKZW4tdXMGOgZFVDoIdXJsSSJPL2hjL2VuLXVzL2FydGljbGVzLzIyODAxNDYxNDQzMDkxLVZlcmlmaWNhdGlvbi1mb3ItUHJvZHVjdGlvbi1BcHBsaWNhdGlvbnMGOwhUOglyYW5raQc%3D--b9cfe17a3c7a1f45a7ae750d0f94b98204c62dd3
+              - listitem [ref=e91]:
+                - link "Summoner Name to Riot ID" [ref=e92] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/related/click?data=BAh7CjobZGVzdGluYXRpb25fYXJ0aWNsZV9pZGwrCBNT0wSlFDoYcmVmZXJyZXJfYXJ0aWNsZV9pZGwrCJMfVty8FDoLbG9jYWxlSSIKZW4tdXMGOgZFVDoIdXJsSSI%2FL2hjL2VuLXVzL2FydGljbGVzLzIyNjk4OTgzMTE3NTg3LVN1bW1vbmVyLU5hbWUtdG8tUmlvdC1JRAY7CFQ6CXJhbmtpCA%3D%3D--04df30f619f54bca9bce5304113ae43fa4bf1ac0
+              - listitem [ref=e93]:
+                - link "API Terms and Conditions" [ref=e94] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/related/click?data=BAh7CjobZGVzdGluYXRpb25fYXJ0aWNsZV9pZGwrCBPI5QClFDoYcmVmZXJyZXJfYXJ0aWNsZV9pZGwrCJMfVty8FDoLbG9jYWxlSSIKZW4tdXMGOgZFVDoIdXJsSSI%2FL2hjL2VuLXVzL2FydGljbGVzLzIyNjk4OTE3MjE4MzIzLUFQSS1UZXJtcy1hbmQtQ29uZGl0aW9ucwY7CFQ6CXJhbmtpCQ%3D%3D--e9d354e36f83ee1dbaacb0c3bb138f9af769e326
+              - listitem [ref=e95]:
+                - link "Response Times" [ref=e96] [cursor=pointer]:
+                  - /url: /web/20251012013734/https://support-developer.riotgames.com/hc/en-us/related/click?data=BAh7CjobZGVzdGluYXRpb25fYXJ0aWNsZV9pZGwrCBOioNW8FDoYcmVmZXJyZXJfYXJ0aWNsZV9pZGwrCJMfVty8FDoLbG9jYWxlSSIKZW4tdXMGOgZFVDoIdXJsSSI1L2hjL2VuLXVzL2FydGljbGVzLzIyODAxMjcwNDgxNDI3LVJlc3BvbnNlLVRpbWVzBjsIVDoJcmFua2kK--7703a664db9b167e7a97797e1cf08cf8e579fce5
+  - generic [ref=e99]:
+    - link "Riot Games" [ref=e102] [cursor=pointer]:
+      - /url: https://web.archive.org/web/20241223152443/http://www.riotgames.com/
+      - img "Riot Games" [ref=e103]
+    - paragraph [ref=e106]: © 2024 Riot Games, Inc. Riot Games, League of Legends and any associated logos are trademarks, service marks, and/or registered trademarks of Riot Games, Inc.
+    - list [ref=e108]:
+      - listitem [ref=e109]:
+        - link "Privacy Notice" [ref=e110] [cursor=pointer]:
+          - /url: https://web.archive.org/web/20241223152443/https://www.riotgames.com/en/privacy-notice
+      - listitem [ref=e111]:
+        - link "Terms of Service" [ref=e112] [cursor=pointer]:
+          - /url: https://web.archive.org/web/20241223152443/https://www.riotgames.com/en/terms-of-service
+      - listitem [ref=e113]:
+        - link "Cookie Preferences" [ref=e114] [cursor=pointer]:
+          - /url: javascript:void(0);
+  - generic [ref=e116]:
+    - link "mainLogoRiotFist21 mainMenuDownNonHover" [ref=e119] [cursor=pointer]:
+      - /url: https://web.archive.org/web/20241223152443/https://support-developer.riotgames.com
+      - generic [ref=e120]:
+        - img "mainLogoRiotFist21"
+      - generic [ref=e121]:
+        - img "mainMenuDownNonHover"
+    - generic [ref=e123]:
+      - paragraph [ref=e126] [cursor=pointer]: My Tickets
+      - paragraph [ref=e129] [cursor=pointer]: Submit A Ticket
+    - generic [ref=e133] [cursor=pointer]: SIGN IN
