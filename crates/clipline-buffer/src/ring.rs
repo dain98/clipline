@@ -100,6 +100,7 @@ mod tests {
             pts_start_s: pts,
             duration_s: dur,
             data: vec![0u8; bytes],
+            samples: Vec::new(),
         }
     }
 
