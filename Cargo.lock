@@ -319,6 +319,15 @@ name = "clipline-buffer"
 version = "0.1.0"
 
 [[package]]
+name = "clipline-capture"
+version = "0.1.0"
+dependencies = [
+ "clipline-buffer",
+ "clipline-mp4",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "clipline-events"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,10 @@
+[package]
+name = "clipline-capture"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clipline-buffer = { path = "../clipline-buffer" }
+clipline-mp4 = { path = "../clipline-mp4" }
+thiserror = { workspace = true }
