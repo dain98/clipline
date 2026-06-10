@@ -53,7 +53,7 @@ impl Encoder for MockEncoder {
             data,
             pts_s: frame.pts_s,
             duration_s: 1.0 / self.fps as f64,
-            is_keyframe: idx % self.gop_len == 0,
+            is_keyframe: idx.is_multiple_of(self.gop_len),
         }])
     }
 
