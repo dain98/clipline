@@ -17,6 +17,15 @@ pub struct VideoTrackConfig {
     pub pps: Vec<u8>,
 }
 
+/// Opus audio track parameters (ddoc §4/§10). Track timescale = sample rate.
+#[derive(Debug, Clone)]
+pub struct AudioTrackConfig {
+    pub channels: u16,
+    pub sample_rate: u32,
+    /// Opus pre-skip in 48 kHz samples (dOps PreSkip).
+    pub pre_skip: u16,
+}
+
 pub fn ftyp() -> Vec<u8> {
     let mut p = Payload::new();
     p.bytes(b"isom").u32(512).bytes(b"isom").bytes(b"iso6").bytes(b"mp41");
@@ -64,59 +73,101 @@ pub fn trak(cfg: &VideoTrackConfig, duration_movie_ts: u64, duration_media_ts: u
     trak_with_tables(cfg, duration_movie_ts, duration_media_ts, empty_stbl_tail())
 }
 
-/// Same as `trak` but with caller-provided populated sample tables
-/// (stts/stss/stsc/stsz/co64) — used by finalize.
+/// Video trak (track 1) with populated sample tables — original API.
 pub fn trak_with_tables(
     cfg: &VideoTrackConfig,
     duration_movie_ts: u64,
     duration_media_ts: u64,
     stbl_tail: Vec<u8>,
 ) -> Vec<u8> {
-    let mut t = tkhd(cfg, duration_movie_ts);
-    t.extend(mdia(cfg, duration_media_ts, stbl_tail));
+    video_trak_with_tables(cfg, 1, duration_movie_ts, duration_media_ts, stbl_tail)
+}
+
+pub fn video_trak_with_tables(
+    cfg: &VideoTrackConfig,
+    track_id: u32,
+    duration_movie_ts: u64,
+    duration_media_ts: u64,
+    stbl_tail: Vec<u8>,
+) -> Vec<u8> {
+    let mut v = Payload::new();
+    v.u16(0).u16(0).u16(0).u16(0); // graphicsmode + opcolor
+    let vmhd = full_box(*b"vmhd", 0, 1, v.into_vec());
+
+    let mut t = tkhd(track_id, duration_movie_ts, 0, cfg.width, cfg.height);
+    t.extend(mdia_generic(
+        cfg.timescale,
+        duration_media_ts,
+        *b"vide",
+        b"Clipline Video\0",
+        vmhd,
+        stsd(cfg),
+        stbl_tail,
+    ));
     mp4_box(*b"trak", t)
 }
 
-fn tkhd(cfg: &VideoTrackConfig, duration_movie_ts: u64) -> Vec<u8> {
+pub fn audio_trak_with_tables(
+    cfg: &AudioTrackConfig,
+    track_id: u32,
+    duration_movie_ts: u64,
+    duration_media_ts: u64,
+    stbl_tail: Vec<u8>,
+) -> Vec<u8> {
+    let mut s = Payload::new();
+    s.u16(0).u16(0); // balance + reserved
+    let smhd = full_box(*b"smhd", 0, 0, s.into_vec());
+
+    let mut t = tkhd(track_id, duration_movie_ts, 0x0100, 0, 0);
+    t.extend(mdia_generic(
+        cfg.sample_rate,
+        duration_media_ts,
+        *b"soun",
+        b"Clipline Audio\0",
+        smhd,
+        audio_stsd(cfg),
+        stbl_tail,
+    ));
+    mp4_box(*b"trak", t)
+}
+
+fn tkhd(track_id: u32, duration_movie_ts: u64, volume: u16, width: u16, height: u16) -> Vec<u8> {
     let mut p = Payload::new();
     p.u32(0).u32(0) // creation/modification
-        .u32(1) // track_ID
+        .u32(track_id)
         .u32(0) // reserved
         .u32(duration_movie_ts as u32)
         .u32(0)
         .u32(0) // reserved
         .u16(0) // layer
         .u16(0) // alternate_group
-        .u16(0) // volume (video)
+        .u16(volume)
         .u16(0); // reserved
     for m in MATRIX {
         p.u32(m);
     }
-    p.u32((cfg.width as u32) << 16).u32((cfg.height as u32) << 16);
+    p.u32((width as u32) << 16).u32((height as u32) << 16);
     full_box(*b"tkhd", 0, 0x000003, p.into_vec()) // enabled | in_movie
 }
 
-fn mdia(cfg: &VideoTrackConfig, duration_media_ts: u64, stbl_tail: Vec<u8>) -> Vec<u8> {
+fn mdia_generic(
+    timescale: u32,
+    duration_media_ts: u64,
+    handler: [u8; 4],
+    handler_name: &[u8],
+    media_header_box: Vec<u8>,
+    stsd_box: Vec<u8>,
+    stbl_tail: Vec<u8>,
+) -> Vec<u8> {
     let mut p = Payload::new();
-    p.u32(0).u32(0).u32(cfg.timescale).u32(duration_media_ts as u32)
+    p.u32(0).u32(0).u32(timescale).u32(duration_media_ts as u32)
         .u16(0x55C4) // language: und
         .u16(0);
     let mdhd = full_box(*b"mdhd", 0, 0, p.into_vec());
 
     let mut h = Payload::new();
-    h.u32(0).bytes(b"vide").u32(0).u32(0).u32(0).bytes(b"Clipline Video\0");
+    h.u32(0).bytes(&handler).u32(0).u32(0).u32(0).bytes(handler_name);
     let hdlr = full_box(*b"hdlr", 0, 0, h.into_vec());
-
-    let mut m = mdhd;
-    m.extend(hdlr);
-    m.extend(minf(cfg, stbl_tail));
-    mp4_box(*b"mdia", m)
-}
-
-fn minf(cfg: &VideoTrackConfig, stbl_tail: Vec<u8>) -> Vec<u8> {
-    let mut v = Payload::new();
-    v.u16(0).u16(0).u16(0).u16(0); // graphicsmode + opcolor
-    let vmhd = full_box(*b"vmhd", 0, 1, v.into_vec());
 
     let url = full_box(*b"url ", 0, 1, vec![]); // self-contained
     let mut d = Payload::new();
@@ -126,13 +177,53 @@ fn minf(cfg: &VideoTrackConfig, stbl_tail: Vec<u8>) -> Vec<u8> {
     let dref = full_box(*b"dref", 0, 0, dref_payload);
     let dinf = mp4_box(*b"dinf", dref);
 
-    let mut stbl = stsd(cfg);
+    let mut stbl = stsd_box;
     stbl.extend(stbl_tail);
 
-    let mut m = vmhd;
-    m.extend(dinf);
-    m.extend(mp4_box(*b"stbl", stbl));
-    mp4_box(*b"minf", m)
+    let mut minf = media_header_box;
+    minf.extend(dinf);
+    minf.extend(mp4_box(*b"stbl", stbl));
+
+    let mut m = mdhd;
+    m.extend(hdlr);
+    m.extend(mp4_box(*b"minf", minf));
+    mp4_box(*b"mdia", m)
+}
+
+fn audio_stsd(cfg: &AudioTrackConfig) -> Vec<u8> {
+    let mut p = Payload::new();
+    p.u32(1); // entry_count
+    let mut payload = p.into_vec();
+    payload.extend(opus_sample_entry(cfg));
+    full_box(*b"stsd", 0, 0, payload)
+}
+
+fn opus_sample_entry(cfg: &AudioTrackConfig) -> Vec<u8> {
+    let mut p = Payload::new();
+    p.bytes(&[0; 6]) // reserved
+        .u16(1) // data_reference_index
+        .u32(0)
+        .u32(0) // reserved
+        .u16(cfg.channels)
+        .u16(16) // samplesize
+        .u16(0) // pre_defined
+        .u16(0) // reserved
+        .u32(cfg.sample_rate << 16); // 16.16 fixed
+    let mut payload = p.into_vec();
+    payload.extend(dops(cfg));
+    mp4_box(*b"Opus", payload)
+}
+
+/// Opus-in-ISOBMFF `dOps` box (plain box, NOT a full box).
+fn dops(cfg: &AudioTrackConfig) -> Vec<u8> {
+    let mut p = Payload::new();
+    p.u8(0) // version
+        .u8(cfg.channels as u8) // OutputChannelCount
+        .u16(cfg.pre_skip)
+        .u32(cfg.sample_rate) // InputSampleRate (true rate)
+        .u16(0) // OutputGain (i16 0)
+        .u8(0); // ChannelMappingFamily
+    mp4_box(*b"dOps", p.into_vec())
 }
 
 fn stsd(cfg: &VideoTrackConfig) -> Vec<u8> {
@@ -183,7 +274,7 @@ fn avcc(cfg: &VideoTrackConfig) -> Vec<u8> {
 }
 
 /// Empty stts/stsc/stsz/stco for the fragmented init moov.
-fn empty_stbl_tail() -> Vec<u8> {
+pub(crate) fn empty_stbl_tail() -> Vec<u8> {
     let mut out = full_box(*b"stts", 0, 0, 0u32.to_be_bytes().to_vec());
     let mut stsc = Payload::new();
     stsc.u32(0);
@@ -244,6 +335,42 @@ mod tests {
         assert!(find(&kids, b"mvhd").is_some());
         assert!(find(&kids, b"trak").is_some());
         assert!(find(&kids, b"mvex").is_some());
+    }
+
+    fn audio_cfg() -> AudioTrackConfig {
+        AudioTrackConfig { channels: 2, sample_rate: 48_000, pre_skip: 312 }
+    }
+
+    #[test]
+    fn audio_trak_uses_soun_handler_and_smhd() {
+        let buf = audio_trak_with_tables(&audio_cfg(), 2, 0, 0, empty_stbl_tail());
+        assert!(buf.windows(4).any(|w| w == b"soun"));
+        assert!(buf.windows(4).any(|w| w == b"smhd"));
+        assert!(!buf.windows(4).any(|w| w == b"vmhd"));
+    }
+
+    #[test]
+    fn audio_stsd_embeds_opus_and_dops() {
+        let buf = audio_trak_with_tables(&audio_cfg(), 2, 0, 0, empty_stbl_tail());
+        assert!(buf.windows(4).any(|w| w == b"Opus"));
+        // dOps payload: ver=0, ch=2, pre_skip=312 (0x0138), rate=48000
+        // (0x0000BB80), gain=0, mapping=0.
+        let dops: &[u8] = &[
+            b'd', b'O', b'p', b's', 0, 2, 0x01, 0x38, 0x00, 0x00, 0xBB, 0x80, 0, 0, 0,
+        ];
+        assert!(buf.windows(dops.len()).any(|w| w == dops));
+    }
+
+    #[test]
+    fn track_ids_are_parameterized() {
+        let buf = audio_trak_with_tables(&audio_cfg(), 7, 0, 0, empty_stbl_tail());
+        // tkhd payload: version/flags(4) creation(4) modification(4) track_ID(4)
+        let top = walk(&buf);
+        let kids = children(&buf, &top[0]);
+        let tkhd = find(&kids, b"tkhd").unwrap();
+        let p = tkhd.payload_offset as usize;
+        let id = u32::from_be_bytes(buf[p + 12..p + 16].try_into().unwrap());
+        assert_eq!(id, 7);
     }
 
     #[test]
