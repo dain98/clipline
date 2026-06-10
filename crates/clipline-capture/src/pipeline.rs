@@ -115,6 +115,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             duration_s,
             data,
             samples,
+            audio: Vec::new(),
         });
     }
 }

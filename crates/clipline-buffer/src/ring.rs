@@ -18,11 +18,11 @@ impl ReplayRing {
     }
 
     pub fn push(&mut self, seg: Segment) {
-        self.bytes += seg.data.len();
+        self.bytes += seg.byte_len();
         self.segments.push_back(seg);
         while self.bytes > self.max_bytes && self.segments.len() > 1 {
             if let Some(front) = self.segments.pop_front() {
-                self.bytes -= front.data.len();
+                self.bytes -= front.byte_len();
             }
         }
     }
@@ -101,6 +101,7 @@ mod tests {
             duration_s: dur,
             data: vec![0u8; bytes],
             samples: Vec::new(),
+            audio: Vec::new(),
         }
     }
 
@@ -120,6 +121,22 @@ mod tests {
         let mut ring = ReplayRing::new(10);
         ring.push(seg(0.0, 2.0, 100, true)); // oversized but alone
         assert_eq!(ring.len(), 1);
+    }
+
+    #[test]
+    fn eviction_counts_audio_bytes() {
+        let mut ring = ReplayRing::new(250);
+        let mut s1 = seg(0.0, 2.0, 50, true);
+        s1.audio.push(crate::segment::TrackSamples { data: vec![0; 60], samples: vec![] });
+        let mut s2 = seg(2.0, 2.0, 50, true);
+        s2.audio.push(crate::segment::TrackSamples { data: vec![0; 60], samples: vec![] });
+        let mut s3 = seg(4.0, 2.0, 50, true);
+        s3.audio.push(crate::segment::TrackSamples { data: vec![0; 60], samples: vec![] });
+        ring.push(s1);
+        ring.push(s2);
+        ring.push(s3); // 330 bytes total > 250 → evict front
+        assert_eq!(ring.len(), 2);
+        assert_eq!(ring.bytes(), 220);
     }
 
     #[test]

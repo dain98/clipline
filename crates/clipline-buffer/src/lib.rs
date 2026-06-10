@@ -4,4 +4,4 @@ pub mod segment;
 
 pub use estimate::estimate_buffer_bytes;
 pub use ring::ReplayRing;
-pub use segment::{SampleInfo, Segment};
+pub use segment::{SampleInfo, Segment, TrackSamples};
