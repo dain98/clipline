@@ -38,16 +38,58 @@ pub fn free_placeholder() -> Vec<u8> {
     mp4_box(*b"free", vec![0; 8])
 }
 
+/// One track in a multi-track recording (ddoc §10: video + game/mic/system).
+#[derive(Debug, Clone)]
+pub enum TrackConfig {
+    Video(VideoTrackConfig),
+    Audio(AudioTrackConfig),
+}
+
+impl TrackConfig {
+    /// Media timescale: sample durations for this track use these ticks.
+    pub fn timescale(&self) -> u32 {
+        match self {
+            TrackConfig::Video(v) => v.timescale,
+            TrackConfig::Audio(a) => a.sample_rate,
+        }
+    }
+}
+
 /// Fragmented-init `moov`: zero-duration sample tables plus `mvex` so
 /// readers know sample data lives in movie fragments.
 pub fn moov_init(cfg: &VideoTrackConfig) -> Vec<u8> {
-    let mut moov = mvhd(0);
-    moov.extend(trak(cfg, 0, 0));
-    moov.extend(mvex());
+    moov_init_multi(&[TrackConfig::Video(cfg.clone())])
+}
+
+/// Fragmented-init moov for N tracks; track IDs are 1-based positions.
+pub fn moov_init_multi(tracks: &[TrackConfig]) -> Vec<u8> {
+    let mut moov = mvhd(0, tracks.len() as u32 + 1);
+    for (i, t) in tracks.iter().enumerate() {
+        let id = i as u32 + 1;
+        moov.extend(match t {
+            TrackConfig::Video(v) => video_trak_with_tables(v, id, 0, 0, empty_stbl_tail()),
+            TrackConfig::Audio(a) => audio_trak_with_tables(a, id, 0, 0, empty_stbl_tail()),
+        });
+    }
+    moov.extend(mvex_multi(tracks.len() as u32));
     mp4_box(*b"moov", moov)
 }
 
-pub fn mvhd(duration_movie_ts: u64) -> Vec<u8> {
+fn mvex_multi(track_count: u32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for id in 1..=track_count {
+        let mut p = Payload::new();
+        p.u32(id) // track_ID
+            .u32(1) // default_sample_description_index
+            .u32(0) // default_sample_duration
+            .u32(0) // default_sample_size
+            .u32(0); // default_sample_flags
+        payload.extend(full_box(*b"trex", 0, 0, p.into_vec()));
+    }
+    mp4_box(*b"mvex", payload)
+}
+
+pub fn mvhd(duration_movie_ts: u64, next_track_id: u32) -> Vec<u8> {
     let mut p = Payload::new();
     p.u32(0) // creation_time
         .u32(0) // modification_time
@@ -64,7 +106,7 @@ pub fn mvhd(duration_movie_ts: u64) -> Vec<u8> {
     for _ in 0..6 {
         p.u32(0); // pre_defined
     }
-    p.u32(2); // next_track_ID
+    p.u32(next_track_id);
     full_box(*b"mvhd", 0, 0, p.into_vec())
 }
 
@@ -288,16 +330,6 @@ pub(crate) fn empty_stbl_tail() -> Vec<u8> {
     out
 }
 
-fn mvex() -> Vec<u8> {
-    let mut p = Payload::new();
-    p.u32(1) // track_ID
-        .u32(1) // default_sample_description_index
-        .u32(0) // default_sample_duration
-        .u32(0) // default_sample_size
-        .u32(0); // default_sample_flags
-    let trex = full_box(*b"trex", 0, 0, p.into_vec());
-    mp4_box(*b"mvex", trex)
-}
 
 #[cfg(test)]
 mod tests {
@@ -371,6 +403,25 @@ mod tests {
         let p = tkhd.payload_offset as usize;
         let id = u32::from_be_bytes(buf[p + 12..p + 16].try_into().unwrap());
         assert_eq!(id, 7);
+    }
+
+    #[test]
+    fn multi_track_moov_has_one_trak_and_trex_per_track() {
+        let tracks = vec![
+            TrackConfig::Video(cfg()),
+            TrackConfig::Audio(audio_cfg()),
+        ];
+        let buf = moov_init_multi(&tracks);
+        let top = walk(&buf);
+        let kids = children(&buf, &top[0]);
+        let traks: Vec<_> = kids.iter().filter(|b| &b.fourcc == b"trak").collect();
+        assert_eq!(traks.len(), 2);
+        let mvex = find(&kids, b"mvex").unwrap();
+        let trexes = children(&buf, mvex);
+        assert_eq!(trexes.len(), 2);
+        // trex payload: version/flags(4) then track_ID.
+        let p = trexes[1].payload_offset as usize;
+        assert_eq!(u32::from_be_bytes(buf[p + 4..p + 8].try_into().unwrap()), 2);
     }
 
     #[test]

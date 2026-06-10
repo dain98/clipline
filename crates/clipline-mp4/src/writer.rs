@@ -106,7 +106,7 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         tail.extend(self.stsz());
         tail.extend(self.co64());
 
-        let mut moov = mvhd(duration_movie);
+        let mut moov = mvhd(duration_movie, 2);
         moov.extend(trak_with_tables(&self.cfg, duration_movie, duration_media, tail));
         mp4_box(*b"moov", moov)
     }

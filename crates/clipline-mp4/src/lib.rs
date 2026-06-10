@@ -5,5 +5,5 @@ pub mod walker;
 pub mod writer;
 
 pub use fragment::FragSample;
-pub use init::{AudioTrackConfig, VideoTrackConfig};
+pub use init::{AudioTrackConfig, TrackConfig, VideoTrackConfig};
 pub use writer::HybridMp4Writer;
