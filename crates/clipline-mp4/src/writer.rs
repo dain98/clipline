@@ -1,70 +1,121 @@
 use std::io::{self, Seek, SeekFrom, Write};
 
 use crate::boxes::{full_box, mp4_box, Payload};
-use crate::fragment::{fragment, FragSample};
+use crate::fragment::{fragment_multi, FragSample, TrackRun};
 use crate::init::{
-    free_placeholder, ftyp, moov_init, mvhd, trak_with_tables, VideoTrackConfig,
-    MOVIE_TIMESCALE,
+    audio_trak_with_tables, free_placeholder, ftyp, moov_init_multi, mvhd,
+    video_trak_with_tables, TrackConfig, VideoTrackConfig, MOVIE_TIMESCALE,
 };
 
-/// Streaming Hybrid MP4 writer (ddoc §10). While recording the file is a
-/// fragmented MP4 (crash-safe); `finalize()` turns it into a standard
-/// seekable MP4 in place.
-pub struct HybridMp4Writer<W: Write + Seek> {
-    w: W,
-    cfg: VideoTrackConfig,
-    free_offset: u64,
-    next_sequence: u32,
+/// Per-track bookkeeping for the final moov.
+struct TrackState {
+    cfg: TrackConfig,
     next_decode_time: u64,
-    /// Per-sample bookkeeping for the final moov.
     sizes: Vec<u32>,
     durations: Vec<u32>,
     sync: Vec<bool>,
-    /// (absolute offset of first sample byte, sample count) per fragment.
+    /// (absolute offset of first sample byte, sample count) per fragment
+    /// in which this track had samples.
     chunks: Vec<(u64, u32)>,
 }
 
+/// Streaming Hybrid MP4 writer (ddoc §10). While recording the file is a
+/// fragmented MP4 (crash-safe); `finalize()` turns it into a standard
+/// seekable MP4 in place. Supports N tracks (video + audio).
+pub struct HybridMp4Writer<W: Write + Seek> {
+    w: W,
+    tracks: Vec<TrackState>,
+    free_offset: u64,
+    next_sequence: u32,
+}
+
 impl<W: Write + Seek> HybridMp4Writer<W> {
-    pub fn new(mut w: W, cfg: VideoTrackConfig) -> io::Result<Self> {
+    /// Single video track (original API).
+    pub fn new(w: W, cfg: VideoTrackConfig) -> io::Result<Self> {
+        Self::new_multi(w, vec![TrackConfig::Video(cfg)])
+    }
+
+    pub fn new_multi(mut w: W, tracks: Vec<TrackConfig>) -> io::Result<Self> {
         let ftyp = ftyp();
         w.write_all(&ftyp)?;
         let free_offset = ftyp.len() as u64;
         w.write_all(&free_placeholder())?;
-        w.write_all(&moov_init(&cfg))?;
+        w.write_all(&moov_init_multi(&tracks))?;
         Ok(Self {
             w,
-            cfg,
+            tracks: tracks
+                .into_iter()
+                .map(|cfg| TrackState {
+                    cfg,
+                    next_decode_time: 0,
+                    sizes: Vec::new(),
+                    durations: Vec::new(),
+                    sync: Vec::new(),
+                    chunks: Vec::new(),
+                })
+                .collect(),
             free_offset,
             next_sequence: 1,
-            next_decode_time: 0,
-            sizes: Vec::new(),
-            durations: Vec::new(),
-            sync: Vec::new(),
-            chunks: Vec::new(),
         })
     }
 
+    /// Single-track fragment write (original API; requires exactly 1 track).
     pub fn write_fragment(&mut self, samples: &[FragSample]) -> io::Result<()> {
-        if samples.is_empty() {
+        self.write_fragment_multi(&[samples])
+    }
+
+    /// One fragment carrying samples for each track, positionally aligned
+    /// with the track list. Empty slices are allowed (track sat this
+    /// fragment out).
+    pub fn write_fragment_multi(&mut self, per_track: &[&[FragSample]]) -> io::Result<()> {
+        if per_track.len() != self.tracks.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "expected {} track slices, got {}",
+                    self.tracks.len(),
+                    per_track.len()
+                ),
+            ));
+        }
+        if per_track.iter().all(|s| s.is_empty()) {
             return Ok(());
         }
-        let frag = fragment(self.next_sequence, self.next_decode_time, samples);
+
+        let runs: Vec<TrackRun<'_>> = per_track
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(i, s)| TrackRun {
+                track_id: i as u32 + 1,
+                base_decode_time: self.tracks[i].next_decode_time,
+                samples: s,
+            })
+            .collect();
+
+        let frag = fragment_multi(self.next_sequence, &runs);
         let frag_start = self.w.stream_position()?;
-
-        // First sample byte = fragment start + moof size + mdat header (8).
-        // The moof is everything before the trailing mdat box.
-        let mdat_payload_len: usize = samples.iter().map(|s| s.data.len()).sum();
-        let moof_len = frag.len() - (8 + mdat_payload_len);
-        let first_sample = frag_start + moof_len as u64 + 8;
-
+        let total_payload: usize = runs
+            .iter()
+            .flat_map(|r| r.samples.iter())
+            .map(|s| s.data.len())
+            .sum();
+        let moof_len = frag.len() - (8 + total_payload);
         self.w.write_all(&frag)?;
 
-        self.chunks.push((first_sample, samples.len() as u32));
-        for s in samples {
-            self.sizes.push(s.data.len() as u32);
-            self.durations.push(s.duration);
-            self.sync.push(s.is_sync);
-            self.next_decode_time += s.duration as u64;
+        // Record chunk offsets in run order (the mdat layout order).
+        let mut sample_offset = frag_start + moof_len as u64 + 8;
+        for run in &runs {
+            let idx = (run.track_id - 1) as usize;
+            let state = &mut self.tracks[idx];
+            state.chunks.push((sample_offset, run.samples.len() as u32));
+            for s in run.samples {
+                state.sizes.push(s.data.len() as u32);
+                state.durations.push(s.duration);
+                state.sync.push(s.is_sync);
+                state.next_decode_time += s.duration as u64;
+                sample_offset += s.data.len() as u64;
+            }
         }
         self.next_sequence += 1;
         Ok(())
@@ -94,10 +145,31 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
     }
 
     fn final_moov(&self) -> Vec<u8> {
-        let duration_media: u64 = self.durations.iter().map(|&d| d as u64).sum();
-        let duration_movie =
-            duration_media * MOVIE_TIMESCALE as u64 / self.cfg.timescale as u64;
+        let duration_movie = self
+            .tracks
+            .iter()
+            .map(|t| t.duration_movie_ts())
+            .max()
+            .unwrap_or(0);
 
+        let mut moov = mvhd(duration_movie, self.tracks.len() as u32 + 1);
+        for (i, t) in self.tracks.iter().enumerate() {
+            moov.extend(t.trak(i as u32 + 1, duration_movie));
+        }
+        mp4_box(*b"moov", moov)
+    }
+}
+
+impl TrackState {
+    fn duration_media_ts(&self) -> u64 {
+        self.durations.iter().map(|&d| d as u64).sum()
+    }
+
+    fn duration_movie_ts(&self) -> u64 {
+        self.duration_media_ts() * MOVIE_TIMESCALE as u64 / self.cfg.timescale() as u64
+    }
+
+    fn trak(&self, track_id: u32, duration_movie: u64) -> Vec<u8> {
         let mut tail = self.stts();
         if let Some(stss) = self.stss() {
             tail.extend(stss);
@@ -105,10 +177,15 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         tail.extend(self.stsc());
         tail.extend(self.stsz());
         tail.extend(self.co64());
-
-        let mut moov = mvhd(duration_movie, 2);
-        moov.extend(trak_with_tables(&self.cfg, duration_movie, duration_media, tail));
-        mp4_box(*b"moov", moov)
+        let media = self.duration_media_ts();
+        match &self.cfg {
+            TrackConfig::Video(v) => {
+                video_trak_with_tables(v, track_id, duration_movie, media, tail)
+            }
+            TrackConfig::Audio(a) => {
+                audio_trak_with_tables(a, track_id, duration_movie, media, tail)
+            }
+        }
     }
 
     fn stts(&self) -> Vec<u8> {
