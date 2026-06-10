@@ -100,20 +100,44 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         if segments.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "no new footage in window"));
         }
-        let cfg = self.encoder.track_config();
-        let timescale = cfg.timescale as f64;
-        let mut writer = HybridMp4Writer::new(w, cfg)?;
+        let video_cfg = self.encoder.track_config();
+        let video_ts = video_cfg.timescale as f64;
+        let audio_cfgs: Vec<_> = self.audio_sources.iter().map(|s| s.track_config()).collect();
+        let mut track_cfgs = vec![TrackConfig::Video(video_cfg)];
+        for cfg in &audio_cfgs {
+            track_cfgs.push(TrackConfig::Audio(cfg.clone()));
+        }
+        let mut writer = HybridMp4Writer::new_multi(w, track_cfgs)?;
         for seg in &segments {
-            let samples: Vec<FragSample> = seg
+            let video: Vec<FragSample> = seg
                 .sample_slices()
                 .zip(&seg.samples)
                 .map(|(slice, info)| FragSample {
                     data: slice.to_vec(),
-                    duration: (info.duration_s * timescale).round() as u32,
+                    duration: (info.duration_s * video_ts).round() as u32,
                     is_sync: info.is_sync,
                 })
                 .collect();
-            writer.write_fragment(&samples)?;
+            let mut per_track: Vec<Vec<FragSample>> = vec![video];
+            for (track, cfg) in seg.audio.iter().zip(&audio_cfgs) {
+                let ts = cfg.sample_rate as f64;
+                per_track.push(
+                    track
+                        .sample_slices()
+                        .zip(&track.samples)
+                        .map(|(slice, info)| FragSample {
+                            data: slice.to_vec(),
+                            duration: (info.duration_s * ts).round() as u32,
+                            is_sync: info.is_sync,
+                        })
+                        .collect(),
+                );
+            }
+            // Segments recorded before an audio source was attached have
+            // fewer audio tracks; pad with empty runs to keep alignment.
+            per_track.resize_with(1 + audio_cfgs.len(), Vec::new);
+            let slices: Vec<&[FragSample]> = per_track.iter().map(|v| v.as_slice()).collect();
+            writer.write_fragment_multi(&slices)?;
         }
         let end_pts = segments.last().expect("non-empty").pts_end_s();
         Ok((writer.finalize()?, end_pts))

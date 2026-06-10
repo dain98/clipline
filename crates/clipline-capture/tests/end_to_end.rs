@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use std::process::Command;
 
-use clipline_capture::{MockCapture, MockEncoder, Recorder};
+use clipline_capture::{MockAudioSource, MockCapture, MockEncoder, Recorder};
 use clipline_mp4::walker::walk;
 
 fn recorder_with_3s_of_footage() -> Recorder<MockCapture, MockEncoder> {
@@ -67,6 +67,45 @@ fn ffprobe_accepts_the_saved_replay() {
     assert!(out.status.success());
     assert!(stdout.contains("codec_name=h264"), "got: {stdout}");
     assert!(stdout.contains("nb_frames=60"), "got: {stdout}");
+    assert!(stdout.contains("duration=2.0"), "got: {stdout}");
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn ffprobe_accepts_a_video_plus_audio_replay() {
+    let Some(ffprobe) = ffprobe_path() else {
+        eprintln!("SKIP: ffprobe not found");
+        return;
+    };
+    let mut rec =
+        Recorder::new(MockCapture::new(90, 30), MockEncoder::new(30, 30), usize::MAX)
+            .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+    rec.run_to_end().unwrap();
+    let (w, _) = rec.save_replay(Cursor::new(Vec::new()), 2.0, None).unwrap();
+    let buf = w.into_inner();
+
+    let path = std::env::temp_dir().join("clipline_e2e_av.mp4");
+    std::fs::write(&path, &buf).unwrap();
+    let out = Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name,nb_frames",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1",
+        ])
+        .arg(&path)
+        .output()
+        .expect("run ffprobe");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success());
+    assert!(stdout.contains("codec_name=h264"), "got: {stdout}");
+    assert!(stdout.contains("codec_name=opus"), "got: {stdout}");
+    assert!(stdout.contains("nb_frames=60"), "got: {stdout}");
+    assert!(stdout.contains("nb_frames=100"), "got: {stdout}");
     assert!(stdout.contains("duration=2.0"), "got: {stdout}");
     std::fs::remove_file(&path).ok();
 }
