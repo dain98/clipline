@@ -3,6 +3,9 @@
 //! traits' contracts (see `crate::mock` for the reference behavior).
 
 pub mod d3d11;
+pub mod wgc;
+
+pub use wgc::WgcCapture;
 
 #[cfg(test)]
 mod tests {
