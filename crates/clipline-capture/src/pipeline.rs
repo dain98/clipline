@@ -152,14 +152,31 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
     fn seal_pending(&mut self, boundary_pts_s: f64) {
         let packets = std::mem::take(&mut self.pending);
         let pts_start_s = packets[0].pts_s;
-        let duration_s: f64 = packets.iter().map(|p| p.duration_s).sum();
         let starts_with_keyframe = packets[0].is_keyframe;
+        // ddoc §6: the timeline follows capture stamps, not encoder cadence
+        // claims. Each sample lasts until the next pts; the sealing
+        // keyframe's pts closes the GOP exactly; only the final seal
+        // (boundary = ∞) trusts the encoder's own duration.
+        let durations: Vec<f64> = (0..packets.len())
+            .map(|i| {
+                let next_pts = packets
+                    .get(i + 1)
+                    .map(|p| p.pts_s)
+                    .unwrap_or(boundary_pts_s);
+                if next_pts.is_finite() {
+                    (next_pts - packets[i].pts_s).max(1e-4)
+                } else {
+                    packets[i].duration_s
+                }
+            })
+            .collect();
+        let duration_s: f64 = durations.iter().sum();
         let mut data = Vec::new();
         let mut samples = Vec::with_capacity(packets.len());
-        for p in &packets {
+        for (p, &d) in packets.iter().zip(&durations) {
             samples.push(SampleInfo {
                 size: p.data.len() as u32,
-                duration_s: p.duration_s,
+                duration_s: d,
                 is_sync: p.is_keyframe,
             });
             data.extend_from_slice(&p.data);
@@ -284,6 +301,53 @@ mod tests {
         ) -> Result<Vec<crate::traits::EncodedPacket>, crate::traits::EncodeError> {
             Ok(self.held.take().into_iter().collect())
         }
+    }
+
+    /// Encoder echoing nominal durations while pts jitters (VRR-style):
+    /// the sealed timeline must follow the STAMPS (ddoc §6), not the echo.
+    struct JitteryEncoder {
+        inner: MockEncoder,
+    }
+
+    impl Encoder for JitteryEncoder {
+        fn encode(
+            &mut self,
+            frame: &crate::traits::Frame,
+        ) -> Result<Vec<crate::traits::EncodedPacket>, crate::traits::EncodeError> {
+            let mut pkts = self.inner.encode(frame)?;
+            for p in &mut pkts {
+                // Stamps: frames alternate 10 ms / 30 ms apart, while the
+                // encoder still claims a flat 1/30 s duration.
+                let idx = (p.pts_s * 30.0).round();
+                p.pts_s =
+                    (idx / 2.0).floor() * 0.04 + if idx % 2.0 == 1.0 { 0.01 } else { 0.0 };
+            }
+            Ok(pkts)
+        }
+        fn track_config(&self) -> clipline_mp4::VideoTrackConfig {
+            self.inner.track_config()
+        }
+    }
+
+    #[test]
+    fn sealed_durations_come_from_pts_deltas_not_encoder_claims() {
+        // GOP of 4 over 8 frames → two segments, boundary at frame 4.
+        let enc = JitteryEncoder { inner: MockEncoder::new(4, 30) };
+        let mut rec = Recorder::new(MockCapture::new(8, 30), enc, usize::MAX);
+        rec.run_to_end().unwrap();
+        let segs: Vec<_> = rec.ring().segments().collect();
+        assert_eq!(segs.len(), 2);
+        // Within a GOP: 10/30/10 ms gaps, NOT the encoder's flat 33.3 ms.
+        let d: Vec<f64> = segs[0].samples.iter().map(|s| s.duration_s).collect();
+        assert!((d[0] - 0.01).abs() < 1e-9, "got {d:?}");
+        assert!((d[1] - 0.03).abs() < 1e-9, "got {d:?}");
+        assert!((d[2] - 0.01).abs() < 1e-9, "got {d:?}");
+        // Boundary: last sample of GOP 1 closes exactly at GOP 2's keyframe.
+        let gop2_start = segs[1].pts_start_s;
+        assert!((segs[0].pts_end_s() - gop2_start).abs() < 1e-9, "no gap, no overlap");
+        // Final seal falls back to the encoder duration for the last sample.
+        let last = segs[1].samples.last().unwrap();
+        assert!((last.duration_s - 1.0 / 30.0).abs() < 1e-9);
     }
 
     #[test]
