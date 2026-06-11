@@ -13,6 +13,8 @@ fn main() {
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod library;
+#[cfg(windows)]
 mod markers;
 #[cfg(windows)]
 mod service;

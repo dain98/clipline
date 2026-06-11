@@ -204,7 +204,7 @@ fn save(
     Ok((end, end - saved_from.unwrap_or(end)))
 }
 
-fn clips_dir() -> Result<PathBuf, String> {
+pub(crate) fn clips_dir() -> Result<PathBuf, String> {
     let home = std::env::var_os("USERPROFILE").ok_or("no USERPROFILE")?;
     let dir = PathBuf::from(home).join("Videos").join("Clipline");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;

@@ -53,7 +53,11 @@ pub fn run() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![save_replay])
+        .invoke_handler(tauri::generate_handler![
+            save_replay,
+            crate::library::list_clips,
+            crate::library::delete_clip
+        ])
         .setup(move |app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
             app.global_shortcut().register(alt_f10)?;

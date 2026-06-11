@@ -11,10 +11,11 @@ license.workspace = true
 clipline-capture = { path = "../../crates/clipline-capture" }
 clipline-events = { path = "../../crates/clipline-events" }
 clipline-lol = { path = "../../crates/clipline-lol" }
+clipline-mp4 = { path = "../../crates/clipline-mp4" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-global-shortcut = "2"
 
 [build-dependencies]
