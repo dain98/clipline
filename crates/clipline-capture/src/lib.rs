@@ -1,3 +1,4 @@
+pub mod annexb;
 pub mod clock;
 pub mod mock;
 pub mod pipeline;
@@ -6,6 +7,7 @@ pub mod traits;
 #[cfg(windows)]
 pub mod windows;
 
+pub use annexb::{annexb_to_avcc, even_dimensions, extract_sps_pps, nal_type, split_annexb};
 pub use clock::{qpc_to_ticks_100ns, RelativeClock};
 pub use mock::{MockAudioSource, MockCapture, MockEncoder};
 pub use pipeline::{PipelineError, Recorder};
