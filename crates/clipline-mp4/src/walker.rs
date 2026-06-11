@@ -24,6 +24,31 @@ pub fn find<'a>(boxes: &'a [BoxInfo], fourcc: &[u8; 4]) -> Option<&'a BoxInfo> {
     boxes.iter().find(|b| &b.fourcc == fourcc)
 }
 
+/// Movie duration from moov/mvhd (version 0 or 1). None when the buffer
+/// has no finalized moov (still-fragmented recording or foreign data).
+pub fn movie_duration_s(buf: &[u8]) -> Option<f64> {
+    let top = walk(buf);
+    let moov = find(&top, b"moov")?.clone();
+    let kids = children(buf, &moov);
+    let mvhd = find(&kids, b"mvhd")?;
+    let p = mvhd.payload_offset as usize;
+    let version = *buf.get(p)?;
+    // v0: ver/flags(4) ctime(4) mtime(4) timescale(4) duration(4)
+    // v1: ver/flags(4) ctime(8) mtime(8) timescale(4) duration(8)
+    let (ts_off, dur_off, dur_is_64) = match version {
+        0 => (p + 12, p + 16, false),
+        1 => (p + 20, p + 24, true),
+        _ => return None,
+    };
+    let timescale = u32::from_be_bytes(buf.get(ts_off..ts_off + 4)?.try_into().ok()?) as f64;
+    let duration = if dur_is_64 {
+        u64::from_be_bytes(buf.get(dur_off..dur_off + 8)?.try_into().ok()?) as f64
+    } else {
+        u32::from_be_bytes(buf.get(dur_off..dur_off + 4)?.try_into().ok()?) as f64
+    };
+    (timescale > 0.0).then(|| duration / timescale)
+}
+
 fn walk_range(buf: &[u8], mut pos: u64, end: u64) -> Vec<BoxInfo> {
     let mut out = Vec::new();
     while pos + 8 <= end && (pos + 8) as usize <= buf.len() {
@@ -103,5 +128,38 @@ mod tests {
         let boxes = walk(&buf);
         assert!(find(&boxes, b"ftyp").is_some());
         assert!(find(&boxes, b"moov").is_none());
+    }
+
+    /// Finalized writer output with `n` samples of `dur` ticks at 90 kHz.
+    fn finalized_file_with(n: u32, dur: u32) -> Vec<u8> {
+        use crate::{FragSample, HybridMp4Writer, VideoTrackConfig};
+        let cfg = VideoTrackConfig {
+            width: 64,
+            height: 64,
+            timescale: 90_000,
+            sps: vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+            pps: vec![0x68, 0xEE, 0x38, 0x80],
+        };
+        let mut w = HybridMp4Writer::new(std::io::Cursor::new(Vec::new()), cfg).unwrap();
+        let samples: Vec<FragSample> = (0..n)
+            .map(|i| FragSample { data: vec![0xAB; 8], duration: dur, is_sync: i == 0 })
+            .collect();
+        w.write_fragment(&samples).unwrap();
+        w.finalize().unwrap().into_inner()
+    }
+
+    #[test]
+    fn movie_duration_reads_mvhd() {
+        // 60 samples × 1500 ticks at 90 kHz = exactly 1.0 s.
+        let buf = finalized_file_with(60, 1_500);
+        let d = movie_duration_s(&buf).expect("mvhd present");
+        assert!((d - 1.0).abs() < 1e-6, "got {d}");
+    }
+
+    #[test]
+    fn movie_duration_none_without_moov() {
+        assert!(movie_duration_s(b"not an mp4").is_none());
+        let frag_only = mp4_box(*b"ftyp", vec![0; 4]);
+        assert!(movie_duration_s(&frag_only).is_none());
     }
 }
