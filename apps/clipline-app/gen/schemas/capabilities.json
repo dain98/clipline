@@ -1,1 +1,1 @@
-{}
+{"default":{"identifier":"default","description":"Status page: core events + invoking save_replay.","local":true,"windows":["main"],"permissions":["core:default"]}}

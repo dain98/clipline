@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Status page: core events + invoking save_replay.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

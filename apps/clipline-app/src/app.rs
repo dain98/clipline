@@ -82,7 +82,7 @@ pub fn run() {
                     let _ = match &event {
                         Event::Status { .. } => handle.emit("status", &event),
                         Event::Saved { .. } => handle.emit("saved", &event),
-                        Event::Error(msg) => handle.emit("error", msg.clone()),
+                        Event::Error { message } => handle.emit("error", message.clone()),
                     };
                 }
             });

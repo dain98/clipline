@@ -25,7 +25,7 @@ pub enum Cmd {
 pub enum Event {
     Status { recording: bool, segments: usize, buffered_s: f64, buffered_mb: f64 },
     Saved { path: String, seconds: f64, markers: usize },
-    Error(String),
+    Error { message: String },
 }
 
 pub struct ServiceOptions {
@@ -62,7 +62,7 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
         .name("clipline-recorder".into())
         .spawn(move || {
             if let Err(e) = run(opts, cmd_rx, &event_tx) {
-                let _ = event_tx.send(Event::Error(e));
+                let _ = event_tx.send(Event::Error { message: e });
             }
             let _ = event_tx.send(Event::Status {
                 recording: false,
@@ -171,7 +171,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                             });
                         }
                         Err(e) => {
-                            let _ = events.send(Event::Error(e));
+                            let _ = events.send(Event::Error { message: e });
                             let _ = std::fs::remove_file(&path);
                         }
                     }
