@@ -27,18 +27,26 @@ passes on Windows runners.
 | `clipline-capture` | `CaptureEngine`/`Encoder`/`AudioSource` traits, encoder probe (NVENC→AMF→QSV→x264, AV1→HEVC→H.264), `Recorder` pipeline (capture→encode→GOP segments→ring), `save_replay` → finalized A/V MP4 | mock-driven e2e + ffprobe |
 
 Executed implementation plans (read these to see the conventions in action):
-`docs/superpowers/plans/*.md` — six so far, all completed task-by-task with TDD.
+`docs/superpowers/plans/*.md` — seven so far, all completed task-by-task with TDD.
 
-**Windows progress:** milestone 1 (WGC capture) is **done** — see
-`docs/superpowers/plans/2026-06-10-clipline-wgc-capture.md`. `clipline-capture` now has a
-`#[cfg(windows)]` `windows/` module (`d3d11`, `wgc`, `window`): `WgcCapture` implements
-`CaptureEngine` for monitor + window capture, frames stay GPU-side
-(`FrameData::Gpu(ID3D11Texture2D)`), pts from `SystemRelativeTime` against a QPC origin
-(`RelativeClock`, platform-neutral). Verified on the dev machine via
-`cargo run -p clipline-capture --example wgc_smoke`: 5120x1440 @ 59.7 fps (monitor) and the
-live League client window @ 59.5 fps. Sharp edge: the WGC device test is hard-skipped under
-`CI` — windows-2025 runners report `IsSupported()==true` then access-violate inside the
-capture component.
+**Windows progress:** milestones 1 (WGC capture) and 2 (MFT H.264 encoder) are **done** — see
+`docs/superpowers/plans/2026-06-10-clipline-wgc-capture.md` and
+`…-clipline-mft-encoder.md`. The `#[cfg(windows)]` `windows/` module now holds: `WgcCapture`
+(`CaptureEngine`, monitor + window, GPU-side frames, QPC-anchored pts), `MftH264Encoder`
+(`Encoder`, async hardware MFT — AMF on the dev box — D3D-aware NV12 input, AVCC output,
+CleanPoint keyframes, SPS/PPS from sequence header or first IDR, drain via the new
+`Encoder::finish()`), `VideoConverter` (GPU BGRA→NV12 + scaling via D3D11 video processor),
+`mft_probe::enumerate()` (real ddoc §3 probe; reports Amf{Hevc,H264}+MfSoftware{H264} here),
+and `d3d11` device plumbing (one shared device for capture+encode, MT-protected).
+Platform-neutral additions: `annexb` (Annex B→AVCC, SPS/PPS extraction), `LimitedCapture`,
+`Encoder::finish()`. **End-to-end verified** via
+`cargo run -p clipline-capture --example record_smoke -- --seconds 5 --window league`:
+5 s of the live League client → 3 GOP segments → 15.45 MiB finalized hybrid MP4; ffprobe:
+h264 High 2290x1288, 300 frames, 5.008 s; full ffmpeg decode clean; extracted frames are
+correct. ffmpeg is installed via winget (`Gyan.FFmpeg`) so the ffprobe e2e tests run for real
+locally. Sharp edges: WGC + MFT device tests are hard-skipped under `CI` (windows-2025 runners
+access-violate in WGC; no hardware encoder), and B-frames must stay disabled until the muxer
+grows ctts support.
 
 ## Machine setup (do this first on the Windows clone)
 
@@ -84,7 +92,7 @@ plan each (they're independently verifiable):
      ddoc §6 "Clocking & A/V sync").
    - Verify: a windowed smoke binary that captures N frames and reports resolution/fps. Run
      manually — CI runners have no interactive desktop session for WGC.
-2. **Hardware encoder → `Encoder`**
+2. ~~**Hardware encoder → `Encoder`**~~ ✅ done 2026-06-11 (`crates/clipline-capture/src/windows/mft.rs`)
    - Recommended first path: **Media Foundation H.264 encoder** (`IMFTransform`, hardware MFT) —
      no FFmpeg dependency yet, simplest route to validated end-to-end MP4s. The encoder probe
      (`probe.rs`) gets a real `enumerate()` that lists available MFTs/backends.
