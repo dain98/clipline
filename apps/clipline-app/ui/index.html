@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Clipline</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; padding: 20px 24px; font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+      background: #101216; color: #e6e8ee; user-select: none;
+    }
+    h1 { font-size: 18px; margin: 0 0 2px; letter-spacing: 0.3px; }
+    .sub { color: #8a90a0; font-size: 12px; margin-bottom: 16px; }
+    .row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; }
+    .dot.on { background: #e5484d; box-shadow: 0 0 8px #e5484d; }
+    .stat { color: #8a90a0; } .stat b { color: #e6e8ee; font-variant-numeric: tabular-nums; }
+    button {
+      margin-top: 8px; padding: 8px 16px; border: 0; border-radius: 6px;
+      background: #2f6feb; color: white; font: inherit; cursor: pointer;
+    }
+    button:hover { background: #4181ff; }
+    .hint { color: #8a90a0; font-size: 12px; margin-top: 4px; }
+    #clips { margin-top: 14px; font-size: 12px; color: #8a90a0; max-height: 120px; overflow-y: auto; }
+    #clips div { padding: 2px 0; }
+    #clips b { color: #7ee787; }
+    #error { color: #f0883e; font-size: 12px; min-height: 16px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Clipline</h1>
+  <div class="sub">replay buffer — no injection, ever</div>
+  <div class="row"><div id="dot" class="dot"></div><div id="state">starting…</div></div>
+  <div class="row stat">buffered: <b id="buffered">0.0 s</b> · <b id="mb">0.0 MB</b> · <b id="segs">0</b> GOPs</div>
+  <button id="save">Save Replay</button>
+  <div class="hint">hotkey: Alt+F10</div>
+  <div id="error"></div>
+  <div id="clips"></div>
+  <script>
+    const { invoke } = window.__TAURI__.core;
+    const { listen } = window.__TAURI__.event;
+    const $ = (id) => document.getElementById(id);
+
+    listen("status", (e) => {
+      const s = e.payload;
+      $("dot").className = "dot" + (s.recording ? " on" : "");
+      $("state").textContent = s.recording ? "recording" : "stopped";
+      $("buffered").textContent = s.buffered_s.toFixed(1) + " s";
+      $("mb").textContent = s.buffered_mb.toFixed(1) + " MB";
+      $("segs").textContent = s.segments;
+    });
+    listen("saved", (e) => {
+      const d = document.createElement("div");
+      d.innerHTML = `<b>saved</b> ${e.payload.seconds.toFixed(1)}s &rarr; ${e.payload.path}`;
+      $("clips").prepend(d);
+      $("error").textContent = "";
+    });
+    listen("error", (e) => { $("error").textContent = e.payload; });
+    $("save").addEventListener("click", () => invoke("save_replay"));
+  </script>
+</body>
+</html>

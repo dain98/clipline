@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Clipline",
+  "version": "0.1.0",
+  "identifier": "io.clipline.app",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Clipline",
+        "width": 480,
+        "height": 380,
+        "resizable": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

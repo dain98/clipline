@@ -6,6 +6,7 @@ members = [
     "crates/clipline-buffer",
     "crates/clipline-capture",
     "crates/clipline-mp4",
+    "apps/clipline-app",
 ]
 
 [workspace.package]
