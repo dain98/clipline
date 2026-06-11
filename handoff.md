@@ -27,7 +27,18 @@ passes on Windows runners.
 | `clipline-capture` | `CaptureEngine`/`Encoder`/`AudioSource` traits, encoder probe (NVENC→AMF→QSV→x264, AV1→HEVC→H.264), `Recorder` pipeline (capture→encode→GOP segments→ring), `save_replay` → finalized A/V MP4 | mock-driven e2e + ffprobe |
 
 Executed implementation plans (read these to see the conventions in action):
-`docs/superpowers/plans/*.md` — nine so far, all completed task-by-task with TDD.
+`docs/superpowers/plans/*.md` — ten so far, all completed task-by-task with TDD.
+
+**Milestone 5 (Tauri shell) done 2026-06-11 — Clipline is now a usable tray recorder.**
+`apps/clipline-app` (`cargo run -p clipline-app [-- --window <title>]`): a windows-gated
+Tauri 2 app — recorder service thread (WGC + AMF + WASAPI on one clock, 120 s ring,
+`Recorder::step()` loop tolerating idle-screen timeouts) with **Alt+F10** global hotkey,
+tray menu, and a status webview. Saves land in `Videos\Clipline` with smart no-overlap.
+Verified live: two hotkey saves → 20.1 s clip (A/V durations equal to the millisecond) and a
+4.000 s no-overlap follow-up, both decode-clean. Non-Windows targets build a stub `main`
+(ubuntu CI needs no webkit2gtk). The neutral enabler: `Recorder::step()`/`finish_stream()`
+(save-while-recording). Not yet: installer/bundling, settings UI, event markers in clips,
+WebView2-destroyed-when-minimized.
 
 **Windows progress: all four milestones done — the M0 platform layer is complete.**
 Milestones 1 (WGC capture), 2 (MFT H.264 encoder), 3 (WASAPI loopback audio), and 4 (A/V
