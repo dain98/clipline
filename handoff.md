@@ -27,7 +27,18 @@ passes on Windows runners.
 | `clipline-capture` | `CaptureEngine`/`Encoder`/`AudioSource` traits, encoder probe (NVENC→AMF→QSV→x264, AV1→HEVC→H.264), `Recorder` pipeline (capture→encode→GOP segments→ring), `save_replay` → finalized A/V MP4 | mock-driven e2e + ffprobe |
 
 Executed implementation plans (read these to see the conventions in action):
-`docs/superpowers/plans/*.md` — ten so far, all completed task-by-task with TDD.
+`docs/superpowers/plans/*.md` — eleven so far, all completed task-by-task with TDD.
+
+**Milestone 6 (event markers) done 2026-06-11 — the differentiating feature is live.**
+While the app records, a poller thread hits the League Live Client API at 1 Hz (quiet 5 s
+retry while no game runs; `--lol-url` overrides for mocks), anchored events accumulate in
+`clipline_events::MarkerLog`, and Save Replay writes `<clip>.markers.json` (markers re-based
+to clip time) plus a marker count in the UI. The chain is CI-proven by
+`crates/clipline-lol/tests/markers_e2e.rs` (httpmock), and was verified against the real app
+with a local mock server: a DragonKill landed at t_s 2.15 s in the sidecar while an
+out-of-window kill was correctly excluded. Clock bridge: `recording_t0 = Instant::now()`
+sampled adjacent to `WgcCapture::new_clock()` (both QPC). Not yet: timeline UI rendering,
+auto-clip on importance, VALORANT OCR.
 
 **Milestone 5 (Tauri shell) done 2026-06-11 — Clipline is now a usable tray recorder.**
 `apps/clipline-app` (`cargo run -p clipline-app [-- --window <title>]`): a windows-gated
