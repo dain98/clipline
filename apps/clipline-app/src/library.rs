@@ -53,7 +53,7 @@ pub fn list_clips() -> Result<Vec<ClipInfo>, String> {
             markers,
         });
     }
-    clips.sort_by(|a, b| b.modified_unix.cmp(&a.modified_unix));
+    clips.sort_by_key(|c| std::cmp::Reverse(c.modified_unix));
     Ok(clips)
 }
 
