@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+audiopus = "0.2"
 clipline-buffer = { path = "../clipline-buffer" }
 clipline-mp4 = { path = "../clipline-mp4" }
 thiserror = { workspace = true }
