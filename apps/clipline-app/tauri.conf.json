@@ -20,7 +20,7 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$VIDEO/Clipline/**"]
+        "scope": ["**/Videos/Clipline/*.mp4"]
       }
     }
   }

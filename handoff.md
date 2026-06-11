@@ -27,7 +27,18 @@ passes on Windows runners.
 | `clipline-capture` | `CaptureEngine`/`Encoder`/`AudioSource` traits, encoder probe (NVENC→AMF→QSV→x264, AV1→HEVC→H.264), `Recorder` pipeline (capture→encode→GOP segments→ring), `save_replay` → finalized A/V MP4 | mock-driven e2e + ffprobe |
 
 Executed implementation plans (read these to see the conventions in action):
-`docs/superpowers/plans/*.md` — eleven so far, all completed task-by-task with TDD.
+`docs/superpowers/plans/*.md` — twelve so far, all completed task-by-task with TDD.
+
+**Milestone 7 (library view + marker timeline) done 2026-06-11.** The app shows a clip
+library (name, duration via the new `clipline_mp4::walker::movie_duration_s`, size, age,
+marker-count badge), plays clips in the webview (H.264+Opus `<video>` works in WebView2 —
+verified live), and the player timeline renders marker ticks (hover detail, click-to-seek).
+Delete is path-validated and verified through the UI. Sharp edges learned: Tauri v2's
+assetProtocol scope **does not resolve `$VIDEO`** — use a plain glob
+(`**/Videos/Clipline/*.mp4`); the webview also silently no-ops without
+`capabilities/default.json` (core:default). UI automation note: occluded windows swallow
+synthesized clicks while `PrintWindow` still captures them — position the window first.
+Not yet: thumbnails, trim/export, disk quota/GC, settings UI.
 
 **Milestone 6 (event markers) done 2026-06-11 — the differentiating feature is live.**
 While the app records, a poller thread hits the League Live Client API at 1 Hz (quiet 5 s

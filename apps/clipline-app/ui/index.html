@@ -132,8 +132,16 @@
     }
 
     const video = $("video");
+    video.addEventListener("error", () => {
+      const e = video.error;
+      $("pname").textContent = `load error ${e ? e.code : "?"} (${e && e.message ? e.message : "no detail"}) — ${video.src.slice(0, 80)}`;
+    });
+    video.addEventListener("loadedmetadata", () => {
+      $("pname").textContent = `${$("pname").dataset.name} — ${video.duration.toFixed(1)}s loaded`;
+    });
     function openPlayer(clip) {
       $("pname").textContent = clip.name;
+      $("pname").dataset.name = clip.name;
       video.src = convertFileSrc(clip.path);
       $("player").classList.add("open");
       const tl = $("timeline");
