@@ -204,11 +204,19 @@ mod tests {
     use crate::traits::FrameData;
     use std::time::Duration;
 
-    /// Real WGC against the primary monitor. Self-skips when capture is
-    /// unavailable (CI runners: no GPU / no interactive desktop) — the
-    /// skip-if-absent pattern the ffprobe e2e tests use.
+    /// Real WGC against the primary monitor. Self-skips on CI and when
+    /// capture init fails — the skip-if-absent pattern the ffprobe e2e
+    /// tests use. The CI gate is unconditional: Windows Server runners
+    /// report `IsSupported() == true` and expose a virtual display, then
+    /// access-violate inside the capture component (observed on
+    /// windows-2025); WGC verification is manual on a real desktop
+    /// (see the handoff/plan).
     #[test]
     fn captures_monotonic_gpu_frames_from_primary_monitor() {
+        if std::env::var_os("CI").is_some() {
+            eprintln!("SKIP: WGC device test needs a real interactive desktop");
+            return;
+        }
         let mut cap = match WgcCapture::primary_monitor() {
             Ok(cap) => cap,
             Err(e) => {
