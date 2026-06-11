@@ -1,6 +1,7 @@
 pub mod annexb;
 pub mod clock;
 pub mod mock;
+pub mod opus;
 pub mod pipeline;
 pub mod probe;
 pub mod traits;
@@ -10,6 +11,7 @@ pub mod windows;
 pub use annexb::{annexb_to_avcc, even_dimensions, extract_sps_pps, nal_type, split_annexb};
 pub use clock::{qpc_to_ticks_100ns, RelativeClock};
 pub use mock::{LimitedCapture, MockAudioSource, MockCapture, MockEncoder};
+pub use opus::OpusFrameEncoder;
 pub use pipeline::{PipelineError, Recorder};
 pub use probe::{select_encoder, Codec, EncoderBackend, EncoderCapability};
 pub use traits::{
