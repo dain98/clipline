@@ -46,8 +46,16 @@ pub struct WgcCapture {
 }
 
 impl WgcCapture {
-    /// Capture the primary monitor.
+    /// Capture the primary monitor on a freshly created device.
     pub fn primary_monitor() -> Result<Self, CaptureError> {
+        let (device, _) =
+            d3d11::create_device().map_err(|e| CaptureError::Init(e.to_string()))?;
+        Self::primary_monitor_on(device)
+    }
+
+    /// Capture the primary monitor on a caller-provided device (one device
+    /// must be shared with the encoder — textures don't cross devices).
+    pub fn primary_monitor_on(device: ID3D11Device) -> Result<Self, CaptureError> {
         // SAFETY: plain Win32 call returning a handle (null in headless
         // sessions — checked below, since CreateForMonitor access-violates
         // on an invalid HMONITOR instead of returning an error).
@@ -56,24 +64,32 @@ impl WgcCapture {
             return Err(CaptureError::Init("no monitor in this session (headless?)".into()));
         }
         let item = create_item(|interop| unsafe { interop.CreateForMonitor(hmon) })?;
-        Self::new(item)
+        Self::new(item, device)
     }
 
     /// Capture one window (must be visible; ddoc §3: per-window preferred,
     /// borderless fullscreen recommended for games).
     pub fn for_window(hwnd: HWND) -> Result<Self, CaptureError> {
+        let (device, _) =
+            d3d11::create_device().map_err(|e| CaptureError::Init(e.to_string()))?;
+        Self::for_window_on(device, hwnd)
+    }
+
+    /// Window capture on a caller-provided device.
+    pub fn for_window_on(device: ID3D11Device, hwnd: HWND) -> Result<Self, CaptureError> {
         if hwnd.is_invalid() {
             return Err(CaptureError::Init("invalid window handle".into()));
         }
         let item = create_item(|interop| unsafe { interop.CreateForWindow(hwnd) })?;
-        Self::new(item)
+        Self::new(item, device)
     }
 
-    fn new(item: GraphicsCaptureItem) -> Result<Self, CaptureError> {
+    fn new(item: GraphicsCaptureItem, device: ID3D11Device) -> Result<Self, CaptureError> {
         init_winrt()?;
         let init = |e: windows::core::Error| CaptureError::Init(e.to_string());
 
-        let (device, context) = d3d11::create_device().map_err(init)?;
+        // SAFETY: trivial getter on a valid device.
+        let context = unsafe { device.GetImmediateContext() }.map_err(init)?;
         let winrt_device = winrt_device(&device).map_err(init)?;
 
         let size = item.Size().map_err(init)?;
@@ -239,5 +255,31 @@ mod tests {
             let (w, h) = crate::windows::d3d11::texture_size(tex);
             assert!(w > 0 && h > 0);
         }
+    }
+
+    #[test]
+    fn capture_runs_on_a_caller_provided_device() {
+        if std::env::var_os("CI").is_some() {
+            eprintln!("SKIP: WGC device test needs a real interactive desktop");
+            return;
+        }
+        let (device, _ctx) = crate::windows::d3d11::create_device().expect("device");
+        let mut cap = match WgcCapture::primary_monitor_on(device.clone()) {
+            Ok(cap) => cap,
+            Err(e) => {
+                eprintln!("SKIP: WGC unavailable: {e}");
+                return;
+            }
+        };
+        let frame = cap
+            .next_frame_timeout(Duration::from_secs(5))
+            .expect("frame")
+            .expect("session open");
+        let FrameData::Gpu(tex) = &frame.data else { panic!("gpu frame") };
+        // The texture must live on the device we provided.
+        use windows::core::Interface;
+        // SAFETY: trivial getter on a valid texture.
+        let owner = unsafe { tex.GetDevice() }.expect("owner device");
+        assert_eq!(owner.as_raw(), device.as_raw());
     }
 }

@@ -1,8 +1,9 @@
 //! Thin safe wrappers over D3D11 device/texture creation, shared by WGC
 //! capture now and the Media Foundation encoder milestone later.
 
-use windows::core::Result as WinResult;
+use windows::core::{Interface, Result as WinResult};
 use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
 };
@@ -41,10 +42,13 @@ fn create_device_with(driver: D3D_DRIVER_TYPE) -> WinResult<(ID3D11Device, ID3D1
             Some(&mut context),
         )?;
     }
-    Ok((
-        device.expect("device out-param set on Ok"),
-        context.expect("context out-param set on Ok"),
-    ))
+    let device = device.expect("device out-param set on Ok");
+    // MF's DXGI device manager shares this device across threads —
+    // multithread protection is required for D3D-aware MFTs.
+    let mt: ID3D10Multithread = device.cast()?;
+    // SAFETY: trivial setter on a valid interface.
+    unsafe { mt.SetMultithreadProtected(true) };
+    Ok((device, context.expect("context out-param set on Ok")))
 }
 
 /// Default-usage BGRA texture, e.g. the destination for a capture-frame copy.
