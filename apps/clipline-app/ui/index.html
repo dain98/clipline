@@ -5,26 +5,59 @@
   <title>Clipline</title>
   <style>
     :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
     body {
       margin: 0; padding: 20px 24px; font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
       background: #101216; color: #e6e8ee; user-select: none;
     }
     h1 { font-size: 18px; margin: 0 0 2px; letter-spacing: 0.3px; }
-    .sub { color: #8a90a0; font-size: 12px; margin-bottom: 16px; }
-    .row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+    .sub { color: #8a90a0; font-size: 12px; margin-bottom: 14px; }
+    .row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
     .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; }
     .dot.on { background: #e5484d; box-shadow: 0 0 8px #e5484d; }
     .stat { color: #8a90a0; } .stat b { color: #e6e8ee; font-variant-numeric: tabular-nums; }
     button {
-      margin-top: 8px; padding: 8px 16px; border: 0; border-radius: 6px;
+      padding: 7px 14px; border: 0; border-radius: 6px;
       background: #2f6feb; color: white; font: inherit; cursor: pointer;
     }
     button:hover { background: #4181ff; }
-    .hint { color: #8a90a0; font-size: 12px; margin-top: 4px; }
-    #clips { margin-top: 14px; font-size: 12px; color: #8a90a0; max-height: 120px; overflow-y: auto; }
-    #clips div { padding: 2px 0; }
-    #clips b { color: #7ee787; }
-    #error { color: #f0883e; font-size: 12px; min-height: 16px; margin-top: 6px; }
+    button.ghost { background: #23262e; color: #c2c8d6; padding: 5px 10px; }
+    button.ghost:hover { background: #2c3039; }
+    .hint { color: #8a90a0; font-size: 12px; }
+    #error { color: #f0883e; font-size: 12px; min-height: 16px; margin: 4px 0; }
+    h2 { font-size: 13px; color: #8a90a0; text-transform: uppercase; letter-spacing: 1px;
+         margin: 18px 0 8px; }
+    .clip {
+      display: flex; align-items: center; gap: 10px; padding: 9px 12px; margin-bottom: 6px;
+      background: #171a20; border-radius: 8px;
+    }
+    .clip .meta { flex: 1; min-width: 0; }
+    .clip .name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .clip .info { font-size: 11.5px; color: #8a90a0; font-variant-numeric: tabular-nums; }
+    .badge {
+      background: #1d3450; color: #7ab8ff; font-size: 11px; padding: 1px 7px;
+      border-radius: 9px; margin-left: 6px;
+    }
+    #player {
+      position: fixed; inset: 0; background: rgba(6,8,11,0.96); display: none;
+      flex-direction: column; padding: 18px; z-index: 10;
+    }
+    #player.open { display: flex; }
+    #player video { flex: 1; min-height: 0; width: 100%; background: black; border-radius: 8px; }
+    #ptitle { font-size: 13px; margin-bottom: 8px; display: flex; justify-content: space-between; }
+    #timeline {
+      position: relative; height: 26px; margin-top: 10px; background: #171a20;
+      border-radius: 6px; cursor: pointer;
+    }
+    #progress {
+      position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+      background: #233048; border-radius: 6px;
+    }
+    .tick {
+      position: absolute; top: 2px; bottom: 2px; width: 4px; margin-left: -2px;
+      background: #e8b341; border-radius: 2px; cursor: pointer; z-index: 2;
+    }
+    .tick:hover { background: #ffd066; box-shadow: 0 0 6px #e8b341; }
   </style>
 </head>
 <body>
@@ -32,12 +65,20 @@
   <div class="sub">replay buffer — no injection, ever</div>
   <div class="row"><div id="dot" class="dot"></div><div id="state">starting…</div></div>
   <div class="row stat">buffered: <b id="buffered">0.0 s</b> · <b id="mb">0.0 MB</b> · <b id="segs">0</b> GOPs</div>
-  <button id="save">Save Replay</button>
-  <div class="hint">hotkey: Alt+F10</div>
+  <div class="row"><button id="save">Save Replay</button><span class="hint">hotkey: Alt+F10</span></div>
   <div id="error"></div>
+
+  <h2>Library</h2>
   <div id="clips"></div>
+
+  <div id="player">
+    <div id="ptitle"><span id="pname"></span><button class="ghost" id="close">✕ close</button></div>
+    <video id="video" controls></video>
+    <div id="timeline"><div id="progress"></div></div>
+  </div>
+
   <script>
-    const { invoke } = window.__TAURI__.core;
+    const { invoke, convertFileSrc } = window.__TAURI__.core;
     const { listen } = window.__TAURI__.event;
     const $ = (id) => document.getElementById(id);
 
@@ -49,15 +90,85 @@
       $("mb").textContent = s.buffered_mb.toFixed(1) + " MB";
       $("segs").textContent = s.segments;
     });
-    listen("saved", (e) => {
-      const d = document.createElement("div");
-      const m = e.payload.markers > 0 ? ` · ${e.payload.markers} marker${e.payload.markers > 1 ? "s" : ""}` : "";
-      d.innerHTML = `<b>saved</b> ${e.payload.seconds.toFixed(1)}s${m} &rarr; ${e.payload.path}`;
-      $("clips").prepend(d);
-      $("error").textContent = "";
-    });
+    listen("saved", () => { $("error").textContent = ""; refresh(); });
     listen("error", (e) => { $("error").textContent = e.payload; });
     $("save").addEventListener("click", () => invoke("save_replay"));
+
+    const fmtDur = (s) => s == null ? "?" :
+      `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
+    const fmtAgo = (unix) => {
+      const d = Math.max(0, Date.now() / 1000 - unix);
+      if (d < 90) return `${Math.round(d)}s ago`;
+      if (d < 5400) return `${Math.round(d / 60)}m ago`;
+      return `${Math.round(d / 3600)}h ago`;
+    };
+
+    async function refresh() {
+      const clips = await invoke("list_clips");
+      const root = $("clips");
+      root.replaceChildren();
+      if (!clips.length) {
+        root.innerHTML = '<div class="hint">no clips yet — press Alt+F10 while something plays</div>';
+        return;
+      }
+      for (const c of clips) {
+        const n = c.markers ? c.markers.markers.length : 0;
+        const el = document.createElement("div");
+        el.className = "clip";
+        el.innerHTML = `
+          <div class="meta">
+            <div class="name">${c.name}${n ? `<span class="badge">${n} marker${n > 1 ? "s" : ""}</span>` : ""}</div>
+            <div class="info">${fmtDur(c.duration_s)} · ${c.size_mb.toFixed(1)} MB · ${fmtAgo(c.modified_unix)}</div>
+          </div>
+          <button class="ghost play">▶</button>
+          <button class="ghost del">🗑</button>`;
+        el.querySelector(".play").addEventListener("click", () => openPlayer(c));
+        el.querySelector(".del").addEventListener("click", async () => {
+          await invoke("delete_clip", { path: c.path }).catch((e) => $("error").textContent = e);
+          refresh();
+        });
+        root.appendChild(el);
+      }
+    }
+
+    const video = $("video");
+    function openPlayer(clip) {
+      $("pname").textContent = clip.name;
+      video.src = convertFileSrc(clip.path);
+      $("player").classList.add("open");
+      const tl = $("timeline");
+      tl.querySelectorAll(".tick").forEach((t) => t.remove());
+      const dur = clip.duration_s ?? (clip.markers ? clip.markers.duration_s : null);
+      if (clip.markers && dur) {
+        for (const m of clip.markers.markers) {
+          const tick = document.createElement("div");
+          tick.className = "tick";
+          tick.style.left = `${(m.t_s / dur) * 100}%`;
+          tick.title = `${m.kind}${m.subtype ? ` (${m.subtype})` : ""} — ${m.actor}${m.victim ? " → " + m.victim : ""} @ ${m.t_s.toFixed(1)}s`;
+          tick.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            video.currentTime = m.t_s;
+            video.play();
+          });
+          tl.appendChild(tick);
+        }
+      }
+      tl.onclick = (ev) => {
+        const r = tl.getBoundingClientRect();
+        if (video.duration) video.currentTime = ((ev.clientX - r.left) / r.width) * video.duration;
+      };
+      video.ontimeupdate = () => {
+        if (video.duration) $("progress").style.width = `${(video.currentTime / video.duration) * 100}%`;
+      };
+      video.play();
+    }
+    $("close").addEventListener("click", () => {
+      video.pause();
+      video.src = "";
+      $("player").classList.remove("open");
+    });
+
+    refresh();
   </script>
 </body>
 </html>

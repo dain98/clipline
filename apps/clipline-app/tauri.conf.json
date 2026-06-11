@@ -11,9 +11,9 @@
     "windows": [
       {
         "title": "Clipline",
-        "width": 480,
-        "height": 380,
-        "resizable": false
+        "width": 520,
+        "height": 660,
+        "resizable": true
       }
     ],
     "security": {
