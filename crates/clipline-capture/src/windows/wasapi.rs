@@ -80,12 +80,19 @@ impl WasapiLoopback {
             let capture: IAudioCaptureClient = client.GetService().map_err(init)?;
             client.Start().map_err(init)?;
 
+            // Anchor the audio timeline at the clock origin (recording
+            // start): the gap fill turns any lead-in before the first
+            // device buffer into silence, keeping the muxed track aligned
+            // with video (both tracks start at t=0 in the file).
+            let mut assembler = LoopbackAssembler::new();
+            assembler.push_chunk(0.0, &[]);
+
             Ok(Self {
                 client,
                 capture,
                 clock,
                 channels,
-                assembler: LoopbackAssembler::new(),
+                assembler,
                 opus: OpusFrameEncoder::new()
                     .map_err(|e| CaptureError::Init(format!("opus: {e}")))?,
                 queue: Vec::new(),

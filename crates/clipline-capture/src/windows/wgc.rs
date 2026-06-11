@@ -114,6 +114,12 @@ impl WgcCapture {
         Ok(Self { session, frame_pool, rx, clock: RelativeClock::new(origin) })
     }
 
+    /// The capture-start clock — share it with audio sources so all pts
+    /// live on one timeline (ddoc §6).
+    pub fn clock(&self) -> RelativeClock {
+        self.clock
+    }
+
     /// `next_frame` with an explicit wait bound.
     pub fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
         match self.rx.recv_timeout(timeout) {

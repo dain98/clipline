@@ -12,7 +12,7 @@ fn main() {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use clipline_capture::traits::FrameData;
     use clipline_capture::windows::{
-        d3d11, find_window_by_title, MftConfig, MftH264Encoder, WgcCapture,
+        d3d11, find_window_by_title, MftConfig, MftH264Encoder, WasapiLoopback, WgcCapture,
     };
     use clipline_capture::{even_dimensions, LimitedCapture, Recorder};
 
@@ -52,11 +52,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let encoder = MftH264Encoder::new(&device, in_w, in_h, cfg)?;
 
     let started = std::time::Instant::now();
+    // Audio shares the video capture's clock origin: one timeline (ddoc §6).
+    let clock = cap.clock();
     let mut rec = Recorder::new(
         LimitedCapture::new(cap, seconds * FPS as u64),
         encoder,
         usize::MAX,
     );
+    if args.iter().any(|a| a == "--audio") {
+        rec = rec.with_audio(Box::new(WasapiLoopback::start(clock)?));
+        println!("system loopback audio attached");
+    }
     rec.run_to_end()?;
     let elapsed = started.elapsed();
 
