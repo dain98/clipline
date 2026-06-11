@@ -33,6 +33,9 @@ pub fn run() {
     if let Some(i) = args.iter().position(|a| a == "--window") {
         opts.window_title = args.get(i + 1).cloned();
     }
+    if let Some(i) = args.iter().position(|a| a == "--lol-url") {
+        opts.lol_url = args.get(i + 1).cloned();
+    }
 
     let (cmd_tx, event_rx) = service::spawn(opts);
     let quit_tx = cmd_tx.clone();

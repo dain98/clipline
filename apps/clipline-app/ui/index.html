@@ -51,7 +51,8 @@
     });
     listen("saved", (e) => {
       const d = document.createElement("div");
-      d.innerHTML = `<b>saved</b> ${e.payload.seconds.toFixed(1)}s &rarr; ${e.payload.path}`;
+      const m = e.payload.markers > 0 ? ` · ${e.payload.markers} marker${e.payload.markers > 1 ? "s" : ""}` : "";
+      d.innerHTML = `<b>saved</b> ${e.payload.seconds.toFixed(1)}s${m} &rarr; ${e.payload.path}`;
       $("clips").prepend(d);
       $("error").textContent = "";
     });

@@ -11,6 +11,9 @@ use clipline_capture::windows::{
     d3d11, find_window_by_title, MftConfig, MftH264Encoder, WasapiLoopback, WgcCapture,
 };
 use clipline_capture::{even_dimensions, PipelineError, Recorder};
+use clipline_events::MarkerLog;
+
+use crate::markers;
 
 pub enum Cmd {
     Save,
@@ -21,13 +24,15 @@ pub enum Cmd {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
     Status { recording: bool, segments: usize, buffered_s: f64, buffered_mb: f64 },
-    Saved { path: String, seconds: f64 },
+    Saved { path: String, seconds: f64, markers: usize },
     Error(String),
 }
 
 pub struct ServiceOptions {
     /// Capture a window matching this title substring; None = primary monitor.
     pub window_title: Option<String>,
+    /// Override the League Live Client endpoint (mock servers).
+    pub lol_url: Option<String>,
     /// Save Replay trailing window (s).
     pub replay_window_s: f64,
     /// Ring budget in bytes.
@@ -40,6 +45,7 @@ impl Default for ServiceOptions {
     fn default() -> Self {
         Self {
             window_title: None,
+            lol_url: None,
             replay_window_s: 60.0,
             // ~2 min at 12 Mbps video + audio headroom.
             buffer_bytes: 220 * 1024 * 1024,
@@ -73,6 +79,11 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let init = |e: &dyn std::fmt::Display| format!("init: {e}");
     let (device, _ctx) = d3d11::create_device().map_err(|e| init(&e))?;
     let clock = WgcCapture::new_clock().map_err(|e| init(&e))?;
+    // The wall-clock twin of the capture clock origin (both are QPC under
+    // the hood; sampled together they describe one timeline — ddoc §5).
+    let recording_t0 = Instant::now();
+    let marker_rx = markers::spawn(opts.lol_url.clone(), recording_t0);
+    let mut marker_log = MarkerLog::new();
     let mut cap = match &opts.window_title {
         Some(needle) => {
             let hwnd = find_window_by_title(needle)
@@ -115,6 +126,10 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             Err(e) => return Err(format!("recording: {e}")),
         }
 
+        while let Ok(event) = marker_rx.try_recv() {
+            marker_log.push(event);
+        }
+
         if last_status.elapsed() >= Duration::from_secs(1) {
             last_status = Instant::now();
             let (mut span, mut first_pts) = (0.0f64, None::<f64>);
@@ -139,9 +154,20 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     match save(&rec, &path, opts.replay_window_s, last_save_end) {
                         Ok((end, seconds)) => {
                             last_save_end = Some(end);
+                            // Markers inside the saved window ride along as
+                            // a sidecar (ddoc §5) — only when there are any.
+                            let clip = marker_log.clip_markers(end - seconds, end);
+                            let markers = clip.markers.len();
+                            if markers > 0 {
+                                let sidecar = path.with_extension("markers.json");
+                                if let Ok(json) = serde_json::to_string_pretty(&clip) {
+                                    let _ = std::fs::write(sidecar, json);
+                                }
+                            }
                             let _ = events.send(Event::Saved {
                                 path: path.display().to_string(),
                                 seconds,
+                                markers,
                             });
                         }
                         Err(e) => {

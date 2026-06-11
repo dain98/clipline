@@ -590,11 +590,14 @@ name = "clipline-app"
 version = "0.1.0"
 dependencies = [
  "clipline-capture",
+ "clipline-events",
+ "clipline-lol",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",
+ "tokio",
 ]
 
 [[package]]
