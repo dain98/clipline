@@ -67,6 +67,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let elapsed = started.elapsed();
 
     let segments = rec.ring().len();
+    {
+        use clipline_capture::{validate_timeline, SyncTolerances};
+        let segs: Vec<_> = rec.ring().segments().collect();
+        match validate_timeline(&segs, &SyncTolerances::default()) {
+            Ok(r) => println!(
+                "sync: video {:.3}s, audio {:?}s, max gap {:.1}ms, drift {:?}ms",
+                r.video_duration_s,
+                r.audio_duration_s.iter().map(|d| (d * 1e3).round() / 1e3).collect::<Vec<_>>(),
+                r.max_video_gap_s * 1e3,
+                r.total_drift_s.iter().map(|d| (d * 1e4).round() / 10.0).collect::<Vec<_>>(),
+            ),
+            Err(v) => return Err(format!("timeline validation failed: {v}").into()),
+        }
+    }
     let file = std::fs::File::create(&out_path)?;
     let (file, end_pts) = rec.save_replay(file, seconds as f64 + 2.0, None)?;
     drop(file);

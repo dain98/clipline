@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn rejects_non_keyframe_led_segment() {
-        let segs = vec![video_seg(0.0, 30, 1.0 / 30.0, false)];
+        let segs = [video_seg(0.0, 30, 1.0 / 30.0, false)];
         let refs: Vec<&Segment> = segs.iter().collect();
         match validate_timeline(&refs, &SyncTolerances::default()) {
             Err(SyncViolation::NotKeyframeLed { segment: 0 }) => {}
@@ -162,7 +162,7 @@ mod tests {
     fn rejects_inter_segment_video_gap() {
         // Second segment starts 50 ms after the first ends.
         let segs =
-            vec![video_seg(0.0, 30, 1.0 / 30.0, true), video_seg(1.05, 30, 1.0 / 30.0, true)];
+            [video_seg(0.0, 30, 1.0 / 30.0, true), video_seg(1.05, 30, 1.0 / 30.0, true)];
         let refs: Vec<&Segment> = segs.iter().collect();
         match validate_timeline(&refs, &SyncTolerances::default()) {
             Err(SyncViolation::VideoGap { segment: 1, gap_s }) => {
@@ -185,7 +185,7 @@ mod tests {
         first.audio.push(track);
         let mut second = video_seg(1.0, 30, 1.0 / 30.0, true);
         second.audio.push(TrackSamples::default()); // empty: also skewed, but seg 0 fails first
-        let segs = vec![first, second];
+        let segs = [first, second];
         let refs: Vec<&Segment> = segs.iter().collect();
         match validate_timeline(&refs, &SyncTolerances::default()) {
             Err(SyncViolation::AudioSegmentSkew { segment: 0, track: 0, skew_s }) => {
@@ -205,7 +205,7 @@ mod tests {
             track.data.push(0);
         }
         seg.audio.push(track);
-        let segs = vec![seg];
+        let segs = [seg];
         let refs: Vec<&Segment> = segs.iter().collect();
         // Total drift tolerance must absorb the 200 ms shortfall for this test.
         let tol = SyncTolerances { max_total_drift_s: 0.3, ..Default::default() };
@@ -218,7 +218,7 @@ mod tests {
             long.data.push(0);
         }
         seg2.audio.push(long);
-        let segs2 = vec![seg2];
+        let segs2 = [seg2];
         let refs2: Vec<&Segment> = segs2.iter().collect();
         assert!(matches!(
             validate_timeline(&refs2, &tol),
