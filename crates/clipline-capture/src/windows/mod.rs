@@ -6,12 +6,29 @@ pub mod d3d11;
 pub mod mft;
 pub mod mft_probe;
 pub mod nv12;
+pub mod wasapi;
 pub mod wgc;
 pub mod window;
 
 pub use mft::{MftConfig, MftH264Encoder};
+pub use wasapi::WasapiLoopback;
 pub use wgc::WgcCapture;
 pub use window::find_window_by_title;
+
+/// The capture-clock origin: QPC now, in the 100 ns units shared by WGC
+/// `SystemRelativeTime` and WASAPI QPC positions (ddoc §6).
+pub fn qpc_now_ticks_100ns() -> windows::core::Result<i64> {
+    use windows::Win32::System::Performance::{
+        QueryPerformanceCounter, QueryPerformanceFrequency,
+    };
+    let (mut counter, mut freq) = (0i64, 0i64);
+    // SAFETY: out-pointers are valid; these calls cannot fail on XP+.
+    unsafe {
+        QueryPerformanceCounter(&mut counter)?;
+        QueryPerformanceFrequency(&mut freq)?;
+    }
+    Ok(crate::clock::qpc_to_ticks_100ns(counter, freq))
+}
 
 #[cfg(test)]
 mod tests {

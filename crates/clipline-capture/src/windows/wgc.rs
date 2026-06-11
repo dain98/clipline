@@ -17,14 +17,13 @@ use windows::Win32::Foundation::{HWND, POINT, RPC_E_CHANGED_MODE};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
-use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
-use crate::clock::{qpc_to_ticks_100ns, RelativeClock};
+use crate::clock::RelativeClock;
 use crate::traits::{CaptureEngine, CaptureError, Frame, FrameData};
 use crate::windows::d3d11;
 
@@ -105,7 +104,7 @@ impl WgcCapture {
         // builds show the yellow border.
         let _ = session.SetIsBorderRequired(false);
 
-        let origin = qpc_now_ticks_100ns().map_err(init)?;
+        let origin = crate::windows::qpc_now_ticks_100ns().map_err(init)?;
         let (tx, rx) = mpsc::channel();
         frame_pool
             .FrameArrived(&TypedEventHandler::new(on_frame_arrived(device, context, tx)))
@@ -191,16 +190,6 @@ fn winrt_device(device: &ID3D11Device) -> WinResult<IDirect3DDevice> {
     // SAFETY: dxgi is a valid device; the call returns an IInspectable we cast.
     let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? };
     inspectable.cast()
-}
-
-fn qpc_now_ticks_100ns() -> WinResult<i64> {
-    let (mut counter, mut freq) = (0i64, 0i64);
-    // SAFETY: out-pointers are valid; these calls cannot fail on XP+.
-    unsafe {
-        QueryPerformanceCounter(&mut counter)?;
-        QueryPerformanceFrequency(&mut freq)?;
-    }
-    Ok(qpc_to_ticks_100ns(counter, freq))
 }
 
 /// Idempotent WinRT init; an already-initialized thread (RPC_E_CHANGED_MODE
