@@ -27,12 +27,14 @@ passes on Windows runners.
 | `clipline-capture` | `CaptureEngine`/`Encoder`/`AudioSource` traits, encoder probe (NVENC→AMF→QSV→x264, AV1→HEVC→H.264), `Recorder` pipeline (capture→encode→GOP segments→ring), `save_replay` → finalized A/V MP4 | mock-driven e2e + ffprobe |
 
 Executed implementation plans (read these to see the conventions in action):
-`docs/superpowers/plans/*.md` — eight so far, all completed task-by-task with TDD.
+`docs/superpowers/plans/*.md` — nine so far, all completed task-by-task with TDD.
 
-**Windows progress:** milestones 1 (WGC capture), 2 (MFT H.264 encoder), and 3 (WASAPI
-loopback audio) are **done** — see
+**Windows progress: all four milestones done — the M0 platform layer is complete.**
+Milestones 1 (WGC capture), 2 (MFT H.264 encoder), 3 (WASAPI loopback audio), and 4 (A/V
+sync hardening) — see
 `docs/superpowers/plans/2026-06-10-clipline-wgc-capture.md`,
-`…-clipline-mft-encoder.md`, and `2026-06-11-clipline-wasapi-loopback.md`.
+`…-clipline-mft-encoder.md`, `2026-06-11-clipline-wasapi-loopback.md`, and
+`2026-06-11-clipline-av-sync.md`.
 The `#[cfg(windows)]` `windows/` module now holds: `WgcCapture`
 (`CaptureEngine`, monitor + window, GPU-side frames, QPC-anchored pts), `MftH264Encoder`
 (`Encoder`, async hardware MFT — AMF on the dev box — D3D-aware NV12 input, AVCC output,
@@ -45,16 +47,27 @@ capture+encode, MT-protected). Platform-neutral additions: `annexb` (Annex B→A
 extraction), `opus` (20 ms/960-sample frame encoder), `pcm` (`LoopbackAssembler` — continuity
 + **silence gap fill**, required because loopback goes quiet when nothing renders and the MP4
 audio timeline is duration-cumulative), `LimitedCapture`, `Encoder::finish()`.
+**A/V sync (milestone 4):** the MP4 video timeline is derived from capture stamps at seal
+time (`duration[i] = pts[i+1] − pts[i]`, the sealing keyframe closes each GOP exactly —
+ddoc §6 "stamps, not cadence"; VRR-jitter mock test pins it); `avsync::validate_timeline`
+checks keyframe-led segments, video continuity, per-segment audio coverage, and cumulative
+drift against tolerances; the clock is an explicit constructor parameter
+(`WgcCapture::new_clock()` → shared by `*_on(device, …, clock)` and `WasapiLoopback::start`);
+the `Recorder` drops audio captured before the first video packet (the validator caught this
+for real: engine-init lead-in would have shifted video ~63 ms early). Real-engine device test
+(`real_engines_on_one_clock_produce_a_synced_timeline`) records WGC+AMF+WASAPI+Opus on one
+clock and validates: total drift −8.3 ms.
 **A/V end-to-end verified** via
 `cargo run -p clipline-capture --example record_smoke -- --seconds 5 --window <w> --audio`:
-5 s window capture → h264 (300 frames, 5.000 s) + opus (252 pkts, 5.040 s) in one finalized
-hybrid MP4; decode clean; audio volumedetect shows real content. Audio shares the video
-clock via `WgcCapture::clock()` and anchors its timeline at t=0 (lead-in becomes silence) so
-tracks start aligned. ffmpeg is installed via winget (`Gyan.FFmpeg`) so the ffprobe e2e tests
-run for real locally. Sharp edges: WGC/MFT/WASAPI device tests are hard-skipped under `CI`
-(windows-2025 runners access-violate in WGC; no hardware encoder/audio endpoint); B-frames
-must stay disabled until the muxer grows ctts support; the loopback path requires a 48 kHz
-float mix format (resampler is a follow-up).
+5 s window capture → h264 (300 frames, 5.008 s) + opus (5.020 s), max inter-GOP gap 0.0 ms,
+total drift 11.7 ms; decode clean; audio volumedetect shows real content. ffmpeg is installed
+via winget (`Gyan.FFmpeg`) so the ffprobe e2e tests run for real locally. Sharp edges:
+WGC/MFT/WASAPI device tests are hard-skipped under `CI` (windows-2025 runners access-violate
+in WGC; no hardware encoder/audio endpoint); B-frames must stay disabled until the muxer
+grows ctts support; the loopback path requires a 48 kHz float mix format (resampler is a
+follow-up). **Next frontier (ddoc §15):** FFmpeg encoder matrix (NVENC/AMF/QSV, AV1/HEVC),
+per-process audio loopback, mic track, Tauri shell wiring hotkey → `save_replay`, and the
+continuous-recording second sink.
 
 ## Machine setup (do this first on the Windows clone)
 
@@ -117,9 +130,8 @@ plan each (they're independently verifiable):
      `GetMixFormat`/`IsFormatSupported` return `E_NOTIMPL` on the process-loopback path, assume a
      fixed format. Opus encoding: `audiopus`/`opus` crate (libopus) or defer encoding and store
      PCM-in-Opus-clothing only for testing — real Opus before shipping.
-4. **A/V sync hardening** — both capture clocks against one QPC timebase; ddoc §6 calls this
-   M0-core, not polish. The mock tests pinned exact GOP-boundary behavior; reproduce that
-   discipline with real clocks (tolerances, not exact equality).
+4. ~~**A/V sync hardening**~~ ✅ done 2026-06-11 — stamp-derived MP4 timeline, shared-clock
+   API, lead-in trimming, `avsync` validator + real-engine sync test (drift −8.3 ms).
 
 Useful references: robmikh's windows-rs capture samples (ddoc §4 cites them as the de-risk),
 Microsoft's ApplicationLoopback sample, `clipline-capture/src/mock.rs` for the contract each
