@@ -190,7 +190,7 @@ fn init_winrt() -> Result<(), CaptureError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::{CaptureEngine, FrameData};
+    use crate::traits::FrameData;
     use std::time::Duration;
 
     /// Real WGC against the primary monitor. Self-skips when capture is
