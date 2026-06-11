@@ -6,6 +6,8 @@ pub enum EncoderBackend {
     Amf,
     QuickSync,
     X264,
+    /// Microsoft software H.264 MFT — last resort until FFmpeg/x264 lands.
+    MfSoftware,
 }
 
 /// Codec preference order (ddoc §3: AV1 → HEVC → H.264).
@@ -66,6 +68,15 @@ mod tests {
             backend: EncoderBackend::X264,
             codecs: vec![Codec::H264],
         }];
+        assert_eq!(select_encoder(&caps), Some((EncoderBackend::X264, Codec::H264)));
+    }
+
+    #[test]
+    fn mf_software_ranks_below_x264() {
+        let caps = vec![
+            EncoderCapability { backend: EncoderBackend::MfSoftware, codecs: vec![Codec::H264] },
+            EncoderCapability { backend: EncoderBackend::X264, codecs: vec![Codec::H264] },
+        ];
         assert_eq!(select_encoder(&caps), Some((EncoderBackend::X264, Codec::H264)));
     }
 

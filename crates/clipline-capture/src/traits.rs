@@ -54,6 +54,11 @@ pub trait Encoder {
     fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError>;
     /// Track parameters for muxing the produced stream.
     fn track_config(&self) -> VideoTrackConfig;
+    /// Drain any internally buffered packets at end of stream. Called by
+    /// the pipeline after the capture source ends.
+    fn finish(&mut self) -> Result<Vec<EncodedPacket>, EncodeError> {
+        Ok(Vec::new())
+    }
 }
 
 /// One encoded audio packet (e.g. a 20 ms Opus frame).

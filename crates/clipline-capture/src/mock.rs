@@ -68,6 +68,32 @@ impl Encoder for MockEncoder {
     }
 }
 
+/// Bounds an endless capture source to N frames so
+/// `Recorder::run_to_end` terminates (WGC never ends on its own).
+pub struct LimitedCapture<C: CaptureEngine> {
+    inner: C,
+    remaining: u64,
+}
+
+impl<C: CaptureEngine> LimitedCapture<C> {
+    pub fn new(inner: C, frames: u64) -> Self {
+        Self { inner, remaining: frames }
+    }
+}
+
+impl<C: CaptureEngine> CaptureEngine for LimitedCapture<C> {
+    fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError> {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        let frame = self.inner.next_frame()?;
+        if frame.is_some() {
+            self.remaining -= 1;
+        }
+        Ok(frame)
+    }
+}
+
 /// Deterministic audio source: fixed-size packets every `packet_ms`.
 pub struct MockAudioSource {
     sample_rate: u32,
@@ -150,6 +176,17 @@ mod tests {
         assert!(cfg.timescale > 0);
         assert!(!cfg.sps.is_empty());
         assert!(!cfg.pps.is_empty());
+    }
+
+    #[test]
+    fn limited_capture_truncates_an_endless_source() {
+        // MockCapture would produce 100; the limiter ends the stream at 3.
+        let mut cap = LimitedCapture::new(MockCapture::new(100, 30), 3);
+        let mut n = 0;
+        while cap.next_frame().unwrap().is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 3);
     }
 
     #[test]

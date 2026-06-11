@@ -63,6 +63,12 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
                 self.pending.push(pkt);
             }
         }
+        for pkt in self.encoder.finish()? {
+            if pkt.is_keyframe && !self.pending.is_empty() {
+                self.seal_pending(pkt.pts_s);
+            }
+            self.pending.push(pkt);
+        }
         if !self.pending.is_empty() {
             // Drain any audio still buffered in the sources to the end of
             // the final GOP, then seal everything.
@@ -248,6 +254,46 @@ mod tests {
         // First packet of the second segment starts at its GOP boundary.
         let seg2 = ring.segments().nth(1).unwrap();
         assert_eq!(&seg2.audio[0].data[..6], b"P00050");
+    }
+
+    /// Wraps MockEncoder but holds back the latest packet until finish() —
+    /// models real encoders' internal buffering.
+    struct OneFrameLatency {
+        inner: MockEncoder,
+        held: Option<crate::traits::EncodedPacket>,
+    }
+
+    impl Encoder for OneFrameLatency {
+        fn encode(
+            &mut self,
+            frame: &crate::traits::Frame,
+        ) -> Result<Vec<crate::traits::EncodedPacket>, crate::traits::EncodeError> {
+            let mut out = self.inner.encode(frame)?;
+            let newly = out.pop();
+            let released = self.held.take();
+            self.held = newly;
+            Ok(released.into_iter().collect())
+        }
+
+        fn track_config(&self) -> clipline_mp4::VideoTrackConfig {
+            self.inner.track_config()
+        }
+
+        fn finish(
+            &mut self,
+        ) -> Result<Vec<crate::traits::EncodedPacket>, crate::traits::EncodeError> {
+            Ok(self.held.take().into_iter().collect())
+        }
+    }
+
+    #[test]
+    fn run_to_end_drains_encoder_via_finish() {
+        let enc = OneFrameLatency { inner: MockEncoder::new(30, 30), held: None };
+        let mut rec = Recorder::new(MockCapture::new(30, 30), enc, usize::MAX);
+        rec.run_to_end().unwrap();
+        // All 30 frames present despite the encoder's one-frame latency.
+        let total: usize = rec.ring().segments().map(|s| s.samples.len()).sum();
+        assert_eq!(total, 30);
     }
 
     #[test]
