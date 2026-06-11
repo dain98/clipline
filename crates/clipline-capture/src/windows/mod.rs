@@ -4,8 +4,10 @@
 
 pub mod d3d11;
 pub mod wgc;
+pub mod window;
 
 pub use wgc::WgcCapture;
+pub use window::find_window_by_title;
 
 #[cfg(test)]
 mod tests {
