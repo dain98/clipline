@@ -23,16 +23,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const FPS: u32 = 60;
 
     let (device, _ctx) = d3d11::create_device()?;
+    // One clock for every engine of the recording (ddoc §6).
+    let clock = WgcCapture::new_clock()?;
     let mut cap = match arg("--window") {
         Some(needle) => {
             let hwnd = find_window_by_title(&needle)
                 .ok_or_else(|| format!("no visible window matching {needle:?}"))?;
             println!("capturing window matching {needle:?}");
-            WgcCapture::for_window_on(device.clone(), hwnd)?
+            WgcCapture::for_window_on(device.clone(), hwnd, clock)?
         }
         None => {
             println!("capturing primary monitor");
-            WgcCapture::primary_monitor_on(device.clone())?
+            WgcCapture::primary_monitor_on(device.clone(), clock)?
         }
     };
 
@@ -52,8 +54,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let encoder = MftH264Encoder::new(&device, in_w, in_h, cfg)?;
 
     let started = std::time::Instant::now();
-    // Audio shares the video capture's clock origin: one timeline (ddoc §6).
-    let clock = cap.clock();
     let mut rec = Recorder::new(
         LimitedCapture::new(cap, seconds * FPS as u64),
         encoder,

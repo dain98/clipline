@@ -25,6 +25,10 @@ pub struct Recorder<C: CaptureEngine, E: Encoder> {
     pending: Vec<EncodedPacket>,
     audio_sources: Vec<Box<dyn AudioSource>>,
     pending_audio: Vec<Vec<AudioPacket>>,
+    /// pts of the first video packet — the recording's timeline start.
+    /// Audio captured before it (engine-init lead-in) is dropped so both
+    /// tracks begin together in the file.
+    video_start_pts_s: Option<f64>,
 }
 
 impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
@@ -36,6 +40,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             pending: Vec::new(),
             audio_sources: Vec::new(),
             pending_audio: Vec::new(),
+            video_start_pts_s: None,
         }
     }
 
@@ -57,6 +62,9 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
                 pending.extend(src.poll_packets(frame.pts_s)?);
             }
             for pkt in self.encoder.encode(&frame)? {
+                if self.video_start_pts_s.is_none() {
+                    self.video_start_pts_s = Some(pkt.pts_s);
+                }
                 if pkt.is_keyframe && !self.pending.is_empty() {
                     self.seal_pending(pkt.pts_s);
                 }
@@ -182,6 +190,12 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             data.extend_from_slice(&p.data);
         }
 
+        // Audio captured before the first video packet is engine-init
+        // lead-in: drop it, or video plays early by that offset.
+        let timeline_start = self.video_start_pts_s.unwrap_or(pts_start_s);
+        for pending in &mut self.pending_audio {
+            pending.retain(|p| p.pts_s + p.duration_s > timeline_start + 1e-9);
+        }
         // Audio packets ending at or before the boundary belong to this GOP.
         let mut audio = Vec::with_capacity(self.pending_audio.len());
         for pending in &mut self.pending_audio {
@@ -358,6 +372,49 @@ mod tests {
         // All 30 frames present despite the encoder's one-frame latency.
         let total: usize = rec.ring().segments().map(|s| s.samples.len()).sum();
         assert_eq!(total, 30);
+    }
+
+    /// Shifts a capture source's pts later — models the real lead-in
+    /// between clock creation and the first WGC frame.
+    struct OffsetCapture {
+        inner: MockCapture,
+        offset_s: f64,
+    }
+
+    impl crate::traits::CaptureEngine for OffsetCapture {
+        fn next_frame(
+            &mut self,
+        ) -> Result<Option<crate::traits::Frame>, crate::traits::CaptureError> {
+            Ok(self.inner.next_frame()?.map(|mut f| {
+                f.pts_s += self.offset_s;
+                f
+            }))
+        }
+    }
+
+    #[test]
+    fn audio_lead_in_before_first_video_frame_is_dropped() {
+        // Video starts 0.5 s after the shared clock origin; audio has been
+        // capturing (and silence-filling) since t=0. The pre-video audio
+        // must not ride in the file or video plays early by the lead-in.
+        use crate::mock::MockAudioSource;
+        let cap = OffsetCapture { inner: MockCapture::new(60, 30), offset_s: 0.5 };
+        let mut rec = Recorder::new(cap, MockEncoder::new(30, 30), usize::MAX)
+            .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+        rec.run_to_end().unwrap();
+        let segs: Vec<_> = rec.ring().segments().collect();
+        assert_eq!(segs.len(), 2);
+        // First segment: audio coverage matches video duration within one
+        // 20 ms packet (the packet straddling the boundary is dropped).
+        let covered: f64 = segs[0].audio[0].samples.iter().map(|s| s.duration_s).sum();
+        assert!(
+            (covered - segs[0].duration_s).abs() <= 0.02 + 1e-9,
+            "lead-in dropped: covered {covered}, video {}",
+            segs[0].duration_s
+        );
+        // And the first kept packet starts at/after the video start.
+        // (MockAudioSource stamps pts; we can't read them back from the
+        // sealed track, but coverage bounds above imply it.)
     }
 
     #[test]
