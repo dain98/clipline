@@ -10,17 +10,23 @@ pub struct Frame {
     pub data: FrameData,
 }
 
-/// Frame payload. `Cpu` serves mocks/tests/software paths; a GPU texture
-/// variant arrives with the Windows WGC implementation.
+/// Frame payload. `Cpu` serves mocks/tests/software paths; `Gpu` keeps
+/// pixels on the GPU as ddoc §3 requires (no CPU round-trips).
 #[derive(Debug, Clone)]
 pub enum FrameData {
     Cpu(Vec<u8>),
+    #[cfg(windows)]
+    Gpu(::windows::Win32::Graphics::Direct3D11::ID3D11Texture2D),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
+    #[error("capture init failed: {0}")]
+    Init(String),
     #[error("capture device lost: {0}")]
     DeviceLost(String),
+    #[error("no frame arrived within {0:?}")]
+    Timeout(std::time::Duration),
 }
 
 #[derive(Debug, thiserror::Error)]

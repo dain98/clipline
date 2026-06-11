@@ -45,7 +45,6 @@ impl MockEncoder {
 
 impl Encoder for MockEncoder {
     fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
-        let FrameData::Cpu(_) = &frame.data;
         let idx = self.count;
         self.count += 1;
         let mut data = format!("F{idx:06}").into_bytes();

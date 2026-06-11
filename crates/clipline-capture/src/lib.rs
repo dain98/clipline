@@ -3,6 +3,8 @@ pub mod mock;
 pub mod pipeline;
 pub mod probe;
 pub mod traits;
+#[cfg(windows)]
+pub mod windows;
 
 pub use clock::{qpc_to_ticks_100ns, RelativeClock};
 pub use mock::{MockAudioSource, MockCapture, MockEncoder};
