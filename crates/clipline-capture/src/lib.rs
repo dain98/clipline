@@ -1,4 +1,5 @@
 pub mod annexb;
+pub mod avsync;
 pub mod clock;
 pub mod mock;
 pub mod opus;
@@ -10,6 +11,7 @@ pub mod traits;
 pub mod windows;
 
 pub use annexb::{annexb_to_avcc, even_dimensions, extract_sps_pps, nal_type, split_annexb};
+pub use avsync::{validate_timeline, SyncReport, SyncTolerances, SyncViolation};
 pub use clock::{qpc_to_ticks_100ns, RelativeClock};
 pub use mock::{LimitedCapture, MockAudioSource, MockCapture, MockEncoder};
 pub use opus::OpusFrameEncoder;
