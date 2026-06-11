@@ -50,7 +50,7 @@ pub fn extract_sps_pps(annexb: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
 pub fn annexb_to_avcc(annexb: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(annexb.len());
     for unit in split_annexb(annexb) {
-        if matches!(nal_type(unit), 7 | 8 | 9) {
+        if matches!(nal_type(unit), 7..=9) {
             continue;
         }
         out.extend_from_slice(&(unit.len() as u32).to_be_bytes());

@@ -3,11 +3,13 @@
 //! traits' contracts (see `crate::mock` for the reference behavior).
 
 pub mod d3d11;
+pub mod mft;
 pub mod mft_probe;
 pub mod nv12;
 pub mod wgc;
 pub mod window;
 
+pub use mft::{MftConfig, MftH264Encoder};
 pub use wgc::WgcCapture;
 pub use window::find_window_by_title;
 

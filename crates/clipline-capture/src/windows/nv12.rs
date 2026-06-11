@@ -116,7 +116,7 @@ impl VideoConverter {
                 &self.processor,
                 out_view.as_ref().expect("out view set on Ok"),
                 0,
-                &[stream.clone()],
+                std::slice::from_ref(&stream),
             )
         };
         // Reclaim the input view reference wrapped in ManuallyDrop.

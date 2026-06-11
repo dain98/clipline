@@ -32,7 +32,7 @@ pub fn ensure_mf_started() -> windows::core::Result<()> {
 
 /// Enumerate activates for one codec/flag combination. The returned
 /// activates are released on drop; the CoTaskMem array is freed here.
-fn enum_activates(
+pub(crate) fn enum_activates(
     subtype: GUID,
     flags: windows::Win32::Media::MediaFoundation::MFT_ENUM_FLAG,
 ) -> windows::core::Result<Vec<IMFActivate>> {
