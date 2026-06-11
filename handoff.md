@@ -27,7 +27,18 @@ passes on Windows runners.
 | `clipline-capture` | `CaptureEngine`/`Encoder`/`AudioSource` traits, encoder probe (NVENC→AMF→QSV→x264, AV1→HEVC→H.264), `Recorder` pipeline (capture→encode→GOP segments→ring), `save_replay` → finalized A/V MP4 | mock-driven e2e + ffprobe |
 
 Executed implementation plans (read these to see the conventions in action):
-`docs/superpowers/plans/*.md` — five so far, all completed task-by-task with TDD.
+`docs/superpowers/plans/*.md` — six so far, all completed task-by-task with TDD.
+
+**Windows progress:** milestone 1 (WGC capture) is **done** — see
+`docs/superpowers/plans/2026-06-10-clipline-wgc-capture.md`. `clipline-capture` now has a
+`#[cfg(windows)]` `windows/` module (`d3d11`, `wgc`, `window`): `WgcCapture` implements
+`CaptureEngine` for monitor + window capture, frames stay GPU-side
+(`FrameData::Gpu(ID3D11Texture2D)`), pts from `SystemRelativeTime` against a QPC origin
+(`RelativeClock`, platform-neutral). Verified on the dev machine via
+`cargo run -p clipline-capture --example wgc_smoke`: 5120x1440 @ 59.7 fps (monitor) and the
+live League client window @ 59.5 fps. Sharp edge: the WGC device test is hard-skipped under
+`CI` — windows-2025 runners report `IsSupported()==true` then access-violate inside the
+capture component.
 
 ## Machine setup (do this first on the Windows clone)
 
@@ -63,7 +74,7 @@ Goal: real implementations behind the existing traits in `clipline-capture`, so 
 `save_replay` produce a real screen recording on a real GPU. Work top-down through these, one
 plan each (they're independently verifiable):
 
-1. **WGC capture → `CaptureEngine`** (`crates/clipline-capture/src/windows/wgc.rs`)
+1. ~~**WGC capture → `CaptureEngine`**~~ ✅ done 2026-06-10 (`crates/clipline-capture/src/windows/wgc.rs`)
    - `windows` crate (windows-rs): `Direct3D11CaptureFramePool` + `GraphicsCaptureItem`
      (monitor first, window capture second). Frames stay GPU-side
      (`FrameData` gains a `Gpu(ID3D11Texture2D)` variant behind `#[cfg(windows)]`).
