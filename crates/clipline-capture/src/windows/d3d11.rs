@@ -9,10 +9,12 @@ use windows::Win32::Graphics::Direct3D::{
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC,
+};
 
 /// Create a hardware D3D11 device with BGRA support (required by WGC).
 pub fn create_device() -> WinResult<(ID3D11Device, ID3D11DeviceContext)> {
@@ -46,12 +48,15 @@ fn create_device_with(driver: D3D_DRIVER_TYPE) -> WinResult<(ID3D11Device, ID3D1
     // MF's DXGI device manager shares this device across threads —
     // multithread protection is required for D3D-aware MFTs.
     let mt: ID3D10Multithread = device.cast()?;
-    // SAFETY: trivial setter on a valid interface.
-    unsafe { mt.SetMultithreadProtected(true) };
+    // SAFETY: trivial setter on a valid interface (returns the previous
+    // value, which we don't need).
+    let _ = unsafe { mt.SetMultithreadProtected(true) };
     Ok((device, context.expect("context out-param set on Ok")))
 }
 
-/// Default-usage BGRA texture, e.g. the destination for a capture-frame copy.
+/// Default-usage BGRA texture, e.g. the destination for a capture-frame
+/// copy. RENDER_TARGET is included so the texture can feed video-processor
+/// views (drivers reject input views on SHADER_RESOURCE-only textures).
 pub fn create_bgra_texture(
     device: &ID3D11Device,
     width: u32,
@@ -65,7 +70,7 @@ pub fn create_bgra_texture(
         Format: DXGI_FORMAT_B8G8R8A8_UNORM,
         SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Usage: D3D11_USAGE_DEFAULT,
-        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
         CPUAccessFlags: 0,
         MiscFlags: 0,
     };
@@ -74,6 +79,38 @@ pub fn create_bgra_texture(
     // on success.
     unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture))? };
     Ok(texture.expect("texture out-param set on Ok"))
+}
+
+/// NV12 render-target texture (video processor output / encoder input).
+pub fn create_nv12_texture(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+) -> WinResult<ID3D11Texture2D> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_NV12,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    // SAFETY: desc is fully initialized; out-param receives a valid pointer
+    // on success.
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture))? };
+    Ok(texture.expect("texture out-param set on Ok"))
+}
+
+pub fn texture_desc(texture: &ID3D11Texture2D) -> D3D11_TEXTURE2D_DESC {
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    // SAFETY: GetDesc writes to a valid out-pointer.
+    unsafe { texture.GetDesc(&mut desc) };
+    desc
 }
 
 pub fn texture_size(texture: &ID3D11Texture2D) -> (u32, u32) {

@@ -4,6 +4,7 @@
 
 pub mod d3d11;
 pub mod mft_probe;
+pub mod nv12;
 pub mod wgc;
 pub mod window;
 
