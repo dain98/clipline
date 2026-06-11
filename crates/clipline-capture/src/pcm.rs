@@ -30,7 +30,7 @@ impl LoopbackAssembler {
         let gap = pts_s - expected;
         if gap > GAP_TOLERANCE_S {
             let missing_pairs = (gap * SAMPLE_RATE).round() as usize;
-            self.buffered.extend(std::iter::repeat(0.0).take(missing_pairs * 2));
+            self.buffered.extend(std::iter::repeat_n(0.0, missing_pairs * 2));
         }
         self.buffered.extend_from_slice(interleaved);
     }
