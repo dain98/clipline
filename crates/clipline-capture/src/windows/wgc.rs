@@ -48,10 +48,13 @@ pub struct WgcCapture {
 impl WgcCapture {
     /// Capture the primary monitor.
     pub fn primary_monitor() -> Result<Self, CaptureError> {
-        // SAFETY: plain Win32 call; a primary monitor always exists in an
-        // interactive session (HMONITOR is null otherwise, failing item
-        // creation below with a descriptive error).
+        // SAFETY: plain Win32 call returning a handle (null in headless
+        // sessions — checked below, since CreateForMonitor access-violates
+        // on an invalid HMONITOR instead of returning an error).
         let hmon = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+        if hmon.is_invalid() {
+            return Err(CaptureError::Init("no monitor in this session (headless?)".into()));
+        }
         let item = create_item(|interop| unsafe { interop.CreateForMonitor(hmon) })?;
         Self::new(item)
     }
@@ -59,6 +62,9 @@ impl WgcCapture {
     /// Capture one window (must be visible; ddoc §3: per-window preferred,
     /// borderless fullscreen recommended for games).
     pub fn for_window(hwnd: HWND) -> Result<Self, CaptureError> {
+        if hwnd.is_invalid() {
+            return Err(CaptureError::Init("invalid window handle".into()));
+        }
         let item = create_item(|interop| unsafe { interop.CreateForWindow(hwnd) })?;
         Self::new(item)
     }
@@ -153,6 +159,11 @@ fn create_item(
     create: impl FnOnce(&IGraphicsCaptureItemInterop) -> WinResult<GraphicsCaptureItem>,
 ) -> Result<GraphicsCaptureItem, CaptureError> {
     init_winrt()?;
+    match GraphicsCaptureSession::IsSupported() {
+        Ok(true) => {}
+        Ok(false) => return Err(CaptureError::Init("WGC not supported in this session".into())),
+        Err(e) => return Err(CaptureError::Init(format!("WGC support query: {e}"))),
+    }
     let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
         .map_err(|e| CaptureError::Init(format!("WGC interop factory: {e}")))?;
     create(&interop).map_err(|e| CaptureError::Init(format!("create capture item: {e}")))
