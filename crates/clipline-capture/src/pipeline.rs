@@ -52,25 +52,32 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         self
     }
 
-    /// Drive the loop until the capture source ends, sealing a segment at
-    /// every GOP boundary (a keyframe closes the previous GOP). Audio
-    /// sources are drained per frame; packets ride in the segment whose
-    /// GOP interval contains them.
-    pub fn run_to_end(&mut self) -> Result<(), PipelineError> {
-        while let Some(frame) = self.capture.next_frame()? {
-            for (src, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
-                pending.extend(src.poll_packets(frame.pts_s)?);
-            }
-            for pkt in self.encoder.encode(&frame)? {
-                if self.video_start_pts_s.is_none() {
-                    self.video_start_pts_s = Some(pkt.pts_s);
-                }
-                if pkt.is_keyframe && !self.pending.is_empty() {
-                    self.seal_pending(pkt.pts_s);
-                }
-                self.pending.push(pkt);
-            }
+    /// Process one captured frame (audio drain → encode → GOP sealing).
+    /// `Ok(false)` = the capture source ended. Errors pass through —
+    /// callers running live decide how to treat `CaptureError::Timeout`
+    /// (an idle screen delivers no frames; that is not fatal).
+    pub fn step(&mut self) -> Result<bool, PipelineError> {
+        let Some(frame) = self.capture.next_frame()? else {
+            return Ok(false);
+        };
+        for (src, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
+            pending.extend(src.poll_packets(frame.pts_s)?);
         }
+        for pkt in self.encoder.encode(&frame)? {
+            if self.video_start_pts_s.is_none() {
+                self.video_start_pts_s = Some(pkt.pts_s);
+            }
+            if pkt.is_keyframe && !self.pending.is_empty() {
+                self.seal_pending(pkt.pts_s);
+            }
+            self.pending.push(pkt);
+        }
+        Ok(true)
+    }
+
+    /// End of stream: drain the encoder, drain audio to the final GOP's
+    /// end, seal the trailing partial GOP.
+    pub fn finish_stream(&mut self) -> Result<(), PipelineError> {
         for pkt in self.encoder.finish()? {
             if pkt.is_keyframe && !self.pending.is_empty() {
                 self.seal_pending(pkt.pts_s);
@@ -78,8 +85,6 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             self.pending.push(pkt);
         }
         if !self.pending.is_empty() {
-            // Drain any audio still buffered in the sources to the end of
-            // the final GOP, then seal everything.
             let end = self.pending.last().map(|p| p.pts_s + p.duration_s).unwrap_or(0.0);
             for (src, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
                 pending.extend(src.poll_packets(end)?);
@@ -87,6 +92,15 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             self.seal_pending(f64::INFINITY);
         }
         Ok(())
+    }
+
+    /// Drive the loop until the capture source ends, sealing a segment at
+    /// every GOP boundary (a keyframe closes the previous GOP). Audio
+    /// sources are drained per frame; packets ride in the segment whose
+    /// GOP interval contains them.
+    pub fn run_to_end(&mut self) -> Result<(), PipelineError> {
+        while self.step()? {}
+        self.finish_stream()
     }
 
     pub fn ring(&self) -> &ReplayRing {
@@ -372,6 +386,37 @@ mod tests {
         // All 30 frames present despite the encoder's one-frame latency.
         let total: usize = rec.ring().segments().map(|s| s.samples.len()).sum();
         assert_eq!(total, 30);
+    }
+
+    #[test]
+    fn save_replay_works_between_steps_while_recording() {
+        let mut rec =
+            Recorder::new(MockCapture::new(90, 30), MockEncoder::new(30, 30), usize::MAX);
+        // Two GOPs in: a save must succeed without ending the recording.
+        for _ in 0..60 {
+            assert!(rec.step().unwrap());
+        }
+        let (buf, end) = rec
+            .save_replay(std::io::Cursor::new(Vec::new()), 10.0, None)
+            .map(|(w, e)| (w.into_inner(), e))
+            .expect("mid-recording save");
+        assert!(!buf.is_empty());
+        assert!((end - 1.0).abs() < 1e-6, "one sealed GOP at save time (second pending)");
+        // Recording continues; smart mode skips the already-saved second.
+        for _ in 0..30 {
+            assert!(rec.step().unwrap());
+        }
+        assert!(!rec.step().unwrap(), "source exhausted");
+        rec.finish_stream().unwrap();
+        let (_, end2) = rec
+            .save_replay(std::io::Cursor::new(Vec::new()), 10.0, Some(end))
+            .expect("post-finish save");
+        assert!((end2 - 3.0).abs() < 1e-6, "everything sealed after finish");
+        // run_to_end equivalence: same segment layout as the stepped path.
+        let mut whole =
+            Recorder::new(MockCapture::new(90, 30), MockEncoder::new(30, 30), usize::MAX);
+        whole.run_to_end().unwrap();
+        assert_eq!(whole.ring().len(), rec.ring().len());
     }
 
     /// Shifts a capture source's pts later — models the real lead-in
