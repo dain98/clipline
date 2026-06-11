@@ -27,26 +27,34 @@ passes on Windows runners.
 | `clipline-capture` | `CaptureEngine`/`Encoder`/`AudioSource` traits, encoder probe (NVENC→AMF→QSV→x264, AV1→HEVC→H.264), `Recorder` pipeline (capture→encode→GOP segments→ring), `save_replay` → finalized A/V MP4 | mock-driven e2e + ffprobe |
 
 Executed implementation plans (read these to see the conventions in action):
-`docs/superpowers/plans/*.md` — seven so far, all completed task-by-task with TDD.
+`docs/superpowers/plans/*.md` — eight so far, all completed task-by-task with TDD.
 
-**Windows progress:** milestones 1 (WGC capture) and 2 (MFT H.264 encoder) are **done** — see
-`docs/superpowers/plans/2026-06-10-clipline-wgc-capture.md` and
-`…-clipline-mft-encoder.md`. The `#[cfg(windows)]` `windows/` module now holds: `WgcCapture`
+**Windows progress:** milestones 1 (WGC capture), 2 (MFT H.264 encoder), and 3 (WASAPI
+loopback audio) are **done** — see
+`docs/superpowers/plans/2026-06-10-clipline-wgc-capture.md`,
+`…-clipline-mft-encoder.md`, and `2026-06-11-clipline-wasapi-loopback.md`.
+The `#[cfg(windows)]` `windows/` module now holds: `WgcCapture`
 (`CaptureEngine`, monitor + window, GPU-side frames, QPC-anchored pts), `MftH264Encoder`
 (`Encoder`, async hardware MFT — AMF on the dev box — D3D-aware NV12 input, AVCC output,
 CleanPoint keyframes, SPS/PPS from sequence header or first IDR, drain via the new
 `Encoder::finish()`), `VideoConverter` (GPU BGRA→NV12 + scaling via D3D11 video processor),
 `mft_probe::enumerate()` (real ddoc §3 probe; reports Amf{Hevc,H264}+MfSoftware{H264} here),
-and `d3d11` device plumbing (one shared device for capture+encode, MT-protected).
-Platform-neutral additions: `annexb` (Annex B→AVCC, SPS/PPS extraction), `LimitedCapture`,
-`Encoder::finish()`. **End-to-end verified** via
-`cargo run -p clipline-capture --example record_smoke -- --seconds 5 --window league`:
-5 s of the live League client → 3 GOP segments → 15.45 MiB finalized hybrid MP4; ffprobe:
-h264 High 2290x1288, 300 frames, 5.008 s; full ffmpeg decode clean; extracted frames are
-correct. ffmpeg is installed via winget (`Gyan.FFmpeg`) so the ffprobe e2e tests run for real
-locally. Sharp edges: WGC + MFT device tests are hard-skipped under `CI` (windows-2025 runners
-access-violate in WGC; no hardware encoder), and B-frames must stay disabled until the muxer
-grows ctts support.
+`WasapiLoopback` (`AudioSource`: default render endpoint in shared loopback, QPC-stamped
+drains, real Opus via `audiopus`), and `d3d11` device plumbing (one shared device for
+capture+encode, MT-protected). Platform-neutral additions: `annexb` (Annex B→AVCC, SPS/PPS
+extraction), `opus` (20 ms/960-sample frame encoder), `pcm` (`LoopbackAssembler` — continuity
++ **silence gap fill**, required because loopback goes quiet when nothing renders and the MP4
+audio timeline is duration-cumulative), `LimitedCapture`, `Encoder::finish()`.
+**A/V end-to-end verified** via
+`cargo run -p clipline-capture --example record_smoke -- --seconds 5 --window <w> --audio`:
+5 s window capture → h264 (300 frames, 5.000 s) + opus (252 pkts, 5.040 s) in one finalized
+hybrid MP4; decode clean; audio volumedetect shows real content. Audio shares the video
+clock via `WgcCapture::clock()` and anchors its timeline at t=0 (lead-in becomes silence) so
+tracks start aligned. ffmpeg is installed via winget (`Gyan.FFmpeg`) so the ffprobe e2e tests
+run for real locally. Sharp edges: WGC/MFT/WASAPI device tests are hard-skipped under `CI`
+(windows-2025 runners access-violate in WGC; no hardware encoder/audio endpoint); B-frames
+must stay disabled until the muxer grows ctts support; the loopback path requires a 48 kHz
+float mix format (resampler is a follow-up).
 
 ## Machine setup (do this first on the Windows clone)
 
@@ -103,7 +111,7 @@ plan each (they're independently verifiable):
      convert from Annex B if the MFT emits start codes).
    - Verify: `Recorder` with WGC + MFT on the dev machine → `save_replay` → file plays in a real
      player, ffprobe shows sane stream. That moment is the milestone exit criterion.
-3. **WASAPI loopback → `AudioSource`**
+3. ~~**WASAPI loopback → `AudioSource`**~~ ✅ done 2026-06-11 system loopback + real Opus (`crates/clipline-capture/src/windows/wasapi.rs`); per-process loopback still pending:
    - System loopback first; per-process (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) second —
      note ddoc Caveats: documented for build 20348+/Win11 but works on updated Win10 2004+;
      `GetMixFormat`/`IsFormatSupported` return `E_NOTIMPL` on the process-loopback path, assume a
