@@ -3,6 +3,7 @@
 //! traits' contracts (see `crate::mock` for the reference behavior).
 
 pub mod d3d11;
+pub mod mft_probe;
 pub mod wgc;
 pub mod window;
 
