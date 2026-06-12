@@ -13,7 +13,7 @@ Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
 ## Current state (2026-06-12): a working tray recorder with a first-party review player
 
-Sixteen milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-two plan docs, all
+Twenty milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-six plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -86,6 +86,39 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     (priority over closing the clip; player shortcuts are inert behind the page), or opening
     a clip. The open clip pauses and survives the round-trip. Field ids and the
     validate/save/restart wiring are unchanged from milestone 9.
+17. **Display-region capture** — Capture settings now include `display_region`, persisted as
+    `{ display_id, x, y, width, height }`. The settings page renders a virtual desktop map with
+    draggable/resizable region box, numeric pixel fields, and right-click menu actions
+    (Align: left/right/top/bottom/center; Set to Display: enumerated Win32 displays). The
+    recorder enumerates monitors with `EnumDisplayMonitors`, captures the selected monitor with
+    WGC, derives a safe in-frame crop from virtual-desktop coordinates, and crops GPU-side in the
+    D3D11 video processor before MFT encode. This is intentionally a single-display region crop;
+    stitched regions spanning multiple monitors are still out of scope. Verified locally with
+    `CARGO_TARGET_DIR=target\codex-test cargo test --workspace`,
+    `CARGO_TARGET_DIR=target\codex-test cargo clippy --workspace --all-targets -- -D warnings`,
+    and a static Chrome screenshot harness for the settings UI.
+18. **Hotkey recorder** — Settings > Hotkeys no longer asks users to type shortcut strings.
+    `#set-hotkey` is a read-only recorder: focus/click it, press F1-F11/F13-F24 with optional
+    Ctrl/Alt/Shift, and the UI writes the normalized shortcut (`F10`, `Ctrl+Alt+F9`, etc.)
+    through the same validate/save/rebind path. Modifier-only input prompts for an F-key,
+    `Escape` cancels, F12 is rejected as debugger-reserved on Windows, and invalid keys stay in
+    recorder mode with inline status. The pure formatter lives in `ui/player-core.js` and is
+    covered by `tests/player_core.rs`; `ui_contract` requires the read-only recorder/status
+    markup.
+19. **Settings UX cleanup** — the display-region map no longer has its own internal scrollbars;
+    it computes a static height from the virtual desktop shape and lets the settings page own any
+    scrolling. Recording settings now read in user terms: replay history, save length, video
+    quality, and smoothness. Recording controls use sliders with human summaries and visible scale
+    markers, and quality snaps to Compact/Balanced/Sharp/Maximum preset stops. The underlying ids
+    and persisted settings values are unchanged.
+20. **Recording controls cleanup** — the user-facing Replay history control is gone; Clipline keeps
+    the internal rolling buffer at two minutes and exposes only Save length, capped at 5 sec-2 min
+    with 30 sec / 1 min / 2 min presets. Smoothness now has 30/60/90/120 FPS stops. The Settings
+    page no longer has the top-right X button, so the bottom-left Settings control is the close
+    affordance. The sidebar now shows a clickable capture status (`Capturing Desktop`, window, or
+    display region), storage/quota/clip count, and Save Replay; it no longer shows buffered seconds,
+    MB, or GOP diagnostics. The new `set_recording` Tauri command pauses/resumes the recorder from
+    that status control, and internal settings restarts do not emit a stale stopped status.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window

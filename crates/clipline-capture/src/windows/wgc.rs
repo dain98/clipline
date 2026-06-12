@@ -16,7 +16,7 @@ use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::{HWND, POINT, RPC_E_CHANGED_MODE};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
-use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
@@ -47,16 +47,15 @@ pub struct WgcCapture {
 impl WgcCapture {
     /// Capture the primary monitor on a freshly created device and clock.
     pub fn primary_monitor() -> Result<Self, CaptureError> {
-        let (device, _) =
-            d3d11::create_device().map_err(|e| CaptureError::Init(e.to_string()))?;
+        let (device, _) = d3d11::create_device().map_err(|e| CaptureError::Init(e.to_string()))?;
         Self::primary_monitor_on(device, Self::new_clock()?)
     }
 
     /// A capture clock anchored at "now" — create one and share it across
     /// every engine of a recording (ddoc §6: one QPC timebase).
     pub fn new_clock() -> Result<RelativeClock, CaptureError> {
-        let origin = crate::windows::qpc_now_ticks_100ns()
-            .map_err(|e| CaptureError::Init(e.to_string()))?;
+        let origin =
+            crate::windows::qpc_now_ticks_100ns().map_err(|e| CaptureError::Init(e.to_string()))?;
         Ok(RelativeClock::new(origin))
     }
 
@@ -72,17 +71,30 @@ impl WgcCapture {
         // on an invalid HMONITOR instead of returning an error).
         let hmon = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
         if hmon.is_invalid() {
-            return Err(CaptureError::Init("no monitor in this session (headless?)".into()));
+            return Err(CaptureError::Init(
+                "no monitor in this session (headless?)".into(),
+            ));
         }
-        let item = create_item(|interop| unsafe { interop.CreateForMonitor(hmon) })?;
+        Self::for_monitor_on(device, hmon, clock)
+    }
+
+    /// Capture a specific monitor on a caller-provided device and clock.
+    pub fn for_monitor_on(
+        device: ID3D11Device,
+        monitor: HMONITOR,
+        clock: RelativeClock,
+    ) -> Result<Self, CaptureError> {
+        if monitor.is_invalid() {
+            return Err(CaptureError::Init("invalid monitor handle".into()));
+        }
+        let item = create_item(|interop| unsafe { interop.CreateForMonitor(monitor) })?;
         Self::new(item, device, clock)
     }
 
     /// Capture one window (must be visible; ddoc §3: per-window preferred,
     /// borderless fullscreen recommended for games).
     pub fn for_window(hwnd: HWND) -> Result<Self, CaptureError> {
-        let (device, _) =
-            d3d11::create_device().map_err(|e| CaptureError::Init(e.to_string()))?;
+        let (device, _) = d3d11::create_device().map_err(|e| CaptureError::Init(e.to_string()))?;
         Self::for_window_on(device, hwnd, Self::new_clock()?)
     }
 
@@ -126,11 +138,18 @@ impl WgcCapture {
 
         let (tx, rx) = mpsc::channel();
         frame_pool
-            .FrameArrived(&TypedEventHandler::new(on_frame_arrived(device, context, tx)))
+            .FrameArrived(&TypedEventHandler::new(on_frame_arrived(
+                device, context, tx,
+            )))
             .map_err(init)?;
         session.StartCapture().map_err(init)?;
 
-        Ok(Self { session, frame_pool, rx, clock })
+        Ok(Self {
+            session,
+            frame_pool,
+            rx,
+            clock,
+        })
     }
 
     /// The capture-start clock — share it with audio sources so all pts
@@ -177,8 +196,12 @@ fn on_frame_arrived(
     windows::core::Ref<'_, windows::core::IInspectable>,
 ) -> WinResult<()> {
     move |pool, _| {
-        let Some(pool) = pool.as_ref() else { return Ok(()) };
-        let Ok(frame) = pool.TryGetNextFrame() else { return Ok(()) };
+        let Some(pool) = pool.as_ref() else {
+            return Ok(());
+        };
+        let Ok(frame) = pool.TryGetNextFrame() else {
+            return Ok(());
+        };
         let ticks_100ns = frame.SystemRelativeTime()?.Duration;
         let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
         // SAFETY: the surface is a live IDirect3D surface backed by an
@@ -190,7 +213,10 @@ fn on_frame_arrived(
         // for same-format, same-size textures.
         unsafe { context.CopyResource(&copy, &source) };
         // Receiver gone (engine dropped) → stop forwarding, not an error.
-        let _ = tx.send(QueuedFrame { texture: copy, ticks_100ns });
+        let _ = tx.send(QueuedFrame {
+            texture: copy,
+            ticks_100ns,
+        });
         Ok(())
     }
 }
@@ -201,7 +227,11 @@ fn create_item(
     init_winrt()?;
     match GraphicsCaptureSession::IsSupported() {
         Ok(true) => {}
-        Ok(false) => return Err(CaptureError::Init("WGC not supported in this session".into())),
+        Ok(false) => {
+            return Err(CaptureError::Init(
+                "WGC not supported in this session".into(),
+            ))
+        }
         Err(e) => return Err(CaptureError::Init(format!("WGC support query: {e}"))),
     }
     let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
@@ -291,8 +321,14 @@ mod tests {
             .expect("frame")
             .expect("session open");
         // The provided clock is the frame timebase: pts is near zero.
-        assert!(frame.pts_s >= 0.0 && frame.pts_s < 5.0, "pts {}", frame.pts_s);
-        let FrameData::Gpu(tex) = &frame.data else { panic!("gpu frame") };
+        assert!(
+            frame.pts_s >= 0.0 && frame.pts_s < 5.0,
+            "pts {}",
+            frame.pts_s
+        );
+        let FrameData::Gpu(tex) = &frame.data else {
+            panic!("gpu frame")
+        };
         // The texture must live on the device we provided.
         use windows::core::Interface;
         // SAFETY: trivial getter on a valid texture.
@@ -337,7 +373,9 @@ mod tests {
             .next_frame_timeout(std::time::Duration::from_secs(5))
             .expect("frame")
             .expect("open");
-        let crate::traits::FrameData::Gpu(tex) = &first.data else { panic!("gpu") };
+        let crate::traits::FrameData::Gpu(tex) = &first.data else {
+            panic!("gpu")
+        };
         let (in_w, in_h) = crate::windows::d3d11::texture_size(tex);
         let enc = match crate::windows::MftH264Encoder::new(&device, in_w, in_h, cfg) {
             Ok(e) => e,
@@ -358,6 +396,9 @@ mod tests {
             crate::avsync::validate_timeline(&segs, &crate::avsync::SyncTolerances::default())
                 .expect("real-clock timeline within tolerances");
         eprintln!("sync report: {report:?}");
-        assert!(report.video_duration_s > 0.5, "recorded something substantial");
+        assert!(
+            report.video_duration_s > 0.5,
+            "recorded something substantial"
+        );
     }
 }

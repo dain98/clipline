@@ -3,6 +3,7 @@
 //! traits' contracts (see `crate::mock` for the reference behavior).
 
 pub mod d3d11;
+pub mod display;
 pub mod mft;
 pub mod mft_probe;
 pub mod nv12;
@@ -18,9 +19,7 @@ pub use window::find_window_by_title;
 /// The capture-clock origin: QPC now, in the 100 ns units shared by WGC
 /// `SystemRelativeTime` and WASAPI QPC positions (ddoc §6).
 pub fn qpc_now_ticks_100ns() -> windows::core::Result<i64> {
-    use windows::Win32::System::Performance::{
-        QueryPerformanceCounter, QueryPerformanceFrequency,
-    };
+    use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
     let (mut counter, mut freq) = (0i64, 0i64);
     // SAFETY: out-pointers are valid; these calls cannot fail on XP+.
     unsafe {
@@ -41,9 +40,11 @@ mod tests {
     fn gpu_frame_data_wraps_a_d3d11_texture() {
         let (device, _context) =
             super::d3d11::create_device_for_tests().expect("WARP D3D11 device");
-        let texture =
-            super::d3d11::create_bgra_texture(&device, 16, 16).expect("16x16 texture");
-        let frame = Frame { pts_s: 0.25, data: FrameData::Gpu(texture) };
+        let texture = super::d3d11::create_bgra_texture(&device, 16, 16).expect("16x16 texture");
+        let frame = Frame {
+            pts_s: 0.25,
+            data: FrameData::Gpu(texture),
+        };
         let cloned = frame.clone();
         let FrameData::Gpu(tex) = cloned.data else {
             panic!("expected Gpu variant");

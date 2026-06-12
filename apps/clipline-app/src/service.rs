@@ -7,6 +7,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clipline_capture::traits::{CaptureError, FrameData};
+use clipline_capture::windows::nv12::CropRect;
 use clipline_capture::windows::{
     d3d11, find_window_by_title, MftConfig, MftH264Encoder, WasapiLoopback, WgcCapture,
 };
@@ -19,7 +20,23 @@ use crate::markers::{self, PollerMsg};
 
 pub enum Cmd {
     Save,
-    Stop,
+    Stop { announce: bool },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureRegion {
+    pub display_id: Option<String>,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CaptureSource {
+    PrimaryMonitor,
+    WindowTitle(String),
+    DisplayRegion(CaptureRegion),
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -47,8 +64,7 @@ pub enum Event {
 }
 
 pub struct ServiceOptions {
-    /// Capture a window matching this title substring; None = primary monitor.
-    pub window_title: Option<String>,
+    pub capture_source: CaptureSource,
     /// Override the League Live Client endpoint (mock servers).
     pub lol_url: Option<String>,
     /// Save Replay trailing window (s).
@@ -66,7 +82,7 @@ pub const DEFAULT_DISK_QUOTA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 impl Default for ServiceOptions {
     fn default() -> Self {
         Self {
-            window_title: None,
+            capture_source: CaptureSource::PrimaryMonitor,
             lol_url: None,
             replay_window_s: 60.0,
             // ~2 min at 12 Mbps video + audio headroom.
@@ -86,13 +102,8 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
         .spawn(move || {
             if let Err(e) = run(opts, cmd_rx, &event_tx) {
                 let _ = event_tx.send(Event::Error { message: e });
+                send_stopped(&event_tx);
             }
-            let _ = event_tx.send(Event::Status {
-                recording: false,
-                segments: 0,
-                buffered_s: 0.0,
-                buffered_mb: 0.0,
-            });
         })
         .expect("spawn recorder thread");
     (cmd_tx, event_rx)
@@ -107,13 +118,31 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let recording_t0 = Instant::now();
     let marker_rx = markers::spawn(opts.lol_url.clone(), recording_t0);
     let mut marker_log = MarkerLog::new();
-    let mut cap = match &opts.window_title {
-        Some(needle) => {
+    let (mut cap, crop) = match &opts.capture_source {
+        CaptureSource::WindowTitle(needle) => {
             let hwnd = find_window_by_title(needle)
                 .ok_or_else(|| format!("no visible window matching {needle:?}"))?;
-            WgcCapture::for_window_on(device.clone(), hwnd, clock).map_err(|e| init(&e))?
+            (
+                WgcCapture::for_window_on(device.clone(), hwnd, clock).map_err(|e| init(&e))?,
+                None,
+            )
         }
-        None => WgcCapture::primary_monitor_on(device.clone(), clock).map_err(|e| init(&e))?,
+        CaptureSource::PrimaryMonitor => (
+            WgcCapture::primary_monitor_on(device.clone(), clock).map_err(|e| init(&e))?,
+            None,
+        ),
+        CaptureSource::DisplayRegion(region) => {
+            let display = clipline_capture::windows::display::display_handle_by_id(
+                region.display_id.as_deref(),
+            )
+            .map_err(|e| init(&e))?;
+            let crop = crop_for_region(region, &display.info)?;
+            (
+                WgcCapture::for_monitor_on(device.clone(), display.handle, clock)
+                    .map_err(|e| init(&e))?,
+                Some(crop),
+            )
+        }
     };
 
     // First frame fixes the capture size; ultrawide scales to ≤2560.
@@ -125,14 +154,18 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         return Err("expected a GPU frame".into());
     };
     let (in_w, in_h) = d3d11::texture_size(tex);
-    let scale = if in_w > 2560 {
-        2560.0 / in_w as f64
+    validate_crop_in_frame(crop, in_w, in_h)?;
+    let (source_w, source_h) = crop
+        .map(|crop| (crop.width, crop.height))
+        .unwrap_or((in_w, in_h));
+    let scale = if source_w > 2560 {
+        2560.0 / source_w as f64
     } else {
         1.0
     };
     let (enc_w, enc_h) = even_dimensions(
-        (in_w as f64 * scale).round() as u32,
-        (in_h as f64 * scale).round() as u32,
+        (source_w as f64 * scale).round() as u32,
+        (source_h as f64 * scale).round() as u32,
     );
 
     let cfg = MftConfig {
@@ -141,7 +174,8 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         fps: opts.fps,
         bitrate_bps: opts.bitrate_bps,
     };
-    let encoder = MftH264Encoder::new(&device, in_w, in_h, cfg).map_err(|e| init(&e))?;
+    let encoder =
+        MftH264Encoder::new_with_crop(&device, in_w, in_h, cfg, crop).map_err(|e| init(&e))?;
     let audio = WasapiLoopback::start(clock).map_err(|e| init(&e))?;
 
     let mut rec = Recorder::new(cap, encoder, opts.buffer_bytes).with_audio(Box::new(audio));
@@ -258,15 +292,34 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         }
                     }
                 }
-                Ok(Cmd::Stop) | Err(TryRecvError::Disconnected) => {
+                Ok(Cmd::Stop { announce }) => {
                     let _ = rec.finish_stream();
+                    if announce {
+                        send_stopped(events);
+                    }
+                    return Ok(());
+                }
+                Err(TryRecvError::Disconnected) => {
+                    let _ = rec.finish_stream();
+                    send_stopped(events);
                     return Ok(());
                 }
                 Err(TryRecvError::Empty) => break,
             }
         }
     }
-    rec.finish_stream().map_err(|e| format!("finish: {e}"))
+    rec.finish_stream().map_err(|e| format!("finish: {e}"))?;
+    send_stopped(events);
+    Ok(())
+}
+
+fn send_stopped(events: &Sender<Event>) {
+    let _ = events.send(Event::Status {
+        recording: false,
+        segments: 0,
+        buffered_s: 0.0,
+        buffered_mb: 0.0,
+    });
 }
 
 fn save(
@@ -284,6 +337,44 @@ fn save(
         .save_replay(file, window_s, exclude_before_s)
         .map_err(|e| format!("save: {e}"))?;
     Ok((end, end - saved_from.unwrap_or(end)))
+}
+
+fn crop_for_region(
+    region: &CaptureRegion,
+    display: &clipline_capture::windows::display::DisplayInfo,
+) -> Result<CropRect, String> {
+    if region.width < 2 || region.height < 2 {
+        return Err("capture region must be at least 2x2 pixels".into());
+    }
+    let local_x = region.x - display.x;
+    let local_y = region.y - display.y;
+    if local_x < 0
+        || local_y < 0
+        || local_x as i64 + region.width as i64 > display.width as i64
+        || local_y as i64 + region.height as i64 > display.height as i64
+    {
+        return Err(format!(
+            "capture region must fit inside {} ({}x{} at {}, {})",
+            display.name, display.width, display.height, display.x, display.y
+        ));
+    }
+    Ok(CropRect {
+        x: local_x as u32,
+        y: local_y as u32,
+        width: region.width,
+        height: region.height,
+    })
+}
+
+fn validate_crop_in_frame(crop: Option<CropRect>, in_w: u32, in_h: u32) -> Result<(), String> {
+    let Some(crop) = crop else { return Ok(()) };
+    if crop.x + crop.width > in_w || crop.y + crop.height > in_h {
+        return Err(format!(
+            "capture region {}x{} at {}, {} exceeds captured frame {}x{}",
+            crop.width, crop.height, crop.x, crop.y, in_w, in_h
+        ));
+    }
+    Ok(())
 }
 
 /// Session label from the local wall clock (folder names should match what

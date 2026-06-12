@@ -41,6 +41,65 @@ const PlayerCore = (() => {
     return `${Math.round(d / 3600)}h ago`;
   };
 
+  const settingDurationLabel = (seconds) => {
+    const total = Math.max(0, Math.round(seconds || 0));
+    if (total < 60) return `${total} sec`;
+    const minutes = Math.floor(total / 60);
+    const rest = total - minutes * 60;
+    const minutePart = `${minutes} min`;
+    return rest ? `${minutePart} ${rest} sec` : minutePart;
+  };
+
+  const QUALITY_PRESETS = [
+    { label: "Compact", bitrate: 6, hint: "smaller files" },
+    { label: "Balanced", bitrate: 12, hint: "good default" },
+    { label: "Sharp", bitrate: 24, hint: "more detail" },
+    { label: "Maximum", bitrate: 40, hint: "largest files" },
+  ];
+
+  const SMOOTHNESS_PRESETS = [
+    { fps: 30, label: "30 FPS", hint: "lighter on the PC" },
+    { fps: 60, label: "60 FPS", hint: "good default for most games" },
+    { fps: 90, label: "90 FPS", hint: "smoother for high-refresh play" },
+    { fps: 120, label: "120 FPS", hint: "best for high-refresh footage" },
+  ];
+
+  const nearestPresetIndex = (presets, value, field) => {
+    let best = 0;
+    let bestDistance = Infinity;
+    for (let i = 0; i < presets.length; i++) {
+      const distance = Math.abs(presets[i][field] - value);
+      if (distance < bestDistance) {
+        best = i;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  };
+
+  const recordingQualityPreset = (index) =>
+    QUALITY_PRESETS[Math.max(0, Math.min(QUALITY_PRESETS.length - 1, Math.round(index || 0)))];
+
+  const qualityIndexForBitrate = (mbps) =>
+    nearestPresetIndex(QUALITY_PRESETS, Number(mbps) || QUALITY_PRESETS[1].bitrate, "bitrate");
+
+  const smoothnessPreset = (index) =>
+    SMOOTHNESS_PRESETS[Math.max(0, Math.min(SMOOTHNESS_PRESETS.length - 1, Math.round(index || 0)))];
+
+  const smoothnessIndexForFps = (fps) =>
+    nearestPresetIndex(SMOOTHNESS_PRESETS, Number(fps) || SMOOTHNESS_PRESETS[1].fps, "fps");
+
+  const captureSourceLabel = (settings) => {
+    switch (settings && settings.capture_mode) {
+      case "window_title":
+        return settings.window_title ? `Window: ${settings.window_title}` : "Window";
+      case "display_region":
+        return "Display region";
+      default:
+        return "Desktop";
+    }
+  };
+
   const clampTime = (value, duration) => {
     // Unknown duration (metadata not loaded yet) must not clamp seeks to zero.
     const max = duration > 0 ? duration : Number.MAX_SAFE_INTEGER;
@@ -222,6 +281,123 @@ const PlayerCore = (() => {
     }
   };
 
+  const functionKeyNumber = (ev) => {
+    const raw = String(ev.code || ev.key || "").toUpperCase();
+    const match = raw.match(/^F([1-9]|1[0-9]|2[0-4])$/);
+    return match ? Number(match[1]) : null;
+  };
+
+  const hotkeyFromKeyEvent = (ev) => {
+    if (ev.code === "Escape" || ev.key === "Escape") return { kind: "cancel" };
+    if (
+      ev.code === "ControlLeft" ||
+      ev.code === "ControlRight" ||
+      ev.code === "AltLeft" ||
+      ev.code === "AltRight" ||
+      ev.code === "ShiftLeft" ||
+      ev.code === "ShiftRight"
+    ) {
+      return { kind: "pending", message: "Now press an F-key." };
+    }
+
+    const key = functionKeyNumber(ev);
+    if (!key) {
+      return { kind: "invalid", message: "Use F1-F11 or F13-F24 as the shortcut key." };
+    }
+    if (key === 12) {
+      return { kind: "invalid", message: "F12 is reserved by Windows for debuggers." };
+    }
+
+    const parts = [];
+    if (ev.ctrlKey) parts.push("Ctrl");
+    if (ev.altKey) parts.push("Alt");
+    if (ev.shiftKey) parts.push("Shift");
+    parts.push(`F${key}`);
+    return { kind: "captured", value: parts.join("+") };
+  };
+
+  const displayBounds = (displays) => {
+    if (!displays.length) return { x: 0, y: 0, width: 0, height: 0 };
+    const left = Math.min(...displays.map((d) => d.x));
+    const top = Math.min(...displays.map((d) => d.y));
+    const right = Math.max(...displays.map((d) => d.x + d.width));
+    const bottom = Math.max(...displays.map((d) => d.y + d.height));
+    return { x: left, y: top, width: right - left, height: bottom - top };
+  };
+
+  const displayMapLayout = (displays, viewportW, viewportH, padding = 10) => {
+    const bounds = displayBounds(displays);
+    const innerW = Math.max(1, viewportW - padding * 2);
+    const innerH = Math.max(1, viewportH - padding * 2);
+    const scale = bounds.width && bounds.height
+      ? Math.min(innerW / bounds.width, innerH / bounds.height)
+      : 1;
+    return {
+      bounds,
+      scale,
+      width: bounds.width * scale + padding * 2,
+      height: bounds.height * scale + padding * 2,
+      displays: displays.map((d) => ({
+        id: d.id,
+        left: padding + (d.x - bounds.x) * scale,
+        top: padding + (d.y - bounds.y) * scale,
+        width: d.width * scale,
+        height: d.height * scale,
+      })),
+    };
+  };
+
+  const displayMapHeight = (displays, viewportW, padding = 10, minH = 180, maxH = 420) => {
+    const bounds = displayBounds(displays);
+    if (!bounds.width || !bounds.height) return minH;
+    const innerW = Math.max(1, viewportW - padding * 2);
+    const height = bounds.height * (innerW / bounds.width) + padding * 2;
+    return Math.max(minH, Math.min(maxH, height));
+  };
+
+  const regionForDisplay = (display) => ({
+    display_id: display.id,
+    x: display.x,
+    y: display.y,
+    width: display.width,
+    height: display.height,
+  });
+
+  const clampRegionToDisplay = (region, display) => {
+    const width = Math.max(2, Math.min(Math.round(region.width || 2), display.width));
+    const height = Math.max(2, Math.min(Math.round(region.height || 2), display.height));
+    const minX = display.x;
+    const minY = display.y;
+    const maxX = display.x + display.width - width;
+    const maxY = display.y + display.height - height;
+    const x = Math.max(minX, Math.min(maxX, Math.round(region.x || 0)));
+    const y = Math.max(minY, Math.min(maxY, Math.round(region.y || 0)));
+    return { display_id: display.id, x, y, width, height };
+  };
+
+  const alignRegion = (region, display, align) => {
+    const next = clampRegionToDisplay(region, display);
+    switch (align) {
+      case "left":
+        next.x = display.x;
+        break;
+      case "right":
+        next.x = display.x + display.width - next.width;
+        break;
+      case "top":
+        next.y = display.y;
+        break;
+      case "bottom":
+        next.y = display.y + display.height - next.height;
+        break;
+      case "center":
+        next.x = Math.round(display.x + (display.width - next.width) / 2);
+        next.y = Math.round(display.y + (display.height - next.height) / 2);
+        break;
+    }
+    return next;
+  };
+
   return {
     MIN_TRIM_GAP_S,
     MARKER_EPSILON_S,
@@ -231,6 +407,12 @@ const PlayerCore = (() => {
     fmtDur,
     fmtTenths,
     fmtAgo,
+    settingDurationLabel,
+    recordingQualityPreset,
+    qualityIndexForBitrate,
+    smoothnessPreset,
+    smoothnessIndexForFps,
+    captureSourceLabel,
     clampTime,
     percentFor,
     timelineTime,
@@ -246,6 +428,13 @@ const PlayerCore = (() => {
     sessionGroups,
     formatClipTitle,
     keyIntent,
+    hotkeyFromKeyEvent,
+    displayBounds,
+    displayMapLayout,
+    displayMapHeight,
+    regionForDisplay,
+    clampRegionToDisplay,
+    alignRegion,
   };
 })();
 

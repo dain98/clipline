@@ -25,11 +25,31 @@ const {
   sessionGroups,
   formatClipTitle,
   keyIntent,
+  hotkeyFromKeyEvent,
+  displayMapLayout,
+  displayMapHeight,
+  regionForDisplay,
+  clampRegionToDisplay,
+  alignRegion,
+  settingDurationLabel,
+  recordingQualityPreset,
+  qualityIndexForBitrate,
+  smoothnessPreset,
+  smoothnessIndexForFps,
+  captureSourceLabel,
 } = PlayerCore;
 
 const video = $("video");
 let currentClip = null;
 let clipsCache = [];
+let currentSettings = null;
+let recordingActive = true;
+let displays = [];
+let regionState = { display_id: null, x: 0, y: 0, width: 1920, height: 1080 };
+let regionLayout = null;
+let regionDrag = null;
+let regionMenuDisplayId = null;
+let hotkeyCaptureActive = false;
 let trimStart = 0;
 let trimEnd = 0;
 let dragging = null;
@@ -51,33 +71,306 @@ function clipMarkers() {
 /* ---- sidebar: status, settings, library ---- */
 
 function fillSettings(s) {
+  currentSettings = s;
   $("set-capture").value = s.capture_mode;
   $("set-window").value = s.window_title ?? "";
-  $("set-buffer").value = s.buffer_seconds;
-  $("set-replay").value = s.replay_window_s;
-  $("set-bitrate").value = s.bitrate_mbps;
-  $("set-fps").value = s.fps;
+  regionState = s.capture_region ?? regionState;
+  $("set-buffer").value = Math.max(120, Number(s.buffer_seconds) || 120);
+  $("set-replay").value = Math.min(120, Number(s.replay_window_s) || 60);
+  $("set-bitrate").value = qualityIndexForBitrate(s.bitrate_mbps);
+  $("set-fps").value = smoothnessIndexForFps(s.fps);
   $("set-quota").value = s.disk_quota_gb;
   $("set-hotkey").value = s.hotkey;
   $("save-hotkey").textContent = s.hotkey;
+  endHotkeyCapture("Click the field to record a new shortcut.");
   syncCaptureFields();
+  syncRecordingFields();
+  updateCaptureStatus();
 }
 
 function readSettings() {
+  const replay = Number($("set-replay").value);
   return {
     capture_mode: $("set-capture").value,
     window_title: $("set-window").value,
-    buffer_seconds: Number($("set-buffer").value),
-    replay_window_s: Number($("set-replay").value),
-    bitrate_mbps: Number($("set-bitrate").value),
-    fps: Number($("set-fps").value),
+    capture_region: regionState,
+    buffer_seconds: Math.max(120, replay),
+    replay_window_s: replay,
+    bitrate_mbps: recordingQualityPreset(Number($("set-bitrate").value)).bitrate,
+    fps: smoothnessPreset(Number($("set-fps").value)).fps,
     disk_quota_gb: Number($("set-quota").value),
     hotkey: $("set-hotkey").value,
   };
 }
 
 function syncCaptureFields() {
-  $("set-window").disabled = $("set-capture").value !== "window_title";
+  const mode = $("set-capture").value;
+  $("set-window").disabled = mode !== "window_title";
+  $("capture-region-editor").hidden = mode !== "display_region";
+  if (mode === "display_region") renderRegionEditor();
+}
+
+function syncRecordingFields() {
+  const replay = Number($("set-replay").value);
+  const quality = recordingQualityPreset(Number($("set-bitrate").value));
+  const smoothness = smoothnessPreset(Number($("set-fps").value));
+  $("replay-summary").textContent = `Save Replay writes the last ${settingDurationLabel(replay)}.`;
+  $("replay-summary").className = "setting-summary";
+  $("quality-summary").textContent = `${quality.label} quality - ${quality.hint}.`;
+  $("fps-summary").textContent = `${smoothness.label} - ${smoothness.hint}.`;
+}
+
+function updateCaptureStatus() {
+  const source = captureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
+  $("capture-status-label").textContent = recordingActive ? `Capturing ${source}` : "Recording paused";
+  $("capture-status").classList.toggle("paused", !recordingActive);
+  $("capture-status").setAttribute("aria-pressed", String(recordingActive));
+  $("capture-status").title = recordingActive ? "Pause recording" : `Resume ${source}`;
+  $("rail-status").title = $("capture-status").title;
+  $("save").disabled = !recordingActive;
+  $("rail-save").disabled = !recordingActive;
+}
+
+async function toggleRecording() {
+  const next = !recordingActive;
+  $("capture-status").disabled = true;
+  $("rail-status").disabled = true;
+  try {
+    recordingActive = await invoke("set_recording", { recording: next });
+    updateCaptureStatus();
+  } catch (e) {
+    $("error").textContent = e;
+  } finally {
+    $("capture-status").disabled = false;
+    $("rail-status").disabled = false;
+  }
+}
+
+function setHotkeyStatus(message, state = "") {
+  const status = $("hotkey-status");
+  status.textContent = message;
+  status.dataset.state = state;
+}
+
+function beginHotkeyCapture() {
+  hotkeyCaptureActive = true;
+  $("set-hotkey").classList.add("recording");
+  setHotkeyStatus("Press F1-F11 or F13-F24. Ctrl/Alt/Shift are optional.", "recording");
+}
+
+function endHotkeyCapture(message = "Click the field to record a new shortcut.", state = "") {
+  hotkeyCaptureActive = false;
+  $("set-hotkey").classList.remove("recording");
+  setHotkeyStatus(message, state);
+}
+
+function recordHotkey(ev) {
+  if (!hotkeyCaptureActive) beginHotkeyCapture();
+  ev.preventDefault();
+  ev.stopPropagation();
+
+  const result = hotkeyFromKeyEvent(ev);
+  switch (result.kind) {
+    case "captured":
+      $("set-hotkey").value = result.value;
+      endHotkeyCapture("Ready to save.", "ready");
+      break;
+    case "pending":
+      setHotkeyStatus(result.message, "recording");
+      break;
+    case "cancel":
+      endHotkeyCapture("Shortcut unchanged.", "");
+      $("set-hotkey").blur();
+      break;
+    case "invalid":
+      setHotkeyStatus(result.message, "error");
+      break;
+  }
+}
+
+function primaryDisplay() {
+  return displays.find((d) => d.is_primary) || displays[0] || null;
+}
+
+function activeDisplay() {
+  return displays.find((d) => d.id === regionState.display_id) || primaryDisplay();
+}
+
+function menuDisplay() {
+  return displays.find((d) => d.id === regionMenuDisplayId) || activeDisplay();
+}
+
+function setRegion(next) {
+  const display = displays.find((d) => d.id === next.display_id) || activeDisplay();
+  regionState = display
+    ? clampRegionToDisplay({ ...next, display_id: display.id }, display)
+    : {
+        display_id: next.display_id ?? null,
+        x: Math.round(next.x || 0),
+        y: Math.round(next.y || 0),
+        width: Math.max(2, Math.round(next.width || 2)),
+        height: Math.max(2, Math.round(next.height || 2)),
+      };
+  renderRegionEditor();
+}
+
+async function loadDisplays() {
+  try {
+    displays = await invoke("list_displays");
+    if (!regionState.display_id && displays.length) {
+      regionState = regionForDisplay(primaryDisplay());
+    }
+    renderRegionEditor();
+  } catch (e) {
+    $("region-display-label").textContent = "display list unavailable";
+    $("error").textContent = e;
+  }
+}
+
+function updateRegionFields() {
+  $("set-region-width").value = regionState.width;
+  $("set-region-height").value = regionState.height;
+  $("set-region-x").value = regionState.x;
+  $("set-region-y").value = regionState.y;
+  const display = activeDisplay();
+  $("region-display-label").textContent = display
+    ? `${display.name} · ${display.width}x${display.height} at ${display.x}, ${display.y}`
+    : "no displays";
+  $("region-size-label").textContent = `${regionState.width}x${regionState.height}`;
+}
+
+function renderDisplayMenu() {
+  const menu = $("region-display-menu");
+  menu.replaceChildren();
+  for (const display of displays) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.textContent = display.name + (display.is_primary ? " (primary)" : "");
+    item.addEventListener("click", () => {
+      hideRegionMenu();
+      setRegion(regionForDisplay(display));
+    });
+    menu.appendChild(item);
+  }
+}
+
+function renderRegionEditor() {
+  const editor = $("capture-region-editor");
+  if (editor.hidden) return;
+  const map = $("display-map");
+  const inner = $("display-map-inner");
+  const box = $("region-box");
+  inner.querySelectorAll(".display-tile").forEach((node) => node.remove());
+  if (!displays.length) {
+    updateRegionFields();
+    box.hidden = true;
+    return;
+  }
+  const display = activeDisplay();
+  if (display) {
+    regionState = clampRegionToDisplay(regionState, display);
+  }
+  const mapWidth = Math.max(320, map.clientWidth);
+  const mapHeight = displayMapHeight(displays, mapWidth, 10);
+  map.style.height = `${mapHeight}px`;
+  regionLayout = displayMapLayout(displays, mapWidth, mapHeight, 10);
+  inner.style.width = "100%";
+  inner.style.height = "100%";
+
+  for (const item of regionLayout.displays) {
+    const displayInfo = displays.find((d) => d.id === item.id);
+    const tile = document.createElement("button");
+    tile.type = "button";
+    tile.className =
+      "display-tile" +
+      (displayInfo && displayInfo.is_primary ? " primary" : "") +
+      (displayInfo && displayInfo.id === regionState.display_id ? " active" : "");
+    tile.style.left = `${item.left}px`;
+    tile.style.top = `${item.top}px`;
+    tile.style.width = `${item.width}px`;
+    tile.style.height = `${item.height}px`;
+    tile.addEventListener("click", () => {
+      if (displayInfo) setRegion({ ...regionState, display_id: displayInfo.id });
+    });
+    tile.addEventListener("contextmenu", (ev) => showRegionMenu(ev, displayInfo && displayInfo.id));
+    const label = document.createElement("span");
+    label.textContent = displayInfo ? displayInfo.name : item.id;
+    tile.appendChild(label);
+    inner.insertBefore(tile, box);
+  }
+
+  const bounds = regionLayout.bounds;
+  const scale = regionLayout.scale;
+  box.hidden = false;
+  box.style.left = `${10 + (regionState.x - bounds.x) * scale}px`;
+  box.style.top = `${10 + (regionState.y - bounds.y) * scale}px`;
+  box.style.width = `${regionState.width * scale}px`;
+  box.style.height = `${regionState.height * scale}px`;
+  updateRegionFields();
+  renderDisplayMenu();
+}
+
+function regionFromFields() {
+  return {
+    display_id: regionState.display_id,
+    x: Number($("set-region-x").value),
+    y: Number($("set-region-y").value),
+    width: Number($("set-region-width").value),
+    height: Number($("set-region-height").value),
+  };
+}
+
+function startRegionDrag(kind, ev) {
+  if (!regionLayout || !activeDisplay()) return;
+  regionDrag = {
+    kind,
+    startX: ev.clientX,
+    startY: ev.clientY,
+    region: { ...regionState },
+  };
+  $("region-box").setPointerCapture(ev.pointerId);
+  ev.preventDefault();
+  ev.stopPropagation();
+}
+
+function moveRegionDrag(ev) {
+  if (!regionDrag || !regionLayout) return;
+  const dx = Math.round((ev.clientX - regionDrag.startX) / regionLayout.scale);
+  const dy = Math.round((ev.clientY - regionDrag.startY) / regionLayout.scale);
+  const base = regionDrag.region;
+  if (regionDrag.kind === "resize") {
+    setRegion({
+      ...base,
+      width: base.width + dx,
+      height: base.height + dy,
+    });
+  } else {
+    setRegion({
+      ...base,
+      x: base.x + dx,
+      y: base.y + dy,
+    });
+  }
+}
+
+function endRegionDrag() {
+  regionDrag = null;
+}
+
+function showRegionMenu(ev, displayId = null) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  regionMenuDisplayId = displayId || (activeDisplay() && activeDisplay().id);
+  renderDisplayMenu();
+  const menu = $("capture-region-menu");
+  menu.hidden = false;
+  menu.style.left = `${ev.clientX}px`;
+  menu.style.top = `${ev.clientY}px`;
+}
+
+function hideRegionMenu() {
+  $("capture-region-menu").hidden = true;
+  regionMenuDisplayId = null;
 }
 
 async function refresh() {
@@ -466,12 +759,10 @@ async function openFolder() {
 
 listen("status", (e) => {
   const s = e.payload;
+  recordingActive = s.recording;
   $("dot").className = "dot" + (s.recording ? " on" : "");
   $("rail-dot").className = "dot" + (s.recording ? " on" : "");
-  $("state").textContent = s.recording ? "recording" : "stopped";
-  $("buffered").textContent = s.buffered_s.toFixed(1) + " s";
-  $("mb").textContent = s.buffered_mb.toFixed(1) + " MB";
-  $("segs").textContent = s.segments;
+  updateCaptureStatus();
 });
 
 listen("saved", (e) => {
@@ -488,7 +779,41 @@ listen("error", (e) => { $("error").textContent = e.payload; });
 /* ---- wiring ---- */
 
 $("save").addEventListener("click", () => invoke("save_replay"));
+$("capture-status").addEventListener("click", toggleRecording);
+$("rail-status").addEventListener("click", toggleRecording);
 $("set-capture").addEventListener("change", syncCaptureFields);
+for (const id of ["set-buffer", "set-replay", "set-bitrate", "set-fps"]) {
+  $(id).addEventListener("input", syncRecordingFields);
+  $(id).addEventListener("change", syncRecordingFields);
+}
+document.querySelectorAll("[data-replay-preset]").forEach((button) => {
+  button.addEventListener("click", () => {
+    $("set-replay").value = button.dataset.replayPreset;
+    syncRecordingFields();
+  });
+});
+for (const id of ["set-region-width", "set-region-height", "set-region-x", "set-region-y"]) {
+  $(id).addEventListener("input", () => setRegion(regionFromFields()));
+}
+$("display-map").addEventListener("contextmenu", showRegionMenu);
+$("region-box").addEventListener("pointerdown", (ev) => {
+  startRegionDrag(ev.target.dataset.regionResize ? "resize" : "move", ev);
+});
+$("region-box").addEventListener("pointermove", moveRegionDrag);
+$("region-box").addEventListener("pointerup", endRegionDrag);
+$("region-box").addEventListener("pointercancel", endRegionDrag);
+$("region-box").addEventListener("lostpointercapture", endRegionDrag);
+document.querySelectorAll("#region-align-menu button").forEach((button) => {
+  button.addEventListener("click", () => {
+    const display = menuDisplay();
+    if (display) setRegion(alignRegion(regionState, display, button.dataset.align));
+    hideRegionMenu();
+  });
+});
+document.addEventListener("click", (ev) => {
+  if (!$("capture-region-menu").contains(ev.target)) hideRegionMenu();
+});
+window.addEventListener("resize", renderRegionEditor);
 $("settings-save").addEventListener("click", async () => {
   $("settings-status").textContent = "";
   $("error").textContent = "";
@@ -551,7 +876,13 @@ $("sidebar-toggle").addEventListener("click", toggleRail);
 $("rail-save").addEventListener("click", () => invoke("save_replay"));
 $("rail-settings").addEventListener("click", () => toggleSettings());
 $("open-settings").addEventListener("click", () => toggleSettings());
-$("settings-close").addEventListener("click", () => toggleSettings(false));
+$("set-hotkey").addEventListener("focus", beginHotkeyCapture);
+$("set-hotkey").addEventListener("click", beginHotkeyCapture);
+$("set-hotkey").addEventListener("keydown", recordHotkey);
+$("set-hotkey").addEventListener("paste", (ev) => ev.preventDefault());
+$("set-hotkey").addEventListener("blur", () => {
+  if (hotkeyCaptureActive) endHotkeyCapture("Shortcut unchanged.");
+});
 
 document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
   tab.addEventListener("click", () => {
@@ -616,4 +947,5 @@ updateViews();
 syncPlayState();
 syncVolume();
 invoke("get_settings").then(fillSettings).catch((e) => $("error").textContent = e);
+loadDisplays();
 refresh();

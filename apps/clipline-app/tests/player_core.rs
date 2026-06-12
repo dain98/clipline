@@ -59,10 +59,107 @@ fn fmt_tenths_keeps_a_tenth_and_carries() {
 #[test]
 fn fmt_bytes_switches_units_at_a_gigabyte() {
     let mut ctx = player_core_context();
-    assert_eq!(eval(&mut ctx, "PlayerCore.fmtBytes(5 * 1024 * 1024)"), "5.0 MB");
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.fmtBytes(5 * 1024 * 1024)"),
+        "5.0 MB"
+    );
     assert_eq!(
         eval(&mut ctx, "PlayerCore.fmtBytes(1536 * 1024 * 1024)"),
         "1.5 GB"
+    );
+}
+
+#[test]
+fn setting_duration_labels_are_human_readable() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.settingDurationLabel(45)"),
+        "45 sec"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.settingDurationLabel(60)"),
+        "1 min"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.settingDurationLabel(90)"),
+        "1 min 30 sec"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.settingDurationLabel(120)"),
+        "2 min"
+    );
+}
+
+#[test]
+fn recording_quality_labels_hide_bitrate_jargon() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.recordingQualityPreset(0)"),
+        r#"{"label":"Compact","bitrate":6,"hint":"smaller files"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.recordingQualityPreset(1)"),
+        r#"{"label":"Balanced","bitrate":12,"hint":"good default"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.recordingQualityPreset(2)"),
+        r#"{"label":"Sharp","bitrate":24,"hint":"more detail"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.recordingQualityPreset(3)"),
+        r#"{"label":"Maximum","bitrate":40,"hint":"largest files"}"#
+    );
+    assert_eq!(eval(&mut ctx, "PlayerCore.qualityIndexForBitrate(13)"), "1");
+    assert_eq!(eval(&mut ctx, "PlayerCore.qualityIndexForBitrate(35)"), "3");
+}
+
+#[test]
+fn smoothness_slider_maps_to_valid_fps_values() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.smoothnessPreset(0)"),
+        r#"{"fps":30,"label":"30 FPS","hint":"lighter on the PC"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.smoothnessPreset(1)"),
+        r#"{"fps":60,"label":"60 FPS","hint":"good default for most games"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.smoothnessPreset(2)"),
+        r#"{"fps":90,"label":"90 FPS","hint":"smoother for high-refresh play"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.smoothnessPreset(3)"),
+        r#"{"fps":120,"label":"120 FPS","hint":"best for high-refresh footage"}"#
+    );
+    assert_eq!(eval(&mut ctx, "PlayerCore.smoothnessIndexForFps(60)"), "1");
+    assert_eq!(eval(&mut ctx, "PlayerCore.smoothnessIndexForFps(90)"), "2");
+    assert_eq!(eval(&mut ctx, "PlayerCore.smoothnessIndexForFps(120)"), "3");
+}
+
+#[test]
+fn capture_source_labels_are_sidebar_friendly() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.captureSourceLabel({ capture_mode: 'primary_monitor' })"
+        ),
+        "Desktop"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.captureSourceLabel({ capture_mode: 'window_title', window_title: 'League of Legends' })"
+        ),
+        "Window: League of Legends"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.captureSourceLabel({ capture_mode: 'display_region' })"
+        ),
+        "Display region"
     );
 }
 
@@ -91,9 +188,18 @@ fn clamp_time_and_percent_respect_duration() {
 #[test]
 fn timeline_time_maps_pointer_x_to_clip_time() {
     let mut ctx = player_core_context();
-    assert_eq!(eval(&mut ctx, "PlayerCore.timelineTime(150, 100, 200, 10)"), "2.5");
-    assert_eq!(eval(&mut ctx, "PlayerCore.timelineTime(50, 100, 200, 10)"), "0");
-    assert_eq!(eval(&mut ctx, "PlayerCore.timelineTime(400, 100, 200, 10)"), "10");
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.timelineTime(150, 100, 200, 10)"),
+        "2.5"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.timelineTime(50, 100, 200, 10)"),
+        "0"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.timelineTime(400, 100, 200, 10)"),
+        "10"
+    );
 }
 
 #[test]
@@ -181,7 +287,10 @@ fn marker_count_pluralizes() {
         "1 marker"
     );
     assert_eq!(
-        eval(&mut ctx, "PlayerCore.markerSummary([{ t_s: 1 }, { t_s: 2 }])"),
+        eval(
+            &mut ctx,
+            "PlayerCore.markerSummary([{ t_s: 1 }, { t_s: 2 }])"
+        ),
         "2 markers"
     );
 }
@@ -240,7 +349,76 @@ fn key_intents_cover_the_documented_shortcuts() {
         eval_json(&mut ctx, "PlayerCore.keyIntent('Escape', false)"),
         r#"{"kind":"close"}"#
     );
-    assert_eq!(eval_json(&mut ctx, "PlayerCore.keyIntent('KeyZ', false)"), "null");
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('KeyZ', false)"),
+        "null"
+    );
+}
+
+#[test]
+fn hotkey_recorder_formats_modifier_function_keys() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'F10', ctrlKey: false, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"F10"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'F9', ctrlKey: true, altKey: true, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"Ctrl+Alt+F9"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ key: 'F13', ctrlKey: false, altKey: true, shiftKey: true })"
+        ),
+        r#"{"kind":"captured","value":"Alt+Shift+F13"}"#
+    );
+}
+
+#[test]
+fn hotkey_recorder_reports_pending_cancel_and_invalid_inputs() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'ControlLeft', ctrlKey: true })"
+        ),
+        r#"{"kind":"pending","message":"Now press an F-key."}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'Escape' })"
+        ),
+        r#"{"kind":"cancel"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'F10', ctrlKey: false, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"F10"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'F12', ctrlKey: false, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"invalid","message":"F12 is reserved by Windows for debuggers."}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'KeyS', ctrlKey: true, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"invalid","message":"Use F1-F11 or F13-F24 as the shortcut key."}"#
+    );
 }
 
 #[test]
@@ -373,11 +551,20 @@ fn focus_mode_has_a_key() {
 fn overlay_pins_while_paused_and_fades_when_idle() {
     let mut ctx = player_core_context();
     // Paused: always visible, no matter how stale the activity.
-    assert_eq!(eval(&mut ctx, "PlayerCore.overlayVisible(true, 999999)"), "true");
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.overlayVisible(true, 999999)"),
+        "true"
+    );
     // Playing with fresh pointer activity: visible.
-    assert_eq!(eval(&mut ctx, "PlayerCore.overlayVisible(false, 500)"), "true");
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.overlayVisible(false, 500)"),
+        "true"
+    );
     // Playing and idle past the threshold: hidden.
-    assert_eq!(eval(&mut ctx, "PlayerCore.overlayVisible(false, 2500)"), "false");
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.overlayVisible(false, 2500)"),
+        "false"
+    );
     assert_eq!(eval(&mut ctx, "PlayerCore.OVERLAY_HIDE_MS"), "2000");
 }
 
@@ -386,4 +573,118 @@ fn shared_constants_are_exposed() {
     let mut ctx = player_core_context();
     assert_eq!(eval(&mut ctx, "PlayerCore.MIN_TRIM_GAP_S"), "0.1");
     assert_eq!(eval(&mut ctx, "PlayerCore.MARKER_EPSILON_S"), "0.05");
+}
+
+#[test]
+fn display_bounds_cover_the_virtual_desktop() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"const DISPLAYS = [
+            { id: 'DISPLAY1', name: 'Display 1', x: -1280, y: 120, width: 1280, height: 720, is_primary: false },
+            { id: 'DISPLAY2', name: 'Display 2', x: 0, y: 0, width: 1920, height: 1080, is_primary: true },
+        ];"#,
+    ))
+    .expect("define displays");
+
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.displayBounds(DISPLAYS)"),
+        r#"{"x":-1280,"y":0,"width":3200,"height":1080}"#
+    );
+}
+
+#[test]
+fn display_map_layout_fits_displays_into_viewport() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"const DISPLAYS = [
+            { id: 'DISPLAY1', name: 'Display 1', x: 0, y: 0, width: 1920, height: 1080, is_primary: true },
+            { id: 'DISPLAY2', name: 'Display 2', x: 1920, y: 0, width: 2560, height: 1440, is_primary: false },
+        ];
+        const LAYOUT = PlayerCore.displayMapLayout(DISPLAYS, 500, 250, 10);"#,
+    ))
+    .expect("define layout");
+
+    assert_eq!(
+        eval_json(&mut ctx, "LAYOUT.bounds"),
+        r#"{"x":0,"y":0,"width":4480,"height":1440}"#
+    );
+    assert_eq!(eval(&mut ctx, "Math.round(LAYOUT.scale * 1000)"), "107");
+    assert_eq!(eval(&mut ctx, "Math.round(LAYOUT.displays[1].left)"), "216");
+    assert_eq!(
+        eval(&mut ctx, "Math.round(LAYOUT.displays[1].width)"),
+        "274"
+    );
+}
+
+#[test]
+fn display_map_height_scales_with_virtual_desktop_shape() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"const WIDE_STACK = [
+            { id: 'DISPLAY2', name: 'Display 2', x: 0, y: 0, width: 5120, height: 1440, is_primary: true },
+            { id: 'DISPLAY1', name: 'Display 1', x: 1920, y: 1440, width: 1920, height: 1080, is_primary: false },
+        ];
+        const SINGLE = [
+            { id: 'DISPLAY1', name: 'Display 1', x: 0, y: 0, width: 1920, height: 1080, is_primary: true },
+        ];"#,
+    ))
+    .expect("define displays");
+
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "Math.round(PlayerCore.displayMapHeight(SINGLE, 620))"
+        ),
+        "358"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "Math.round(PlayerCore.displayMapHeight(WIDE_STACK, 620))"
+        ),
+        "315"
+    );
+}
+
+#[test]
+fn region_helpers_set_align_and_clamp_to_display() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"const DISPLAY = { id: 'DISPLAY2', name: 'Display 2', x: 1920, y: -120, width: 2560, height: 1440, is_primary: false };
+        const FULL = PlayerCore.regionForDisplay(DISPLAY);
+        const SMALL = { display_id: 'DISPLAY2', x: 2000, y: 0, width: 800, height: 450 };"#,
+    ))
+    .expect("define display and region");
+
+    assert_eq!(
+        eval_json(&mut ctx, "FULL"),
+        r#"{"display_id":"DISPLAY2","x":1920,"y":-120,"width":2560,"height":1440}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.alignRegion(SMALL, DISPLAY, 'left')"),
+        r#"{"display_id":"DISPLAY2","x":1920,"y":0,"width":800,"height":450}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.alignRegion(SMALL, DISPLAY, 'right')"),
+        r#"{"display_id":"DISPLAY2","x":3680,"y":0,"width":800,"height":450}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.alignRegion(SMALL, DISPLAY, 'top')"),
+        r#"{"display_id":"DISPLAY2","x":2000,"y":-120,"width":800,"height":450}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.alignRegion(SMALL, DISPLAY, 'bottom')"),
+        r#"{"display_id":"DISPLAY2","x":2000,"y":870,"width":800,"height":450}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.alignRegion(SMALL, DISPLAY, 'center')"),
+        r#"{"display_id":"DISPLAY2","x":2800,"y":375,"width":800,"height":450}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.clampRegionToDisplay({ display_id: 'DISPLAY2', x: 1000, y: -900, width: 4000, height: 2000 }, DISPLAY)"
+        ),
+        r#"{"display_id":"DISPLAY2","x":1920,"y":-120,"width":2560,"height":1440}"#
+    );
 }

@@ -3,6 +3,7 @@
 //! the path to stay on the GPU.
 
 use windows::core::{Interface, Result as WinResult};
+use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
     ID3D11VideoProcessorEnumerator, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
@@ -16,6 +17,25 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_RATIONAL;
 
 use crate::windows::d3d11;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CropRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl CropRect {
+    fn to_rect(self) -> RECT {
+        RECT {
+            left: self.x as i32,
+            top: self.y as i32,
+            right: (self.x + self.width) as i32,
+            bottom: (self.y + self.height) as i32,
+        }
+    }
+}
+
 /// One converter per recording: input size is fixed by the capture item,
 /// output size by the encoder configuration (already even-rounded).
 pub struct VideoConverter {
@@ -26,6 +46,7 @@ pub struct VideoConverter {
     enumerator: ID3D11VideoProcessorEnumerator,
     out_width: u32,
     out_height: u32,
+    source_rect: Option<RECT>,
 }
 
 impl VideoConverter {
@@ -36,15 +57,32 @@ impl VideoConverter {
         out_w: u32,
         out_h: u32,
     ) -> WinResult<Self> {
+        Self::new_with_crop(device, in_w, in_h, out_w, out_h, None)
+    }
+
+    pub fn new_with_crop(
+        device: &ID3D11Device,
+        in_w: u32,
+        in_h: u32,
+        out_w: u32,
+        out_h: u32,
+        crop: Option<CropRect>,
+    ) -> WinResult<Self> {
         let video_device: ID3D11VideoDevice = device.cast()?;
         // SAFETY: trivial getter on a valid device.
         let video_context: ID3D11VideoContext = unsafe { device.GetImmediateContext()? }.cast()?;
         let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-            InputFrameRate: DXGI_RATIONAL { Numerator: 60, Denominator: 1 },
+            InputFrameRate: DXGI_RATIONAL {
+                Numerator: 60,
+                Denominator: 1,
+            },
             InputWidth: in_w,
             InputHeight: in_h,
-            OutputFrameRate: DXGI_RATIONAL { Numerator: 60, Denominator: 1 },
+            OutputFrameRate: DXGI_RATIONAL {
+                Numerator: 60,
+                Denominator: 1,
+            },
             OutputWidth: out_w,
             OutputHeight: out_h,
             Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
@@ -61,6 +99,7 @@ impl VideoConverter {
             enumerator,
             out_width: out_w,
             out_height: out_h,
+            source_rect: crop.map(CropRect::to_rect),
         })
     }
 
@@ -73,7 +112,10 @@ impl VideoConverter {
             FourCC: 0,
             ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
             Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
-                Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 },
+                Texture2D: D3D11_TEX2D_VPIV {
+                    MipSlice: 0,
+                    ArraySlice: 0,
+                },
             },
         };
         let mut in_view = None;
@@ -109,6 +151,18 @@ impl VideoConverter {
             pInputSurface: std::mem::ManuallyDrop::new(in_view),
             ..Default::default()
         };
+        if let Some(rect) = &self.source_rect {
+            // SAFETY: processor is live and `rect` is a valid source rectangle
+            // for stream 0. The caller validates the crop against the input.
+            unsafe {
+                self.video_context.VideoProcessorSetStreamSourceRect(
+                    &self.processor,
+                    0,
+                    true,
+                    Some(rect),
+                );
+            }
+        }
         // SAFETY: processor/views are live; one enabled stream, no past or
         // future frames. ManuallyDrop field: we drop the view ourselves after.
         let result = unsafe {
@@ -151,6 +205,42 @@ mod tests {
         let nv12 = conv.convert(&src).expect("convert");
         let desc = crate::windows::d3d11::texture_desc(&nv12);
         assert_eq!((desc.Width, desc.Height), (32, 32));
-        assert_eq!(desc.Format, windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12);
+        assert_eq!(
+            desc.Format,
+            windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12
+        );
+    }
+
+    #[test]
+    fn converts_bgra_texture_with_source_crop() {
+        // WARP has no ID3D11VideoDevice — needs real hardware; skips on CI.
+        let device = match crate::windows::d3d11::create_device() {
+            Ok((device, _ctx)) => device,
+            Err(e) => {
+                eprintln!("SKIP: no hardware D3D11 device: {e}");
+                return;
+            }
+        };
+        let crop = CropRect {
+            x: 16,
+            y: 8,
+            width: 32,
+            height: 24,
+        };
+        let mut conv = match VideoConverter::new_with_crop(&device, 96, 64, 48, 36, Some(crop)) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("SKIP: video processor unavailable: {e}");
+                return;
+            }
+        };
+        let src = crate::windows::d3d11::create_bgra_texture(&device, 96, 64).expect("src");
+        let nv12 = conv.convert(&src).expect("convert");
+        let desc = crate::windows::d3d11::texture_desc(&nv12);
+        assert_eq!((desc.Width, desc.Height), (48, 36));
+        assert_eq!(
+            desc.Format,
+            windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12
+        );
     }
 }
