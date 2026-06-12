@@ -6,12 +6,13 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use clipline_capture::traits::{CaptureError, FrameData};
+use clipline_capture::traits::{AudioSource, CaptureError, FrameData};
 use clipline_capture::windows::nv12::CropRect;
+use clipline_capture::windows::wasapi::{WasapiChannelMode, WasapiMixedLoopback};
 use clipline_capture::windows::{
     d3d11, find_window_by_title, MftConfig, MftH264Encoder, WasapiLoopback, WgcCapture,
 };
-use clipline_capture::{even_dimensions, PipelineError, Recorder};
+use clipline_capture::{even_dimensions, PipelineError, Recorder, RelativeClock};
 use clipline_events::{EventKind, MarkerLog};
 use clipline_storage::sessions::{session_label, SessionTracker};
 use clipline_storage::{enforce_quota, storage_status};
@@ -37,6 +38,39 @@ pub enum CaptureSource {
     PrimaryMonitor,
     WindowTitle(String),
     DisplayRegion(CaptureRegion),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioChannelMode {
+    #[default]
+    Mono,
+    Stereo,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioOptions {
+    pub output_enabled: bool,
+    pub output_device_id: Option<String>,
+    pub output_volume: f64,
+    pub mic_enabled: bool,
+    pub mic_device_id: Option<String>,
+    pub mic_volume: f64,
+    pub mic_channels: AudioChannelMode,
+}
+
+impl Default for AudioOptions {
+    fn default() -> Self {
+        Self {
+            output_enabled: true,
+            output_device_id: None,
+            output_volume: 1.0,
+            mic_enabled: false,
+            mic_device_id: None,
+            mic_volume: 1.0,
+            mic_channels: AudioChannelMode::Mono,
+        }
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -75,6 +109,7 @@ pub struct ServiceOptions {
     pub disk_quota_bytes: Option<u64>,
     pub fps: u32,
     pub bitrate_bps: u32,
+    pub audio: AudioOptions,
 }
 
 pub const DEFAULT_DISK_QUOTA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
@@ -90,6 +125,7 @@ impl Default for ServiceOptions {
             disk_quota_bytes: Some(DEFAULT_DISK_QUOTA_BYTES),
             fps: 60,
             bitrate_bps: 12_000_000,
+            audio: AudioOptions::default(),
         }
     }
 }
@@ -176,9 +212,11 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     };
     let encoder =
         MftH264Encoder::new_with_crop(&device, in_w, in_h, cfg, crop).map_err(|e| init(&e))?;
-    let audio = WasapiLoopback::start(clock).map_err(|e| init(&e))?;
 
-    let mut rec = Recorder::new(cap, encoder, opts.buffer_bytes).with_audio(Box::new(audio));
+    let mut rec = Recorder::new(cap, encoder, opts.buffer_bytes);
+    if let Some(audio) = audio_source_from_options(clock, &opts.audio, events) {
+        rec = rec.with_audio(audio);
+    }
     let clips_dir = clips_dir()?;
     // Saves land in a session folder: one per recorder run, with a dedicated
     // folder per detected match. Folders are created lazily at save time.
@@ -311,6 +349,82 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     rec.finish_stream().map_err(|e| format!("finish: {e}"))?;
     send_stopped(events);
     Ok(())
+}
+
+fn audio_source_from_options(
+    clock: RelativeClock,
+    options: &AudioOptions,
+    events: &Sender<Event>,
+) -> Option<Box<dyn AudioSource>> {
+    let mic_channels = match options.mic_channels {
+        AudioChannelMode::Mono => WasapiChannelMode::Mono,
+        AudioChannelMode::Stereo => WasapiChannelMode::Stereo,
+    };
+    match (options.output_enabled, options.mic_enabled) {
+        (true, true) => match WasapiMixedLoopback::start(
+            clock,
+            Some((options.output_device_id.as_deref(), options.output_volume)),
+            Some((
+                options.mic_device_id.as_deref(),
+                options.mic_volume,
+                mic_channels,
+            )),
+        ) {
+            Ok(audio) => Some(Box::new(audio)),
+            Err(e) => {
+                warn_audio(
+                    events,
+                    format!("mixed audio unavailable; trying single-source fallback: {e}"),
+                );
+                audio_source_from_options(
+                    clock,
+                    &AudioOptions {
+                        mic_enabled: false,
+                        ..options.clone()
+                    },
+                    events,
+                )
+                .or_else(|| {
+                    audio_source_from_options(
+                        clock,
+                        &AudioOptions {
+                            output_enabled: false,
+                            ..options.clone()
+                        },
+                        events,
+                    )
+                })
+            }
+        },
+        (true, false) => match WasapiLoopback::start_output(
+            clock,
+            options.output_device_id.as_deref(),
+            options.output_volume,
+        ) {
+            Ok(audio) => Some(Box::new(audio)),
+            Err(e) => {
+                warn_audio(events, format!("output audio unavailable; continuing: {e}"));
+                None
+            }
+        },
+        (false, true) => match WasapiLoopback::start_microphone(
+            clock,
+            options.mic_device_id.as_deref(),
+            options.mic_volume,
+            mic_channels,
+        ) {
+            Ok(audio) => Some(Box::new(audio)),
+            Err(e) => {
+                warn_audio(events, format!("microphone unavailable; continuing: {e}"));
+                None
+            }
+        },
+        (false, false) => None,
+    }
+}
+
+fn warn_audio(events: &Sender<Event>, message: String) {
+    let _ = events.send(Event::Error { message });
 }
 
 fn send_stopped(events: &Sender<Event>) {

@@ -85,7 +85,11 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             self.pending.push(pkt);
         }
         if !self.pending.is_empty() {
-            let end = self.pending.last().map(|p| p.pts_s + p.duration_s).unwrap_or(0.0);
+            let end = self
+                .pending
+                .last()
+                .map(|p| p.pts_s + p.duration_s)
+                .unwrap_or(0.0);
             for (src, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
                 pending.extend(src.poll_packets(end)?);
             }
@@ -126,11 +130,18 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
     ) -> io::Result<(W, f64)> {
         let segments = self.ring.save_window(window_s, exclude_before_s);
         if segments.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "no new footage in window"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "no new footage in window",
+            ));
         }
         let video_cfg = self.encoder.track_config();
         let video_ts = video_cfg.timescale as f64;
-        let audio_cfgs: Vec<_> = self.audio_sources.iter().map(|s| s.track_config()).collect();
+        let audio_cfgs: Vec<_> = self
+            .audio_sources
+            .iter()
+            .map(|s| s.track_config())
+            .collect();
         let mut track_cfgs = vec![TrackConfig::Video(video_cfg)];
         for cfg in &audio_cfgs {
             track_cfgs.push(TrackConfig::Audio(cfg.clone()));
@@ -267,11 +278,7 @@ mod tests {
     fn byte_budget_evicts_oldest_gop() {
         // Each MockEncoder sample is 64–70 bytes → a GOP of 30 ≈ ~2 KB.
         // Budget for ~2 GOPs: the first of three must be evicted.
-        let mut rec = Recorder::new(
-            MockCapture::new(90, 30),
-            MockEncoder::new(30, 30),
-            4 * 1024,
-        );
+        let mut rec = Recorder::new(MockCapture::new(90, 30), MockEncoder::new(30, 30), 4 * 1024);
         rec.run_to_end().unwrap();
         let ring = rec.ring();
         assert_eq!(ring.len(), 2);
@@ -299,6 +306,35 @@ mod tests {
         // First packet of the second segment starts at its GOP boundary.
         let seg2 = ring.segments().nth(1).unwrap();
         assert_eq!(&seg2.audio[0].data[..6], b"P00050");
+    }
+
+    #[test]
+    fn save_replay_preserves_multiple_audio_tracks() {
+        use crate::mock::MockAudioSource;
+        use clipline_mp4::walker::{children, find, walk};
+
+        let mut rec = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        )
+        .with_audio(Box::new(MockAudioSource::new(48_000, 20)))
+        .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+
+        rec.run_to_end().unwrap();
+        for seg in rec.ring().segments() {
+            assert_eq!(seg.audio.len(), 2, "system plus microphone tracks");
+        }
+
+        let (buf, _) = rec
+            .save_replay(std::io::Cursor::new(Vec::new()), 10.0, None)
+            .map(|(w, e)| (w.into_inner(), e))
+            .expect("multi-audio save");
+        let boxes = walk(&buf);
+        let moov = find(&boxes, b"moov").expect("moov");
+        let kids = children(&buf, moov);
+        let traks = kids.iter().filter(|b| &b.fourcc == b"trak").count();
+        assert_eq!(traks, 3, "video plus two audio tracks");
     }
 
     /// Wraps MockEncoder but holds back the latest packet until finish() —
@@ -347,8 +383,7 @@ mod tests {
                 // Stamps: frames alternate 10 ms / 30 ms apart, while the
                 // encoder still claims a flat 1/30 s duration.
                 let idx = (p.pts_s * 30.0).round();
-                p.pts_s =
-                    (idx / 2.0).floor() * 0.04 + if idx % 2.0 == 1.0 { 0.01 } else { 0.0 };
+                p.pts_s = (idx / 2.0).floor() * 0.04 + if idx % 2.0 == 1.0 { 0.01 } else { 0.0 };
             }
             Ok(pkts)
         }
@@ -360,7 +395,9 @@ mod tests {
     #[test]
     fn sealed_durations_come_from_pts_deltas_not_encoder_claims() {
         // GOP of 4 over 8 frames → two segments, boundary at frame 4.
-        let enc = JitteryEncoder { inner: MockEncoder::new(4, 30) };
+        let enc = JitteryEncoder {
+            inner: MockEncoder::new(4, 30),
+        };
         let mut rec = Recorder::new(MockCapture::new(8, 30), enc, usize::MAX);
         rec.run_to_end().unwrap();
         let segs: Vec<_> = rec.ring().segments().collect();
@@ -372,7 +409,10 @@ mod tests {
         assert!((d[2] - 0.01).abs() < 1e-9, "got {d:?}");
         // Boundary: last sample of GOP 1 closes exactly at GOP 2's keyframe.
         let gop2_start = segs[1].pts_start_s;
-        assert!((segs[0].pts_end_s() - gop2_start).abs() < 1e-9, "no gap, no overlap");
+        assert!(
+            (segs[0].pts_end_s() - gop2_start).abs() < 1e-9,
+            "no gap, no overlap"
+        );
         // Final seal falls back to the encoder duration for the last sample.
         let last = segs[1].samples.last().unwrap();
         assert!((last.duration_s - 1.0 / 30.0).abs() < 1e-9);
@@ -380,7 +420,10 @@ mod tests {
 
     #[test]
     fn run_to_end_drains_encoder_via_finish() {
-        let enc = OneFrameLatency { inner: MockEncoder::new(30, 30), held: None };
+        let enc = OneFrameLatency {
+            inner: MockEncoder::new(30, 30),
+            held: None,
+        };
         let mut rec = Recorder::new(MockCapture::new(30, 30), enc, usize::MAX);
         rec.run_to_end().unwrap();
         // All 30 frames present despite the encoder's one-frame latency.
@@ -390,8 +433,11 @@ mod tests {
 
     #[test]
     fn save_replay_works_between_steps_while_recording() {
-        let mut rec =
-            Recorder::new(MockCapture::new(90, 30), MockEncoder::new(30, 30), usize::MAX);
+        let mut rec = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        );
         // Two GOPs in: a save must succeed without ending the recording.
         for _ in 0..60 {
             assert!(rec.step().unwrap());
@@ -401,7 +447,10 @@ mod tests {
             .map(|(w, e)| (w.into_inner(), e))
             .expect("mid-recording save");
         assert!(!buf.is_empty());
-        assert!((end - 1.0).abs() < 1e-6, "one sealed GOP at save time (second pending)");
+        assert!(
+            (end - 1.0).abs() < 1e-6,
+            "one sealed GOP at save time (second pending)"
+        );
         // Recording continues; smart mode skips the already-saved second.
         for _ in 0..30 {
             assert!(rec.step().unwrap());
@@ -413,8 +462,11 @@ mod tests {
             .expect("post-finish save");
         assert!((end2 - 3.0).abs() < 1e-6, "everything sealed after finish");
         // run_to_end equivalence: same segment layout as the stepped path.
-        let mut whole =
-            Recorder::new(MockCapture::new(90, 30), MockEncoder::new(30, 30), usize::MAX);
+        let mut whole = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        );
         whole.run_to_end().unwrap();
         assert_eq!(whole.ring().len(), rec.ring().len());
     }
@@ -443,7 +495,10 @@ mod tests {
         // capturing (and silence-filling) since t=0. The pre-video audio
         // must not ride in the file or video plays early by the lead-in.
         use crate::mock::MockAudioSource;
-        let cap = OffsetCapture { inner: MockCapture::new(60, 30), offset_s: 0.5 };
+        let cap = OffsetCapture {
+            inner: MockCapture::new(60, 30),
+            offset_s: 0.5,
+        };
         let mut rec = Recorder::new(cap, MockEncoder::new(30, 30), usize::MAX)
             .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
         rec.run_to_end().unwrap();
@@ -471,8 +526,7 @@ mod tests {
             usize::MAX,
         );
         rec.run_to_end().unwrap();
-        let counts: Vec<usize> =
-            rec.ring().segments().map(|s| s.samples.len()).collect();
+        let counts: Vec<usize> = rec.ring().segments().map(|s| s.samples.len()).collect();
         assert_eq!(counts, vec![30, 15]);
     }
 }

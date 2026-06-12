@@ -219,6 +219,53 @@
                 </div>
               </div>
             </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Audio output</strong>
+                <span>Sound from the selected Windows playback device.</span>
+              </div>
+              <div class="audio-control">
+                <label class="check-line">
+                  <input id="set-output-enabled" type="checkbox" />
+                  <span>Record output audio</span>
+                </label>
+                <select id="set-output-device"></select>
+                <div class="volume-line">
+                  <input id="set-output-volume" type="range" min="0" max="2" step="0.05" />
+                  <span id="output-volume-summary" class="setting-summary"></span>
+                </div>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Microphone</strong>
+                <span>Voice input mixed into saved clip audio.</span>
+              </div>
+              <div class="audio-control">
+                <label class="check-line">
+                  <input id="set-mic-enabled" type="checkbox" />
+                  <span>Record microphone</span>
+                </label>
+                <select id="set-mic-device"></select>
+                <div class="audio-grid">
+                  <div class="volume-line">
+                    <input id="set-mic-volume" type="range" min="0" max="2" step="0.05" />
+                    <span id="mic-volume-summary" class="setting-summary"></span>
+                  </div>
+                  <label class="check-line mono-check">
+                    <input id="set-mic-mono" type="checkbox" />
+                    <span>Mono</span>
+                  </label>
+                </div>
+                <div class="mic-test-row">
+                  <button id="test-mic" type="button">Test mic</button>
+                  <div class="mic-meter" aria-hidden="true">
+                    <span id="mic-meter-fill"></span>
+                  </div>
+                  <span id="mic-test-status" class="setting-summary"></span>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div class="settings-section" data-section="recording" hidden>

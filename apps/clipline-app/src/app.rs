@@ -1,8 +1,9 @@
 //! Tauri shell: tray, Alt+F10 global hotkey, status webview — all thin
 //! wiring around the recorder service thread.
 
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
@@ -22,6 +23,42 @@ struct DisplayInfo {
     width: u32,
     height: u32,
     is_primary: bool,
+}
+
+#[derive(serde::Serialize)]
+struct AudioDeviceInfo {
+    id: String,
+    name: String,
+    is_default: bool,
+}
+
+#[derive(serde::Serialize)]
+struct AudioDeviceLists {
+    outputs: Vec<AudioDeviceInfo>,
+    inputs: Vec<AudioDeviceInfo>,
+}
+
+#[derive(serde::Serialize, Clone)]
+// Tauri events are JSON, so the live monitor keeps 30 ms chunks as compact
+// i16 samples instead of shipping f32 PCM through IPC.
+struct MicMonitorEvent {
+    rms: f32,
+    peak: f32,
+    sample_count: usize,
+    samples: Vec<i16>,
+}
+
+#[derive(Default)]
+struct MicTestState(Mutex<Option<Sender<()>>>);
+
+impl MicTestState {
+    fn stop(&self) {
+        if let Ok(mut tx) = self.0.lock() {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
 }
 
 struct RuntimeState(Mutex<RuntimeInner>);
@@ -175,6 +212,102 @@ fn list_displays() -> Result<Vec<DisplayInfo>, String> {
 }
 
 #[tauri::command]
+fn list_audio_devices() -> Result<AudioDeviceLists, String> {
+    clipline_capture::windows::wasapi::enumerate_audio_devices()
+        .map_err(|e| e.to_string())
+        .map(|devices| AudioDeviceLists {
+            outputs: devices
+                .outputs
+                .into_iter()
+                .map(|device| AudioDeviceInfo {
+                    id: device.id,
+                    name: device.name,
+                    is_default: device.is_default,
+                })
+                .collect(),
+            inputs: devices
+                .inputs
+                .into_iter()
+                .map(|device| AudioDeviceInfo {
+                    id: device.id,
+                    name: device.name,
+                    is_default: device.is_default,
+                })
+                .collect(),
+        })
+}
+
+#[tauri::command]
+fn start_microphone_test<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<MicTestState>,
+    device_id: Option<String>,
+    volume: f64,
+    mono: bool,
+) -> Result<(), String> {
+    state.stop();
+    let channels = if mono {
+        clipline_capture::windows::wasapi::WasapiChannelMode::Mono
+    } else {
+        clipline_capture::windows::wasapi::WasapiChannelMode::Stereo
+    };
+    let (stop_tx, stop_rx) = mpsc::channel();
+    {
+        let mut guard = state.0.lock().map_err(|_| "mic test state lock poisoned")?;
+        *guard = Some(stop_tx);
+    }
+    std::thread::spawn(move || {
+        let run = || -> Result<(), String> {
+            let clock = clipline_capture::clock::RelativeClock::new(
+                clipline_capture::windows::qpc_now_ticks_100ns().map_err(|e| e.to_string())?,
+            );
+            let mut source = clipline_capture::windows::wasapi::WasapiLoopback::start_microphone(
+                clock,
+                device_id.as_deref(),
+                volume,
+                channels,
+            )
+            .map_err(|e| e.to_string())?;
+            loop {
+                if stop_rx.try_recv().is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(30));
+                let chunk = source.poll_monitor_chunk().map_err(|e| e.to_string())?;
+                let samples = chunk
+                    .samples
+                    .into_iter()
+                    .map(|sample| {
+                        let scaled = (sample.clamp(-1.0, 1.0) * 32_768.0).round();
+                        scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                    })
+                    .collect();
+                let _ = app.emit(
+                    "mic-test",
+                    MicMonitorEvent {
+                        rms: chunk.level.rms,
+                        peak: chunk.level.peak,
+                        sample_count: chunk.level.sample_count,
+                        samples,
+                    },
+                );
+            }
+            Ok(())
+        };
+        if let Err(e) = run() {
+            let _ = app.emit("mic-test-error", e);
+            let _ = app.emit("mic-test-stopped", ());
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_microphone_test(state: tauri::State<MicTestState>) {
+    state.stop();
+}
+
+#[tauri::command]
 fn save_settings<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<RuntimeState>,
@@ -259,6 +392,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(RuntimeState::new(cmd_tx, settings.clone(), lol_url))
+        .manage(MicTestState::default())
         .manage(crate::library::StorageSettings::new(quota_bytes))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -277,6 +411,9 @@ pub fn run() {
             set_recording,
             get_settings,
             list_displays,
+            list_audio_devices,
+            start_microphone_test,
+            stop_microphone_test,
             save_settings,
             crate::library::list_clips,
             crate::library::delete_clip,
@@ -308,6 +445,7 @@ pub fn run() {
                         app.state::<RuntimeState>().send(Cmd::Save);
                     }
                     "quit" => {
+                        app.state::<MicTestState>().stop();
                         app.state::<RuntimeState>()
                             .send(Cmd::Stop { announce: false });
                         app.exit(0);
@@ -323,6 +461,7 @@ pub fn run() {
         .expect("build tauri app")
         .run(move |app, event| {
             if let tauri::RunEvent::Exit = event {
+                app.state::<MicTestState>().stop();
                 app.state::<RuntimeState>()
                     .send(Cmd::Stop { announce: false });
             }
