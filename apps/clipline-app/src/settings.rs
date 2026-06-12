@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tauri_plugin_global_shortcut::Shortcut;
 
 use crate::service::{
-    AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource, ServiceOptions,
+    AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource, ServiceOptions, VideoEncoder,
 };
 
 const MAX_REPLAY_WINDOW_S: f64 = 120.0;
@@ -54,6 +54,19 @@ impl CaptureRegionSettings {
 
 fn default_enabled() -> bool {
     true
+}
+
+/// Tolerate an unknown `video_encoder` value — a hand-edit, or a downgrade
+/// from a future build that adds an HEVC/AV1 option — by falling back to Auto
+/// instead of failing the whole-file parse. Mirrors how `hotkey` is repaired
+/// in `load_from`; reuses `VideoEncoder`'s own snake_case serde so the names
+/// can't drift from the enum.
+fn deserialize_video_encoder<'de, D>(deserializer: D) -> Result<VideoEncoder, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or(VideoEncoder::Auto))
 }
 
 fn default_volume() -> f64 {
@@ -124,6 +137,8 @@ pub struct AppSettings {
     pub replay_window_s: f64,
     pub bitrate_mbps: f64,
     pub fps: u32,
+    #[serde(default, deserialize_with = "deserialize_video_encoder")]
+    pub video_encoder: VideoEncoder,
     pub disk_quota_gb: f64,
     pub hotkey: String,
 }
@@ -139,6 +154,7 @@ impl Default for AppSettings {
             replay_window_s: 60.0,
             bitrate_mbps: 12.0,
             fps: 60,
+            video_encoder: VideoEncoder::Auto,
             disk_quota_gb: 10.0,
             hotkey: "Alt+F10".into(),
         }
@@ -199,6 +215,7 @@ impl AppSettings {
             disk_quota_bytes: quota_bytes_from_gb(self.disk_quota_gb)?,
             fps: self.fps,
             bitrate_bps: (self.bitrate_mbps * 1_000_000.0).round() as u32,
+            video_encoder: self.video_encoder,
             audio: self.audio.to_service_options(),
         })
     }
@@ -402,6 +419,7 @@ mod tests {
         assert_eq!(settings.replay_window_s, 60.0);
         assert_eq!(settings.bitrate_mbps, 12.0);
         assert_eq!(settings.fps, 60);
+        assert_eq!(settings.video_encoder, VideoEncoder::Auto);
         assert_eq!(settings.disk_quota_gb, 10.0);
         assert_eq!(settings.hotkey, "Alt+F10");
     }
@@ -445,6 +463,7 @@ mod tests {
         assert_eq!(settings.capture_region.width, 1920);
         assert_eq!(settings.capture_region.height, 1080);
         assert_eq!(settings.audio, AudioSettings::default());
+        assert_eq!(settings.video_encoder, VideoEncoder::Auto);
         assert!(settings.validate().is_ok());
     }
 
@@ -533,6 +552,35 @@ mod tests {
     }
 
     #[test]
+    fn load_tolerates_unknown_video_encoder_without_resetting_settings() {
+        let dir = TestDir::new("unknown-encoder");
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "buffer_seconds": 120.0,
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 24.0,
+                "fps": 90,
+                "video_encoder": "hevc_av1_turbo",
+                "disk_quota_gb": 6.0,
+                "hotkey": "Alt+F9"
+            }"#,
+        )
+        .unwrap();
+
+        let settings = AppSettings::load_from(&path).unwrap();
+
+        assert_eq!(settings.video_encoder, VideoEncoder::Auto);
+        assert_eq!(settings.bitrate_mbps, 24.0);
+        assert_eq!(settings.fps, 90);
+        assert_eq!(settings.disk_quota_gb, 6.0);
+        assert_eq!(settings.hotkey, "Alt+F9");
+    }
+
+    #[test]
     fn display_region_settings_round_trip_json() {
         let dir = TestDir::new("region-round-trip");
         let path = dir.path().join("settings.json");
@@ -579,6 +627,7 @@ mod tests {
         assert_eq!(opts.replay_window_s, 60.0);
         assert_eq!(opts.fps, 60);
         assert_eq!(opts.bitrate_bps, 12_000_000);
+        assert_eq!(opts.video_encoder, VideoEncoder::Auto);
         assert_eq!(opts.disk_quota_bytes, Some(DEFAULT_DISK_QUOTA_BYTES));
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
         assert_eq!(opts.audio, AudioOptions::default());
@@ -609,6 +658,18 @@ mod tests {
         assert_eq!(opts.audio.mic_device_id.as_deref(), Some("mic-id"));
         assert_eq!(opts.audio.mic_volume, 1.5);
         assert_eq!(opts.audio.mic_channels, AudioChannelMode::Stereo);
+    }
+
+    #[test]
+    fn service_options_include_video_encoder_choice() {
+        let settings = AppSettings {
+            video_encoder: VideoEncoder::AmfH264,
+            ..AppSettings::default()
+        };
+
+        let opts = settings.to_service_options(None).unwrap();
+
+        assert_eq!(opts.video_encoder, VideoEncoder::AmfH264);
     }
 
     #[test]

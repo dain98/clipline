@@ -84,6 +84,8 @@ fn review_player_owns_all_controls() {
         "id=\"region-align-menu\"",
         "id=\"region-display-menu\"",
         "id=\"set-buffer\"",
+        "id=\"set-encoder\"",
+        "id=\"encoder-summary\"",
         "id=\"set-replay\"",
         "id=\"replay-summary\"",
         "id=\"replay-scale\"",
