@@ -138,7 +138,8 @@ impl AppSettings {
     pub fn load_from(path: &Path) -> Result<Self, String> {
         let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let mut settings: Self = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-        settings.hotkey = normalize_hotkey(&settings.hotkey)?;
+        settings.hotkey =
+            normalize_hotkey(&settings.hotkey).unwrap_or_else(|_| AppSettings::default().hotkey);
         settings.replay_window_s = settings.replay_window_s.min(MAX_REPLAY_WINDOW_S);
         settings.buffer_seconds = settings.buffer_seconds.max(settings.replay_window_s);
         settings.validate()?;
@@ -386,6 +387,42 @@ mod tests {
 
         assert_eq!(settings.replay_window_s, 120.0);
         assert_eq!(settings.buffer_seconds, 300.0);
+    }
+
+    #[test]
+    fn load_migrates_invalid_legacy_hotkey_without_resetting_settings() {
+        let dir = TestDir::new("migrate-hotkey");
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "capture_mode": "display_region",
+                "window_title": "",
+                "capture_region": {
+                    "display_id": "\\\\.\\DISPLAY2",
+                    "x": 1920,
+                    "y": 0,
+                    "width": 1280,
+                    "height": 720
+                },
+                "buffer_seconds": 120.0,
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 24.0,
+                "fps": 90,
+                "disk_quota_gb": 6.0,
+                "hotkey": "F12"
+            }"#,
+        )
+        .unwrap();
+
+        let settings = AppSettings::load_from(&path).unwrap();
+
+        assert_eq!(settings.hotkey, "Alt+F10");
+        assert_eq!(settings.capture_mode, CaptureMode::DisplayRegion);
+        assert_eq!(settings.capture_region.width, 1280);
+        assert_eq!(settings.bitrate_mbps, 24.0);
+        assert_eq!(settings.fps, 90);
+        assert_eq!(settings.disk_quota_gb, 6.0);
     }
 
     #[test]

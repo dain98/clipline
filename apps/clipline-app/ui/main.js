@@ -122,10 +122,10 @@ function syncRecordingFields() {
 
 function updateCaptureStatus() {
   const source = captureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
-  $("capture-status-label").textContent = recordingActive ? `Capturing ${source}` : "Recording paused";
-  $("capture-status").classList.toggle("paused", !recordingActive);
+  $("capture-status-label").textContent = recordingActive ? `Capturing ${source}` : "Recording stopped";
+  $("capture-status").classList.toggle("stopped", !recordingActive);
   $("capture-status").setAttribute("aria-pressed", String(recordingActive));
-  $("capture-status").title = recordingActive ? "Pause recording" : `Resume ${source}`;
+  $("capture-status").title = recordingActive ? "Stop recording" : `Start ${source} recording`;
   $("rail-status").title = $("capture-status").title;
   $("save").disabled = !recordingActive;
   $("rail-save").disabled = !recordingActive;
@@ -499,11 +499,19 @@ function updateViews() {
   $("review-empty").hidden = settingsOpen || !!currentClip;
 }
 
+function renderVisibleSettingsSection() {
+  const active = document.querySelector("#settings-tabs .tab.active");
+  if (settingsOpen && active && active.dataset.tab === "capture") {
+    requestAnimationFrame(renderRegionEditor);
+  }
+}
+
 function toggleSettings(open = !settingsOpen) {
   settingsOpen = open;
   // The clip survives the round-trip; just don't play behind the page.
   if (settingsOpen && !video.paused) video.pause();
   updateViews();
+  renderVisibleSettingsSection();
 }
 
 function setTrim(start, end) {
@@ -793,7 +801,8 @@ document.querySelectorAll("[data-replay-preset]").forEach((button) => {
   });
 });
 for (const id of ["set-region-width", "set-region-height", "set-region-x", "set-region-y"]) {
-  $(id).addEventListener("input", () => setRegion(regionFromFields()));
+  $(id).addEventListener("change", () => setRegion(regionFromFields()));
+  $(id).addEventListener("blur", () => setRegion(regionFromFields()));
 }
 $("display-map").addEventListener("contextmenu", showRegionMenu);
 $("region-box").addEventListener("pointerdown", (ev) => {
@@ -892,6 +901,7 @@ document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
     document.querySelectorAll(".settings-section").forEach((s) => {
       s.hidden = s.dataset.section !== tab.dataset.tab;
     });
+    renderVisibleSettingsSection();
   });
 });
 

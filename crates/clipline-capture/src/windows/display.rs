@@ -8,6 +8,8 @@ use windows::Win32::Graphics::Gdi::{
 
 use crate::traits::CaptureError;
 
+const MONITORINFOF_PRIMARY: u32 = 0x00000001;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayInfo {
     /// Win32 device id, e.g. `\\.\DISPLAY1`.
@@ -105,7 +107,7 @@ unsafe extern "system" fn enum_monitor_proc(
             y: rect.top,
             width,
             height,
-            is_primary: info.monitorInfo.dwFlags & 1 == 1,
+            is_primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY == MONITORINFOF_PRIMARY,
         },
     });
     BOOL(1)

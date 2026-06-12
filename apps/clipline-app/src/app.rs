@@ -79,23 +79,20 @@ impl RuntimeState {
     }
 
     fn restart<R: Runtime>(&self, app: AppHandle<R>, settings: AppSettings) -> Result<(), String> {
-        let (old_tx, lol_url, was_recording) = {
-            let inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            (inner.tx.clone(), inner.lol_url.clone(), inner.tx.is_some())
-        };
-        let new_tx = if was_recording {
-            let (tx, rx) = service::spawn(settings.to_service_options(lol_url.clone())?);
-            pump_events(app, rx);
-            Some(tx)
-        } else {
-            None
+        let old_tx = {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            let old_tx = inner.tx.clone();
+            if inner.tx.is_some() {
+                let (tx, rx) = service::spawn(settings.to_service_options(inner.lol_url.clone())?);
+                inner.tx = Some(tx);
+                pump_events(app, rx);
+            }
+            inner.settings = settings;
+            old_tx
         };
         if let Some(tx) = old_tx {
             let _ = tx.send(Cmd::Stop { announce: false });
         }
-        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-        inner.tx = new_tx;
-        inner.settings = settings;
         Ok(())
     }
 
@@ -112,17 +109,17 @@ impl RuntimeState {
     }
 
     fn start_recording<R: Runtime>(&self, app: AppHandle<R>) -> Result<bool, String> {
-        let (settings, lol_url) = {
-            let inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        let rx = {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             if inner.tx.is_some() {
                 return Ok(true);
             }
-            (inner.settings.clone(), inner.lol_url.clone())
+            let (tx, rx) =
+                service::spawn(inner.settings.to_service_options(inner.lol_url.clone())?);
+            inner.tx = Some(tx);
+            rx
         };
-        let (tx, rx) = service::spawn(settings.to_service_options(lol_url.clone())?);
         pump_events(app, rx);
-        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-        inner.tx = Some(tx);
         Ok(true)
     }
 

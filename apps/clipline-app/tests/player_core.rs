@@ -687,4 +687,11 @@ fn region_helpers_set_align_and_clamp_to_display() {
         ),
         r#"{"display_id":"DISPLAY2","x":1920,"y":-120,"width":2560,"height":1440}"#
     );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.clampRegionToDisplay({ display_id: 'DISPLAY2', x: 2000, y: 0, width: 801, height: 451 }, DISPLAY)"
+        ),
+        r#"{"display_id":"DISPLAY2","x":2000,"y":0,"width":800,"height":450}"#
+    );
 }

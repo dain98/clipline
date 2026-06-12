@@ -117,8 +117,9 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     page no longer has the top-right X button, so the bottom-left Settings control is the close
     affordance. The sidebar now shows a clickable capture status (`Capturing Desktop`, window, or
     display region), storage/quota/clip count, and Save Replay; it no longer shows buffered seconds,
-    MB, or GOP diagnostics. The new `set_recording` Tauri command pauses/resumes the recorder from
-    that status control, and internal settings restarts do not emit a stale stopped status.
+    MB, or GOP diagnostics. The new `set_recording` Tauri command stops/starts the recorder from
+    that status control. Stopping intentionally clears the rolling replay buffer, and internal
+    settings restarts do not emit a stale stopped status.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window

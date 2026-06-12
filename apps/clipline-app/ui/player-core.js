@@ -363,9 +363,14 @@ const PlayerCore = (() => {
     height: display.height,
   });
 
+  const evenSize = (value, max) => {
+    const clamped = Math.max(2, Math.min(Math.round(value || 2), max));
+    return clamped % 2 === 0 ? clamped : Math.max(2, clamped - 1);
+  };
+
   const clampRegionToDisplay = (region, display) => {
-    const width = Math.max(2, Math.min(Math.round(region.width || 2), display.width));
-    const height = Math.max(2, Math.min(Math.round(region.height || 2), display.height));
+    const width = evenSize(region.width, display.width);
+    const height = evenSize(region.height, display.height);
     const minX = display.x;
     const minY = display.y;
     const maxX = display.x + display.width - width;

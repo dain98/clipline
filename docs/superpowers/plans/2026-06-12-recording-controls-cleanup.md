@@ -5,13 +5,13 @@
 Make recording controls match the way users think about the app. **Exit criterion:** Settings exposes
 only the save length users care about, capped at two minutes; Smoothness includes 30/60/90/120 FPS;
 the Settings page has no redundant close button; and the sidebar shows capture target, storage, clip
-count, and a real recording pause/resume control.
+count, and a real recording stop/start control.
 
 ## Scope
 
 - Recording settings UI and validation ranges.
 - Sidebar status presentation.
-- Minimal Tauri command wiring to pause/resume the recorder from the sidebar.
+- Minimal Tauri command wiring to stop/start the recorder from the sidebar.
 - No changes to capture pipelines, saved clip format, or library behavior.
 
 ## Tests
@@ -28,5 +28,5 @@ count, and a real recording pause/resume control.
 - [ ] Add the 90 FPS Smoothness stop.
 - [ ] Remove the Settings X button.
 - [ ] Replace sidebar diagnostics with capture target, storage, clips, and Save Replay.
-- [ ] Add `set_recording` so the sidebar dot/status can pause and resume recording.
+- [ ] Add `set_recording` so the sidebar dot/status can stop and start recording.
 - [ ] Run tests/clippy, visual-check Settings/sidebar, then reopen the app for manual testing.

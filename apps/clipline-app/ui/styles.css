@@ -172,7 +172,7 @@ label span { white-space: nowrap; }
 }
 .capture-status:hover { background: transparent; color: var(--text); }
 .capture-status:active { transform: none; }
-.capture-status.paused { color: var(--muted); }
+.capture-status.stopped { color: var(--muted); }
 
 .status-row {
   display: flex;
