@@ -17,10 +17,11 @@
 
       <div class="sidebar-full">
       <header class="sidebar-head">
-        <div class="sub">replay buffer — no injection, ever</div>
-        <div class="status-row"><span id="dot" class="dot"></span><span id="state">starting…</span></div>
-        <div class="status-row stat">buffered <b id="buffered">0.0 s</b> · <b id="mb">0.0 MB</b> · <b id="segs">0</b> GOPs</div>
-        <div class="status-row stat">storage <b id="storage-used">0.0 MB</b> / <b id="storage-quota">10.0 GB</b> · <b id="storage-clips">0</b> clips</div>
+        <button id="capture-status" class="capture-status" type="button" aria-pressed="true">
+          <span id="dot" class="dot"></span>
+          <span id="capture-status-label">Starting…</span>
+        </button>
+        <div class="status-row stat">Storage <b id="storage-used">0.0 MB</b> / <b id="storage-quota">10.0 GB</b> · <b id="storage-clips">0</b> clips</div>
         <div class="save-row">
           <button id="save" class="primary">Save Replay</button>
           <span id="save-hotkey" class="hint">Alt+F10</span>
@@ -41,7 +42,9 @@
       </div>
 
       <div class="sidebar-rail">
-        <span id="rail-dot" class="dot" title="recorder status"></span>
+        <button id="rail-status" title="Stop recording">
+          <span id="rail-dot" class="dot"></span>
+        </button>
         <button id="rail-save" title="Save Replay (Alt+F10)">
           <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16z"/><circle cx="12" cy="12" r="4.5"/></svg>
         </button>
@@ -149,9 +152,6 @@
       <section id="settings-page" class="settings-page" hidden>
         <header class="settings-head">
           <h1>Settings</h1>
-          <button id="settings-close" class="icon-button" title="Back (Esc)">
-            <svg viewBox="0 0 24 24"><path d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6z"/></svg>
-          </button>
         </header>
 
         <nav id="settings-tabs" class="settings-tabs">
@@ -166,11 +166,12 @@
             <div class="setting-row">
               <div class="setting-info">
                 <strong>Capture target</strong>
-                <span>What the recorder captures: the primary monitor, or a single window.</span>
+                <span>What the recorder captures: the primary monitor, a single window, or a display region.</span>
               </div>
               <select id="set-capture">
                 <option value="primary_monitor">primary monitor</option>
                 <option value="window_title">window title</option>
+                <option value="display_region">display region</option>
               </select>
             </div>
             <div class="setting-row">
@@ -180,40 +181,99 @@
               </div>
               <input id="set-window" spellcheck="false" />
             </div>
+            <div id="capture-region-editor" class="capture-region-editor" hidden>
+              <div class="region-head">
+                <div class="setting-info">
+                  <strong>Region</strong>
+                  <span id="region-display-label"></span>
+                </div>
+              </div>
+              <div id="display-map" class="display-map">
+                <div id="display-map-inner" class="display-map-inner">
+                  <div id="region-box" class="region-box">
+                    <span id="region-size-label"></span>
+                    <span class="region-resize" data-region-resize="corner"></span>
+                  </div>
+                </div>
+              </div>
+              <div class="region-fields">
+                <label><span>Width</span><input id="set-region-width" type="number" min="2" step="2" /></label>
+                <label><span>Height</span><input id="set-region-height" type="number" min="2" step="2" /></label>
+                <label><span>X</span><input id="set-region-x" type="number" step="1" /></label>
+                <label><span>Y</span><input id="set-region-y" type="number" step="1" /></label>
+              </div>
+              <div id="capture-region-menu" class="context-menu" hidden>
+                <div class="menu-group">
+                  <div class="menu-label">Align</div>
+                  <div id="region-align-menu">
+                    <button data-align="left">Left</button>
+                    <button data-align="right">Right</button>
+                    <button data-align="top">Top</button>
+                    <button data-align="bottom">Bottom</button>
+                    <button data-align="center">Center</button>
+                  </div>
+                </div>
+                <div class="menu-group">
+                  <div class="menu-label">Set to Display</div>
+                  <div id="region-display-menu"></div>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div class="settings-section" data-section="recording" hidden>
+            <input id="set-buffer" type="hidden" value="120" />
             <div class="setting-row">
               <div class="setting-info">
-                <strong>Buffer length</strong>
-                <span>Seconds of rolling history the replay buffer keeps in memory.</span>
+                <strong>Save length</strong>
+                <span>How much recent footage each replay saves.</span>
               </div>
-              <input id="set-buffer" type="number" min="10" max="1200" step="5" />
+              <div class="recording-control">
+                <input id="set-replay" type="range" min="5" max="120" step="5" />
+                <div id="replay-scale" class="slider-scale" aria-hidden="true">
+                  <span style="--pos: 0%;">5 sec</span>
+                  <span style="--pos: 47.8%;">1 min</span>
+                  <span style="--pos: 100%;">2 min</span>
+                </div>
+                <div class="preset-row" aria-label="Replay length presets">
+                  <button type="button" data-replay-preset="30">30 sec</button>
+                  <button type="button" data-replay-preset="60">1 min</button>
+                  <button type="button" data-replay-preset="120">2 min</button>
+                </div>
+                <span id="replay-summary" class="setting-summary"></span>
+              </div>
             </div>
             <div class="setting-row">
               <div class="setting-info">
-                <strong>Replay length</strong>
-                <span>Trailing seconds written to disk when you save a replay.</span>
+                <strong>Video quality</strong>
+                <span>Higher quality keeps more detail and uses more disk space.</span>
               </div>
-              <input id="set-replay" type="number" min="5" max="1200" step="5" />
+              <div class="recording-control">
+                <input id="set-bitrate" type="range" min="0" max="3" step="1" />
+                <div id="quality-scale" class="slider-scale" aria-hidden="true">
+                  <span style="--pos: 0%;">Compact</span>
+                  <span style="--pos: 33.333%;">Balanced</span>
+                  <span style="--pos: 66.667%;">Sharp</span>
+                  <span style="--pos: 100%;">Maximum</span>
+                </div>
+                <span id="quality-summary" class="setting-summary"></span>
+              </div>
             </div>
             <div class="setting-row">
               <div class="setting-info">
-                <strong>Bitrate (Mbps)</strong>
-                <span>H.264 video bitrate — higher means better quality and bigger files.</span>
+                <strong>Smoothness</strong>
+                <span>Higher FPS feels smoother and costs more performance.</span>
               </div>
-              <input id="set-bitrate" type="number" min="1" max="100" step="1" />
-            </div>
-            <div class="setting-row">
-              <div class="setting-info">
-                <strong>Frame rate</strong>
-                <span>Capture and encode FPS.</span>
+              <div class="recording-control">
+                <input id="set-fps" type="range" min="0" max="3" step="1" />
+                <div id="fps-scale" class="slider-scale" aria-hidden="true">
+                  <span style="--pos: 0%;">30 FPS</span>
+                  <span style="--pos: 33.333%;">60 FPS</span>
+                  <span style="--pos: 66.667%;">90 FPS</span>
+                  <span style="--pos: 100%;">120 FPS</span>
+                </div>
+                <span id="fps-summary" class="setting-summary"></span>
               </div>
-              <select id="set-fps">
-                <option value="30">30</option>
-                <option value="60">60</option>
-                <option value="120">120</option>
-              </select>
             </div>
           </div>
 
@@ -231,9 +291,12 @@
             <div class="setting-row">
               <div class="setting-info">
                 <strong>Save Replay</strong>
-                <span>Global shortcut — modifiers plus an F-key, e.g. Alt+F10 or Ctrl+Shift+F9.</span>
+                <span>Global shortcut — use an F-key alone, or add Ctrl/Alt/Shift.</span>
               </div>
-              <input id="set-hotkey" spellcheck="false" />
+              <div class="hotkey-recorder">
+                <input id="set-hotkey" spellcheck="false" readonly inputmode="none" aria-describedby="hotkey-status" />
+                <span id="hotkey-status" class="hint">Click the field, then press F1-F11 or F13-F24.</span>
+              </div>
             </div>
           </div>
         </div>

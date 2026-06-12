@@ -45,7 +45,10 @@ fn review_player_owns_all_controls() {
         "id=\"open-folder\"",
         "id=\"stage-overlay\"",
         "id=\"sidebar-toggle\"",
+        "id=\"capture-status\"",
+        "id=\"capture-status-label\"",
         "id=\"rail-dot\"",
+        "id=\"rail-status\"",
         "id=\"rail-save\"",
         "id=\"rail-settings\"",
         "id=\"confirm-dialog\"",
@@ -54,13 +57,30 @@ fn review_player_owns_all_controls() {
         "id=\"settings-page\"",
         "id=\"settings-tabs\"",
         "id=\"open-settings\"",
-        "id=\"settings-close\"",
         "id=\"set-capture\"",
         "id=\"set-window\"",
+        "id=\"capture-region-editor\"",
+        "id=\"display-map\"",
+        "id=\"display-map-inner\"",
+        "id=\"region-box\"",
+        "id=\"region-display-label\"",
+        "id=\"set-region-width\"",
+        "id=\"set-region-height\"",
+        "id=\"set-region-x\"",
+        "id=\"set-region-y\"",
+        "id=\"capture-region-menu\"",
+        "id=\"region-align-menu\"",
+        "id=\"region-display-menu\"",
         "id=\"set-buffer\"",
         "id=\"set-replay\"",
+        "id=\"replay-summary\"",
+        "id=\"replay-scale\"",
         "id=\"set-bitrate\"",
+        "id=\"quality-summary\"",
+        "id=\"quality-scale\"",
         "id=\"set-fps\"",
+        "id=\"fps-summary\"",
+        "id=\"fps-scale\"",
         "id=\"set-quota\"",
         "id=\"set-hotkey\"",
         "id=\"settings-save\"",
@@ -71,15 +91,71 @@ fn review_player_owns_all_controls() {
         );
     }
 
+    assert!(
+        html.contains("value=\"display_region\""),
+        "capture target must expose the display_region mode"
+    );
+    assert!(
+        html.contains("data-replay-preset=\"30\"")
+            && html.contains("data-replay-preset=\"60\"")
+            && html.contains("data-replay-preset=\"120\""),
+        "recording tab must expose quick save-length presets up to two minutes"
+    );
+    assert!(
+        !html.contains("data-replay-preset=\"300\""),
+        "save length must not expose presets beyond two minutes"
+    );
+    let replay_start = html
+        .find("id=\"set-replay\"")
+        .expect("replay control exists");
+    let replay_tag_end = html[replay_start..]
+        .find('>')
+        .map(|offset| replay_start + offset)
+        .expect("replay control tag closes");
+    assert!(
+        html[replay_start..=replay_tag_end].contains("max=\"120\""),
+        "save length slider must stop at two minutes"
+    );
+    let fps_start = html.find("id=\"set-fps\"").expect("fps control exists");
+    let fps_tag_end = html[fps_start..]
+        .find('>')
+        .map(|offset| fps_start + offset)
+        .expect("fps control tag closes");
+    assert!(
+        html[fps_start..=fps_tag_end].contains("type=\"range\""),
+        "smoothness must be a slider, not a dropdown"
+    );
+    assert!(
+        html.contains("id=\"hotkey-status\""),
+        "hotkeys page must expose recorder status text"
+    );
+    let hotkey_start = html.find("id=\"set-hotkey\"").expect("hotkey input exists");
+    let hotkey_tag_end = html[hotkey_start..]
+        .find('>')
+        .map(|offset| hotkey_start + offset)
+        .expect("hotkey input tag closes");
+    assert!(
+        html[hotkey_start..=hotkey_tag_end].contains("readonly"),
+        "hotkey input must record shortcuts instead of accepting free text"
+    );
+
     // Settings is a page in the main pane now, not a sidebar fold.
     assert!(
         !html.contains("settings-fold"),
         "the sidebar settings fold was replaced by #settings-page"
     );
+    assert!(
+        !html.contains("id=\"settings-close\""),
+        "the settings page closes from the bottom-left Settings control, not an extra X button"
+    );
 
     // Removed on purpose (2026-06-12): the path lives in #pmeta, and clicking
     // the active library row again closes the clip.
-    for gone in ["id=\"copy-path\"", "id=\"close-review\"", "id=\"focus-toggle\""] {
+    for gone in [
+        "id=\"copy-path\"",
+        "id=\"close-review\"",
+        "id=\"focus-toggle\"",
+    ] {
         assert!(
             !html.contains(gone),
             "{gone} was removed from the header — do not reintroduce it"

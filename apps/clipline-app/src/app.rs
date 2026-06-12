@@ -13,6 +13,17 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode};
 
+#[derive(serde::Serialize)]
+struct DisplayInfo {
+    id: String,
+    name: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    is_primary: bool,
+}
+
 struct RuntimeState(Mutex<RuntimeInner>);
 
 struct TrayItems<R: Runtime> {
@@ -28,7 +39,7 @@ impl<R: Runtime> TrayItems<R> {
 }
 
 struct RuntimeInner {
-    tx: Sender<Cmd>,
+    tx: Option<Sender<Cmd>>,
     settings: AppSettings,
     lol_url: Option<String>,
 }
@@ -36,16 +47,20 @@ struct RuntimeInner {
 impl RuntimeState {
     fn new(tx: Sender<Cmd>, settings: AppSettings, lol_url: Option<String>) -> Self {
         Self(Mutex::new(RuntimeInner {
-            tx,
+            tx: Some(tx),
             settings,
             lol_url,
         }))
     }
 
-    fn send(&self, cmd: Cmd) {
+    fn send(&self, cmd: Cmd) -> bool {
         if let Ok(inner) = self.0.lock() {
-            let _ = inner.tx.send(cmd);
+            if let Some(tx) = &inner.tx {
+                let _ = tx.send(cmd);
+                return true;
+            }
         }
+        false
     }
 
     fn settings(&self) -> AppSettings {
@@ -64,17 +79,59 @@ impl RuntimeState {
     }
 
     fn restart<R: Runtime>(&self, app: AppHandle<R>, settings: AppSettings) -> Result<(), String> {
-        let (old_tx, lol_url) = {
-            let inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            (inner.tx.clone(), inner.lol_url.clone())
+        let old_tx = {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            let old_tx = inner.tx.clone();
+            if inner.tx.is_some() {
+                let (tx, rx) = service::spawn(settings.to_service_options(inner.lol_url.clone())?);
+                inner.tx = Some(tx);
+                pump_events(app, rx);
+            }
+            inner.settings = settings;
+            old_tx
         };
-        let (tx, rx) = service::spawn(settings.to_service_options(lol_url.clone())?);
-        pump_events(app, rx);
-        let _ = old_tx.send(Cmd::Stop);
-        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-        inner.tx = tx;
-        inner.settings = settings;
+        if let Some(tx) = old_tx {
+            let _ = tx.send(Cmd::Stop { announce: false });
+        }
         Ok(())
+    }
+
+    fn set_recording<R: Runtime>(
+        &self,
+        app: AppHandle<R>,
+        recording: bool,
+    ) -> Result<bool, String> {
+        if recording {
+            self.start_recording(app)
+        } else {
+            self.stop_recording()
+        }
+    }
+
+    fn start_recording<R: Runtime>(&self, app: AppHandle<R>) -> Result<bool, String> {
+        let rx = {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            if inner.tx.is_some() {
+                return Ok(true);
+            }
+            let (tx, rx) =
+                service::spawn(inner.settings.to_service_options(inner.lol_url.clone())?);
+            inner.tx = Some(tx);
+            rx
+        };
+        pump_events(app, rx);
+        Ok(true)
+    }
+
+    fn stop_recording(&self) -> Result<bool, String> {
+        let tx = {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            inner.tx.take()
+        };
+        if let Some(tx) = tx {
+            let _ = tx.send(Cmd::Stop { announce: true });
+        }
+        Ok(false)
     }
 }
 
@@ -84,8 +141,37 @@ fn save_replay(state: tauri::State<RuntimeState>) {
 }
 
 #[tauri::command]
+fn set_recording<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<RuntimeState>,
+    recording: bool,
+) -> Result<bool, String> {
+    state.set_recording(app, recording)
+}
+
+#[tauri::command]
 fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
     state.settings()
+}
+
+#[tauri::command]
+fn list_displays() -> Result<Vec<DisplayInfo>, String> {
+    clipline_capture::windows::display::enumerate_displays()
+        .map_err(|e| e.to_string())
+        .map(|displays| {
+            displays
+                .into_iter()
+                .map(|display| DisplayInfo {
+                    id: display.id,
+                    name: display.name,
+                    x: display.x,
+                    y: display.y,
+                    width: display.width,
+                    height: display.height,
+                    is_primary: display.is_primary,
+                })
+                .collect()
+        })
 }
 
 #[tauri::command]
@@ -188,7 +274,9 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             save_replay,
+            set_recording,
             get_settings,
+            list_displays,
             save_settings,
             crate::library::list_clips,
             crate::library::delete_clip,
@@ -216,9 +304,12 @@ pub fn run() {
                 .tooltip("Clipline — replay buffer")
                 .menu(&menu)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
-                    "save" => app.state::<RuntimeState>().send(Cmd::Save),
+                    "save" => {
+                        app.state::<RuntimeState>().send(Cmd::Save);
+                    }
                     "quit" => {
-                        app.state::<RuntimeState>().send(Cmd::Stop);
+                        app.state::<RuntimeState>()
+                            .send(Cmd::Stop { announce: false });
                         app.exit(0);
                     }
                     _ => {}
@@ -232,7 +323,8 @@ pub fn run() {
         .expect("build tauri app")
         .run(move |app, event| {
             if let tauri::RunEvent::Exit = event {
-                app.state::<RuntimeState>().send(Cmd::Stop);
+                app.state::<RuntimeState>()
+                    .send(Cmd::Stop { announce: false });
             }
         });
 }
