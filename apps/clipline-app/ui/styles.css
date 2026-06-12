@@ -1,0 +1,414 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --panel: #151920;
+  --panel-2: #1a1f28;
+  --line: #262c37;
+  --line-strong: #36404f;
+  --text: #e7eaf0;
+  --muted: #8b93a3;
+  --accent: #3d7bfd;
+  --accent-hover: #5a8efd;
+  --marker: #e8b341;
+  --rec: #e5484d;
+  --warn: #f0883e;
+  --ok: #7ab8ff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  /* Matches the tauri.conf.json minimum: below it the page scrolls instead of
+     mangling the deck. */
+  min-width: 960px;
+  min-height: 640px;
+  font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  user-select: none;
+}
+
+h1 { margin: 0; font-size: 18px; letter-spacing: 0.3px; }
+h2 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+button {
+  height: 30px;
+  min-width: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+button:hover { border-color: var(--line-strong); background: #222936; }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: 0.45; cursor: default; transform: none; }
+button.primary { border-color: #2b5cc4; background: #2456c4; }
+button.primary:hover { background: #2d63da; }
+button.danger { border-color: #6d3034; color: #ffc9c9; }
+button.danger:hover { background: #3c2326; }
+button.wide { min-width: 72px; }
+
+input, select {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #12151b;
+  color: var(--text);
+  font: inherit;
+}
+input:disabled { color: #5a6170; }
+
+label { display: grid; gap: 3px; min-width: 0; color: var(--muted); font-size: 11.5px; }
+label span { white-space: nowrap; }
+
+.hint { color: var(--muted); font-size: 12px; }
+.warn { color: var(--warn); }
+
+/* ---- shell ----
+   Lesson learned: a grid only bounds its children if the track is sized.
+   Every grid here pins its rows with minmax(0, 1fr); every scroll/shrink
+   child carries min-height: 0. */
+.app {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---- sidebar ---- */
+.sidebar {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.sidebar-head {
+  padding: 16px 16px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.sub { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.status-row b { color: var(--text); font-weight: 600; }
+
+.dot { width: 10px; height: 10px; border-radius: 50%; background: #4a5160; flex: none; }
+.dot.on { background: var(--rec); box-shadow: 0 0 10px rgba(229, 72, 77, 0.8); }
+
+.save-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+
+#notice { color: var(--ok); font-size: 12px; min-height: 17px; margin-top: 6px; }
+#error { color: var(--warn); font-size: 12px; min-height: 17px; }
+
+.library {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 12px;
+}
+
+.clip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--panel-2);
+  cursor: pointer;
+}
+.clip:hover { border-color: var(--line-strong); }
+.clip.active { border-color: var(--accent); background: #1b2334; }
+
+.clip .name {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.clip .info { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 8px;
+  background: #3a3013;
+  color: var(--marker);
+  font-size: 11px;
+}
+
+.clip .del { height: 26px; min-width: 26px; padding: 0 8px; font-size: 12px; }
+
+.settings-fold {
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+.settings-fold summary {
+  padding: 10px 16px;
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  cursor: pointer;
+}
+.settings-fold summary:hover { color: var(--text); }
+
+.settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 10px;
+  padding: 4px 16px 14px;
+}
+.settings .actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ---- review pane ---- */
+.review {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.review-empty {
+  grid-area: 1 / 1;
+  display: grid;
+  place-items: center;
+  padding: 40px;
+  text-align: center;
+  color: var(--muted);
+}
+.review-empty strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+  font-size: 16px;
+}
+.review-empty span { display: block; max-width: 420px; }
+
+.review-viewer {
+  grid-area: 1 / 1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+}
+.review-viewer[hidden] { display: none; }
+
+.review-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.clip-title { min-width: 0; display: grid; gap: 1px; }
+.clip-title strong {
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.clip-title span {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.review-actions { display: flex; gap: 8px; }
+
+.stage {
+  position: relative;
+  min-height: 0;
+  background: #000;
+}
+#video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.stage-note {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  max-width: calc(100% - 20px);
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: rgba(8, 10, 14, 0.65);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+.stage-note:empty { display: none; }
+
+/* ---- control deck ---- */
+.deck {
+  display: grid;
+  gap: 10px;
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+#timeline {
+  position: relative;
+  height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #1d2430;
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: none;
+}
+
+/* What you keep stays bright; the trimmed-away ends are dimmed. */
+.dim {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(8, 10, 14, 0.62);
+  pointer-events: none;
+}
+#dim-in { left: 0; width: 0; border-right: 1px solid var(--line-strong); }
+#dim-out { right: 0; width: 0; border-left: 1px solid var(--line-strong); }
+
+#playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #f4f6fa;
+  box-shadow: 0 0 6px rgba(244, 246, 250, 0.6);
+  pointer-events: none;
+  z-index: 4;
+}
+
+.handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  margin-left: -5px;
+  background: var(--accent);
+  opacity: 0.9;
+  cursor: ew-resize;
+  z-index: 5;
+}
+.handle:hover { opacity: 1; }
+#handle-in { border-radius: 6px 0 0 6px; }
+#handle-out { border-radius: 0 6px 6px 0; }
+
+.tick {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  width: 4px;
+  margin-left: -2px;
+  border: 0;
+  border-radius: 2px;
+  padding: 0;
+  min-width: 0;
+  background: var(--marker);
+  z-index: 3;
+  cursor: pointer;
+}
+.tick:hover { background: #ffd066; box-shadow: 0 0 6px var(--marker); }
+
+.transport {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 10px;
+}
+.cluster { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.cluster.middle { justify-content: center; }
+.cluster.right { justify-content: flex-end; }
+
+#marker-count { white-space: nowrap; }
+
+#time-readout {
+  margin-left: 6px;
+  min-width: 132px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+#rate-select { width: 70px; }
+#volume-slider { width: 90px; padding: 0; accent-color: var(--accent); }
+
+.export-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.export-row button { flex: none; }
+.trim-readout {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.deck-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ok);
+}
+.export-row .keys {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* Near the minimum window size the shortcut legend costs more than it gives. */
+@media (max-width: 1020px) {
+  .export-row .keys { display: none; }
+}

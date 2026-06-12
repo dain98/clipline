@@ -21,3 +21,6 @@ tauri-plugin-global-shortcut = "2"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+boa_engine = "0.21.1"

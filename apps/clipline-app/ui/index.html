@@ -3,340 +3,129 @@
 <head>
   <meta charset="utf-8" />
   <title>Clipline</title>
-  <style>
-    :root { color-scheme: dark; }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; padding: 20px 24px; font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
-      background: #101216; color: #e6e8ee; user-select: none;
-    }
-    h1 { font-size: 18px; margin: 0 0 2px; letter-spacing: 0.3px; }
-    .sub { color: #8a90a0; font-size: 12px; margin-bottom: 14px; }
-    .row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
-    .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; }
-    .dot.on { background: #e5484d; box-shadow: 0 0 8px #e5484d; }
-    .stat { color: #8a90a0; } .stat b { color: #e6e8ee; font-variant-numeric: tabular-nums; }
-    button {
-      padding: 7px 14px; border: 0; border-radius: 6px;
-      background: #2f6feb; color: white; font: inherit; cursor: pointer;
-    }
-    button:hover { background: #4181ff; }
-    button.ghost { background: #23262e; color: #c2c8d6; padding: 5px 10px; }
-    button.ghost:hover { background: #2c3039; }
-    input, select {
-      width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid #2c3039;
-      border-radius: 6px; background: #171a20; color: #e6e8ee; font: inherit;
-    }
-    label { display: grid; gap: 3px; min-width: 0; color: #8a90a0; font-size: 11.5px; }
-    label span { white-space: nowrap; }
-    .hint { color: #8a90a0; font-size: 12px; }
-    #error { color: #f0883e; font-size: 12px; min-height: 16px; margin: 4px 0; }
-    #notice { color: #7ab8ff; font-size: 12px; min-height: 16px; margin: 4px 0; }
-    .warn { color: #f0883e; }
-    h2 { font-size: 13px; color: #8a90a0; text-transform: uppercase; letter-spacing: 1px;
-         margin: 18px 0 8px; }
-    .clip {
-      display: flex; align-items: center; gap: 10px; padding: 9px 12px; margin-bottom: 6px;
-      background: #171a20; border-radius: 8px;
-    }
-    .clip .meta { flex: 1; min-width: 0; }
-    .clip .name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .clip .info { font-size: 11.5px; color: #8a90a0; font-variant-numeric: tabular-nums; }
-    .badge {
-      background: #1d3450; color: #7ab8ff; font-size: 11px; padding: 1px 7px;
-      border-radius: 9px; margin-left: 6px;
-    }
-    .settings {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px;
-      padding: 10px 12px; background: #171a20; border-radius: 8px; margin-bottom: 8px;
-    }
-    .settings .wide { grid-column: 1 / -1; }
-    .settings .actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
-    #player {
-      position: fixed; inset: 0; background: rgba(6,8,11,0.96); display: none;
-      flex-direction: column; padding: 18px; z-index: 10;
-    }
-    #player.open { display: flex; }
-    #player video { flex: 1; min-height: 0; width: 100%; background: black; border-radius: 8px; }
-    #ptitle { font-size: 13px; margin-bottom: 8px; display: flex; justify-content: space-between; }
-    .editor {
-      display: grid; grid-template-columns: 96px 96px auto auto auto 1fr;
-      gap: 8px; align-items: end; margin-top: 10px;
-    }
-    .editor button { height: 32px; padding: 5px 10px; }
-    .editor .status { align-self: center; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #timeline {
-      position: relative; height: 26px; margin-top: 10px; background: #171a20;
-      border-radius: 6px; cursor: pointer;
-    }
-    #progress {
-      position: absolute; left: 0; top: 0; bottom: 0; width: 0;
-      background: #233048; border-radius: 6px;
-    }
-    .tick {
-      position: absolute; top: 2px; bottom: 2px; width: 4px; margin-left: -2px;
-      background: #e8b341; border-radius: 2px; cursor: pointer; z-index: 2;
-    }
-    .tick:hover { background: #ffd066; box-shadow: 0 0 6px #e8b341; }
-  </style>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <h1>Clipline</h1>
-  <div class="sub">replay buffer — no injection, ever</div>
-  <div class="row"><div id="dot" class="dot"></div><div id="state">starting…</div></div>
-  <div class="row stat">buffered: <b id="buffered">0.0 s</b> · <b id="mb">0.0 MB</b> · <b id="segs">0</b> GOPs</div>
-  <div class="row stat">storage: <b id="storage-used">0.0 MB</b> / <b id="storage-quota">10.0 GB</b> · <b id="storage-clips">0</b> clips</div>
-  <div class="row"><button id="save">Save Replay</button><span class="hint" id="save-hotkey">hotkey: Alt+F10</span></div>
-  <div id="notice"></div>
-  <div id="error"></div>
+  <div class="app">
+    <aside class="sidebar">
+      <header class="sidebar-head">
+        <h1>Clipline</h1>
+        <div class="sub">replay buffer — no injection, ever</div>
+        <div class="status-row"><span id="dot" class="dot"></span><span id="state">starting…</span></div>
+        <div class="status-row stat">buffered <b id="buffered">0.0 s</b> · <b id="mb">0.0 MB</b> · <b id="segs">0</b> GOPs</div>
+        <div class="status-row stat">storage <b id="storage-used">0.0 MB</b> / <b id="storage-quota">10.0 GB</b> · <b id="storage-clips">0</b> clips</div>
+        <div class="save-row">
+          <button id="save" class="primary">Save Replay</button>
+          <span id="save-hotkey" class="hint">Alt+F10</span>
+        </div>
+        <div id="notice"></div>
+        <div id="error"></div>
+      </header>
 
-  <h2>Settings</h2>
-  <div class="settings">
-    <label><span>capture</span><select id="set-capture">
-      <option value="primary_monitor">primary monitor</option>
-      <option value="window_title">window title</option>
-    </select></label>
-    <label><span>window title</span><input id="set-window" spellcheck="false" /></label>
-    <label><span>buffer s</span><input id="set-buffer" type="number" min="10" max="1200" step="5" /></label>
-    <label><span>replay s</span><input id="set-replay" type="number" min="5" max="1200" step="5" /></label>
-    <label><span>bitrate Mbps</span><input id="set-bitrate" type="number" min="1" max="100" step="1" /></label>
-    <label><span>fps</span><select id="set-fps">
-      <option value="30">30</option>
-      <option value="60">60</option>
-      <option value="120">120</option>
-    </select></label>
-    <label><span>quota GiB</span><input id="set-quota" type="number" min="0" step="0.5" /></label>
-    <label><span>hotkey</span><input id="set-hotkey" spellcheck="false" /></label>
-    <div class="actions"><button class="ghost" id="settings-save">Save Settings</button><span class="hint" id="settings-status"></span></div>
-  </div>
+      <section class="library">
+        <h2>Library</h2>
+        <div id="clips"></div>
+      </section>
 
-  <h2>Library</h2>
-  <div id="clips"></div>
-
-  <div id="player">
-    <div id="ptitle"><span id="pname"></span><button class="ghost" id="close">✕ close</button></div>
-    <video id="video" controls></video>
-    <div class="editor">
-      <label><span>in s</span><input id="trim-start" type="number" min="0" step="0.1" /></label>
-      <label><span>out s</span><input id="trim-end" type="number" min="0" step="0.1" /></label>
-      <button class="ghost" id="trim-set-in">In</button>
-      <button class="ghost" id="trim-set-out">Out</button>
-      <button id="trim-export">Export</button>
-      <span class="hint status" id="trim-status"></span>
-    </div>
-    <div id="timeline"><div id="progress"></div></div>
-  </div>
-
-  <script>
-    const { invoke, convertFileSrc } = window.__TAURI__.core;
-    const { listen } = window.__TAURI__.event;
-    const $ = (id) => document.getElementById(id);
-
-    listen("status", (e) => {
-      const s = e.payload;
-      $("dot").className = "dot" + (s.recording ? " on" : "");
-      $("state").textContent = s.recording ? "recording" : "stopped";
-      $("buffered").textContent = s.buffered_s.toFixed(1) + " s";
-      $("mb").textContent = s.buffered_mb.toFixed(1) + " MB";
-      $("segs").textContent = s.segments;
-    });
-    listen("saved", (e) => {
-      $("error").textContent = "";
-      const s = e.payload;
-      $("notice").textContent = s.gc_deleted
-        ? `cleaned up ${s.gc_deleted} old clip${s.gc_deleted > 1 ? "s" : ""} (${fmtBytes(s.gc_freed_bytes)})`
-        : `saved ${fmtDur(s.seconds)} replay`;
-      refresh();
-    });
-    listen("error", (e) => { $("error").textContent = e.payload; });
-    $("save").addEventListener("click", () => invoke("save_replay"));
-
-    const fmtBytes = (bytes) => {
-      const mb = bytes / (1024 * 1024);
-      if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
-      return `${mb.toFixed(1)} MB`;
-    };
-    const fmtDur = (s) => s == null ? "?" :
-      `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
-    const fmtAgo = (unix) => {
-      const d = Math.max(0, Date.now() / 1000 - unix);
-      if (d < 90) return `${Math.round(d)}s ago`;
-      if (d < 5400) return `${Math.round(d / 60)}m ago`;
-      return `${Math.round(d / 3600)}h ago`;
-    };
-
-    function fillSettings(s) {
-      $("set-capture").value = s.capture_mode;
-      $("set-window").value = s.window_title ?? "";
-      $("set-buffer").value = s.buffer_seconds;
-      $("set-replay").value = s.replay_window_s;
-      $("set-bitrate").value = s.bitrate_mbps;
-      $("set-fps").value = s.fps;
-      $("set-quota").value = s.disk_quota_gb;
-      $("set-hotkey").value = s.hotkey;
-      $("save-hotkey").textContent = `hotkey: ${s.hotkey}`;
-      syncCaptureFields();
-    }
-
-    function readSettings() {
-      return {
-        capture_mode: $("set-capture").value,
-        window_title: $("set-window").value,
-        buffer_seconds: Number($("set-buffer").value),
-        replay_window_s: Number($("set-replay").value),
-        bitrate_mbps: Number($("set-bitrate").value),
-        fps: Number($("set-fps").value),
-        disk_quota_gb: Number($("set-quota").value),
-        hotkey: $("set-hotkey").value,
-      };
-    }
-
-    function syncCaptureFields() {
-      $("set-window").disabled = $("set-capture").value !== "window_title";
-    }
-
-    $("set-capture").addEventListener("change", syncCaptureFields);
-    $("settings-save").addEventListener("click", async () => {
-      $("settings-status").textContent = "";
-      $("error").textContent = "";
-      try {
-        const saved = await invoke("save_settings", { settings: readSettings() });
-        fillSettings(saved);
-        $("settings-status").textContent = "saved";
-        await refresh();
-      } catch (e) {
-        $("error").textContent = e;
-      }
-    });
-
-    async function refresh() {
-      await Promise.all([refreshClips(), refreshStorage()]);
-    }
-
-    async function refreshStorage() {
-      const s = await invoke("storage_status");
-      $("storage-used").textContent = fmtBytes(s.total_bytes);
-      $("storage-used").className = s.over_quota ? "warn" : "";
-      $("storage-quota").textContent = s.quota_bytes == null ? "no limit" : fmtBytes(s.quota_bytes);
-      $("storage-clips").textContent = s.clip_count;
-    }
-
-    async function refreshClips() {
-      const clips = await invoke("list_clips");
-      const root = $("clips");
-      root.replaceChildren();
-      if (!clips.length) {
-        root.innerHTML = '<div class="hint">no clips yet — press Alt+F10 while something plays</div>';
-        return;
-      }
-      for (const c of clips) {
-        const n = c.markers ? c.markers.markers.length : 0;
-        const el = document.createElement("div");
-        el.className = "clip";
-        el.innerHTML = `
-          <div class="meta">
-            <div class="name">${c.name}${n ? `<span class="badge">${n} marker${n > 1 ? "s" : ""}</span>` : ""}</div>
-            <div class="info">${fmtDur(c.duration_s)} · ${c.size_mb.toFixed(1)} MB · ${fmtAgo(c.modified_unix)}</div>
+      <details class="settings-fold">
+        <summary>Settings</summary>
+        <div class="settings">
+          <label><span>capture</span><select id="set-capture">
+            <option value="primary_monitor">primary monitor</option>
+            <option value="window_title">window title</option>
+          </select></label>
+          <label><span>window title</span><input id="set-window" spellcheck="false" /></label>
+          <label><span>buffer s</span><input id="set-buffer" type="number" min="10" max="1200" step="5" /></label>
+          <label><span>replay s</span><input id="set-replay" type="number" min="5" max="1200" step="5" /></label>
+          <label><span>bitrate Mbps</span><input id="set-bitrate" type="number" min="1" max="100" step="1" /></label>
+          <label><span>fps</span><select id="set-fps">
+            <option value="30">30</option>
+            <option value="60">60</option>
+            <option value="120">120</option>
+          </select></label>
+          <label><span>quota GiB</span><input id="set-quota" type="number" min="0" step="0.5" /></label>
+          <label><span>hotkey</span><input id="set-hotkey" spellcheck="false" /></label>
+          <div class="actions">
+            <button id="settings-save">Save Settings</button>
+            <span id="settings-status" class="hint"></span>
           </div>
-          <button class="ghost play">▶</button>
-          <button class="ghost del">🗑</button>`;
-        el.querySelector(".play").addEventListener("click", () => openPlayer(c));
-        el.querySelector(".del").addEventListener("click", async () => {
-          await invoke("delete_clip", { path: c.path }).catch((e) => $("error").textContent = e);
-          $("notice").textContent = "";
-          refresh();
-        });
-        root.appendChild(el);
-      }
-    }
+        </div>
+      </details>
+    </aside>
 
-    let currentClip = null;
-    const video = $("video");
-    video.addEventListener("error", () => {
-      const e = video.error;
-      $("pname").textContent = `load error ${e ? e.code : "?"} (${e && e.message ? e.message : "no detail"}) — ${video.src.slice(0, 80)}`;
-    });
-    video.addEventListener("loadedmetadata", () => {
-      $("pname").textContent = `${$("pname").dataset.name} — ${video.duration.toFixed(1)}s loaded`;
-      if (currentClip && !Number($("trim-end").value)) setTrimBounds(0, video.duration);
-    });
-    function setTrimBounds(start, end) {
-      const dur = Number.isFinite(video.duration) ? video.duration : end;
-      $("trim-start").max = dur;
-      $("trim-end").max = dur;
-      $("trim-start").value = Math.max(0, start).toFixed(1);
-      $("trim-end").value = Math.max(0, end).toFixed(1);
-    }
-    function openPlayer(clip) {
-      currentClip = clip;
-      $("pname").textContent = clip.name;
-      $("pname").dataset.name = clip.name;
-      video.src = convertFileSrc(clip.path);
-      $("player").classList.add("open");
-      $("trim-status").textContent = "";
-      const tl = $("timeline");
-      tl.querySelectorAll(".tick").forEach((t) => t.remove());
-      const dur = clip.duration_s ?? (clip.markers ? clip.markers.duration_s : null);
-      if (dur) setTrimBounds(0, dur);
-      if (clip.markers && dur) {
-        for (const m of clip.markers.markers) {
-          const tick = document.createElement("div");
-          tick.className = "tick";
-          tick.style.left = `${(m.t_s / dur) * 100}%`;
-          tick.title = `${m.kind}${m.subtype ? ` (${m.subtype})` : ""} — ${m.actor}${m.victim ? " → " + m.victim : ""} @ ${m.t_s.toFixed(1)}s`;
-          tick.addEventListener("click", (ev) => {
-            ev.stopPropagation();
-            video.currentTime = m.t_s;
-            video.play();
-          });
-          tl.appendChild(tick);
-        }
-      }
-      tl.onclick = (ev) => {
-        const r = tl.getBoundingClientRect();
-        if (video.duration) video.currentTime = ((ev.clientX - r.left) / r.width) * video.duration;
-      };
-      video.ontimeupdate = () => {
-        if (video.duration) $("progress").style.width = `${(video.currentTime / video.duration) * 100}%`;
-      };
-      video.play();
-    }
-    $("trim-set-in").addEventListener("click", () => {
-      const end = Number($("trim-end").value);
-      setTrimBounds(video.currentTime, Number.isFinite(end) ? end : video.duration);
-    });
-    $("trim-set-out").addEventListener("click", () => {
-      const start = Number($("trim-start").value);
-      setTrimBounds(Number.isFinite(start) ? start : 0, video.currentTime);
-    });
-    $("trim-export").addEventListener("click", async () => {
-      $("trim-status").textContent = "";
-      $("error").textContent = "";
-      if (!currentClip) return;
-      const start = Number($("trim-start").value);
-      const end = Number($("trim-end").value);
-      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-        $("error").textContent = "trim out must be greater than in";
-        return;
-      }
-      try {
-        const exported = await invoke("export_clip", { path: currentClip.path, startS: start, endS: end });
-        $("trim-status").textContent = `${exported.name} · ${fmtDur(exported.aligned_start_s)}–${fmtDur(exported.aligned_end_s)}`;
-        $("notice").textContent = `exported ${fmtDur(exported.duration_s)} clip`;
-        await refresh();
-      } catch (e) {
-        $("error").textContent = e;
-      }
-    });
-    $("close").addEventListener("click", () => {
-      video.pause();
-      video.src = "";
-      currentClip = null;
-      $("player").classList.remove("open");
-    });
+    <main class="review">
+      <div id="review-empty" class="review-empty">
+        <div>
+          <strong>Nothing open</strong>
+          <span>Save a replay with Alt+F10, then pick a clip from the library to scrub, trim, and export.</span>
+        </div>
+      </div>
 
-    invoke("get_settings").then(fillSettings).catch((e) => $("error").textContent = e);
-    refresh();
-  </script>
+      <div id="review-viewer" class="review-viewer">
+        <header class="review-head">
+          <div class="clip-title">
+            <strong id="pname"></strong>
+            <span id="pmeta"></span>
+          </div>
+          <div class="review-actions">
+            <button id="copy-path" title="Copy source path to clipboard">Copy Path</button>
+            <button id="delete-clip" class="danger" title="Delete source clip from disk">Delete</button>
+            <button id="close-review" title="Close (Esc)">Close</button>
+          </div>
+        </header>
+
+        <div class="stage">
+          <video id="video" playsinline></video>
+          <div id="stage-note" class="stage-note"></div>
+        </div>
+
+        <div class="deck">
+          <div id="timeline" title="Click to seek · drag the edges to trim">
+            <div id="dim-in" class="dim"></div>
+            <div id="dim-out" class="dim"></div>
+            <div id="playhead"></div>
+            <div id="handle-in" class="handle" title="Trim in (I at playhead)"></div>
+            <div id="handle-out" class="handle" title="Trim out (O at playhead)"></div>
+          </div>
+
+          <div class="transport">
+            <div class="cluster">
+              <button id="prev-marker" title="Previous marker (Shift+M)">&#10216;</button>
+              <button id="next-marker" title="Next marker (M)">&#10217;</button>
+              <span id="marker-count" class="hint">no markers</span>
+            </div>
+            <div class="cluster middle">
+              <button id="seek-back" title="Back 5 s (Left)">&minus;5</button>
+              <button id="play-toggle" class="primary wide" title="Play / pause (Space)">Play</button>
+              <button id="seek-forward" title="Forward 5 s (Right)">+5</button>
+              <span id="time-readout">0:00.0 / 0:00.0</span>
+            </div>
+            <div class="cluster right">
+              <select id="rate-select" title="Playback speed">
+                <option value="0.5">0.5x</option>
+                <option value="0.75">0.75x</option>
+                <option value="1" selected>1x</option>
+                <option value="1.25">1.25x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2">2x</option>
+              </select>
+              <button id="mute-toggle" title="Mute / unmute">Mute</button>
+              <input id="volume-slider" type="range" min="0" max="1" step="0.01" value="1" title="Volume" />
+            </div>
+          </div>
+
+          <div class="export-row">
+            <button id="export-clip" class="primary">Export</button>
+            <span class="trim-readout"><span id="trim-summary"></span> <span class="hint">· snaps to keyframes</span></span>
+            <span id="deck-status" class="deck-status"></span>
+            <span class="hint keys">Space play · &larr;/&rarr; 5s · ,/. 0.1s · I/O trim · M marker · Esc close</span>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="player-core.js"></script>
+  <script src="main.js"></script>
 </body>
 </html>

@@ -11,9 +11,9 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-12): a working tray recorder with trim/export
+## Current state (2026-06-12): a working tray recorder with a first-party review player
 
-Ten milestones executed (plans in `docs/superpowers/plans/*.md` — fifteen plan docs, all
+Eleven milestones executed (plans in `docs/superpowers/plans/*.md` — seventeen plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -40,6 +40,16 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     without touching the source clip. `clipline-mp4::trim_keyframe_aligned` parses Clipline's
     finalized H.264/Opus MP4 tables, aligns start backward and end forward to video keyframes,
     stream-copies selected samples into a fresh finalized MP4, and crops marker sidecars.
+11. **Review player v2** — clips open in a two-pane review player with no native video chrome:
+    dimmed-outside-trim timeline with draggable in/out edges and amber marker ticks,
+    transport row (marker prev/next, ±5 s, play/pause, tenths readout, rate, volume),
+    keyboard-first review (`Space`/`K`, `←→`/`J`/`L` 5 s / `Shift` 1 s, `,`/`.` 0.1 s,
+    `I`/`O` trim at playhead, `M`/`Shift+M` markers, `Esc`), and an export row that shows the
+    kept range live. There are deliberately no trim number inputs — position the playhead,
+    then mark. The UI is split into `index.html` / `styles.css` / `player-core.js` (pure,
+    DOM-free logic) / `main.js` (wiring); `player-core.js` is unit-tested **from Rust** via
+    `boa_engine` (`tests/player_core.rs`), and `tests/ui_contract.rs` guards the DOM contract.
+    (An earlier externally-authored workspace, `bd1c84f`, was reverted and redone this way.)
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
@@ -57,7 +67,7 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 | `clipline-storage` | Saved-clip inventory, sidecar-aware size accounting, oldest-first quota GC with protected fresh saves | unit tests |
 | `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), multi-track h264+Opus, box walker, `movie_duration_s`, keyframe-aligned stream-copy trim | ffprobe + unit tests |
 | `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`) + neutral `annexb`/`opus`/`pcm`/`clock`/`avsync` | mocks on CI; CI-skipped device tests run real on the dev machine |
-| `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/player/settings/editor UI | live e2e (screenshots in the session logs) |
+| `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/settings plus the first-party review player | live e2e (screenshots in the session logs) + `player_core` (Boa) + `ui_contract` |
 
 ## Machine setup (already done on this machine; for a fresh clone elsewhere)
 
@@ -138,7 +148,18 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   next sync sample/EOF, so the exported range can be wider than the numeric in/out request.
 - UI automation: occluded windows swallow synthesized clicks while `PrintWindow`
   (PW_RENDERFULLCONTENT) still captures the window content — reposition/topmost before
-  clicking; `CopyFromScreen` shows black for accelerated webviews.
+  clicking; `CopyFromScreen` shows black for accelerated webviews. If someone is at the
+  machine, their live mouse/window-drags race synthesized input — coordinate with them
+  instead of fighting for the cursor.
+- Frontend logic is testable without Node: `ui/player-core.js` is pure (no DOM, no Tauri,
+  exposed via `globalThis`) and `tests/player_core.rs` evaluates it in `boa_engine`
+  (dev-dependency). Keep player math/formatting there, not in `main.js`, or it falls out of
+  test coverage. `tests/ui_contract.rs` fails if anyone re-inlines styles/scripts into
+  `index.html` or puts `controls` back on the video element.
+- WebView2 layout: a CSS grid row only bounds its children if the track is sized — the
+  `.app`/`.review-viewer` grids pin rows with `minmax(0, 1fr)` and shrink children carry
+  `min-height: 0`. A content-sized row lets the video's intrinsic height push the control
+  deck below the window (this exact bug shipped once and was fixed in review-player v2).
 - `ddoc.md` Caveats section lists every externally-verified Windows API claim with nuance —
   check it before trusting API behavior.
 
