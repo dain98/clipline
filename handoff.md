@@ -11,9 +11,9 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-12): a working tray recorder with a custom review workspace
+## Current state (2026-06-12): a working tray recorder with trim/export
 
-Eleven milestones executed (plans in `docs/superpowers/plans/*.md` — sixteen plan docs, all
+Ten milestones executed (plans in `docs/superpowers/plans/*.md` — fifteen plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -40,11 +40,6 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     without touching the source clip. `clipline-mp4::trim_keyframe_aligned` parses Clipline's
     finalized H.264/Opus MP4 tables, aligns start backward and end forward to video keyframes,
     stream-copies selected samples into a fresh finalized MP4, and crops marker sidecars.
-11. **Review workspace** — the app no longer exposes browser-native media controls. Saved clips
-    open in a two-pane Clipline workspace with a first-party transport row, seek/jump controls,
-    mute/rate/volume, marker navigation, visible trim selection/handles, keyboard review shortcuts,
-    and clip-local export/delete/copy-path actions. A CI-friendly `ui_contract` integration test
-    guards the player DOM contract.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
@@ -62,7 +57,7 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 | `clipline-storage` | Saved-clip inventory, sidecar-aware size accounting, oldest-first quota GC with protected fresh saves | unit tests |
 | `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), multi-track h264+Opus, box walker, `movie_duration_s`, keyframe-aligned stream-copy trim | ffprobe + unit tests |
 | `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`) + neutral `annexb`/`opus`/`pcm`/`clock`/`avsync` | mocks on CI; CI-skipped device tests run real on the dev machine |
-| `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/settings plus custom review workspace/editor UI | live e2e (screenshots in the session logs) + `ui_contract` |
+| `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/player/settings/editor UI | live e2e (screenshots in the session logs) |
 
 ## Machine setup (already done on this machine; for a fresh clone elsewhere)
 
@@ -144,18 +139,12 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 - UI automation: occluded windows swallow synthesized clicks while `PrintWindow`
   (PW_RENDERFULLCONTENT) still captures the window content — reposition/topmost before
   clicking; `CopyFromScreen` shows black for accelerated webviews.
-- Review workspace sizing is intentionally pinned to the Tauri window (`1180x780`, min
-  `980x680`). WebView2 let the video stage use content height and push controls below the viewport
-  until the review body was constrained with `height: calc(100vh - 73px)`.
-- Tauri tray-process shutdown during smoke tests can leave a not-responding process object after
-  closing the window. `Invoke-CimMethod Win32_Process.Terminate` against the launched PID reliably
-  releases `target\debug\clipline-app.exe` before rebuilding.
 - `ddoc.md` Caveats section lists every externally-verified Windows API claim with nuance —
   check it before trusting API behavior.
 
 ## What's next (rough value order; each gets its own plan)
 
-1. **Auto-clip on importance** (ddoc §5): `importance >= threshold` -> auto-save; marker kinds
+1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
    already carry importance.
 2. **Frame-accurate trim polish** (ddoc §11): re-encode only boundary GOPs, keep the current
    stream-copy path as the instant/lossless mode.

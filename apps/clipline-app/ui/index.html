@@ -4,677 +4,127 @@
   <meta charset="utf-8" />
   <title>Clipline</title>
   <style>
-    :root {
-      color-scheme: dark;
-      --bg: #12110f;
-      --panel: #1a1917;
-      --panel-2: #20201d;
-      --panel-3: #282520;
-      --line: #35312a;
-      --line-strong: #4a443a;
-      --text: #ece8df;
-      --muted: #aaa298;
-      --faint: #766f66;
-      --blue: #4aa3ff;
-      --teal: #4ec9b0;
-      --amber: #e7b75f;
-      --red: #e05d52;
-      --green: #74c476;
-      --shadow: rgba(0, 0, 0, 0.38);
-    }
-
+    :root { color-scheme: dark; }
     * { box-sizing: border-box; }
-
     body {
-      margin: 0;
-      min-width: 980px;
-      min-height: 680px;
-      font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      user-select: none;
+      margin: 0; padding: 20px 24px; font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+      background: #101216; color: #e6e8ee; user-select: none;
     }
-
-    button, input, select {
-      font: inherit;
-    }
-
+    h1 { font-size: 18px; margin: 0 0 2px; letter-spacing: 0.3px; }
+    .sub { color: #8a90a0; font-size: 12px; margin-bottom: 14px; }
+    .row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; }
+    .dot.on { background: #e5484d; box-shadow: 0 0 8px #e5484d; }
+    .stat { color: #8a90a0; } .stat b { color: #e6e8ee; font-variant-numeric: tabular-nums; }
     button {
-      height: 32px;
-      min-width: 32px;
-      padding: 0 10px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--panel-3);
-      color: var(--text);
-      cursor: pointer;
+      padding: 7px 14px; border: 0; border-radius: 6px;
+      background: #2f6feb; color: white; font: inherit; cursor: pointer;
     }
-
-    button:hover { border-color: var(--line-strong); background: #302d27; }
-    button:active { transform: translateY(1px); }
-    button.primary { border-color: #2f6ea7; background: #1d5d91; }
-    button.primary:hover { background: #246da8; }
-    button.danger { border-color: #67352f; color: #ffd2cd; }
-    button.danger:hover { background: #3a211e; }
-    button:disabled { opacity: 0.48; cursor: default; transform: none; }
-
+    button:hover { background: #4181ff; }
+    button.ghost { background: #23262e; color: #c2c8d6; padding: 5px 10px; }
+    button.ghost:hover { background: #2c3039; }
     input, select {
-      width: 100%;
-      min-width: 0;
-      height: 32px;
-      padding: 5px 8px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #151412;
-      color: var(--text);
+      width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid #2c3039;
+      border-radius: 6px; background: #171a20; color: #e6e8ee; font: inherit;
     }
-
-    input:disabled { color: var(--faint); }
-
-    label {
-      display: grid;
-      gap: 4px;
-      min-width: 0;
-      color: var(--muted);
-      font-size: 11.5px;
-    }
-
+    label { display: grid; gap: 3px; min-width: 0; color: #8a90a0; font-size: 11.5px; }
     label span { white-space: nowrap; }
-
-    h1 {
-      margin: 0;
-      font-size: 20px;
-      font-weight: 650;
-      letter-spacing: 0;
-    }
-
-    h2 {
-      margin: 20px 0 8px;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 650;
-      letter-spacing: 0.7px;
-      text-transform: uppercase;
-    }
-
-    .app {
-      display: grid;
-      grid-template-columns: 360px minmax(620px, 1fr);
-      height: 100vh;
-      overflow: hidden;
-    }
-
-    .sidebar {
-      display: flex;
-      flex-direction: column;
-      min-width: 0;
-      border-right: 1px solid var(--line);
-      background: var(--panel);
-    }
-
-    .sidebar-head {
-      padding: 18px 18px 12px;
-      border-bottom: 1px solid var(--line);
-    }
-
-    .sub {
-      color: var(--muted);
-      font-size: 12px;
-      margin-top: 1px;
-    }
-
-    .status-grid {
-      display: grid;
-      gap: 8px;
-      margin-top: 14px;
-    }
-
-    .status-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-height: 20px;
-      color: var(--muted);
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .status-row b { color: var(--text); font-weight: 600; }
-
-    .dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: #59524a;
-      flex: 0 0 auto;
-    }
-
-    .dot.on {
-      background: var(--red);
-      box-shadow: 0 0 12px rgba(224, 93, 82, 0.85);
-    }
-
-    .save-row {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-      align-items: center;
-      margin-top: 12px;
-    }
-
-    .hint {
-      color: var(--muted);
-      font-size: 12px;
-      min-width: 0;
-    }
-
-    #notice, #error {
-      min-height: 18px;
-      margin-top: 6px;
-      font-size: 12px;
-    }
-
-    #notice { color: var(--blue); }
-    #error { color: var(--amber); }
-    .warn { color: var(--amber); }
-
-    .sidebar-scroll {
-      min-height: 0;
-      overflow: auto;
-      padding: 0 14px 16px;
-    }
-
-    .settings {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px 10px;
-      padding: 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #171614;
-    }
-
-    .settings .wide { grid-column: 1 / -1; }
-
-    .settings .actions {
-      grid-column: 1 / -1;
-      display: grid;
-      grid-template-columns: auto 1fr;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .clip-list {
-      display: grid;
-      gap: 6px;
-      padding-bottom: 8px;
-    }
-
+    .hint { color: #8a90a0; font-size: 12px; }
+    #error { color: #f0883e; font-size: 12px; min-height: 16px; margin: 4px 0; }
+    #notice { color: #7ab8ff; font-size: 12px; min-height: 16px; margin: 4px 0; }
+    .warn { color: #f0883e; }
+    h2 { font-size: 13px; color: #8a90a0; text-transform: uppercase; letter-spacing: 1px;
+         margin: 18px 0 8px; }
     .clip {
-      display: grid;
-      grid-template-columns: 1fr auto auto;
-      align-items: center;
-      gap: 7px;
-      min-height: 58px;
-      padding: 8px 8px 8px 10px;
-      border: 1px solid transparent;
-      border-radius: 8px;
-      background: var(--panel-2);
-      cursor: pointer;
+      display: flex; align-items: center; gap: 10px; padding: 9px 12px; margin-bottom: 6px;
+      background: #171a20; border-radius: 8px;
     }
-
-    .clip:hover { border-color: var(--line); background: #24221f; }
-    .clip.active { border-color: #3d795f; background: #1c2822; }
-
-    .clip .meta {
-      min-width: 0;
-      display: grid;
-      gap: 3px;
-    }
-
-    .clip .name {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-size: 13px;
-      color: var(--text);
-    }
-
-    .clip .info {
-      color: var(--muted);
-      font-size: 11.5px;
-      font-variant-numeric: tabular-nums;
-    }
-
+    .clip .meta { flex: 1; min-width: 0; }
+    .clip .name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .clip .info { font-size: 11.5px; color: #8a90a0; font-variant-numeric: tabular-nums; }
     .badge {
-      display: inline-block;
-      margin-left: 6px;
-      padding: 1px 6px;
-      border-radius: 7px;
-      background: #263b34;
-      color: #8ee0c8;
-      font-size: 11px;
-      vertical-align: 1px;
+      background: #1d3450; color: #7ab8ff; font-size: 11px; padding: 1px 7px;
+      border-radius: 9px; margin-left: 6px;
     }
-
-    .icon-btn {
-      width: 32px;
-      padding: 0;
-      text-align: center;
+    .settings {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px;
+      padding: 10px 12px; background: #171a20; border-radius: 8px; margin-bottom: 8px;
     }
-
-    .workspace {
-      display: grid;
-      grid-template-rows: auto minmax(0, 1fr);
-      min-width: 0;
-      min-height: 0;
-      overflow: hidden;
-      background: #11100e;
+    .settings .wide { grid-column: 1 / -1; }
+    .settings .actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
+    #player {
+      position: fixed; inset: 0; background: rgba(6,8,11,0.96); display: none;
+      flex-direction: column; padding: 18px; z-index: 10;
     }
-
-    .workspace-head {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: center;
-      gap: 16px;
-      padding: 16px 18px 12px;
-      border-bottom: 1px solid var(--line);
-      background: #151411;
+    #player.open { display: flex; }
+    #player video { flex: 1; min-height: 0; width: 100%; background: black; border-radius: 8px; }
+    #ptitle { font-size: 13px; margin-bottom: 8px; display: flex; justify-content: space-between; }
+    .editor {
+      display: grid; grid-template-columns: 96px 96px auto auto auto 1fr;
+      gap: 8px; align-items: end; margin-top: 10px;
     }
-
-    .clip-title {
-      min-width: 0;
-      display: grid;
-      gap: 2px;
-    }
-
-    .clip-title strong {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-size: 17px;
-      font-weight: 650;
-    }
-
-    .clip-title span {
-      color: var(--muted);
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .clip-actions {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .review-body {
-      position: relative;
-      height: calc(100vh - 73px);
-      min-height: 0;
-      overflow: hidden;
-      padding: 18px;
-    }
-
-    .empty-review {
-      position: absolute;
-      inset: 0;
-      display: grid;
-      place-items: center;
-      color: var(--muted);
-      text-align: center;
-      padding: 36px;
-    }
-
-    .empty-review strong {
-      display: block;
-      margin-bottom: 4px;
-      color: var(--text);
-      font-size: 17px;
-      font-weight: 650;
-    }
-
-    .review-viewer {
-      min-width: 0;
-      min-height: 0;
-      height: 100%;
-      overflow: hidden;
-      display: none;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    .review-viewer.open { display: flex; }
-
-    .stage {
-      position: relative;
-      flex: 1 1 0;
-      min-height: 0;
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #030303;
-      box-shadow: 0 18px 36px var(--shadow);
-    }
-
-    #video {
-      display: block;
-      width: 100%;
-      height: 100%;
-      min-height: 0;
-      object-fit: contain;
-      background: #030303;
-    }
-
-    .stage-status {
-      position: absolute;
-      left: 12px;
-      bottom: 10px;
-      max-width: calc(100% - 24px);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      padding: 4px 8px;
-      border-radius: 6px;
-      background: rgba(0, 0, 0, 0.58);
-      color: var(--muted);
-      font-size: 12px;
-      pointer-events: none;
-    }
-
-    .controls {
-      display: grid;
-      gap: 9px;
-      padding: 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-    }
-
-    .timeline-wrap {
-      display: grid;
-      grid-template-columns: auto 1fr auto;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .marker-nav {
-      display: flex;
-      gap: 6px;
-    }
-
-    #marker-summary {
-      width: 118px;
-      color: var(--muted);
-      font-size: 12px;
-      text-align: right;
-      font-variant-numeric: tabular-nums;
-    }
-
+    .editor button { height: 32px; padding: 5px 10px; }
+    .editor .status { align-self: center; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #timeline {
-      position: relative;
-      height: 34px;
-      border: 1px solid var(--line);
-      border-radius: 7px;
-      background: #12110f;
-      cursor: pointer;
-      touch-action: none;
+      position: relative; height: 26px; margin-top: 10px; background: #171a20;
+      border-radius: 6px; cursor: pointer;
     }
-
-    .timeline-rail {
-      position: absolute;
-      left: 10px;
-      right: 10px;
-      top: 14px;
-      height: 5px;
-      border-radius: 4px;
-      background: #312d26;
-      pointer-events: none;
-    }
-
     #progress {
-      position: absolute;
-      left: 0;
-      top: 0;
-      bottom: 0;
-      width: 0;
-      border-radius: 4px;
-      background: var(--blue);
-      opacity: 0.7;
+      position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+      background: #233048; border-radius: 6px;
     }
-
-    #trim-range {
-      position: absolute;
-      left: 0;
-      top: 5px;
-      height: 22px;
-      width: 100%;
-      border: 1px solid rgba(78, 201, 176, 0.75);
-      border-radius: 6px;
-      background: rgba(78, 201, 176, 0.12);
-      pointer-events: none;
+    .tick {
+      position: absolute; top: 2px; bottom: 2px; width: 4px; margin-left: -2px;
+      background: #e8b341; border-radius: 2px; cursor: pointer; z-index: 2;
     }
-
-    #playhead {
-      position: absolute;
-      top: 4px;
-      bottom: 4px;
-      left: 0;
-      width: 2px;
-      margin-left: -1px;
-      border-radius: 2px;
-      background: #f7f1e6;
-      box-shadow: 0 0 8px rgba(247, 241, 230, 0.55);
-      pointer-events: none;
-      z-index: 4;
-    }
-
-    .trim-handle {
-      position: absolute;
-      top: 2px;
-      bottom: 2px;
-      width: 11px;
-      margin-left: -5px;
-      border: 1px solid rgba(137, 240, 213, 0.9);
-      border-radius: 5px;
-      background: #173c35;
-      cursor: ew-resize;
-      z-index: 5;
-    }
-
-    .trim-handle::after {
-      content: "";
-      position: absolute;
-      left: 4px;
-      top: 7px;
-      bottom: 7px;
-      width: 1px;
-      background: rgba(236, 232, 223, 0.75);
-    }
-
-    .marker-tick {
-      position: absolute;
-      top: 7px;
-      bottom: 7px;
-      width: 5px;
-      margin-left: -2px;
-      border: 0;
-      border-radius: 3px;
-      background: var(--amber);
-      padding: 0;
-      min-width: 0;
-      z-index: 3;
-    }
-
-    .marker-tick:hover {
-      background: #ffd37a;
-      box-shadow: 0 0 8px rgba(231, 183, 95, 0.8);
-    }
-
-    .transport {
-      display: grid;
-      grid-template-columns: auto auto auto auto 120px auto 150px minmax(120px, 1fr);
-      align-items: center;
-      gap: 8px;
-    }
-
-    .time-readout {
-      min-width: 120px;
-      color: var(--muted);
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
-      text-align: center;
-    }
-
-    .volume-group {
-      display: grid;
-      grid-template-columns: auto 92px;
-      align-items: center;
-      gap: 8px;
-    }
-
-    #volume-slider {
-      padding: 0;
-      accent-color: var(--teal);
-    }
-
-    .trim-editor {
-      display: grid;
-      grid-template-columns: 92px 92px auto auto minmax(140px, 1fr);
-      align-items: end;
-      gap: 8px;
-    }
-
-    .trim-editor .status {
-      align-self: center;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      color: var(--muted);
-      font-size: 12px;
-    }
+    .tick:hover { background: #ffd066; box-shadow: 0 0 6px #e8b341; }
   </style>
 </head>
 <body>
-  <div class="app">
-    <aside class="sidebar">
-      <div class="sidebar-head">
-        <h1>Clipline</h1>
-        <div class="sub">replay buffer - no injection, ever</div>
-        <div class="status-grid">
-          <div class="status-row"><div id="dot" class="dot"></div><div id="state">starting...</div></div>
-          <div class="status-row">buffered: <b id="buffered">0.0 s</b> · <b id="mb">0.0 MB</b> · <b id="segs">0</b> GOPs</div>
-          <div class="status-row">storage: <b id="storage-used">0.0 MB</b> / <b id="storage-quota">10.0 GB</b> · <b id="storage-clips">0</b> clips</div>
-        </div>
-        <div class="save-row">
-          <button id="save" class="primary">Save Replay</button>
-          <span class="hint" id="save-hotkey">Alt+F10</span>
-        </div>
-        <div id="notice"></div>
-        <div id="error"></div>
-      </div>
+  <h1>Clipline</h1>
+  <div class="sub">replay buffer — no injection, ever</div>
+  <div class="row"><div id="dot" class="dot"></div><div id="state">starting…</div></div>
+  <div class="row stat">buffered: <b id="buffered">0.0 s</b> · <b id="mb">0.0 MB</b> · <b id="segs">0</b> GOPs</div>
+  <div class="row stat">storage: <b id="storage-used">0.0 MB</b> / <b id="storage-quota">10.0 GB</b> · <b id="storage-clips">0</b> clips</div>
+  <div class="row"><button id="save">Save Replay</button><span class="hint" id="save-hotkey">hotkey: Alt+F10</span></div>
+  <div id="notice"></div>
+  <div id="error"></div>
 
-      <div class="sidebar-scroll">
-        <h2>Settings</h2>
-        <div class="settings">
-          <label><span>capture</span><select id="set-capture">
-            <option value="primary_monitor">primary monitor</option>
-            <option value="window_title">window title</option>
-          </select></label>
-          <label><span>window title</span><input id="set-window" spellcheck="false" /></label>
-          <label><span>buffer s</span><input id="set-buffer" type="number" min="10" max="1200" step="5" /></label>
-          <label><span>replay s</span><input id="set-replay" type="number" min="5" max="1200" step="5" /></label>
-          <label><span>bitrate Mbps</span><input id="set-bitrate" type="number" min="1" max="100" step="1" /></label>
-          <label><span>fps</span><select id="set-fps">
-            <option value="30">30</option>
-            <option value="60">60</option>
-            <option value="120">120</option>
-          </select></label>
-          <label><span>quota GiB</span><input id="set-quota" type="number" min="0" step="0.5" /></label>
-          <label><span>hotkey</span><input id="set-hotkey" spellcheck="false" /></label>
-          <div class="actions"><button id="settings-save">Save Settings</button><span class="hint" id="settings-status"></span></div>
-        </div>
+  <h2>Settings</h2>
+  <div class="settings">
+    <label><span>capture</span><select id="set-capture">
+      <option value="primary_monitor">primary monitor</option>
+      <option value="window_title">window title</option>
+    </select></label>
+    <label><span>window title</span><input id="set-window" spellcheck="false" /></label>
+    <label><span>buffer s</span><input id="set-buffer" type="number" min="10" max="1200" step="5" /></label>
+    <label><span>replay s</span><input id="set-replay" type="number" min="5" max="1200" step="5" /></label>
+    <label><span>bitrate Mbps</span><input id="set-bitrate" type="number" min="1" max="100" step="1" /></label>
+    <label><span>fps</span><select id="set-fps">
+      <option value="30">30</option>
+      <option value="60">60</option>
+      <option value="120">120</option>
+    </select></label>
+    <label><span>quota GiB</span><input id="set-quota" type="number" min="0" step="0.5" /></label>
+    <label><span>hotkey</span><input id="set-hotkey" spellcheck="false" /></label>
+    <div class="actions"><button class="ghost" id="settings-save">Save Settings</button><span class="hint" id="settings-status"></span></div>
+  </div>
 
-        <h2>Library</h2>
-        <div id="clips" class="clip-list"></div>
-      </div>
-    </aside>
+  <h2>Library</h2>
+  <div id="clips"></div>
 
-    <main id="review-workspace" class="workspace">
-      <header class="workspace-head">
-        <div class="clip-title">
-          <strong id="pname">No clip selected</strong>
-          <span id="pmeta">Save a replay or choose a clip from the library.</span>
-        </div>
-        <div class="clip-actions">
-          <button id="clip-reveal" title="Copy source path" disabled>Copy Path</button>
-          <button id="clip-delete" class="danger" title="Delete source clip" disabled>Delete</button>
-          <button id="clip-export" class="primary" title="Export selected range" disabled>Export</button>
-          <button id="close" title="Close review" disabled>Close</button>
-        </div>
-      </header>
-
-      <section class="review-body">
-        <div id="review-empty" class="empty-review">
-          <div><strong>Review clips here</strong><span>Choose a saved clip to scrub, mark in/out, and export without using browser media controls.</span></div>
-        </div>
-
-        <div id="review-viewer" class="review-viewer">
-          <div class="stage">
-            <video id="video" playsinline></video>
-            <div id="stage-status" class="stage-status">ready</div>
-          </div>
-
-          <div class="controls">
-            <div class="timeline-wrap">
-              <div class="marker-nav">
-                <button id="prev-marker" class="icon-btn" title="Previous marker" disabled>&lt;</button>
-                <button id="next-marker" class="icon-btn" title="Next marker" disabled>&gt;</button>
-              </div>
-              <div id="timeline" title="Click to seek. Drag handles to trim.">
-                <div class="timeline-rail"><div id="progress"></div></div>
-                <div id="trim-range"></div>
-                <div id="playhead"></div>
-                <div id="trim-handle-in" class="trim-handle" title="Trim in"></div>
-                <div id="trim-handle-out" class="trim-handle" title="Trim out"></div>
-              </div>
-              <div id="marker-summary">0 markers</div>
-            </div>
-
-            <div class="transport">
-              <button id="seek-back" class="icon-btn" title="Back 5 seconds">-5</button>
-              <button id="play-toggle" title="Play or pause">Play</button>
-              <button id="seek-forward" class="icon-btn" title="Forward 5 seconds">+5</button>
-              <button id="mute-toggle" title="Mute or unmute">Mute</button>
-              <div id="time-readout" class="time-readout">0:00 / 0:00</div>
-              <select id="rate-select" title="Playback speed">
-                <option value="0.5">0.5x</option>
-                <option value="0.75">0.75x</option>
-                <option value="1" selected>1x</option>
-                <option value="1.25">1.25x</option>
-                <option value="1.5">1.5x</option>
-                <option value="2">2x</option>
-              </select>
-              <div class="volume-group">
-                <span class="hint">volume</span>
-                <input id="volume-slider" type="range" min="0" max="1" step="0.01" value="1" />
-              </div>
-              <span class="hint">Space play/pause · I/O set trim · M next marker</span>
-            </div>
-
-            <div class="trim-editor">
-              <label><span>in s</span><input id="trim-start" type="number" min="0" step="0.1" /></label>
-              <label><span>out s</span><input id="trim-end" type="number" min="0" step="0.1" /></label>
-              <button id="trim-set-in">Set In</button>
-              <button id="trim-set-out">Set Out</button>
-              <span id="trim-status" class="status"></span>
-            </div>
-          </div>
-        </div>
-      </section>
-    </main>
+  <div id="player">
+    <div id="ptitle"><span id="pname"></span><button class="ghost" id="close">✕ close</button></div>
+    <video id="video" controls></video>
+    <div class="editor">
+      <label><span>in s</span><input id="trim-start" type="number" min="0" step="0.1" /></label>
+      <label><span>out s</span><input id="trim-end" type="number" min="0" step="0.1" /></label>
+      <button class="ghost" id="trim-set-in">In</button>
+      <button class="ghost" id="trim-set-out">Out</button>
+      <button id="trim-export">Export</button>
+      <span class="hint status" id="trim-status"></span>
+    </div>
+    <div id="timeline"><div id="progress"></div></div>
   </div>
 
   <script>
@@ -682,51 +132,38 @@
     const { listen } = window.__TAURI__.event;
     const $ = (id) => document.getElementById(id);
 
-    const video = $("video");
-    let currentClip = null;
-    let clipsCache = [];
-    let trimStart = 0;
-    let trimEnd = 0;
-    let dragging = null;
+    listen("status", (e) => {
+      const s = e.payload;
+      $("dot").className = "dot" + (s.recording ? " on" : "");
+      $("state").textContent = s.recording ? "recording" : "stopped";
+      $("buffered").textContent = s.buffered_s.toFixed(1) + " s";
+      $("mb").textContent = s.buffered_mb.toFixed(1) + " MB";
+      $("segs").textContent = s.segments;
+    });
+    listen("saved", (e) => {
+      $("error").textContent = "";
+      const s = e.payload;
+      $("notice").textContent = s.gc_deleted
+        ? `cleaned up ${s.gc_deleted} old clip${s.gc_deleted > 1 ? "s" : ""} (${fmtBytes(s.gc_freed_bytes)})`
+        : `saved ${fmtDur(s.seconds)} replay`;
+      refresh();
+    });
+    listen("error", (e) => { $("error").textContent = e.payload; });
+    $("save").addEventListener("click", () => invoke("save_replay"));
 
     const fmtBytes = (bytes) => {
       const mb = bytes / (1024 * 1024);
       if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
       return `${mb.toFixed(1)} MB`;
     };
-
-    const fmtDur = (s) => s == null || !Number.isFinite(s) ? "?" :
+    const fmtDur = (s) => s == null ? "?" :
       `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
-
-    const fmtPrecise = (s) => s == null || !Number.isFinite(s) ? "0.0" : s.toFixed(1);
-
     const fmtAgo = (unix) => {
       const d = Math.max(0, Date.now() / 1000 - unix);
       if (d < 90) return `${Math.round(d)}s ago`;
       if (d < 5400) return `${Math.round(d / 60)}m ago`;
       return `${Math.round(d / 3600)}h ago`;
     };
-
-    function clipDuration() {
-      if (Number.isFinite(video.duration) && video.duration > 0) return video.duration;
-      if (currentClip && Number.isFinite(currentClip.duration_s)) return currentClip.duration_s;
-      if (currentClip && currentClip.markers && Number.isFinite(currentClip.markers.duration_s)) {
-        return currentClip.markers.duration_s;
-      }
-      return 0;
-    }
-
-    function clampTime(value) {
-      const dur = clipDuration();
-      const max = dur > 0 ? dur : Number.MAX_SAFE_INTEGER;
-      return Math.max(0, Math.min(max, value));
-    }
-
-    function percentFor(time) {
-      const dur = clipDuration();
-      if (!dur) return 0;
-      return Math.max(0, Math.min(100, (time / dur) * 100));
-    }
 
     function fillSettings(s) {
       $("set-capture").value = s.capture_mode;
@@ -737,7 +174,7 @@
       $("set-fps").value = s.fps;
       $("set-quota").value = s.disk_quota_gb;
       $("set-hotkey").value = s.hotkey;
-      $("save-hotkey").textContent = s.hotkey;
+      $("save-hotkey").textContent = `hotkey: ${s.hotkey}`;
       syncCaptureFields();
     }
 
@@ -758,304 +195,6 @@
       $("set-window").disabled = $("set-capture").value !== "window_title";
     }
 
-    async function refresh() {
-      await Promise.all([refreshClips(), refreshStorage()]);
-    }
-
-    async function refreshStorage() {
-      const s = await invoke("storage_status");
-      $("storage-used").textContent = fmtBytes(s.total_bytes);
-      $("storage-used").className = s.over_quota ? "warn" : "";
-      $("storage-quota").textContent = s.quota_bytes == null ? "no limit" : fmtBytes(s.quota_bytes);
-      $("storage-clips").textContent = s.clip_count;
-    }
-
-    async function refreshClips() {
-      clipsCache = await invoke("list_clips");
-      renderClips();
-      if (currentClip) {
-        const fresh = clipsCache.find((clip) => clip.path === currentClip.path);
-        if (fresh) currentClip = fresh;
-      }
-    }
-
-    function renderClips() {
-      const root = $("clips");
-      root.replaceChildren();
-      if (!clipsCache.length) {
-        root.innerHTML = '<div class="hint">no clips yet - press Alt+F10 while something plays</div>';
-        return;
-      }
-
-      for (const c of clipsCache) {
-        const markerCount = c.markers ? c.markers.markers.length : 0;
-        const el = document.createElement("div");
-        el.className = "clip" + (currentClip && currentClip.path === c.path ? " active" : "");
-        el.innerHTML = `
-          <div class="meta">
-            <div class="name">${c.name}${markerCount ? `<span class="badge">${markerCount}</span>` : ""}</div>
-            <div class="info">${fmtDur(c.duration_s)} · ${c.size_mb.toFixed(1)} MB · ${fmtAgo(c.modified_unix)}</div>
-          </div>
-          <button class="icon-btn play" title="Open clip">Open</button>
-          <button class="icon-btn del" title="Delete clip">Del</button>`;
-        el.addEventListener("click", () => openPlayer(c));
-        el.querySelector(".play").addEventListener("click", (ev) => {
-          ev.stopPropagation();
-          openPlayer(c);
-        });
-        el.querySelector(".del").addEventListener("click", async (ev) => {
-          ev.stopPropagation();
-          await deleteClip(c.path);
-        });
-        root.appendChild(el);
-      }
-    }
-
-    function setWorkspaceEnabled(enabled) {
-      $("review-empty").style.display = enabled ? "none" : "grid";
-      $("review-viewer").classList.toggle("open", enabled);
-      for (const id of ["clip-reveal", "clip-delete", "clip-export", "close"]) {
-        $(id).disabled = !enabled;
-      }
-    }
-
-    function openPlayer(clip) {
-      currentClip = clip;
-      $("error").textContent = "";
-      $("notice").textContent = "";
-      $("trim-status").textContent = "";
-      $("stage-status").textContent = "loading";
-      $("pname").textContent = clip.name;
-      $("pmeta").textContent = `${fmtDur(clip.duration_s)} · ${clip.size_mb.toFixed(1)} MB · ${clip.path}`;
-      video.src = convertFileSrc(clip.path);
-      video.playbackRate = Number($("rate-select").value);
-      setWorkspaceEnabled(true);
-      setTrimBounds(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
-      renderMarkers();
-      renderClips();
-      updateTimeline();
-      video.play().catch(() => syncPlayState());
-    }
-
-    function closePlayer() {
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
-      currentClip = null;
-      $("pname").textContent = "No clip selected";
-      $("pmeta").textContent = "Save a replay or choose a clip from the library.";
-      $("stage-status").textContent = "ready";
-      $("trim-status").textContent = "";
-      $("timeline").querySelectorAll(".marker-tick").forEach((t) => t.remove());
-      setWorkspaceEnabled(false);
-      renderClips();
-      updateTimeline();
-    }
-
-    function setTrimBounds(start, end) {
-      const dur = clipDuration();
-      let nextStart = clampTime(Number.isFinite(start) ? start : 0);
-      let nextEnd = clampTime(Number.isFinite(end) && end > 0 ? end : dur);
-      if (dur && nextEnd <= nextStart) nextEnd = Math.min(dur, nextStart + 0.1);
-      if (nextEnd <= nextStart) nextStart = Math.max(0, nextEnd - 0.1);
-      trimStart = nextStart;
-      trimEnd = nextEnd;
-      $("trim-start").max = dur || "";
-      $("trim-end").max = dur || "";
-      $("trim-start").value = fmtPrecise(trimStart);
-      $("trim-end").value = fmtPrecise(trimEnd);
-      updateTimeline();
-    }
-
-    function updateTimeline() {
-      const dur = clipDuration();
-      const current = dur ? clampTime(video.currentTime || 0) : 0;
-      $("time-readout").textContent = `${fmtDur(current)} / ${fmtDur(dur)}`;
-      $("progress").style.width = `${percentFor(current)}%`;
-      $("playhead").style.left = `${percentFor(current)}%`;
-      $("trim-range").style.left = `${percentFor(trimStart)}%`;
-      $("trim-range").style.width = `${Math.max(0, percentFor(trimEnd) - percentFor(trimStart))}%`;
-      $("trim-handle-in").style.left = `${percentFor(trimStart)}%`;
-      $("trim-handle-out").style.left = `${percentFor(trimEnd)}%`;
-      updateMarkerSummary();
-    }
-
-    function renderMarkers() {
-      const timeline = $("timeline");
-      timeline.querySelectorAll(".marker-tick").forEach((t) => t.remove());
-      const dur = clipDuration();
-      const markers = currentClip && currentClip.markers ? currentClip.markers.markers : [];
-      for (const m of markers) {
-        const tick = document.createElement("button");
-        tick.className = "marker-tick";
-        tick.style.left = `${dur ? (m.t_s / dur) * 100 : 0}%`;
-        tick.title = `${m.kind}${m.subtype ? ` (${m.subtype})` : ""} - ${m.actor}${m.victim ? " -> " + m.victim : ""} @ ${m.t_s.toFixed(1)}s`;
-        tick.addEventListener("pointerdown", (ev) => ev.stopPropagation());
-        tick.addEventListener("click", (ev) => {
-          ev.stopPropagation();
-          seekTo(m.t_s);
-          video.play().catch(() => syncPlayState());
-        });
-        timeline.appendChild(tick);
-      }
-      $("prev-marker").disabled = markers.length === 0;
-      $("next-marker").disabled = markers.length === 0;
-      updateMarkerSummary();
-    }
-
-    function updateMarkerSummary() {
-      const markers = currentClip && currentClip.markers ? currentClip.markers.markers : [];
-      if (!markers.length) {
-        $("marker-summary").textContent = "0 markers";
-        return;
-      }
-      const next = markers.find((m) => m.t_s > (video.currentTime || 0) + 0.05);
-      $("marker-summary").textContent = next
-        ? `${markers.length} markers · next ${fmtDur(next.t_s)}`
-        : `${markers.length} markers`;
-    }
-
-    function seekTo(time) {
-      if (!currentClip) return;
-      video.currentTime = clampTime(time);
-      updateTimeline();
-    }
-
-    function seekBy(delta) {
-      seekTo((video.currentTime || 0) + delta);
-    }
-
-    function togglePlayback() {
-      if (!currentClip) return;
-      if (video.paused) video.play().catch(() => syncPlayState());
-      else video.pause();
-    }
-
-    function syncPlayState() {
-      $("play-toggle").textContent = video.paused ? "Play" : "Pause";
-      $("play-toggle").setAttribute("aria-pressed", String(!video.paused));
-    }
-
-    function syncMuteState() {
-      $("mute-toggle").textContent = video.muted || video.volume === 0 ? "Unmute" : "Mute";
-      $("volume-slider").value = String(video.muted ? 0 : video.volume);
-    }
-
-    function timelineTimeFromEvent(ev) {
-      const rect = $("timeline").getBoundingClientRect();
-      const x = Math.max(0, Math.min(rect.width, ev.clientX - rect.left));
-      return clampTime((x / rect.width) * clipDuration());
-    }
-
-    function startTimelineDrag(kind, ev) {
-      if (!currentClip) return;
-      dragging = kind;
-      $("timeline").setPointerCapture(ev.pointerId);
-      handleTimelineDrag(ev);
-    }
-
-    function handleTimelineDrag(ev) {
-      if (!dragging) return;
-      const t = timelineTimeFromEvent(ev);
-      if (dragging === "in") {
-        setTrimBounds(Math.min(t, trimEnd - 0.1), trimEnd);
-      } else if (dragging === "out") {
-        setTrimBounds(trimStart, Math.max(t, trimStart + 0.1));
-      } else {
-        seekTo(t);
-      }
-    }
-
-    function stopTimelineDrag() {
-      dragging = null;
-    }
-
-    function jumpMarker(direction) {
-      const markers = currentClip && currentClip.markers ? currentClip.markers.markers : [];
-      if (!markers.length) return;
-      const current = video.currentTime || 0;
-      let target;
-      if (direction > 0) {
-        target = markers.find((m) => m.t_s > current + 0.05) ?? markers[0];
-      } else {
-        target = [...markers].reverse().find((m) => m.t_s < current - 0.05) ?? markers[markers.length - 1];
-      }
-      seekTo(target.t_s);
-      video.play().catch(() => syncPlayState());
-    }
-
-    async function exportCurrentTrim() {
-      $("trim-status").textContent = "";
-      $("error").textContent = "";
-      if (!currentClip) return;
-      if (!Number.isFinite(trimStart) || !Number.isFinite(trimEnd) || trimEnd <= trimStart) {
-        $("error").textContent = "trim out must be greater than in";
-        return;
-      }
-      $("clip-export").disabled = true;
-      $("trim-status").textContent = "exporting";
-      try {
-        const exported = await invoke("export_clip", {
-          path: currentClip.path,
-          startS: trimStart,
-          endS: trimEnd,
-        });
-        $("trim-status").textContent = `${exported.name} · aligned ${fmtDur(exported.aligned_start_s)}-${fmtDur(exported.aligned_end_s)}`;
-        $("notice").textContent = `exported ${fmtDur(exported.duration_s)} clip`;
-        await refresh();
-      } catch (e) {
-        $("error").textContent = e;
-        $("trim-status").textContent = "";
-      } finally {
-        $("clip-export").disabled = !currentClip;
-      }
-    }
-
-    async function deleteClip(path = currentClip && currentClip.path) {
-      if (!path) return;
-      if (!confirm("Delete this clip from disk?")) return;
-      try {
-        await invoke("delete_clip", { path });
-        $("notice").textContent = "clip deleted";
-        $("error").textContent = "";
-        if (currentClip && currentClip.path === path) closePlayer();
-        await refresh();
-      } catch (e) {
-        $("error").textContent = e;
-      }
-    }
-
-    async function copyCurrentPath() {
-      if (!currentClip) return;
-      try {
-        await navigator.clipboard.writeText(currentClip.path);
-        $("trim-status").textContent = "source path copied";
-      } catch (_) {
-        $("trim-status").textContent = currentClip.path;
-      }
-    }
-
-    listen("status", (e) => {
-      const s = e.payload;
-      $("dot").className = "dot" + (s.recording ? " on" : "");
-      $("state").textContent = s.recording ? "recording" : "stopped";
-      $("buffered").textContent = s.buffered_s.toFixed(1) + " s";
-      $("mb").textContent = s.buffered_mb.toFixed(1) + " MB";
-      $("segs").textContent = s.segments;
-    });
-
-    listen("saved", (e) => {
-      $("error").textContent = "";
-      const s = e.payload;
-      $("notice").textContent = s.gc_deleted
-        ? `cleaned up ${s.gc_deleted} old clip${s.gc_deleted > 1 ? "s" : ""} (${fmtBytes(s.gc_freed_bytes)})`
-        : `saved ${fmtDur(s.seconds)} replay`;
-      refresh();
-    });
-
-    listen("error", (e) => { $("error").textContent = e.payload; });
-
-    $("save").addEventListener("click", () => invoke("save_replay"));
     $("set-capture").addEventListener("change", syncCaptureFields);
     $("settings-save").addEventListener("click", async () => {
       $("settings-status").textContent = "";
@@ -1070,90 +209,132 @@
       }
     });
 
-    video.addEventListener("click", togglePlayback);
-    video.addEventListener("play", syncPlayState);
-    video.addEventListener("pause", syncPlayState);
-    video.addEventListener("timeupdate", updateTimeline);
-    video.addEventListener("durationchange", () => {
-      if (currentClip && clipDuration() && (!trimEnd || trimEnd > clipDuration())) setTrimBounds(trimStart, clipDuration());
-      renderMarkers();
-      updateTimeline();
-    });
-    video.addEventListener("loadedmetadata", () => {
-      $("stage-status").textContent = `${Math.round(video.videoWidth)}x${Math.round(video.videoHeight)} · ${fmtDur(video.duration)}`;
-      if (currentClip) {
-        $("pmeta").textContent = `${fmtDur(video.duration)} · ${currentClip.size_mb.toFixed(1)} MB · ${currentClip.path}`;
-        setTrimBounds(0, video.duration);
+    async function refresh() {
+      await Promise.all([refreshClips(), refreshStorage()]);
+    }
+
+    async function refreshStorage() {
+      const s = await invoke("storage_status");
+      $("storage-used").textContent = fmtBytes(s.total_bytes);
+      $("storage-used").className = s.over_quota ? "warn" : "";
+      $("storage-quota").textContent = s.quota_bytes == null ? "no limit" : fmtBytes(s.quota_bytes);
+      $("storage-clips").textContent = s.clip_count;
+    }
+
+    async function refreshClips() {
+      const clips = await invoke("list_clips");
+      const root = $("clips");
+      root.replaceChildren();
+      if (!clips.length) {
+        root.innerHTML = '<div class="hint">no clips yet — press Alt+F10 while something plays</div>';
+        return;
       }
-    });
+      for (const c of clips) {
+        const n = c.markers ? c.markers.markers.length : 0;
+        const el = document.createElement("div");
+        el.className = "clip";
+        el.innerHTML = `
+          <div class="meta">
+            <div class="name">${c.name}${n ? `<span class="badge">${n} marker${n > 1 ? "s" : ""}</span>` : ""}</div>
+            <div class="info">${fmtDur(c.duration_s)} · ${c.size_mb.toFixed(1)} MB · ${fmtAgo(c.modified_unix)}</div>
+          </div>
+          <button class="ghost play">▶</button>
+          <button class="ghost del">🗑</button>`;
+        el.querySelector(".play").addEventListener("click", () => openPlayer(c));
+        el.querySelector(".del").addEventListener("click", async () => {
+          await invoke("delete_clip", { path: c.path }).catch((e) => $("error").textContent = e);
+          $("notice").textContent = "";
+          refresh();
+        });
+        root.appendChild(el);
+      }
+    }
+
+    let currentClip = null;
+    const video = $("video");
     video.addEventListener("error", () => {
       const e = video.error;
-      $("stage-status").textContent = `load error ${e ? e.code : "?"}`;
+      $("pname").textContent = `load error ${e ? e.code : "?"} (${e && e.message ? e.message : "no detail"}) — ${video.src.slice(0, 80)}`;
     });
-    video.addEventListener("volumechange", syncMuteState);
-
-    $("play-toggle").addEventListener("click", togglePlayback);
-    $("seek-back").addEventListener("click", () => seekBy(-5));
-    $("seek-forward").addEventListener("click", () => seekBy(5));
-    $("mute-toggle").addEventListener("click", () => { video.muted = !video.muted; syncMuteState(); });
-    $("rate-select").addEventListener("change", () => { video.playbackRate = Number($("rate-select").value); });
-    $("volume-slider").addEventListener("input", () => {
-      video.volume = Number($("volume-slider").value);
-      video.muted = video.volume === 0;
+    video.addEventListener("loadedmetadata", () => {
+      $("pname").textContent = `${$("pname").dataset.name} — ${video.duration.toFixed(1)}s loaded`;
+      if (currentClip && !Number($("trim-end").value)) setTrimBounds(0, video.duration);
     });
-
-    $("trim-set-in").addEventListener("click", () => setTrimBounds(video.currentTime || 0, trimEnd));
-    $("trim-set-out").addEventListener("click", () => setTrimBounds(trimStart, video.currentTime || 0));
-    $("trim-start").addEventListener("change", () => setTrimBounds(Number($("trim-start").value), trimEnd));
-    $("trim-end").addEventListener("change", () => setTrimBounds(trimStart, Number($("trim-end").value)));
-    $("clip-export").addEventListener("click", exportCurrentTrim);
-    $("clip-delete").addEventListener("click", () => deleteClip());
-    $("clip-reveal").addEventListener("click", copyCurrentPath);
-    $("close").addEventListener("click", closePlayer);
-    $("prev-marker").addEventListener("click", () => jumpMarker(-1));
-    $("next-marker").addEventListener("click", () => jumpMarker(1));
-
-    $("timeline").addEventListener("pointerdown", (ev) => {
-      if (ev.target === $("trim-handle-in")) startTimelineDrag("in", ev);
-      else if (ev.target === $("trim-handle-out")) startTimelineDrag("out", ev);
-      else startTimelineDrag("seek", ev);
+    function setTrimBounds(start, end) {
+      const dur = Number.isFinite(video.duration) ? video.duration : end;
+      $("trim-start").max = dur;
+      $("trim-end").max = dur;
+      $("trim-start").value = Math.max(0, start).toFixed(1);
+      $("trim-end").value = Math.max(0, end).toFixed(1);
+    }
+    function openPlayer(clip) {
+      currentClip = clip;
+      $("pname").textContent = clip.name;
+      $("pname").dataset.name = clip.name;
+      video.src = convertFileSrc(clip.path);
+      $("player").classList.add("open");
+      $("trim-status").textContent = "";
+      const tl = $("timeline");
+      tl.querySelectorAll(".tick").forEach((t) => t.remove());
+      const dur = clip.duration_s ?? (clip.markers ? clip.markers.duration_s : null);
+      if (dur) setTrimBounds(0, dur);
+      if (clip.markers && dur) {
+        for (const m of clip.markers.markers) {
+          const tick = document.createElement("div");
+          tick.className = "tick";
+          tick.style.left = `${(m.t_s / dur) * 100}%`;
+          tick.title = `${m.kind}${m.subtype ? ` (${m.subtype})` : ""} — ${m.actor}${m.victim ? " → " + m.victim : ""} @ ${m.t_s.toFixed(1)}s`;
+          tick.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            video.currentTime = m.t_s;
+            video.play();
+          });
+          tl.appendChild(tick);
+        }
+      }
+      tl.onclick = (ev) => {
+        const r = tl.getBoundingClientRect();
+        if (video.duration) video.currentTime = ((ev.clientX - r.left) / r.width) * video.duration;
+      };
+      video.ontimeupdate = () => {
+        if (video.duration) $("progress").style.width = `${(video.currentTime / video.duration) * 100}%`;
+      };
+      video.play();
+    }
+    $("trim-set-in").addEventListener("click", () => {
+      const end = Number($("trim-end").value);
+      setTrimBounds(video.currentTime, Number.isFinite(end) ? end : video.duration);
     });
-    $("timeline").addEventListener("pointermove", handleTimelineDrag);
-    $("timeline").addEventListener("pointerup", stopTimelineDrag);
-    $("timeline").addEventListener("pointercancel", stopTimelineDrag);
-    $("timeline").addEventListener("lostpointercapture", stopTimelineDrag);
-
-    document.addEventListener("keydown", (ev) => {
+    $("trim-set-out").addEventListener("click", () => {
+      const start = Number($("trim-start").value);
+      setTrimBounds(Number.isFinite(start) ? start : 0, video.currentTime);
+    });
+    $("trim-export").addEventListener("click", async () => {
+      $("trim-status").textContent = "";
+      $("error").textContent = "";
       if (!currentClip) return;
-      const tag = ev.target && ev.target.tagName;
-      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
-      if (ev.code === "Space" || ev.code === "KeyK") {
-        ev.preventDefault();
-        togglePlayback();
-      } else if (ev.code === "ArrowLeft" || ev.code === "KeyJ") {
-        ev.preventDefault();
-        seekBy(ev.shiftKey ? -1 : -5);
-      } else if (ev.code === "ArrowRight" || ev.code === "KeyL") {
-        ev.preventDefault();
-        seekBy(ev.shiftKey ? 1 : 5);
-      } else if (ev.code === "KeyI") {
-        ev.preventDefault();
-        setTrimBounds(video.currentTime || 0, trimEnd);
-      } else if (ev.code === "KeyO") {
-        ev.preventDefault();
-        setTrimBounds(trimStart, video.currentTime || 0);
-      } else if (ev.code === "KeyM") {
-        ev.preventDefault();
-        jumpMarker(1);
-      } else if (ev.code === "Escape") {
-        ev.preventDefault();
-        closePlayer();
+      const start = Number($("trim-start").value);
+      const end = Number($("trim-end").value);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+        $("error").textContent = "trim out must be greater than in";
+        return;
+      }
+      try {
+        const exported = await invoke("export_clip", { path: currentClip.path, startS: start, endS: end });
+        $("trim-status").textContent = `${exported.name} · ${fmtDur(exported.aligned_start_s)}–${fmtDur(exported.aligned_end_s)}`;
+        $("notice").textContent = `exported ${fmtDur(exported.duration_s)} clip`;
+        await refresh();
+      } catch (e) {
+        $("error").textContent = e;
       }
     });
+    $("close").addEventListener("click", () => {
+      video.pause();
+      video.src = "";
+      currentClip = null;
+      $("player").classList.remove("open");
+    });
 
-    setWorkspaceEnabled(false);
-    syncPlayState();
-    syncMuteState();
     invoke("get_settings").then(fillSettings).catch((e) => $("error").textContent = e);
     refresh();
   </script>
