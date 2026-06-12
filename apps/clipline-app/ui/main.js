@@ -713,6 +713,8 @@ function toggleSettings(open = !settingsOpen) {
   // The clip survives the round-trip; just don't play behind the page.
   if (settingsOpen && !video.paused) video.pause();
   if (settingsOpen && !wasOpen) loadAudioDevices();
+  // Closing discards unsaved edits by repainting from last-saved settings.
+  if (wasOpen && !settingsOpen && currentSettings) fillSettings(currentSettings);
   updateViews();
   renderVisibleSettingsSection();
 }
