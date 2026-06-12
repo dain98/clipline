@@ -244,6 +244,106 @@ fn key_intents_cover_the_documented_shortcuts() {
 }
 
 #[test]
+fn marker_styles_map_kinds_to_categories() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('ChampionKill')"),
+        r#"{"glyph":"✕","cls":"kill"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('FirstBlood')"),
+        r#"{"glyph":"✕","cls":"kill"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('Multikill')"),
+        r#"{"glyph":"★","cls":"spree"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('BaronKill')"),
+        r#"{"glyph":"◆","cls":"objective"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('TurretKilled')"),
+        r#"{"glyph":"▣","cls":"structure"}"#
+    );
+    // Unknown / future kinds degrade to the info dot, never crash.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('GameStart')"),
+        r#"{"glyph":"•","cls":"info"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('SomethingNew')"),
+        r#"{"glyph":"•","cls":"info"}"#
+    );
+}
+
+#[test]
+fn ruler_marks_pick_nice_steps() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.rulerMarks(22, 8).map(m => m.t)"),
+        "[0,5,10,15,20]"
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.rulerMarks(22, 8).map(m => m.label)"),
+        r#"["0:00","0:05","0:10","0:15","0:20"]"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.rulerMarks(1200, 8).map(m => m.t)"),
+        "[0,300,600,900,1200]"
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.rulerMarks(6, 8).map(m => m.t)"),
+        "[0,1,2,3,4,5,6]"
+    );
+    assert_eq!(eval_json(&mut ctx, "PlayerCore.rulerMarks(0, 8)"), "[]");
+}
+
+#[test]
+fn clip_titles_use_twelve_hour_time() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.formatClipTitle(5, 11, 22, 25)"),
+        "Jun 11 · 10:25 PM"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.formatClipTitle(0, 1, 0, 5)"),
+        "Jan 1 · 12:05 AM"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.formatClipTitle(11, 31, 12, 0)"),
+        "Dec 31 · 12:00 PM"
+    );
+}
+
+#[test]
+fn marker_digest_collapses_categories() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        "const D = [{ kind: 'ChampionKill' }, { kind: 'ChampionKill' }, { kind: 'DragonKill' }];",
+    ))
+    .expect("define markers");
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.markerDigest(D)"),
+        "2 kills · 1 objective"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.markerDigest([{ kind: 'Multikill' }])"),
+        "1 spree"
+    );
+    assert_eq!(eval(&mut ctx, "PlayerCore.markerDigest([])"), "");
+}
+
+#[test]
+fn focus_mode_has_a_key() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('KeyF', false)"),
+        r#"{"kind":"toggle-focus"}"#
+    );
+}
+
+#[test]
 fn shared_constants_are_exposed() {
     let mut ctx = player_core_context();
     assert_eq!(eval(&mut ctx, "PlayerCore.MIN_TRIM_GAP_S"), "0.1");

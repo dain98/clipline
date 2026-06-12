@@ -18,6 +18,10 @@ const {
   nextMarker,
   prevMarker,
   markerSummary,
+  markerStyle,
+  markerDigest,
+  rulerMarks,
+  formatClipTitle,
   keyIntent,
 } = PlayerCore;
 
@@ -99,23 +103,21 @@ async function refreshClips() {
 function clipRow(c) {
   const el = document.createElement("div");
   el.className = "clip" + (currentClip && currentClip.path === c.path ? " active" : "");
+  el.title = c.name;
 
   const meta = document.createElement("div");
   const name = document.createElement("div");
   name.className = "name";
-  name.textContent = c.name;
-  const markerCount = c.markers ? c.markers.markers.length : 0;
-  if (markerCount) {
-    const badge = document.createElement("span");
-    badge.className = "badge";
-    badge.textContent = markerCount;
-    name.appendChild(badge);
-  }
+  const when = new Date(c.modified_unix * 1000);
+  name.textContent = formatClipTitle(
+    when.getMonth(), when.getDate(), when.getHours(), when.getMinutes());
   const info = document.createElement("div");
   info.className = "info";
+  const digest = markerDigest(c.markers ? c.markers.markers : []);
   info.textContent =
     `${fmtDur(c.duration_s)} · ${c.size_mb.toFixed(1)} MB · ` +
-    fmtAgo(Date.now() / 1000, c.modified_unix);
+    fmtAgo(Date.now() / 1000, c.modified_unix) +
+    (digest ? ` · ${digest}` : "");
   meta.append(name, info);
 
   const del = document.createElement("button");
@@ -161,6 +163,7 @@ function openClip(clip) {
   video.playbackRate = Number($("rate-select").value);
   setTrim(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
   renderMarkers();
+  renderRuler();
   renderClips();
   paintTimeline();
   video.play().catch(() => syncPlayState());
@@ -172,6 +175,7 @@ function closeReview() {
   video.removeAttribute("src");
   video.load();
   currentClip = null;
+  document.querySelector(".app").classList.remove("focus");
   $("review-viewer").hidden = true;
   $("review-empty").hidden = false;
   $("stage-note").textContent = "";
@@ -211,7 +215,9 @@ function renderMarkers() {
   const markers = clipMarkers();
   for (const m of markers) {
     const tick = document.createElement("button");
-    tick.className = "tick";
+    const style = markerStyle(m.kind);
+    tick.className = `tick tick-${style.cls}`;
+    tick.textContent = style.glyph;
     tick.style.left = `${percentFor(m.t_s, dur)}%`;
     tick.title = `${m.kind}${m.subtype ? ` (${m.subtype})` : ""} — ${m.actor}${m.victim ? " → " + m.victim : ""} @ ${m.t_s.toFixed(1)}s`;
     tick.addEventListener("pointerdown", (ev) => ev.stopPropagation());
@@ -226,11 +232,46 @@ function renderMarkers() {
   $("next-marker").disabled = !markers.length;
 }
 
+function renderRuler() {
+  const root = $("ruler");
+  root.replaceChildren();
+  for (const mark of rulerMarks(clipDuration(), 8)) {
+    const span = document.createElement("span");
+    span.style.left = `${percentFor(mark.t, clipDuration())}%`;
+    span.textContent = mark.label;
+    root.appendChild(span);
+  }
+}
+
+function toggleFocus() {
+  document.querySelector(".app").classList.toggle("focus");
+}
+
+// Rapid seeks (scrubbing) must not pile up: WebView2 stops painting frames
+// when a new seek lands while the previous one is in flight. Issue one seek
+// at a time and chain the latest target from the `seeked` event.
+let pendingSeek = null;
+
 function seekTo(time) {
   if (!currentClip) return;
-  video.currentTime = clampTime(time, clipDuration());
+  const t = clampTime(time, clipDuration());
+  if (video.seeking) {
+    pendingSeek = t;
+  } else {
+    pendingSeek = null;
+    video.currentTime = t;
+  }
   paintTimeline();
 }
+
+video.addEventListener("seeked", () => {
+  if (pendingSeek != null) {
+    const t = pendingSeek;
+    pendingSeek = null;
+    video.currentTime = t;
+  }
+  paintTimeline();
+});
 
 function seekBy(delta) {
   seekTo((video.currentTime || 0) + delta);
@@ -271,9 +312,14 @@ function jumpMarker(direction) {
 
 /* ---- timeline pointer interaction ---- */
 
+let resumeAfterDrag = false;
+
 function startDrag(kind, ev) {
   if (!currentClip) return;
   dragging = kind;
+  // Scrub paused so every pointer position shows its frame, then restore.
+  resumeAfterDrag = !video.paused;
+  if (resumeAfterDrag) video.pause();
   $("timeline").setPointerCapture(ev.pointerId);
   moveDrag(ev);
 }
@@ -287,11 +333,18 @@ function moveDrag(ev) {
   } else {
     const next = trimDrag(dragging, t, trimStart, trimEnd, clipDuration());
     setTrim(next.start, next.end);
+    // The playhead rides the dragged edge — you trim on the frame you see.
+    seekTo(dragging === "in" ? next.start : next.end);
   }
 }
 
 function endDrag() {
+  if (!dragging) return;
   dragging = null;
+  if (resumeAfterDrag) {
+    resumeAfterDrag = false;
+    video.play().catch(() => syncPlayState());
+  }
 }
 
 /* ---- clip actions ---- */
@@ -400,6 +453,7 @@ video.addEventListener("loadedmetadata", () => {
     $("pmeta").textContent = `${fmtDur(video.duration)} · ${currentClip.size_mb.toFixed(1)} MB · ${currentClip.path}`;
     setTrim(0, video.duration);
     renderMarkers();
+    renderRuler();
   }
 });
 video.addEventListener("error", () => {
@@ -425,6 +479,7 @@ $("export-clip").addEventListener("click", exportTrim);
 $("delete-clip").addEventListener("click", () => deleteClip());
 $("copy-path").addEventListener("click", copyPath);
 $("close-review").addEventListener("click", closeReview);
+$("focus-toggle").addEventListener("click", toggleFocus);
 
 $("timeline").addEventListener("pointerdown", (ev) => {
   if (ev.target === $("handle-in")) startDrag("in", ev);
@@ -450,6 +505,7 @@ document.addEventListener("keydown", (ev) => {
     case "set-out": setTrim(trimStart, video.currentTime || 0); break;
     case "next-marker": jumpMarker(1); break;
     case "prev-marker": jumpMarker(-1); break;
+    case "toggle-focus": toggleFocus(); break;
     case "close": closeReview(); break;
   }
 });

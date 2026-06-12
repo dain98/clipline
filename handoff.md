@@ -13,7 +13,7 @@ Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
 ## Current state (2026-06-12): a working tray recorder with a first-party review player
 
-Eleven milestones executed (plans in `docs/superpowers/plans/*.md` — seventeen plan docs, all
+Twelve milestones executed (plans in `docs/superpowers/plans/*.md` — eighteen plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -50,6 +50,13 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     DOM-free logic) / `main.js` (wiring); `player-core.js` is unit-tested **from Rust** via
     `boa_engine` (`tests/player_core.rs`), and `tests/ui_contract.rs` guards the DOM contract.
     (An earlier externally-authored workspace, `bd1c84f`, was reverted and redone this way.)
+12. **Review player polish** (Outplayed comparison-driven) — typed marker chips
+    (kill ✕ / spree ★ / objective ◆ / structure ▣ / info •, kind-colored, unknown kinds
+    degrade to info), labeled time ruler with nice-step gradations, transport reordered to
+    sit under the stage, human-first library labels ("Jun 11 · 10:25 PM" + marker digest,
+    filename in the tooltip), focus mode (`F` hides the sidebar), live scrubbing
+    (seek-throttled via the `seeked` event so WebView2 keeps painting; trim-handle drags
+    ride the playhead and pause/resume playback).
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window

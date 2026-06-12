@@ -99,6 +99,74 @@ const PlayerCore = (() => {
     return markers.length === 1 ? "1 marker" : `${markers.length} markers`;
   };
 
+  // EventKind variant name -> visual category. Unknown kinds degrade to info.
+  const MARKER_CATEGORIES = {
+    ChampionKill: "kill",
+    FirstBlood: "kill",
+    Multikill: "spree",
+    Ace: "spree",
+    DragonKill: "objective",
+    HeraldKill: "objective",
+    BaronKill: "objective",
+    TurretKilled: "structure",
+    InhibKilled: "structure",
+    FirstBrick: "structure",
+  };
+  const MARKER_GLYPHS = {
+    kill: "✕",
+    spree: "★",
+    objective: "◆",
+    structure: "▣",
+    info: "•",
+  };
+
+  const markerStyle = (kind) => {
+    const cls = MARKER_CATEGORIES[kind] || "info";
+    return { glyph: MARKER_GLYPHS[cls], cls };
+  };
+
+  const DIGEST_NOUNS = {
+    kill: ["kill", "kills"],
+    spree: ["spree", "sprees"],
+    objective: ["objective", "objectives"],
+    structure: ["structure", "structures"],
+    info: ["event", "events"],
+  };
+
+  const markerDigest = (markers) => {
+    const counts = {};
+    for (const m of markers) {
+      const cls = MARKER_CATEGORIES[m.kind] || "info";
+      counts[cls] = (counts[cls] || 0) + 1;
+    }
+    return Object.keys(DIGEST_NOUNS)
+      .filter((cls) => counts[cls])
+      .map((cls) => `${counts[cls]} ${DIGEST_NOUNS[cls][counts[cls] === 1 ? 0 : 1]}`)
+      .join(" · ");
+  };
+
+  const RULER_STEPS_S = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+
+  const rulerMarks = (duration, maxMarks) => {
+    if (!Number.isFinite(duration) || duration <= 0) return [];
+    const step =
+      RULER_STEPS_S.find((s) => duration / s <= maxMarks - 1) ??
+      RULER_STEPS_S[RULER_STEPS_S.length - 1];
+    const marks = [];
+    for (let t = 0; t <= duration; t += step) {
+      marks.push({ t, label: fmtDur(t) });
+    }
+    return marks;
+  };
+
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  const formatClipTitle = (month0, day, hours, minutes) => {
+    const h12 = hours % 12 === 0 ? 12 : hours % 12;
+    const ampm = hours < 12 ? "AM" : "PM";
+    return `${MONTHS[month0]} ${day} · ${h12}:${String(minutes).padStart(2, "0")} ${ampm}`;
+  };
+
   const keyIntent = (code, shiftKey) => {
     switch (code) {
       case "Space":
@@ -120,6 +188,8 @@ const PlayerCore = (() => {
         return { kind: "set-out" };
       case "KeyM":
         return { kind: shiftKey ? "prev-marker" : "next-marker" };
+      case "KeyF":
+        return { kind: "toggle-focus" };
       case "Escape":
         return { kind: "close" };
       default:
@@ -143,6 +213,10 @@ const PlayerCore = (() => {
     nextMarker,
     prevMarker,
     markerSummary,
+    markerStyle,
+    markerDigest,
+    rulerMarks,
+    formatClipTitle,
     keyIntent,
   };
 })();

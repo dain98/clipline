@@ -89,6 +89,10 @@ label span { white-space: nowrap; }
   overflow: hidden;
 }
 
+/* Focus mode: the review pane takes the whole window while a clip is open. */
+.app.focus { grid-template-columns: minmax(0, 1fr); }
+.app.focus .sidebar { display: none; }
+
 /* ---- sidebar ---- */
 .sidebar {
   display: grid;
@@ -342,19 +346,53 @@ label span { white-space: nowrap; }
 
 .tick {
   position: absolute;
-  top: 6px;
-  bottom: 6px;
-  width: 4px;
-  margin-left: -2px;
+  top: 8px;
+  bottom: 8px;
+  width: 15px;
+  margin-left: -8px;
+  display: grid;
+  place-items: center;
   border: 0;
-  border-radius: 2px;
+  border-radius: 4px;
   padding: 0;
   min-width: 0;
-  background: var(--marker);
+  font-size: 9px;
+  line-height: 1;
   z-index: 3;
   cursor: pointer;
 }
-.tick:hover { background: #ffd066; box-shadow: 0 0 6px var(--marker); }
+.tick:hover { filter: brightness(1.25); box-shadow: 0 0 6px rgba(255, 255, 255, 0.35); }
+.tick-kill { background: #c93a3f; color: #fff; }
+.tick-spree { background: #ff8c42; color: #2b1503; }
+.tick-objective { background: #a07ee8; color: #1c1030; }
+.tick-structure { background: var(--marker); color: #2b220c; }
+.tick-info { background: #566073; color: #dfe3ea; }
+
+.ruler {
+  position: relative;
+  height: 14px;
+  margin-top: -4px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.ruler span {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+.ruler span::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -5px;
+  width: 1px;
+  height: 4px;
+  background: var(--line-strong);
+}
+.ruler span:first-child { transform: none; }
+.ruler span:first-child::before { left: 0; }
 
 .transport {
   display: grid;

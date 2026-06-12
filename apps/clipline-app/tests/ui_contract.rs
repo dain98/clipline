@@ -43,12 +43,22 @@ fn review_player_owns_all_controls() {
         "id=\"delete-clip\"",
         "id=\"copy-path\"",
         "id=\"close-review\"",
+        "id=\"ruler\"",
+        "id=\"focus-toggle\"",
     ] {
         assert!(
             html.contains(required),
             "review player is missing required control {required}"
         );
     }
+
+    // Conventional ordering: transport glued to the stage, timeline below it.
+    let transport = html.find("id=\"play-toggle\"").expect("play toggle");
+    let timeline = html.find("id=\"timeline\"").expect("timeline");
+    assert!(
+        transport < timeline,
+        "transport row must precede the timeline in the deck"
+    );
 }
 
 #[test]
