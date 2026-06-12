@@ -125,9 +125,15 @@ function clipRow(c) {
   const del = document.createElement("button");
   del.className = "del";
   del.title = "Delete clip";
-  del.textContent = "✕";
+  // Static markup, no clip data — innerHTML is safe here.
+  del.innerHTML =
+    '<svg viewBox="0 0 24 24"><path d="M9 3v1H4v2h16V4h-5V3H9zM6 8v11a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8H6zm3 2h2v9H9v-9zm4 0h2v9h-2v-9z"/></svg>';
 
-  el.addEventListener("click", () => openClip(c));
+  // Clicking the open clip's row again closes it (there is no Close button).
+  el.addEventListener("click", () => {
+    if (currentClip && currentClip.path === c.path) closeReview();
+    else openClip(c);
+  });
   del.addEventListener("click", (ev) => {
     ev.stopPropagation();
     deleteClip(c.path);
@@ -184,7 +190,6 @@ function closeReview() {
   video.removeAttribute("src");
   video.load();
   currentClip = null;
-  document.querySelector(".app").classList.remove("focus");
   $("review-viewer").hidden = true;
   $("review-empty").hidden = false;
   $("stage-note").textContent = "";
@@ -254,8 +259,8 @@ function renderRuler() {
   }
 }
 
-function toggleFocus() {
-  document.querySelector(".app").classList.toggle("focus");
+function toggleRail() {
+  document.querySelector(".app").classList.toggle("rail");
 }
 
 // Rapid seeks (scrubbing) must not pile up: WebView2 stops painting frames
@@ -399,9 +404,28 @@ async function exportTrim() {
   }
 }
 
+// In-app modal — the native browser prompt renders "tauri.localhost says".
+function confirmDelete(name) {
+  return new Promise((resolve) => {
+    const dlg = $("confirm-dialog");
+    $("confirm-detail").textContent = name;
+    const finish = (ok) => {
+      dlg.removeEventListener("close", onClose);
+      if (dlg.open) dlg.close();
+      resolve(ok);
+    };
+    const onClose = () => finish(false); // Esc / backdrop paths
+    dlg.addEventListener("close", onClose);
+    $("confirm-cancel").onclick = () => finish(false);
+    $("confirm-accept").onclick = () => finish(true);
+    dlg.showModal();
+  });
+}
+
 async function deleteClip(path = currentClip && currentClip.path) {
   if (!path) return;
-  if (!confirm("Delete this clip from disk?")) return;
+  const name = path.split(/[\\/]/).pop();
+  if (!(await confirmDelete(name))) return;
   try {
     await invoke("delete_clip", { path });
     $("notice").textContent = "clip deleted";
@@ -410,16 +434,6 @@ async function deleteClip(path = currentClip && currentClip.path) {
     await refresh();
   } catch (e) {
     $("error").textContent = e;
-  }
-}
-
-async function copyPath() {
-  if (!currentClip) return;
-  try {
-    await navigator.clipboard.writeText(currentClip.path);
-    $("deck-status").textContent = "source path copied";
-  } catch (_) {
-    $("deck-status").textContent = currentClip.path;
   }
 }
 
@@ -437,6 +451,7 @@ async function openFolder() {
 listen("status", (e) => {
   const s = e.payload;
   $("dot").className = "dot" + (s.recording ? " on" : "");
+  $("rail-dot").className = "dot" + (s.recording ? " on" : "");
   $("state").textContent = s.recording ? "recording" : "stopped";
   $("buffered").textContent = s.buffered_s.toFixed(1) + " s";
   $("mb").textContent = s.buffered_mb.toFixed(1) + " MB";
@@ -514,10 +529,14 @@ $("volume-slider").addEventListener("input", () => {
 
 $("export-clip").addEventListener("click", exportTrim);
 $("delete-clip").addEventListener("click", () => deleteClip());
-$("copy-path").addEventListener("click", copyPath);
 $("open-folder").addEventListener("click", openFolder);
-$("close-review").addEventListener("click", closeReview);
-$("focus-toggle").addEventListener("click", toggleFocus);
+
+$("sidebar-toggle").addEventListener("click", toggleRail);
+$("rail-save").addEventListener("click", () => invoke("save_replay"));
+$("rail-settings").addEventListener("click", () => {
+  document.querySelector(".app").classList.remove("rail");
+  document.querySelector(".settings-fold").open = true;
+});
 
 $("timeline").addEventListener("pointerdown", (ev) => {
   if (ev.target === $("handle-in")) startDrag("in", ev);
@@ -540,6 +559,7 @@ $("timeline").addEventListener("lostpointercapture", endDrag);
 
 document.addEventListener("keydown", (ev) => {
   if (!currentClip) return;
+  if ($("confirm-dialog").open) return; // the dialog owns the keyboard
   const tag = ev.target && ev.target.tagName;
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
   const intent = keyIntent(ev.code, ev.shiftKey);
@@ -553,7 +573,7 @@ document.addEventListener("keydown", (ev) => {
     case "set-out": setTrim(trimStart, video.currentTime || 0); break;
     case "next-marker": jumpMarker(1); break;
     case "prev-marker": jumpMarker(-1); break;
-    case "toggle-focus": toggleFocus(); break;
+    case "toggle-focus": toggleRail(); break;
     case "close": closeReview(); break;
   }
 });

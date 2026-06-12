@@ -89,21 +89,67 @@ label span { white-space: nowrap; }
   overflow: hidden;
 }
 
-/* Focus mode: the review pane takes the whole window while a clip is open. */
-.app.focus { grid-template-columns: minmax(0, 1fr); }
-.app.focus .sidebar { display: none; }
+/* Rail mode: the sidebar narrows to an icon column; review keeps the rest. */
+.app.rail { grid-template-columns: 52px minmax(0, 1fr); }
+.app.rail .sidebar-full { display: none; }
+.app.rail .sidebar-rail { display: flex; }
+.app.rail .sidebar-top h1 { display: none; }
+.app.rail .sidebar-top { justify-content: center; padding: 10px 0; }
 
 /* ---- sidebar ---- */
 .sidebar {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
   border-right: 1px solid var(--line);
   background: var(--panel);
 }
 
+.sidebar-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px 0;
+}
+
+#sidebar-toggle,
+.sidebar-rail button {
+  width: 34px;
+  height: 34px;
+  min-width: 0;
+  padding: 7px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+#sidebar-toggle:hover,
+.sidebar-rail button:hover { background: var(--panel-2); color: var(--text); }
+#sidebar-toggle svg,
+.sidebar-rail svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+}
+
+.sidebar-full {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+}
+
+.sidebar-rail {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 0;
+  min-height: 0;
+}
+.rail-spacer { flex: 1 1 0; }
+
 .sidebar-head {
-  padding: 16px 16px 10px;
+  padding: 4px 16px 10px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -262,9 +308,65 @@ label span { white-space: nowrap; }
   text-overflow: ellipsis;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  /* The visible path doubles as the copy story — let it be selected. */
+  user-select: text;
 }
 
 .review-actions { display: flex; gap: 8px; }
+
+.review-actions .icon-button {
+  width: 34px;
+  min-width: 0;
+  padding: 7px;
+}
+.review-actions .icon-button svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+}
+
+.clip-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.clip-button svg { width: 15px; height: 15px; fill: currentColor; }
+
+.clip .del svg { display: block; width: 13px; height: 13px; fill: currentColor; margin: 0 auto; }
+
+/* ---- in-app confirm dialog (native confirm() shows browser chrome) ---- */
+#confirm-dialog {
+  width: 380px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+#confirm-dialog::backdrop { background: rgba(5, 7, 10, 0.62); }
+
+.confirm-body {
+  display: grid;
+  gap: 5px;
+  padding: 18px 18px 12px;
+}
+.confirm-body strong { font-size: 15px; }
+#confirm-detail {
+  color: var(--muted);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 18px 16px;
+}
 
 .stage {
   position: relative;

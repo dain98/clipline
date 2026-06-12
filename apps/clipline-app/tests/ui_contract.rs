@@ -41,16 +41,29 @@ fn review_player_owns_all_controls() {
         "id=\"export-clip\"",
         "id=\"trim-summary\"",
         "id=\"delete-clip\"",
-        "id=\"copy-path\"",
-        "id=\"close-review\"",
         "id=\"ruler\"",
-        "id=\"focus-toggle\"",
         "id=\"open-folder\"",
         "id=\"stage-overlay\"",
+        "id=\"sidebar-toggle\"",
+        "id=\"rail-dot\"",
+        "id=\"rail-save\"",
+        "id=\"rail-settings\"",
+        "id=\"confirm-dialog\"",
+        "id=\"confirm-accept\"",
+        "id=\"confirm-cancel\"",
     ] {
         assert!(
             html.contains(required),
             "review player is missing required control {required}"
+        );
+    }
+
+    // Removed on purpose (2026-06-12): the path lives in #pmeta, and clicking
+    // the active library row again closes the clip.
+    for gone in ["id=\"copy-path\"", "id=\"close-review\"", "id=\"focus-toggle\""] {
+        assert!(
+            !html.contains(gone),
+            "{gone} was removed from the header — do not reintroduce it"
         );
     }
 
@@ -62,7 +75,7 @@ fn review_player_owns_all_controls() {
         "transport row must precede the timeline in the deck"
     );
 
-    // Transport buttons carry SVG icons; text labels are a regression.
+    // Icon buttons carry SVG icons; text labels are a regression.
     for id in [
         "id=\"play-toggle\"",
         "id=\"seek-back\"",
@@ -70,6 +83,12 @@ fn review_player_owns_all_controls() {
         "id=\"prev-marker\"",
         "id=\"next-marker\"",
         "id=\"mute-toggle\"",
+        "id=\"sidebar-toggle\"",
+        "id=\"open-folder\"",
+        "id=\"rail-save\"",
+        "id=\"rail-settings\"",
+        "id=\"delete-clip\"",
+        "id=\"export-clip\"",
     ] {
         let start = html.find(id).expect("transport button exists");
         let body_end = html[start..]
@@ -79,6 +98,20 @@ fn review_player_owns_all_controls() {
         assert!(
             html[start..body_end].contains("<svg"),
             "{id} must render an SVG icon, not a text label"
+        );
+    }
+}
+
+#[test]
+fn no_native_browser_dialogs() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/main.js");
+    let js = fs::read_to_string(path).expect("read ui/main.js");
+    // window.confirm/alert render browser chrome ("tauri.localhost says") —
+    // use the in-app #confirm-dialog instead.
+    for banned in ["confirm(", "alert("] {
+        assert!(
+            !js.contains(banned),
+            "main.js must not call native {banned}…) — use the in-app dialog"
         );
     }
 }

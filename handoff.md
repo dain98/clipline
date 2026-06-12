@@ -13,7 +13,7 @@ Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
 ## Current state (2026-06-12): a working tray recorder with a first-party review player
 
-Fourteen milestones executed (plans in `docs/superpowers/plans/*.md` — twenty plan docs, all
+Fifteen milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-one plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -72,6 +72,14 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     the playhead rAF loop — no timers), hides on pointer-leave, wakes on pointer/keyboard.
     Volume is an icon + hover-expanding slider. `ui_contract` now requires `<svg` inside
     every transport button.
+15. **Sidebar rail + header cleanup** — the hamburger collapses the sidebar to a 52 px
+    icon rail (status dot, save, gear; `F` toggles; rail state survives clip open/close)
+    instead of the old full-collapse focus mode. Header is two icon buttons (folder reveal,
+    trash delete); Copy Path is gone (the path in `#pmeta` is selectable text) and Close is
+    gone (click the active library row again, or `Esc`). Export is a scissors-"Clip" primary
+    button. Delete confirmation is an in-app `<dialog>` (Delete left / Cancel right, user
+    preference) — `ui_contract` bans native `confirm()`/`alert()` and the removed header ids
+    outright.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
