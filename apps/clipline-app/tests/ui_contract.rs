@@ -9,6 +9,11 @@ fn index_html() -> String {
     fs::read_to_string(path).expect("read ui/index.html")
 }
 
+fn styles_css() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/styles.css");
+    fs::read_to_string(path).expect("read ui/styles.css")
+}
+
 #[test]
 fn review_player_owns_all_controls() {
     let html = index_html();
@@ -222,6 +227,31 @@ fn no_native_browser_dialogs() {
             "main.js must not call native {banned}…) — use the in-app dialog"
         );
     }
+}
+
+#[test]
+fn controls_have_custom_range_and_scrollbar_skin() {
+    let css = styles_css();
+    let js =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/main.js")).unwrap();
+
+    assert!(
+        css.contains("::-webkit-slider-thumb") && css.contains("::-moz-range-thumb"),
+        "range inputs should use Clipline slider styling instead of native defaults"
+    );
+    assert!(
+        css.contains("::-webkit-scrollbar-thumb") && css.contains("scrollbar-color"),
+        "scrollable areas should use the app scrollbar styling"
+    );
+    assert!(
+        css.contains("--range-progress") && js.contains("syncRangeProgress"),
+        "slider fill must stay synced to the current value"
+    );
+    assert!(
+        css.contains("background-position: right 12px center")
+            && css.contains("-webkit-appearance: none"),
+        "select arrows should use the app inset instead of the native edge-hugging arrow"
+    );
 }
 
 #[test]

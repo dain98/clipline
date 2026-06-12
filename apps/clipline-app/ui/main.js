@@ -150,6 +150,9 @@ function syncRecordingFields() {
   const replay = Number($("set-replay").value);
   const quality = recordingQualityPreset(Number($("set-bitrate").value));
   const smoothness = smoothnessPreset(Number($("set-fps").value));
+  syncRangeProgress($("set-replay"));
+  syncRangeProgress($("set-bitrate"));
+  syncRangeProgress($("set-fps"));
   $("replay-summary").textContent = `Save Replay writes the last ${settingDurationLabel(replay)}.`;
   $("replay-summary").className = "setting-summary";
   $("quality-summary").textContent = `${quality.label} quality - ${quality.hint}.`;
@@ -159,6 +162,18 @@ function syncRecordingFields() {
 function volumeLabel(value) {
   const pct = Math.round(Math.max(0, Math.min(2, Number(value) || 0)) * 100);
   return `${pct}%`;
+}
+
+function syncRangeProgress(input) {
+  const min = Number(input.min || 0);
+  const max = Number(input.max || 100);
+  const value = Number(input.value || min);
+  const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
+  input.style.setProperty("--range-progress", `${Math.max(0, Math.min(100, pct)).toFixed(2)}%`);
+}
+
+function syncAllRangeProgress() {
+  document.querySelectorAll("input[type='range']").forEach(syncRangeProgress);
 }
 
 function selectedDeviceId(id) {
@@ -204,6 +219,8 @@ function syncAudioFields() {
   $("set-mic-mono").disabled = micTestRunning;
   $("test-mic").disabled = false;
   $("test-mic").textContent = micTestRunning ? "Stop testing" : "Test mic";
+  syncRangeProgress($("set-output-volume"));
+  syncRangeProgress($("set-mic-volume"));
   $("output-volume-summary").textContent = volumeLabel($("set-output-volume").value);
   $("mic-volume-summary").textContent = volumeLabel($("set-mic-volume").value);
 }
@@ -828,6 +845,7 @@ function syncPlayState() {
 function syncVolume() {
   $("mute-toggle").classList.toggle("muted", video.muted || video.volume === 0);
   $("volume-slider").value = String(video.muted ? 0 : video.volume);
+  syncRangeProgress($("volume-slider"));
 }
 
 /* ---- overlay visibility (PlayerCore.overlayVisible policy) ---- */
@@ -1021,17 +1039,30 @@ for (const id of ["set-output-enabled", "set-mic-enabled"]) {
   $(id).addEventListener("change", syncAudioFields);
 }
 for (const id of ["set-output-volume", "set-mic-volume"]) {
-  $(id).addEventListener("input", syncAudioFields);
-  $(id).addEventListener("change", syncAudioFields);
+  $(id).addEventListener("input", () => {
+    syncRangeProgress($(id));
+    syncAudioFields();
+  });
+  $(id).addEventListener("change", () => {
+    syncRangeProgress($(id));
+    syncAudioFields();
+  });
 }
 $("test-mic").addEventListener("click", testMic);
 for (const id of ["set-buffer", "set-replay", "set-bitrate", "set-fps"]) {
-  $(id).addEventListener("input", syncRecordingFields);
-  $(id).addEventListener("change", syncRecordingFields);
+  $(id).addEventListener("input", () => {
+    syncRangeProgress($(id));
+    syncRecordingFields();
+  });
+  $(id).addEventListener("change", () => {
+    syncRangeProgress($(id));
+    syncRecordingFields();
+  });
 }
 document.querySelectorAll("[data-replay-preset]").forEach((button) => {
   button.addEventListener("click", () => {
     $("set-replay").value = button.dataset.replayPreset;
+    syncRangeProgress($("set-replay"));
     syncRecordingFields();
   });
 });
@@ -1108,6 +1139,7 @@ $("rate-select").addEventListener("change", () => {
   video.playbackRate = Number($("rate-select").value);
 });
 $("volume-slider").addEventListener("input", () => {
+  syncRangeProgress($("volume-slider"));
   video.volume = Number($("volume-slider").value);
   video.muted = video.volume === 0;
 });
@@ -1191,6 +1223,7 @@ document.addEventListener("keydown", (ev) => {
 updateViews();
 syncPlayState();
 syncVolume();
+syncAllRangeProgress();
 invoke("get_settings").then(fillSettings).catch((e) => $("error").textContent = e);
 loadDisplays();
 loadAudioDevices();
