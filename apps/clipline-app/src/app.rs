@@ -193,6 +193,7 @@ pub fn run() {
             crate::library::list_clips,
             crate::library::delete_clip,
             crate::library::export_clip,
+            crate::library::reveal_clip,
             crate::library::storage_status
         ])
         .setup(move |app| {

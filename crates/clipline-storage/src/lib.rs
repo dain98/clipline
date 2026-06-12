@@ -1,5 +1,7 @@
 //! Filesystem storage management for saved clips.
 
+pub mod sessions;
+
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -68,6 +70,13 @@ pub fn enforce_quota(
         if let Some(sidecar) = &clip.sidecar {
             remove_file_if_exists(sidecar)?;
         }
+        // Session folders disappear with their last clip; remove_dir refuses
+        // non-empty directories, so a leftover sidecar/export keeps it alive.
+        if let Some(parent) = clip.path.parent() {
+            if parent != dir {
+                let _ = fs::remove_dir(parent);
+            }
+        }
         total_bytes = total_bytes.saturating_sub(clip_bytes);
         freed_bytes += clip_bytes;
         deleted_clips += 1;
@@ -95,8 +104,20 @@ impl ClipFile {
     }
 }
 
+/// Clips live at the root (legacy) or one level down in session folders.
 fn inventory(dir: &Path) -> io::Result<Vec<ClipFile>> {
     let mut clips = Vec::new();
+    collect_clips(dir, &mut clips)?;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.metadata()?.is_dir() {
+            collect_clips(&entry.path(), &mut clips)?;
+        }
+    }
+    Ok(clips)
+}
+
+fn collect_clips(dir: &Path, clips: &mut Vec<ClipFile>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -117,7 +138,7 @@ fn inventory(dir: &Path) -> io::Result<Vec<ClipFile>> {
             modified: meta.modified().unwrap_or(UNIX_EPOCH),
         });
     }
-    Ok(clips)
+    Ok(())
 }
 
 fn status_from_clips(clips: &[ClipFile], quota_bytes: Option<u64>) -> StorageStatus {
@@ -190,6 +211,9 @@ mod tests {
 
         fn write(&self, name: &str, bytes: usize) -> PathBuf {
             let path = self.0.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
             fs::write(&path, vec![0u8; bytes]).unwrap();
             path
         }
@@ -284,6 +308,58 @@ mod tests {
         assert!(fresh.exists());
         assert_eq!(report.status.total_bytes, 20);
         assert!(report.status.is_over_quota());
+    }
+
+    #[test]
+    fn status_counts_clips_inside_session_folders() {
+        let dir = TestDir::new("session-status");
+        dir.write("legacy.mp4", 10);
+        dir.write("2026-06-12 14-30/clip.mp4", 7);
+        dir.write("2026-06-12 14-30/clip.markers.json", 3);
+
+        let status = storage_status(dir.path(), Some(100)).unwrap();
+
+        assert_eq!(status.clip_count, 2);
+        assert_eq!(status.total_bytes, 20);
+    }
+
+    #[test]
+    fn enforce_quota_crosses_folders_and_removes_emptied_session_dirs() {
+        let dir = TestDir::new("session-gc");
+        let old = dir.write("2026-06-11 09-00/old.mp4", 10);
+        let old_sidecar = dir.write("2026-06-11 09-00/old.markers.json", 2);
+        tick_mtime();
+        let legacy = dir.write("legacy.mp4", 10);
+        tick_mtime();
+        let fresh = dir.write("2026-06-12 14-30/fresh.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(20), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert_eq!(report.freed_bytes, 12);
+        assert!(!old.exists());
+        assert!(!old_sidecar.exists());
+        assert!(
+            !old.parent().unwrap().exists(),
+            "emptied session folder must be removed"
+        );
+        assert!(legacy.exists());
+        assert!(fresh.exists());
+    }
+
+    #[test]
+    fn enforce_quota_keeps_session_dirs_that_still_hold_clips() {
+        let dir = TestDir::new("session-keep");
+        let old = dir.write("2026-06-12 14-30/old.mp4", 10);
+        tick_mtime();
+        let new = dir.write("2026-06-12 14-30/new.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(10), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(!old.exists());
+        assert!(new.exists());
+        assert!(new.parent().unwrap().exists());
     }
 
     #[test]

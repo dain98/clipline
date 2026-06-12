@@ -18,6 +18,10 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-global-shortcut = "2"
+chrono = "0.4.45"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+boa_engine = "0.21.1"

@@ -11,10 +11,10 @@
     "windows": [
       {
         "title": "Clipline",
-        "width": 1180,
-        "height": 780,
-        "minWidth": 980,
-        "minHeight": 680,
+        "width": 1200,
+        "height": 760,
+        "minWidth": 960,
+        "minHeight": 640,
         "resizable": true
       }
     ],
@@ -22,7 +22,10 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["**/Videos/Clipline/*.mp4"]
+        "scope": [
+          "**/Videos/Clipline/*.mp4",
+          "**/Videos/Clipline/**/*.mp4"
+        ]
       }
     }
   }

@@ -11,9 +11,9 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-12): a working tray recorder with a custom review workspace
+## Current state (2026-06-12): a working tray recorder with a first-party review player
 
-Eleven milestones executed (plans in `docs/superpowers/plans/*.md` — sixteen plan docs, all
+Sixteen milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-two plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -40,11 +40,52 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     without touching the source clip. `clipline-mp4::trim_keyframe_aligned` parses Clipline's
     finalized H.264/Opus MP4 tables, aligns start backward and end forward to video keyframes,
     stream-copies selected samples into a fresh finalized MP4, and crops marker sidecars.
-11. **Review workspace** — the app no longer exposes browser-native media controls. Saved clips
-    open in a two-pane Clipline workspace with a first-party transport row, seek/jump controls,
-    mute/rate/volume, marker navigation, visible trim selection/handles, keyboard review shortcuts,
-    and clip-local export/delete/copy-path actions. A CI-friendly `ui_contract` integration test
-    guards the player DOM contract.
+11. **Review player v2** — clips open in a two-pane review player with no native video chrome:
+    dimmed-outside-trim timeline with draggable in/out edges and amber marker ticks,
+    transport row (marker prev/next, ±5 s, play/pause, tenths readout, rate, volume),
+    keyboard-first review (`Space`/`K`, `←→`/`J`/`L` 5 s / `Shift` 1 s, `,`/`.` 0.1 s,
+    `I`/`O` trim at playhead, `M`/`Shift+M` markers, `Esc`), and an export row that shows the
+    kept range live. There are deliberately no trim number inputs — position the playhead,
+    then mark. The UI is split into `index.html` / `styles.css` / `player-core.js` (pure,
+    DOM-free logic) / `main.js` (wiring); `player-core.js` is unit-tested **from Rust** via
+    `boa_engine` (`tests/player_core.rs`), and `tests/ui_contract.rs` guards the DOM contract.
+    (An earlier externally-authored workspace, `bd1c84f`, was reverted and redone this way.)
+12. **Review player polish** (Outplayed comparison-driven) — typed marker chips
+    (kill ✕ / spree ★ / objective ◆ / structure ▣ / info •, kind-colored, unknown kinds
+    degrade to info), labeled time ruler with nice-step gradations, transport reordered to
+    sit under the stage, human-first library labels ("Jun 11 · 10:25 PM" + marker digest,
+    filename in the tooltip), focus mode (`F` hides the sidebar), live scrubbing
+    (seek-throttled via the `seeked` event so WebView2 keeps painting; trim-handle drags
+    ride the playhead and pause/resume playback).
+13. **Session folders** — saves land in `Videos\Clipline\<session>\`: one folder per recorder
+    run (label `YYYY-MM-DD HH-MM`, local time, fixed at service start) plus a dedicated
+    `… league` folder per detected LoL match (the poller now sends
+    `MatchStarted`/`MatchEnded`; `GameEnd` events also end the match session). Folders are
+    created lazily at save time; exports stay siblings so they inherit the folder; the
+    library groups by session with legacy root clips under "Earlier"; `reveal_clip` opens
+    Explorer with the clip selected; storage status/GC scan root + one level and delete
+    emptied session folders. assetProtocol needed a second glob
+    (`**/Videos/Clipline/**/*.mp4`) for subfolder playback.
+14. **Stage overlay transport** — the transport row moved onto the video as a translucent
+    hover bar (gradient scrim, hand-authored inline SVG icons, no icon font/npm): pins while
+    paused, fades after 2 s idle while playing (`PlayerCore.overlayVisible`, evaluated from
+    the playhead rAF loop — no timers), hides on pointer-leave, wakes on pointer/keyboard.
+    Volume is an icon + hover-expanding slider. `ui_contract` now requires `<svg` inside
+    every transport button.
+15. **Sidebar rail + header cleanup** — the hamburger collapses the sidebar to a 52 px
+    icon rail (status dot, save, gear; `F` toggles; rail state survives clip open/close)
+    instead of the old full-collapse focus mode. Header is two icon buttons (folder reveal,
+    trash delete); Copy Path is gone (the path in `#pmeta` is selectable text) and Close is
+    gone (click the active library row again, or `Esc`). Export is a scissors-"Clip" primary
+    button. Delete confirmation is an in-app `<dialog>` (Delete left / Cancel right, user
+    preference) — `ui_contract` bans native `confirm()`/`alert()` and the removed header ids
+    outright.
+16. **Settings page** — settings left the sidebar fold for a full-bleed tabbed page in the
+    main pane (Capture / Recording / Storage / Hotkeys; name + description rows; one Save
+    footer). Reached via the sidebar Settings row or the rail gear; exits via ✕, `Esc`
+    (priority over closing the clip; player shortcuts are inert behind the page), or opening
+    a clip. The open clip pauses and survives the round-trip. Field ids and the
+    validate/save/restart wiring are unchanged from milestone 9.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
@@ -62,7 +103,7 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 | `clipline-storage` | Saved-clip inventory, sidecar-aware size accounting, oldest-first quota GC with protected fresh saves | unit tests |
 | `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), multi-track h264+Opus, box walker, `movie_duration_s`, keyframe-aligned stream-copy trim | ffprobe + unit tests |
 | `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`) + neutral `annexb`/`opus`/`pcm`/`clock`/`avsync` | mocks on CI; CI-skipped device tests run real on the dev machine |
-| `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/settings plus custom review workspace/editor UI | live e2e (screenshots in the session logs) + `ui_contract` |
+| `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/settings plus the first-party review player | live e2e (screenshots in the session logs) + `player_core` (Boa) + `ui_contract` |
 
 ## Machine setup (already done on this machine; for a fresh clone elsewhere)
 
@@ -141,21 +182,30 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   Opus audio, one sample description per track, no frame-accurate boundary re-encode yet. Exports
   are keyframe-aligned: in snaps backward to the previous sync sample and out snaps forward to the
   next sync sample/EOF, so the exported range can be wider than the numeric in/out request.
+- The main pane stacks `#review-empty` / `#review-viewer` / `#settings-page` on one grid cell.
+  Any `display:` rule on those views **defeats the `[hidden]` attribute** — every stacked view
+  needs an explicit `[hidden] { display: none }` restatement and an opaque background (the
+  empty state once bled through the settings page).
 - UI automation: occluded windows swallow synthesized clicks while `PrintWindow`
   (PW_RENDERFULLCONTENT) still captures the window content — reposition/topmost before
-  clicking; `CopyFromScreen` shows black for accelerated webviews.
-- Review workspace sizing is intentionally pinned to the Tauri window (`1180x780`, min
-  `980x680`). WebView2 let the video stage use content height and push controls below the viewport
-  until the review body was constrained with `height: calc(100vh - 73px)`.
-- Tauri tray-process shutdown during smoke tests can leave a not-responding process object after
-  closing the window. `Invoke-CimMethod Win32_Process.Terminate` against the launched PID reliably
-  releases `target\debug\clipline-app.exe` before rebuilding.
+  clicking; `CopyFromScreen` shows black for accelerated webviews. If someone is at the
+  machine, their live mouse/window-drags race synthesized input — coordinate with them
+  instead of fighting for the cursor.
+- Frontend logic is testable without Node: `ui/player-core.js` is pure (no DOM, no Tauri,
+  exposed via `globalThis`) and `tests/player_core.rs` evaluates it in `boa_engine`
+  (dev-dependency). Keep player math/formatting there, not in `main.js`, or it falls out of
+  test coverage. `tests/ui_contract.rs` fails if anyone re-inlines styles/scripts into
+  `index.html` or puts `controls` back on the video element.
+- WebView2 layout: a CSS grid row only bounds its children if the track is sized — the
+  `.app`/`.review-viewer` grids pin rows with `minmax(0, 1fr)` and shrink children carry
+  `min-height: 0`. A content-sized row lets the video's intrinsic height push the control
+  deck below the window (this exact bug shipped once and was fixed in review-player v2).
 - `ddoc.md` Caveats section lists every externally-verified Windows API claim with nuance —
   check it before trusting API behavior.
 
 ## What's next (rough value order; each gets its own plan)
 
-1. **Auto-clip on importance** (ddoc §5): `importance >= threshold` -> auto-save; marker kinds
+1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
    already carry importance.
 2. **Frame-accurate trim polish** (ddoc §11): re-encode only boundary GOPs, keep the current
    stream-copy path as the instant/lossless mode.

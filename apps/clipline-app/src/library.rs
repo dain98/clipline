@@ -39,6 +39,8 @@ impl StorageSettings {
 pub struct ClipInfo {
     pub path: String,
     pub name: String,
+    /// Session folder name; None for legacy clips at the library root.
+    pub session: Option<String>,
     pub size_mb: f64,
     pub modified_unix: u64,
     pub duration_s: Option<f64>,
@@ -68,13 +70,33 @@ pub struct ExportedClipInfo {
 pub fn list_clips() -> Result<Vec<ClipInfo>, String> {
     let dir = clips_dir()?;
     let mut clips = Vec::new();
+    push_clips_from(&dir, None, &mut clips)?;
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let Ok(entry) = entry else { continue };
+        if entry.metadata().map(|m| m.is_dir()).unwrap_or(false) {
+            let session = entry.file_name().to_string_lossy().into_owned();
+            push_clips_from(&entry.path(), Some(session), &mut clips)?;
+        }
+    }
+    clips.sort_by_key(|c| std::cmp::Reverse(c.modified_unix));
+    Ok(clips)
+}
+
+fn push_clips_from(
+    dir: &Path,
+    session: Option<String>,
+    clips: &mut Vec<ClipInfo>,
+) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("mp4") {
             continue;
         }
         let meta = entry.metadata().ok();
+        if meta.as_ref().is_some_and(|m| !m.is_file()) {
+            continue;
+        }
         let modified_unix = meta
             .as_ref()
             .and_then(|m| m.modified().ok())
@@ -98,14 +120,14 @@ pub fn list_clips() -> Result<Vec<ClipInfo>, String> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            session: session.clone(),
             size_mb,
             modified_unix,
             duration_s,
             markers,
         });
     }
-    clips.sort_by_key(|c| std::cmp::Reverse(c.modified_unix));
-    Ok(clips)
+    Ok(())
 }
 
 #[tauri::command]
@@ -163,12 +185,24 @@ pub fn storage_status(settings: tauri::State<StorageSettings>) -> Result<Storage
 fn validate_clip_path(path: &str) -> Result<PathBuf, String> {
     let dir = clips_dir()?.canonicalize().map_err(|e| e.to_string())?;
     let target = Path::new(path).canonicalize().map_err(|e| e.to_string())?;
-    if target.parent() != Some(dir.as_path())
-        || target.extension().and_then(|e| e.to_str()) != Some("mp4")
-    {
+    // Legacy clips sit at the root; session clips one folder down.
+    let parent_ok = target.parent() == Some(dir.as_path())
+        || target.parent().and_then(Path::parent) == Some(dir.as_path());
+    if !parent_ok || target.extension().and_then(|e| e.to_str()) != Some("mp4") {
         return Err("refusing to access a clip outside the clips directory".into());
     }
     Ok(target)
+}
+
+#[tauri::command]
+pub fn reveal_clip(path: String) -> Result<(), String> {
+    let target = validate_clip_path(&path)?;
+    // Explorer wants `/select,<path>` as a single argument.
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{}", target.display()))
+        .spawn()
+        .map_err(|e| format!("open explorer: {e}"))?;
+    Ok(())
 }
 
 fn read_markers(path: &Path) -> Option<ClipMarkers> {

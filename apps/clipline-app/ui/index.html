@@ -3,1159 +3,262 @@
 <head>
   <meta charset="utf-8" />
   <title>Clipline</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #12110f;
-      --panel: #1a1917;
-      --panel-2: #20201d;
-      --panel-3: #282520;
-      --line: #35312a;
-      --line-strong: #4a443a;
-      --text: #ece8df;
-      --muted: #aaa298;
-      --faint: #766f66;
-      --blue: #4aa3ff;
-      --teal: #4ec9b0;
-      --amber: #e7b75f;
-      --red: #e05d52;
-      --green: #74c476;
-      --shadow: rgba(0, 0, 0, 0.38);
-    }
-
-    * { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      min-width: 980px;
-      min-height: 680px;
-      font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      user-select: none;
-    }
-
-    button, input, select {
-      font: inherit;
-    }
-
-    button {
-      height: 32px;
-      min-width: 32px;
-      padding: 0 10px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--panel-3);
-      color: var(--text);
-      cursor: pointer;
-    }
-
-    button:hover { border-color: var(--line-strong); background: #302d27; }
-    button:active { transform: translateY(1px); }
-    button.primary { border-color: #2f6ea7; background: #1d5d91; }
-    button.primary:hover { background: #246da8; }
-    button.danger { border-color: #67352f; color: #ffd2cd; }
-    button.danger:hover { background: #3a211e; }
-    button:disabled { opacity: 0.48; cursor: default; transform: none; }
-
-    input, select {
-      width: 100%;
-      min-width: 0;
-      height: 32px;
-      padding: 5px 8px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #151412;
-      color: var(--text);
-    }
-
-    input:disabled { color: var(--faint); }
-
-    label {
-      display: grid;
-      gap: 4px;
-      min-width: 0;
-      color: var(--muted);
-      font-size: 11.5px;
-    }
-
-    label span { white-space: nowrap; }
-
-    h1 {
-      margin: 0;
-      font-size: 20px;
-      font-weight: 650;
-      letter-spacing: 0;
-    }
-
-    h2 {
-      margin: 20px 0 8px;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 650;
-      letter-spacing: 0.7px;
-      text-transform: uppercase;
-    }
-
-    .app {
-      display: grid;
-      grid-template-columns: 360px minmax(620px, 1fr);
-      height: 100vh;
-      overflow: hidden;
-    }
-
-    .sidebar {
-      display: flex;
-      flex-direction: column;
-      min-width: 0;
-      border-right: 1px solid var(--line);
-      background: var(--panel);
-    }
-
-    .sidebar-head {
-      padding: 18px 18px 12px;
-      border-bottom: 1px solid var(--line);
-    }
-
-    .sub {
-      color: var(--muted);
-      font-size: 12px;
-      margin-top: 1px;
-    }
-
-    .status-grid {
-      display: grid;
-      gap: 8px;
-      margin-top: 14px;
-    }
-
-    .status-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-height: 20px;
-      color: var(--muted);
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .status-row b { color: var(--text); font-weight: 600; }
-
-    .dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: #59524a;
-      flex: 0 0 auto;
-    }
-
-    .dot.on {
-      background: var(--red);
-      box-shadow: 0 0 12px rgba(224, 93, 82, 0.85);
-    }
-
-    .save-row {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-      align-items: center;
-      margin-top: 12px;
-    }
-
-    .hint {
-      color: var(--muted);
-      font-size: 12px;
-      min-width: 0;
-    }
-
-    #notice, #error {
-      min-height: 18px;
-      margin-top: 6px;
-      font-size: 12px;
-    }
-
-    #notice { color: var(--blue); }
-    #error { color: var(--amber); }
-    .warn { color: var(--amber); }
-
-    .sidebar-scroll {
-      min-height: 0;
-      overflow: auto;
-      padding: 0 14px 16px;
-    }
-
-    .settings {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px 10px;
-      padding: 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #171614;
-    }
-
-    .settings .wide { grid-column: 1 / -1; }
-
-    .settings .actions {
-      grid-column: 1 / -1;
-      display: grid;
-      grid-template-columns: auto 1fr;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .clip-list {
-      display: grid;
-      gap: 6px;
-      padding-bottom: 8px;
-    }
-
-    .clip {
-      display: grid;
-      grid-template-columns: 1fr auto auto;
-      align-items: center;
-      gap: 7px;
-      min-height: 58px;
-      padding: 8px 8px 8px 10px;
-      border: 1px solid transparent;
-      border-radius: 8px;
-      background: var(--panel-2);
-      cursor: pointer;
-    }
-
-    .clip:hover { border-color: var(--line); background: #24221f; }
-    .clip.active { border-color: #3d795f; background: #1c2822; }
-
-    .clip .meta {
-      min-width: 0;
-      display: grid;
-      gap: 3px;
-    }
-
-    .clip .name {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-size: 13px;
-      color: var(--text);
-    }
-
-    .clip .info {
-      color: var(--muted);
-      font-size: 11.5px;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .badge {
-      display: inline-block;
-      margin-left: 6px;
-      padding: 1px 6px;
-      border-radius: 7px;
-      background: #263b34;
-      color: #8ee0c8;
-      font-size: 11px;
-      vertical-align: 1px;
-    }
-
-    .icon-btn {
-      width: 32px;
-      padding: 0;
-      text-align: center;
-    }
-
-    .workspace {
-      display: grid;
-      grid-template-rows: auto minmax(0, 1fr);
-      min-width: 0;
-      min-height: 0;
-      overflow: hidden;
-      background: #11100e;
-    }
-
-    .workspace-head {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: center;
-      gap: 16px;
-      padding: 16px 18px 12px;
-      border-bottom: 1px solid var(--line);
-      background: #151411;
-    }
-
-    .clip-title {
-      min-width: 0;
-      display: grid;
-      gap: 2px;
-    }
-
-    .clip-title strong {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-size: 17px;
-      font-weight: 650;
-    }
-
-    .clip-title span {
-      color: var(--muted);
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .clip-actions {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .review-body {
-      position: relative;
-      height: calc(100vh - 73px);
-      min-height: 0;
-      overflow: hidden;
-      padding: 18px;
-    }
-
-    .empty-review {
-      position: absolute;
-      inset: 0;
-      display: grid;
-      place-items: center;
-      color: var(--muted);
-      text-align: center;
-      padding: 36px;
-    }
-
-    .empty-review strong {
-      display: block;
-      margin-bottom: 4px;
-      color: var(--text);
-      font-size: 17px;
-      font-weight: 650;
-    }
-
-    .review-viewer {
-      min-width: 0;
-      min-height: 0;
-      height: 100%;
-      overflow: hidden;
-      display: none;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    .review-viewer.open { display: flex; }
-
-    .stage {
-      position: relative;
-      flex: 1 1 0;
-      min-height: 0;
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #030303;
-      box-shadow: 0 18px 36px var(--shadow);
-    }
-
-    #video {
-      display: block;
-      width: 100%;
-      height: 100%;
-      min-height: 0;
-      object-fit: contain;
-      background: #030303;
-    }
-
-    .stage-status {
-      position: absolute;
-      left: 12px;
-      bottom: 10px;
-      max-width: calc(100% - 24px);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      padding: 4px 8px;
-      border-radius: 6px;
-      background: rgba(0, 0, 0, 0.58);
-      color: var(--muted);
-      font-size: 12px;
-      pointer-events: none;
-    }
-
-    .controls {
-      display: grid;
-      gap: 9px;
-      padding: 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-    }
-
-    .timeline-wrap {
-      display: grid;
-      grid-template-columns: auto 1fr auto;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .marker-nav {
-      display: flex;
-      gap: 6px;
-    }
-
-    #marker-summary {
-      width: 118px;
-      color: var(--muted);
-      font-size: 12px;
-      text-align: right;
-      font-variant-numeric: tabular-nums;
-    }
-
-    #timeline {
-      position: relative;
-      height: 34px;
-      border: 1px solid var(--line);
-      border-radius: 7px;
-      background: #12110f;
-      cursor: pointer;
-      touch-action: none;
-    }
-
-    .timeline-rail {
-      position: absolute;
-      left: 10px;
-      right: 10px;
-      top: 14px;
-      height: 5px;
-      border-radius: 4px;
-      background: #312d26;
-      pointer-events: none;
-    }
-
-    #progress {
-      position: absolute;
-      left: 0;
-      top: 0;
-      bottom: 0;
-      width: 0;
-      border-radius: 4px;
-      background: var(--blue);
-      opacity: 0.7;
-    }
-
-    #trim-range {
-      position: absolute;
-      left: 0;
-      top: 5px;
-      height: 22px;
-      width: 100%;
-      border: 1px solid rgba(78, 201, 176, 0.75);
-      border-radius: 6px;
-      background: rgba(78, 201, 176, 0.12);
-      pointer-events: none;
-    }
-
-    #playhead {
-      position: absolute;
-      top: 4px;
-      bottom: 4px;
-      left: 0;
-      width: 2px;
-      margin-left: -1px;
-      border-radius: 2px;
-      background: #f7f1e6;
-      box-shadow: 0 0 8px rgba(247, 241, 230, 0.55);
-      pointer-events: none;
-      z-index: 4;
-    }
-
-    .trim-handle {
-      position: absolute;
-      top: 2px;
-      bottom: 2px;
-      width: 11px;
-      margin-left: -5px;
-      border: 1px solid rgba(137, 240, 213, 0.9);
-      border-radius: 5px;
-      background: #173c35;
-      cursor: ew-resize;
-      z-index: 5;
-    }
-
-    .trim-handle::after {
-      content: "";
-      position: absolute;
-      left: 4px;
-      top: 7px;
-      bottom: 7px;
-      width: 1px;
-      background: rgba(236, 232, 223, 0.75);
-    }
-
-    .marker-tick {
-      position: absolute;
-      top: 7px;
-      bottom: 7px;
-      width: 5px;
-      margin-left: -2px;
-      border: 0;
-      border-radius: 3px;
-      background: var(--amber);
-      padding: 0;
-      min-width: 0;
-      z-index: 3;
-    }
-
-    .marker-tick:hover {
-      background: #ffd37a;
-      box-shadow: 0 0 8px rgba(231, 183, 95, 0.8);
-    }
-
-    .transport {
-      display: grid;
-      grid-template-columns: auto auto auto auto 120px auto 150px minmax(120px, 1fr);
-      align-items: center;
-      gap: 8px;
-    }
-
-    .time-readout {
-      min-width: 120px;
-      color: var(--muted);
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
-      text-align: center;
-    }
-
-    .volume-group {
-      display: grid;
-      grid-template-columns: auto 92px;
-      align-items: center;
-      gap: 8px;
-    }
-
-    #volume-slider {
-      padding: 0;
-      accent-color: var(--teal);
-    }
-
-    .trim-editor {
-      display: grid;
-      grid-template-columns: 92px 92px auto auto minmax(140px, 1fr);
-      align-items: end;
-      gap: 8px;
-    }
-
-    .trim-editor .status {
-      align-self: center;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      color: var(--muted);
-      font-size: 12px;
-    }
-  </style>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <div class="app">
     <aside class="sidebar">
-      <div class="sidebar-head">
+      <div class="sidebar-top">
+        <button id="sidebar-toggle" title="Toggle sidebar (F)">
+          <svg viewBox="0 0 24 24"><path d="M3 6h18v2H3zM3 11h18v2H3zM3 16h18v2H3z"/></svg>
+        </button>
         <h1>Clipline</h1>
-        <div class="sub">replay buffer - no injection, ever</div>
-        <div class="status-grid">
-          <div class="status-row"><div id="dot" class="dot"></div><div id="state">starting...</div></div>
-          <div class="status-row">buffered: <b id="buffered">0.0 s</b> · <b id="mb">0.0 MB</b> · <b id="segs">0</b> GOPs</div>
-          <div class="status-row">storage: <b id="storage-used">0.0 MB</b> / <b id="storage-quota">10.0 GB</b> · <b id="storage-clips">0</b> clips</div>
-        </div>
+      </div>
+
+      <div class="sidebar-full">
+      <header class="sidebar-head">
+        <div class="sub">replay buffer — no injection, ever</div>
+        <div class="status-row"><span id="dot" class="dot"></span><span id="state">starting…</span></div>
+        <div class="status-row stat">buffered <b id="buffered">0.0 s</b> · <b id="mb">0.0 MB</b> · <b id="segs">0</b> GOPs</div>
+        <div class="status-row stat">storage <b id="storage-used">0.0 MB</b> / <b id="storage-quota">10.0 GB</b> · <b id="storage-clips">0</b> clips</div>
         <div class="save-row">
           <button id="save" class="primary">Save Replay</button>
-          <span class="hint" id="save-hotkey">Alt+F10</span>
+          <span id="save-hotkey" class="hint">Alt+F10</span>
         </div>
         <div id="notice"></div>
         <div id="error"></div>
+      </header>
+
+      <section class="library">
+        <h2>Library</h2>
+        <div id="clips"></div>
+      </section>
+
+      <button id="open-settings" class="sidebar-settings" title="Settings">
+        <svg viewBox="0 0 24 24"><path d="M19.4 13c.04-.33.07-.66.07-1s-.03-.67-.07-1l2.1-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.48 1a7.6 7.6 0 0 0-1.73-1l-.37-2.63A.5.5 0 0 0 13.93 2h-4a.5.5 0 0 0-.5.43l-.37 2.63c-.62.26-1.2.6-1.73 1l-2.48-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .11.64L4.53 11c-.04.33-.07.66-.07 1s.03.67.07 1l-2.1 1.65a.5.5 0 0 0-.12.64l2 3.46c.13.22.39.31.61.22l2.48-1c.53.4 1.1.74 1.73 1l.37 2.63c.04.25.25.43.5.43h4c.25 0 .46-.18.5-.43l.37-2.63a7.6 7.6 0 0 0 1.73-1l2.48 1c.22.09.48 0 .6-.22l2-3.46a.5.5 0 0 0-.11-.64L19.4 13zM11.93 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>
+        <span>Settings</span>
+      </button>
       </div>
 
-      <div class="sidebar-scroll">
-        <h2>Settings</h2>
-        <div class="settings">
-          <label><span>capture</span><select id="set-capture">
-            <option value="primary_monitor">primary monitor</option>
-            <option value="window_title">window title</option>
-          </select></label>
-          <label><span>window title</span><input id="set-window" spellcheck="false" /></label>
-          <label><span>buffer s</span><input id="set-buffer" type="number" min="10" max="1200" step="5" /></label>
-          <label><span>replay s</span><input id="set-replay" type="number" min="5" max="1200" step="5" /></label>
-          <label><span>bitrate Mbps</span><input id="set-bitrate" type="number" min="1" max="100" step="1" /></label>
-          <label><span>fps</span><select id="set-fps">
-            <option value="30">30</option>
-            <option value="60">60</option>
-            <option value="120">120</option>
-          </select></label>
-          <label><span>quota GiB</span><input id="set-quota" type="number" min="0" step="0.5" /></label>
-          <label><span>hotkey</span><input id="set-hotkey" spellcheck="false" /></label>
-          <div class="actions"><button id="settings-save">Save Settings</button><span class="hint" id="settings-status"></span></div>
-        </div>
-
-        <h2>Library</h2>
-        <div id="clips" class="clip-list"></div>
+      <div class="sidebar-rail">
+        <span id="rail-dot" class="dot" title="recorder status"></span>
+        <button id="rail-save" title="Save Replay (Alt+F10)">
+          <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16z"/><circle cx="12" cy="12" r="4.5"/></svg>
+        </button>
+        <div class="rail-spacer"></div>
+        <button id="rail-settings" title="Settings">
+          <svg viewBox="0 0 24 24"><path d="M19.4 13c.04-.33.07-.66.07-1s-.03-.67-.07-1l2.1-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.48 1a7.6 7.6 0 0 0-1.73-1l-.37-2.63A.5.5 0 0 0 13.93 2h-4a.5.5 0 0 0-.5.43l-.37 2.63c-.62.26-1.2.6-1.73 1l-2.48-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .11.64L4.53 11c-.04.33-.07.66-.07 1s.03.67.07 1l-2.1 1.65a.5.5 0 0 0-.12.64l2 3.46c.13.22.39.31.61.22l2.48-1c.53.4 1.1.74 1.73 1l.37 2.63c.04.25.25.43.5.43h4c.25 0 .46-.18.5-.43l.37-2.63a7.6 7.6 0 0 0 1.73-1l2.48 1c.22.09.48 0 .6-.22l2-3.46a.5.5 0 0 0-.11-.64L19.4 13zM11.93 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>
+        </button>
       </div>
     </aside>
 
-    <main id="review-workspace" class="workspace">
-      <header class="workspace-head">
-        <div class="clip-title">
-          <strong id="pname">No clip selected</strong>
-          <span id="pmeta">Save a replay or choose a clip from the library.</span>
+    <main class="review">
+      <div id="review-empty" class="review-empty">
+        <div>
+          <strong>Nothing open</strong>
+          <span>Save a replay with Alt+F10, then pick a clip from the library to scrub, trim, and export.</span>
         </div>
-        <div class="clip-actions">
-          <button id="clip-reveal" title="Copy source path" disabled>Copy Path</button>
-          <button id="clip-delete" class="danger" title="Delete source clip" disabled>Delete</button>
-          <button id="clip-export" class="primary" title="Export selected range" disabled>Export</button>
-          <button id="close" title="Close review" disabled>Close</button>
-        </div>
-      </header>
+      </div>
 
-      <section class="review-body">
-        <div id="review-empty" class="empty-review">
-          <div><strong>Review clips here</strong><span>Choose a saved clip to scrub, mark in/out, and export without using browser media controls.</span></div>
-        </div>
-
-        <div id="review-viewer" class="review-viewer">
-          <div class="stage">
-            <video id="video" playsinline></video>
-            <div id="stage-status" class="stage-status">ready</div>
+      <div id="review-viewer" class="review-viewer">
+        <header class="review-head">
+          <div class="clip-title">
+            <strong id="pname"></strong>
+            <span id="pmeta"></span>
           </div>
+          <div class="review-actions">
+            <button id="open-folder" class="icon-button" title="Show this clip in Explorer">
+              <svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
+            </button>
+            <button id="delete-clip" class="icon-button danger" title="Delete source clip from disk">
+              <svg viewBox="0 0 24 24"><path d="M9 3v1H4v2h16V4h-5V3H9zM6 8v11a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8H6zm3 2h2v9H9v-9zm4 0h2v9h-2v-9z"/></svg>
+            </button>
+          </div>
+        </header>
 
-          <div class="controls">
-            <div class="timeline-wrap">
-              <div class="marker-nav">
-                <button id="prev-marker" class="icon-btn" title="Previous marker" disabled>&lt;</button>
-                <button id="next-marker" class="icon-btn" title="Next marker" disabled>&gt;</button>
-              </div>
-              <div id="timeline" title="Click to seek. Drag handles to trim.">
-                <div class="timeline-rail"><div id="progress"></div></div>
-                <div id="trim-range"></div>
-                <div id="playhead"></div>
-                <div id="trim-handle-in" class="trim-handle" title="Trim in"></div>
-                <div id="trim-handle-out" class="trim-handle" title="Trim out"></div>
-              </div>
-              <div id="marker-summary">0 markers</div>
-            </div>
-
+        <div class="stage">
+          <video id="video" playsinline></video>
+          <div id="stage-note" class="stage-note"></div>
+          <div id="stage-overlay" class="stage-overlay">
             <div class="transport">
-              <button id="seek-back" class="icon-btn" title="Back 5 seconds">-5</button>
-              <button id="play-toggle" title="Play or pause">Play</button>
-              <button id="seek-forward" class="icon-btn" title="Forward 5 seconds">+5</button>
-              <button id="mute-toggle" title="Mute or unmute">Mute</button>
-              <div id="time-readout" class="time-readout">0:00 / 0:00</div>
-              <select id="rate-select" title="Playback speed">
-                <option value="0.5">0.5x</option>
-                <option value="0.75">0.75x</option>
-                <option value="1" selected>1x</option>
-                <option value="1.25">1.25x</option>
-                <option value="1.5">1.5x</option>
-                <option value="2">2x</option>
-              </select>
-              <div class="volume-group">
-                <span class="hint">volume</span>
-                <input id="volume-slider" type="range" min="0" max="1" step="0.01" value="1" />
+              <div class="cluster">
+                <button id="prev-marker" title="Previous marker (Shift+M)">
+                  <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zM18 6l-8.5 6L18 18z"/></svg>
+                </button>
+                <button id="next-marker" title="Next marker (M)">
+                  <svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM6 6l8.5 6L6 18z"/></svg>
+                </button>
+                <span id="marker-count" class="hint">no markers</span>
               </div>
-              <span class="hint">Space play/pause · I/O set trim · M next marker</span>
-            </div>
-
-            <div class="trim-editor">
-              <label><span>in s</span><input id="trim-start" type="number" min="0" step="0.1" /></label>
-              <label><span>out s</span><input id="trim-end" type="number" min="0" step="0.1" /></label>
-              <button id="trim-set-in">Set In</button>
-              <button id="trim-set-out">Set Out</button>
-              <span id="trim-status" class="status"></span>
+              <div class="cluster middle">
+                <button id="seek-back" title="Back 5 s (Left)">
+                  <svg viewBox="0 0 24 24"><path d="M12 5V2L7 7l5 5V8c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/><text x="12" y="16.6" text-anchor="middle" font-size="8" font-weight="600">5</text></svg>
+                </button>
+                <button id="play-toggle" class="play-toggle" title="Play / pause (Space)">
+                  <svg class="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                  <svg class="i-pause" viewBox="0 0 24 24"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+                </button>
+                <button id="seek-forward" title="Forward 5 s (Right)">
+                  <svg viewBox="0 0 24 24"><g transform="translate(24,0) scale(-1,1)"><path d="M12 5V2L7 7l5 5V8c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></g><text x="12" y="16.6" text-anchor="middle" font-size="8" font-weight="600">5</text></svg>
+                </button>
+                <span id="time-readout">0:00.0 / 0:00.0</span>
+              </div>
+              <div class="cluster right">
+                <select id="rate-select" title="Playback speed">
+                  <option value="0.5">0.5x</option>
+                  <option value="0.75">0.75x</option>
+                  <option value="1" selected>1x</option>
+                  <option value="1.25">1.25x</option>
+                  <option value="1.5">1.5x</option>
+                  <option value="2">2x</option>
+                </select>
+                <div class="volume-group">
+                  <button id="mute-toggle" title="Mute / unmute">
+                    <svg class="i-vol" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16 12c0-1.77-1.02-3.29-2.5-4.03v8.06A4.52 4.52 0 0 0 16 12z"/><path d="M13.5 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+                    <svg class="i-muted" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M14.8 8.6l1.4-1.4 2.3 2.3 2.3-2.3 1.4 1.4-2.3 2.3 2.3 2.3-1.4 1.4-2.3-2.3-2.3 2.3-1.4-1.4 2.3-2.3z"/></svg>
+                  </button>
+                  <input id="volume-slider" type="range" min="0" max="1" step="0.01" value="1" title="Volume" />
+                </div>
+              </div>
             </div>
           </div>
         </div>
+
+        <div class="deck">
+          <div id="timeline" title="Click to seek · drag the edges to trim">
+            <div id="dim-in" class="dim"></div>
+            <div id="dim-out" class="dim"></div>
+            <div id="playhead"></div>
+            <div id="handle-in" class="handle" title="Trim in (I at playhead)"></div>
+            <div id="handle-out" class="handle" title="Trim out (O at playhead)"></div>
+          </div>
+          <div id="ruler" class="ruler"></div>
+
+          <div class="export-row">
+            <button id="export-clip" class="primary clip-button" title="Export the selected range as a new clip">
+              <svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm0 12c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3h-3z"/></svg>
+              <span>Clip</span>
+            </button>
+            <span class="trim-readout"><span id="trim-summary"></span> <span class="hint">· snaps to keyframes</span></span>
+            <span id="deck-status" class="deck-status"></span>
+            <span class="hint keys">Space play · &larr;/&rarr; 5s · ,/. 0.1s · I/O trim · M marker · Esc close</span>
+          </div>
+        </div>
+      </div>
+
+      <section id="settings-page" class="settings-page" hidden>
+        <header class="settings-head">
+          <h1>Settings</h1>
+          <button id="settings-close" class="icon-button" title="Back (Esc)">
+            <svg viewBox="0 0 24 24"><path d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6z"/></svg>
+          </button>
+        </header>
+
+        <nav id="settings-tabs" class="settings-tabs">
+          <button class="tab active" data-tab="capture">Capture</button>
+          <button class="tab" data-tab="recording">Recording</button>
+          <button class="tab" data-tab="storage">Storage</button>
+          <button class="tab" data-tab="hotkeys">Hotkeys</button>
+        </nav>
+
+        <div class="settings-body">
+          <div class="settings-section" data-section="capture">
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Capture target</strong>
+                <span>What the recorder captures: the primary monitor, or a single window.</span>
+              </div>
+              <select id="set-capture">
+                <option value="primary_monitor">primary monitor</option>
+                <option value="window_title">window title</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Window title</strong>
+                <span>Title substring of the window to capture. Only used in window mode.</span>
+              </div>
+              <input id="set-window" spellcheck="false" />
+            </div>
+          </div>
+
+          <div class="settings-section" data-section="recording" hidden>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Buffer length</strong>
+                <span>Seconds of rolling history the replay buffer keeps in memory.</span>
+              </div>
+              <input id="set-buffer" type="number" min="10" max="1200" step="5" />
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Replay length</strong>
+                <span>Trailing seconds written to disk when you save a replay.</span>
+              </div>
+              <input id="set-replay" type="number" min="5" max="1200" step="5" />
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Bitrate (Mbps)</strong>
+                <span>H.264 video bitrate — higher means better quality and bigger files.</span>
+              </div>
+              <input id="set-bitrate" type="number" min="1" max="100" step="1" />
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Frame rate</strong>
+                <span>Capture and encode FPS.</span>
+              </div>
+              <select id="set-fps">
+                <option value="30">30</option>
+                <option value="60">60</option>
+                <option value="120">120</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="settings-section" data-section="storage" hidden>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Disk quota (GiB)</strong>
+                <span>Budget for saved clips — oldest clips are cleaned up after each save.</span>
+              </div>
+              <input id="set-quota" type="number" min="0" step="0.5" />
+            </div>
+          </div>
+
+          <div class="settings-section" data-section="hotkeys" hidden>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Save Replay</strong>
+                <span>Global shortcut — modifiers plus an F-key, e.g. Alt+F10 or Ctrl+Shift+F9.</span>
+              </div>
+              <input id="set-hotkey" spellcheck="false" />
+            </div>
+          </div>
+        </div>
+
+        <footer class="settings-actions">
+          <button id="settings-save" class="primary">Save Settings</button>
+          <span id="settings-status" class="hint"></span>
+        </footer>
       </section>
     </main>
   </div>
 
-  <script>
-    const { invoke, convertFileSrc } = window.__TAURI__.core;
-    const { listen } = window.__TAURI__.event;
-    const $ = (id) => document.getElementById(id);
+  <dialog id="confirm-dialog">
+    <div class="confirm-body">
+      <strong>Delete this clip?</strong>
+      <span id="confirm-detail"></span>
+      <span class="hint">The file and its markers are removed from disk.</span>
+    </div>
+    <div class="confirm-actions">
+      <button id="confirm-accept" class="danger">Delete</button>
+      <button id="confirm-cancel">Cancel</button>
+    </div>
+  </dialog>
 
-    const video = $("video");
-    let currentClip = null;
-    let clipsCache = [];
-    let trimStart = 0;
-    let trimEnd = 0;
-    let dragging = null;
-
-    const fmtBytes = (bytes) => {
-      const mb = bytes / (1024 * 1024);
-      if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
-      return `${mb.toFixed(1)} MB`;
-    };
-
-    const fmtDur = (s) => s == null || !Number.isFinite(s) ? "?" :
-      `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
-
-    const fmtPrecise = (s) => s == null || !Number.isFinite(s) ? "0.0" : s.toFixed(1);
-
-    const fmtAgo = (unix) => {
-      const d = Math.max(0, Date.now() / 1000 - unix);
-      if (d < 90) return `${Math.round(d)}s ago`;
-      if (d < 5400) return `${Math.round(d / 60)}m ago`;
-      return `${Math.round(d / 3600)}h ago`;
-    };
-
-    function clipDuration() {
-      if (Number.isFinite(video.duration) && video.duration > 0) return video.duration;
-      if (currentClip && Number.isFinite(currentClip.duration_s)) return currentClip.duration_s;
-      if (currentClip && currentClip.markers && Number.isFinite(currentClip.markers.duration_s)) {
-        return currentClip.markers.duration_s;
-      }
-      return 0;
-    }
-
-    function clampTime(value) {
-      const dur = clipDuration();
-      const max = dur > 0 ? dur : Number.MAX_SAFE_INTEGER;
-      return Math.max(0, Math.min(max, value));
-    }
-
-    function percentFor(time) {
-      const dur = clipDuration();
-      if (!dur) return 0;
-      return Math.max(0, Math.min(100, (time / dur) * 100));
-    }
-
-    function fillSettings(s) {
-      $("set-capture").value = s.capture_mode;
-      $("set-window").value = s.window_title ?? "";
-      $("set-buffer").value = s.buffer_seconds;
-      $("set-replay").value = s.replay_window_s;
-      $("set-bitrate").value = s.bitrate_mbps;
-      $("set-fps").value = s.fps;
-      $("set-quota").value = s.disk_quota_gb;
-      $("set-hotkey").value = s.hotkey;
-      $("save-hotkey").textContent = s.hotkey;
-      syncCaptureFields();
-    }
-
-    function readSettings() {
-      return {
-        capture_mode: $("set-capture").value,
-        window_title: $("set-window").value,
-        buffer_seconds: Number($("set-buffer").value),
-        replay_window_s: Number($("set-replay").value),
-        bitrate_mbps: Number($("set-bitrate").value),
-        fps: Number($("set-fps").value),
-        disk_quota_gb: Number($("set-quota").value),
-        hotkey: $("set-hotkey").value,
-      };
-    }
-
-    function syncCaptureFields() {
-      $("set-window").disabled = $("set-capture").value !== "window_title";
-    }
-
-    async function refresh() {
-      await Promise.all([refreshClips(), refreshStorage()]);
-    }
-
-    async function refreshStorage() {
-      const s = await invoke("storage_status");
-      $("storage-used").textContent = fmtBytes(s.total_bytes);
-      $("storage-used").className = s.over_quota ? "warn" : "";
-      $("storage-quota").textContent = s.quota_bytes == null ? "no limit" : fmtBytes(s.quota_bytes);
-      $("storage-clips").textContent = s.clip_count;
-    }
-
-    async function refreshClips() {
-      clipsCache = await invoke("list_clips");
-      renderClips();
-      if (currentClip) {
-        const fresh = clipsCache.find((clip) => clip.path === currentClip.path);
-        if (fresh) currentClip = fresh;
-      }
-    }
-
-    function renderClips() {
-      const root = $("clips");
-      root.replaceChildren();
-      if (!clipsCache.length) {
-        root.innerHTML = '<div class="hint">no clips yet - press Alt+F10 while something plays</div>';
-        return;
-      }
-
-      for (const c of clipsCache) {
-        const markerCount = c.markers ? c.markers.markers.length : 0;
-        const el = document.createElement("div");
-        el.className = "clip" + (currentClip && currentClip.path === c.path ? " active" : "");
-        el.innerHTML = `
-          <div class="meta">
-            <div class="name">${c.name}${markerCount ? `<span class="badge">${markerCount}</span>` : ""}</div>
-            <div class="info">${fmtDur(c.duration_s)} · ${c.size_mb.toFixed(1)} MB · ${fmtAgo(c.modified_unix)}</div>
-          </div>
-          <button class="icon-btn play" title="Open clip">Open</button>
-          <button class="icon-btn del" title="Delete clip">Del</button>`;
-        el.addEventListener("click", () => openPlayer(c));
-        el.querySelector(".play").addEventListener("click", (ev) => {
-          ev.stopPropagation();
-          openPlayer(c);
-        });
-        el.querySelector(".del").addEventListener("click", async (ev) => {
-          ev.stopPropagation();
-          await deleteClip(c.path);
-        });
-        root.appendChild(el);
-      }
-    }
-
-    function setWorkspaceEnabled(enabled) {
-      $("review-empty").style.display = enabled ? "none" : "grid";
-      $("review-viewer").classList.toggle("open", enabled);
-      for (const id of ["clip-reveal", "clip-delete", "clip-export", "close"]) {
-        $(id).disabled = !enabled;
-      }
-    }
-
-    function openPlayer(clip) {
-      currentClip = clip;
-      $("error").textContent = "";
-      $("notice").textContent = "";
-      $("trim-status").textContent = "";
-      $("stage-status").textContent = "loading";
-      $("pname").textContent = clip.name;
-      $("pmeta").textContent = `${fmtDur(clip.duration_s)} · ${clip.size_mb.toFixed(1)} MB · ${clip.path}`;
-      video.src = convertFileSrc(clip.path);
-      video.playbackRate = Number($("rate-select").value);
-      setWorkspaceEnabled(true);
-      setTrimBounds(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
-      renderMarkers();
-      renderClips();
-      updateTimeline();
-      video.play().catch(() => syncPlayState());
-    }
-
-    function closePlayer() {
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
-      currentClip = null;
-      $("pname").textContent = "No clip selected";
-      $("pmeta").textContent = "Save a replay or choose a clip from the library.";
-      $("stage-status").textContent = "ready";
-      $("trim-status").textContent = "";
-      $("timeline").querySelectorAll(".marker-tick").forEach((t) => t.remove());
-      setWorkspaceEnabled(false);
-      renderClips();
-      updateTimeline();
-    }
-
-    function setTrimBounds(start, end) {
-      const dur = clipDuration();
-      let nextStart = clampTime(Number.isFinite(start) ? start : 0);
-      let nextEnd = clampTime(Number.isFinite(end) && end > 0 ? end : dur);
-      if (dur && nextEnd <= nextStart) nextEnd = Math.min(dur, nextStart + 0.1);
-      if (nextEnd <= nextStart) nextStart = Math.max(0, nextEnd - 0.1);
-      trimStart = nextStart;
-      trimEnd = nextEnd;
-      $("trim-start").max = dur || "";
-      $("trim-end").max = dur || "";
-      $("trim-start").value = fmtPrecise(trimStart);
-      $("trim-end").value = fmtPrecise(trimEnd);
-      updateTimeline();
-    }
-
-    function updateTimeline() {
-      const dur = clipDuration();
-      const current = dur ? clampTime(video.currentTime || 0) : 0;
-      $("time-readout").textContent = `${fmtDur(current)} / ${fmtDur(dur)}`;
-      $("progress").style.width = `${percentFor(current)}%`;
-      $("playhead").style.left = `${percentFor(current)}%`;
-      $("trim-range").style.left = `${percentFor(trimStart)}%`;
-      $("trim-range").style.width = `${Math.max(0, percentFor(trimEnd) - percentFor(trimStart))}%`;
-      $("trim-handle-in").style.left = `${percentFor(trimStart)}%`;
-      $("trim-handle-out").style.left = `${percentFor(trimEnd)}%`;
-      updateMarkerSummary();
-    }
-
-    function renderMarkers() {
-      const timeline = $("timeline");
-      timeline.querySelectorAll(".marker-tick").forEach((t) => t.remove());
-      const dur = clipDuration();
-      const markers = currentClip && currentClip.markers ? currentClip.markers.markers : [];
-      for (const m of markers) {
-        const tick = document.createElement("button");
-        tick.className = "marker-tick";
-        tick.style.left = `${dur ? (m.t_s / dur) * 100 : 0}%`;
-        tick.title = `${m.kind}${m.subtype ? ` (${m.subtype})` : ""} - ${m.actor}${m.victim ? " -> " + m.victim : ""} @ ${m.t_s.toFixed(1)}s`;
-        tick.addEventListener("pointerdown", (ev) => ev.stopPropagation());
-        tick.addEventListener("click", (ev) => {
-          ev.stopPropagation();
-          seekTo(m.t_s);
-          video.play().catch(() => syncPlayState());
-        });
-        timeline.appendChild(tick);
-      }
-      $("prev-marker").disabled = markers.length === 0;
-      $("next-marker").disabled = markers.length === 0;
-      updateMarkerSummary();
-    }
-
-    function updateMarkerSummary() {
-      const markers = currentClip && currentClip.markers ? currentClip.markers.markers : [];
-      if (!markers.length) {
-        $("marker-summary").textContent = "0 markers";
-        return;
-      }
-      const next = markers.find((m) => m.t_s > (video.currentTime || 0) + 0.05);
-      $("marker-summary").textContent = next
-        ? `${markers.length} markers · next ${fmtDur(next.t_s)}`
-        : `${markers.length} markers`;
-    }
-
-    function seekTo(time) {
-      if (!currentClip) return;
-      video.currentTime = clampTime(time);
-      updateTimeline();
-    }
-
-    function seekBy(delta) {
-      seekTo((video.currentTime || 0) + delta);
-    }
-
-    function togglePlayback() {
-      if (!currentClip) return;
-      if (video.paused) video.play().catch(() => syncPlayState());
-      else video.pause();
-    }
-
-    function syncPlayState() {
-      $("play-toggle").textContent = video.paused ? "Play" : "Pause";
-      $("play-toggle").setAttribute("aria-pressed", String(!video.paused));
-    }
-
-    function syncMuteState() {
-      $("mute-toggle").textContent = video.muted || video.volume === 0 ? "Unmute" : "Mute";
-      $("volume-slider").value = String(video.muted ? 0 : video.volume);
-    }
-
-    function timelineTimeFromEvent(ev) {
-      const rect = $("timeline").getBoundingClientRect();
-      const x = Math.max(0, Math.min(rect.width, ev.clientX - rect.left));
-      return clampTime((x / rect.width) * clipDuration());
-    }
-
-    function startTimelineDrag(kind, ev) {
-      if (!currentClip) return;
-      dragging = kind;
-      $("timeline").setPointerCapture(ev.pointerId);
-      handleTimelineDrag(ev);
-    }
-
-    function handleTimelineDrag(ev) {
-      if (!dragging) return;
-      const t = timelineTimeFromEvent(ev);
-      if (dragging === "in") {
-        setTrimBounds(Math.min(t, trimEnd - 0.1), trimEnd);
-      } else if (dragging === "out") {
-        setTrimBounds(trimStart, Math.max(t, trimStart + 0.1));
-      } else {
-        seekTo(t);
-      }
-    }
-
-    function stopTimelineDrag() {
-      dragging = null;
-    }
-
-    function jumpMarker(direction) {
-      const markers = currentClip && currentClip.markers ? currentClip.markers.markers : [];
-      if (!markers.length) return;
-      const current = video.currentTime || 0;
-      let target;
-      if (direction > 0) {
-        target = markers.find((m) => m.t_s > current + 0.05) ?? markers[0];
-      } else {
-        target = [...markers].reverse().find((m) => m.t_s < current - 0.05) ?? markers[markers.length - 1];
-      }
-      seekTo(target.t_s);
-      video.play().catch(() => syncPlayState());
-    }
-
-    async function exportCurrentTrim() {
-      $("trim-status").textContent = "";
-      $("error").textContent = "";
-      if (!currentClip) return;
-      if (!Number.isFinite(trimStart) || !Number.isFinite(trimEnd) || trimEnd <= trimStart) {
-        $("error").textContent = "trim out must be greater than in";
-        return;
-      }
-      $("clip-export").disabled = true;
-      $("trim-status").textContent = "exporting";
-      try {
-        const exported = await invoke("export_clip", {
-          path: currentClip.path,
-          startS: trimStart,
-          endS: trimEnd,
-        });
-        $("trim-status").textContent = `${exported.name} · aligned ${fmtDur(exported.aligned_start_s)}-${fmtDur(exported.aligned_end_s)}`;
-        $("notice").textContent = `exported ${fmtDur(exported.duration_s)} clip`;
-        await refresh();
-      } catch (e) {
-        $("error").textContent = e;
-        $("trim-status").textContent = "";
-      } finally {
-        $("clip-export").disabled = !currentClip;
-      }
-    }
-
-    async function deleteClip(path = currentClip && currentClip.path) {
-      if (!path) return;
-      if (!confirm("Delete this clip from disk?")) return;
-      try {
-        await invoke("delete_clip", { path });
-        $("notice").textContent = "clip deleted";
-        $("error").textContent = "";
-        if (currentClip && currentClip.path === path) closePlayer();
-        await refresh();
-      } catch (e) {
-        $("error").textContent = e;
-      }
-    }
-
-    async function copyCurrentPath() {
-      if (!currentClip) return;
-      try {
-        await navigator.clipboard.writeText(currentClip.path);
-        $("trim-status").textContent = "source path copied";
-      } catch (_) {
-        $("trim-status").textContent = currentClip.path;
-      }
-    }
-
-    listen("status", (e) => {
-      const s = e.payload;
-      $("dot").className = "dot" + (s.recording ? " on" : "");
-      $("state").textContent = s.recording ? "recording" : "stopped";
-      $("buffered").textContent = s.buffered_s.toFixed(1) + " s";
-      $("mb").textContent = s.buffered_mb.toFixed(1) + " MB";
-      $("segs").textContent = s.segments;
-    });
-
-    listen("saved", (e) => {
-      $("error").textContent = "";
-      const s = e.payload;
-      $("notice").textContent = s.gc_deleted
-        ? `cleaned up ${s.gc_deleted} old clip${s.gc_deleted > 1 ? "s" : ""} (${fmtBytes(s.gc_freed_bytes)})`
-        : `saved ${fmtDur(s.seconds)} replay`;
-      refresh();
-    });
-
-    listen("error", (e) => { $("error").textContent = e.payload; });
-
-    $("save").addEventListener("click", () => invoke("save_replay"));
-    $("set-capture").addEventListener("change", syncCaptureFields);
-    $("settings-save").addEventListener("click", async () => {
-      $("settings-status").textContent = "";
-      $("error").textContent = "";
-      try {
-        const saved = await invoke("save_settings", { settings: readSettings() });
-        fillSettings(saved);
-        $("settings-status").textContent = "saved";
-        await refresh();
-      } catch (e) {
-        $("error").textContent = e;
-      }
-    });
-
-    video.addEventListener("click", togglePlayback);
-    video.addEventListener("play", syncPlayState);
-    video.addEventListener("pause", syncPlayState);
-    video.addEventListener("timeupdate", updateTimeline);
-    video.addEventListener("durationchange", () => {
-      if (currentClip && clipDuration() && (!trimEnd || trimEnd > clipDuration())) setTrimBounds(trimStart, clipDuration());
-      renderMarkers();
-      updateTimeline();
-    });
-    video.addEventListener("loadedmetadata", () => {
-      $("stage-status").textContent = `${Math.round(video.videoWidth)}x${Math.round(video.videoHeight)} · ${fmtDur(video.duration)}`;
-      if (currentClip) {
-        $("pmeta").textContent = `${fmtDur(video.duration)} · ${currentClip.size_mb.toFixed(1)} MB · ${currentClip.path}`;
-        setTrimBounds(0, video.duration);
-      }
-    });
-    video.addEventListener("error", () => {
-      const e = video.error;
-      $("stage-status").textContent = `load error ${e ? e.code : "?"}`;
-    });
-    video.addEventListener("volumechange", syncMuteState);
-
-    $("play-toggle").addEventListener("click", togglePlayback);
-    $("seek-back").addEventListener("click", () => seekBy(-5));
-    $("seek-forward").addEventListener("click", () => seekBy(5));
-    $("mute-toggle").addEventListener("click", () => { video.muted = !video.muted; syncMuteState(); });
-    $("rate-select").addEventListener("change", () => { video.playbackRate = Number($("rate-select").value); });
-    $("volume-slider").addEventListener("input", () => {
-      video.volume = Number($("volume-slider").value);
-      video.muted = video.volume === 0;
-    });
-
-    $("trim-set-in").addEventListener("click", () => setTrimBounds(video.currentTime || 0, trimEnd));
-    $("trim-set-out").addEventListener("click", () => setTrimBounds(trimStart, video.currentTime || 0));
-    $("trim-start").addEventListener("change", () => setTrimBounds(Number($("trim-start").value), trimEnd));
-    $("trim-end").addEventListener("change", () => setTrimBounds(trimStart, Number($("trim-end").value)));
-    $("clip-export").addEventListener("click", exportCurrentTrim);
-    $("clip-delete").addEventListener("click", () => deleteClip());
-    $("clip-reveal").addEventListener("click", copyCurrentPath);
-    $("close").addEventListener("click", closePlayer);
-    $("prev-marker").addEventListener("click", () => jumpMarker(-1));
-    $("next-marker").addEventListener("click", () => jumpMarker(1));
-
-    $("timeline").addEventListener("pointerdown", (ev) => {
-      if (ev.target === $("trim-handle-in")) startTimelineDrag("in", ev);
-      else if (ev.target === $("trim-handle-out")) startTimelineDrag("out", ev);
-      else startTimelineDrag("seek", ev);
-    });
-    $("timeline").addEventListener("pointermove", handleTimelineDrag);
-    $("timeline").addEventListener("pointerup", stopTimelineDrag);
-    $("timeline").addEventListener("pointercancel", stopTimelineDrag);
-    $("timeline").addEventListener("lostpointercapture", stopTimelineDrag);
-
-    document.addEventListener("keydown", (ev) => {
-      if (!currentClip) return;
-      const tag = ev.target && ev.target.tagName;
-      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
-      if (ev.code === "Space" || ev.code === "KeyK") {
-        ev.preventDefault();
-        togglePlayback();
-      } else if (ev.code === "ArrowLeft" || ev.code === "KeyJ") {
-        ev.preventDefault();
-        seekBy(ev.shiftKey ? -1 : -5);
-      } else if (ev.code === "ArrowRight" || ev.code === "KeyL") {
-        ev.preventDefault();
-        seekBy(ev.shiftKey ? 1 : 5);
-      } else if (ev.code === "KeyI") {
-        ev.preventDefault();
-        setTrimBounds(video.currentTime || 0, trimEnd);
-      } else if (ev.code === "KeyO") {
-        ev.preventDefault();
-        setTrimBounds(trimStart, video.currentTime || 0);
-      } else if (ev.code === "KeyM") {
-        ev.preventDefault();
-        jumpMarker(1);
-      } else if (ev.code === "Escape") {
-        ev.preventDefault();
-        closePlayer();
-      }
-    });
-
-    setWorkspaceEnabled(false);
-    syncPlayState();
-    syncMuteState();
-    invoke("get_settings").then(fillSettings).catch((e) => $("error").textContent = e);
-    refresh();
-  </script>
+  <script src="player-core.js"></script>
+  <script src="main.js"></script>
 </body>
 </html>
