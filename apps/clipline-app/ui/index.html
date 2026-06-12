@@ -25,6 +25,8 @@
     button.ghost:hover { background: #2c3039; }
     .hint { color: #8a90a0; font-size: 12px; }
     #error { color: #f0883e; font-size: 12px; min-height: 16px; margin: 4px 0; }
+    #notice { color: #7ab8ff; font-size: 12px; min-height: 16px; margin: 4px 0; }
+    .warn { color: #f0883e; }
     h2 { font-size: 13px; color: #8a90a0; text-transform: uppercase; letter-spacing: 1px;
          margin: 18px 0 8px; }
     .clip {
@@ -65,7 +67,9 @@
   <div class="sub">replay buffer — no injection, ever</div>
   <div class="row"><div id="dot" class="dot"></div><div id="state">starting…</div></div>
   <div class="row stat">buffered: <b id="buffered">0.0 s</b> · <b id="mb">0.0 MB</b> · <b id="segs">0</b> GOPs</div>
+  <div class="row stat">storage: <b id="storage-used">0.0 MB</b> / <b id="storage-quota">10.0 GB</b> · <b id="storage-clips">0</b> clips</div>
   <div class="row"><button id="save">Save Replay</button><span class="hint">hotkey: Alt+F10</span></div>
+  <div id="notice"></div>
   <div id="error"></div>
 
   <h2>Library</h2>
@@ -90,10 +94,22 @@
       $("mb").textContent = s.buffered_mb.toFixed(1) + " MB";
       $("segs").textContent = s.segments;
     });
-    listen("saved", () => { $("error").textContent = ""; refresh(); });
+    listen("saved", (e) => {
+      $("error").textContent = "";
+      const s = e.payload;
+      $("notice").textContent = s.gc_deleted
+        ? `cleaned up ${s.gc_deleted} old clip${s.gc_deleted > 1 ? "s" : ""} (${fmtBytes(s.gc_freed_bytes)})`
+        : `saved ${fmtDur(s.seconds)} replay`;
+      refresh();
+    });
     listen("error", (e) => { $("error").textContent = e.payload; });
     $("save").addEventListener("click", () => invoke("save_replay"));
 
+    const fmtBytes = (bytes) => {
+      const mb = bytes / (1024 * 1024);
+      if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+      return `${mb.toFixed(1)} MB`;
+    };
     const fmtDur = (s) => s == null ? "?" :
       `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
     const fmtAgo = (unix) => {
@@ -104,6 +120,18 @@
     };
 
     async function refresh() {
+      await Promise.all([refreshClips(), refreshStorage()]);
+    }
+
+    async function refreshStorage() {
+      const s = await invoke("storage_status");
+      $("storage-used").textContent = fmtBytes(s.total_bytes);
+      $("storage-used").className = s.over_quota ? "warn" : "";
+      $("storage-quota").textContent = s.quota_bytes == null ? "no limit" : fmtBytes(s.quota_bytes);
+      $("storage-clips").textContent = s.clip_count;
+    }
+
+    async function refreshClips() {
       const clips = await invoke("list_clips");
       const root = $("clips");
       root.replaceChildren();
@@ -125,6 +153,7 @@
         el.querySelector(".play").addEventListener("click", () => openPlayer(c));
         el.querySelector(".del").addEventListener("click", async () => {
           await invoke("delete_clip", { path: c.path }).catch((e) => $("error").textContent = e);
+          $("notice").textContent = "";
           refresh();
         });
         root.appendChild(el);

@@ -12,6 +12,7 @@ clipline-capture = { path = "../../crates/clipline-capture" }
 clipline-events = { path = "../../crates/clipline-events" }
 clipline-lol = { path = "../../crates/clipline-lol" }
 clipline-mp4 = { path = "../../crates/clipline-mp4" }
+clipline-storage = { path = "../../crates/clipline-storage" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

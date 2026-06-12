@@ -36,7 +36,18 @@ pub fn run() {
     if let Some(i) = args.iter().position(|a| a == "--lol-url") {
         opts.lol_url = args.get(i + 1).cloned();
     }
+    if let Some(i) = args.iter().position(|a| a == "--disk-quota-gb") {
+        match args
+            .get(i + 1)
+            .ok_or("missing --disk-quota-gb value")
+            .and_then(|v| parse_quota_gb(v))
+        {
+            Ok(quota) => opts.disk_quota_bytes = quota,
+            Err(e) => eprintln!("invalid disk quota: {e}"),
+        }
+    }
 
+    let quota_bytes = opts.disk_quota_bytes;
     let (cmd_tx, event_rx) = service::spawn(opts);
     let quit_tx = cmd_tx.clone();
     let hotkey_tx = cmd_tx.clone();
@@ -44,6 +55,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(CmdChannel(Mutex::new(cmd_tx)))
+        .manage(crate::library::StorageSettings { quota_bytes })
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |_app, shortcut, event| {
@@ -56,13 +68,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_replay,
             crate::library::list_clips,
-            crate::library::delete_clip
+            crate::library::delete_clip,
+            crate::library::storage_status
         ])
         .setup(move |app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
             app.global_shortcut().register(alt_f10)?;
 
-            let save_item = MenuItem::with_id(app, "save", "Save Replay (Alt+F10)", true, None::<&str>)?;
+            let save_item =
+                MenuItem::with_id(app, "save", "Save Replay (Alt+F10)", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&save_item, &quit_item])?;
             TrayIconBuilder::with_id("clipline")
@@ -101,6 +115,23 @@ pub fn run() {
         });
 }
 
+fn parse_quota_gb(raw: &str) -> Result<Option<u64>, &'static str> {
+    const GIB_BYTES: f64 = 1024.0 * 1024.0 * 1024.0;
+
+    let gb = raw.parse::<f64>().map_err(|_| "expected a number of GiB")?;
+    if !gb.is_finite() || gb < 0.0 {
+        return Err("quota must be a non-negative finite number");
+    }
+    if gb == 0.0 {
+        return Ok(None);
+    }
+    let bytes = gb * GIB_BYTES;
+    if bytes > u64::MAX as f64 {
+        return Err("quota is too large");
+    }
+    Ok(Some(bytes.round() as u64))
+}
+
 /// Procedural 32x32 tray icon: a recording dot on a dark rounded square —
 /// no asset files, no bundler.
 fn tray_icon() -> Image<'static> {
@@ -123,4 +154,26 @@ fn tray_icon() -> Image<'static> {
         }
     }
     Image::new_owned(rgba, N as u32, N as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_parser_converts_gib_to_bytes() {
+        assert_eq!(parse_quota_gb("1").unwrap(), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_quota_gb("0.5").unwrap(), Some(512 * 1024 * 1024));
+    }
+
+    #[test]
+    fn quota_parser_zero_disables_gc() {
+        assert_eq!(parse_quota_gb("0").unwrap(), None);
+    }
+
+    #[test]
+    fn quota_parser_rejects_negative_or_non_numeric_values() {
+        assert!(parse_quota_gb("-1").is_err());
+        assert!(parse_quota_gb("nope").is_err());
+    }
 }

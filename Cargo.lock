@@ -593,6 +593,7 @@ dependencies = [
  "clipline-events",
  "clipline-lol",
  "clipline-mp4",
+ "clipline-storage",
  "serde",
  "serde_json",
  "tauri",
@@ -639,6 +640,10 @@ dependencies = [
 
 [[package]]
 name = "clipline-mp4"
+version = "0.1.0"
+
+[[package]]
+name = "clipline-storage"
 version = "0.1.0"
 
 [[package]]

@@ -4,6 +4,7 @@ members = [
     "crates/clipline-events",
     "crates/clipline-lol",
     "crates/clipline-buffer",
+    "crates/clipline-storage",
     "crates/clipline-capture",
     "crates/clipline-mp4",
     "apps/clipline-app",

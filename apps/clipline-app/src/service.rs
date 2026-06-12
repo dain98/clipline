@@ -12,6 +12,7 @@ use clipline_capture::windows::{
 };
 use clipline_capture::{even_dimensions, PipelineError, Recorder};
 use clipline_events::MarkerLog;
+use clipline_storage::{enforce_quota, storage_status};
 
 use crate::markers;
 
@@ -23,9 +24,25 @@ pub enum Cmd {
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
-    Status { recording: bool, segments: usize, buffered_s: f64, buffered_mb: f64 },
-    Saved { path: String, seconds: f64, markers: usize },
-    Error { message: String },
+    Status {
+        recording: bool,
+        segments: usize,
+        buffered_s: f64,
+        buffered_mb: f64,
+    },
+    Saved {
+        path: String,
+        seconds: f64,
+        markers: usize,
+        gc_deleted: usize,
+        gc_freed_bytes: u64,
+        storage_total_bytes: u64,
+        storage_quota_bytes: Option<u64>,
+        storage_over_quota: bool,
+    },
+    Error {
+        message: String,
+    },
 }
 
 pub struct ServiceOptions {
@@ -37,9 +54,13 @@ pub struct ServiceOptions {
     pub replay_window_s: f64,
     /// Ring budget in bytes.
     pub buffer_bytes: usize,
+    /// Saved clip disk quota. None disables save-time GC.
+    pub disk_quota_bytes: Option<u64>,
     pub fps: u32,
     pub bitrate_bps: u32,
 }
+
+pub const DEFAULT_DISK_QUOTA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 impl Default for ServiceOptions {
     fn default() -> Self {
@@ -49,6 +70,7 @@ impl Default for ServiceOptions {
             replay_window_s: 60.0,
             // ~2 min at 12 Mbps video + audio headroom.
             buffer_bytes: 220 * 1024 * 1024,
+            disk_quota_bytes: Some(DEFAULT_DISK_QUOTA_BYTES),
             fps: 60,
             bitrate_bps: 12_000_000,
         }
@@ -98,21 +120,30 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         .next_frame_timeout(Duration::from_secs(5))
         .map_err(|e| init(&e))?
         .ok_or("capture ended before the first frame")?;
-    let FrameData::Gpu(tex) = &first.data else { return Err("expected a GPU frame".into()) };
+    let FrameData::Gpu(tex) = &first.data else {
+        return Err("expected a GPU frame".into());
+    };
     let (in_w, in_h) = d3d11::texture_size(tex);
-    let scale = if in_w > 2560 { 2560.0 / in_w as f64 } else { 1.0 };
+    let scale = if in_w > 2560 {
+        2560.0 / in_w as f64
+    } else {
+        1.0
+    };
     let (enc_w, enc_h) = even_dimensions(
         (in_w as f64 * scale).round() as u32,
         (in_h as f64 * scale).round() as u32,
     );
 
-    let cfg =
-        MftConfig { width: enc_w, height: enc_h, fps: opts.fps, bitrate_bps: opts.bitrate_bps };
+    let cfg = MftConfig {
+        width: enc_w,
+        height: enc_h,
+        fps: opts.fps,
+        bitrate_bps: opts.bitrate_bps,
+    };
     let encoder = MftH264Encoder::new(&device, in_w, in_h, cfg).map_err(|e| init(&e))?;
     let audio = WasapiLoopback::start(clock).map_err(|e| init(&e))?;
 
-    let mut rec =
-        Recorder::new(cap, encoder, opts.buffer_bytes).with_audio(Box::new(audio));
+    let mut rec = Recorder::new(cap, encoder, opts.buffer_bytes).with_audio(Box::new(audio));
     let clips_dir = clips_dir()?;
     let mut last_save_end: Option<f64> = None;
     let mut last_status = Instant::now();
@@ -148,8 +179,10 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         loop {
             match cmd_rx.try_recv() {
                 Ok(Cmd::Save) => {
-                    let stamp =
-                        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let stamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
                     let path = clips_dir.join(format!("clip_{stamp}.mp4"));
                     match save(&rec, &path, opts.replay_window_s, last_save_end) {
                         Ok((end, seconds)) => {
@@ -164,10 +197,37 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                                     let _ = std::fs::write(sidecar, json);
                                 }
                             }
+                            let gc =
+                                match enforce_quota(&clips_dir, opts.disk_quota_bytes, Some(&path))
+                                {
+                                    Ok(report) => report,
+                                    Err(e) => {
+                                        let _ = events.send(Event::Error {
+                                            message: format!("storage cleanup: {e}"),
+                                        });
+                                        let status =
+                                            storage_status(&clips_dir, opts.disk_quota_bytes)
+                                                .unwrap_or(clipline_storage::StorageStatus {
+                                                    clip_count: 0,
+                                                    total_bytes: 0,
+                                                    quota_bytes: opts.disk_quota_bytes,
+                                                });
+                                        clipline_storage::GcReport {
+                                            deleted_clips: 0,
+                                            freed_bytes: 0,
+                                            status,
+                                        }
+                                    }
+                                };
                             let _ = events.send(Event::Saved {
                                 path: path.display().to_string(),
                                 seconds,
                                 markers,
+                                gc_deleted: gc.deleted_clips,
+                                gc_freed_bytes: gc.freed_bytes,
+                                storage_total_bytes: gc.status.total_bytes,
+                                storage_quota_bytes: gc.status.quota_bytes,
+                                storage_over_quota: gc.status.is_over_quota(),
                             });
                         }
                         Err(e) => {
