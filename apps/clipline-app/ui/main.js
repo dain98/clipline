@@ -171,8 +171,8 @@ function openClip(clip) {
   $("stage-note").textContent = "loading…";
   $("pname").textContent = clip.name;
   $("pmeta").textContent = `${clip.size_mb.toFixed(1)} MB · ${clip.path}`;
-  $("review-empty").hidden = true;
-  $("review-viewer").hidden = false;
+  settingsOpen = false;
+  updateViews();
   video.src = convertFileSrc(clip.path);
   video.playbackRate = Number($("rate-select").value);
   setTrim(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
@@ -190,11 +190,27 @@ function closeReview() {
   video.removeAttribute("src");
   video.load();
   currentClip = null;
-  $("review-viewer").hidden = true;
-  $("review-empty").hidden = false;
+  updateViews();
   $("stage-note").textContent = "";
   $("timeline").querySelectorAll(".tick").forEach((t) => t.remove());
   renderClips();
+}
+
+/* ---- main pane views: empty / player / settings ---- */
+
+let settingsOpen = false;
+
+function updateViews() {
+  $("settings-page").hidden = !settingsOpen;
+  $("review-viewer").hidden = settingsOpen || !currentClip;
+  $("review-empty").hidden = settingsOpen || !!currentClip;
+}
+
+function toggleSettings(open = !settingsOpen) {
+  settingsOpen = open;
+  // The clip survives the round-trip; just don't play behind the page.
+  if (settingsOpen && !video.paused) video.pause();
+  updateViews();
 }
 
 function setTrim(start, end) {
@@ -533,9 +549,19 @@ $("open-folder").addEventListener("click", openFolder);
 
 $("sidebar-toggle").addEventListener("click", toggleRail);
 $("rail-save").addEventListener("click", () => invoke("save_replay"));
-$("rail-settings").addEventListener("click", () => {
-  document.querySelector(".app").classList.remove("rail");
-  document.querySelector(".settings-fold").open = true;
+$("rail-settings").addEventListener("click", () => toggleSettings());
+$("open-settings").addEventListener("click", () => toggleSettings());
+$("settings-close").addEventListener("click", () => toggleSettings(false));
+
+document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    document
+      .querySelectorAll("#settings-tabs .tab")
+      .forEach((t) => t.classList.toggle("active", t === tab));
+    document.querySelectorAll(".settings-section").forEach((s) => {
+      s.hidden = s.dataset.section !== tab.dataset.tab;
+    });
+  });
 });
 
 $("timeline").addEventListener("pointerdown", (ev) => {
@@ -558,8 +584,14 @@ $("timeline").addEventListener("pointercancel", endDrag);
 $("timeline").addEventListener("lostpointercapture", endDrag);
 
 document.addEventListener("keydown", (ev) => {
-  if (!currentClip) return;
   if ($("confirm-dialog").open) return; // the dialog owns the keyboard
+  if (ev.code === "Escape" && settingsOpen) {
+    ev.preventDefault();
+    toggleSettings(false);
+    return;
+  }
+  if (settingsOpen) return; // player shortcuts are inert behind the page
+  if (!currentClip) return;
   const tag = ev.target && ev.target.tagName;
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
   const intent = keyIntent(ev.code, ev.shiftKey);
@@ -580,7 +612,7 @@ document.addEventListener("keydown", (ev) => {
 
 /* ---- boot ---- */
 
-$("review-viewer").hidden = true;
+updateViews();
 syncPlayState();
 syncVolume();
 invoke("get_settings").then(fillSettings).catch((e) => $("error").textContent = e);

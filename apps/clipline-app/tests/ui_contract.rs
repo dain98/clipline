@@ -51,12 +51,31 @@ fn review_player_owns_all_controls() {
         "id=\"confirm-dialog\"",
         "id=\"confirm-accept\"",
         "id=\"confirm-cancel\"",
+        "id=\"settings-page\"",
+        "id=\"settings-tabs\"",
+        "id=\"open-settings\"",
+        "id=\"settings-close\"",
+        "id=\"set-capture\"",
+        "id=\"set-window\"",
+        "id=\"set-buffer\"",
+        "id=\"set-replay\"",
+        "id=\"set-bitrate\"",
+        "id=\"set-fps\"",
+        "id=\"set-quota\"",
+        "id=\"set-hotkey\"",
+        "id=\"settings-save\"",
     ] {
         assert!(
             html.contains(required),
             "review player is missing required control {required}"
         );
     }
+
+    // Settings is a page in the main pane now, not a sidebar fold.
+    assert!(
+        !html.contains("settings-fold"),
+        "the sidebar settings fold was replaced by #settings-page"
+    );
 
     // Removed on purpose (2026-06-12): the path lives in #pmeta, and clicking
     // the active library row again closes the clip.
@@ -89,6 +108,7 @@ fn review_player_owns_all_controls() {
         "id=\"rail-settings\"",
         "id=\"delete-clip\"",
         "id=\"export-clip\"",
+        "id=\"open-settings\"",
     ] {
         let start = html.find(id).expect("transport button exists");
         let body_end = html[start..]

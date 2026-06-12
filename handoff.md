@@ -13,7 +13,7 @@ Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
 ## Current state (2026-06-12): a working tray recorder with a first-party review player
 
-Fifteen milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-one plan docs, all
+Sixteen milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-two plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -80,6 +80,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     button. Delete confirmation is an in-app `<dialog>` (Delete left / Cancel right, user
     preference) — `ui_contract` bans native `confirm()`/`alert()` and the removed header ids
     outright.
+16. **Settings page** — settings left the sidebar fold for a full-bleed tabbed page in the
+    main pane (Capture / Recording / Storage / Hotkeys; name + description rows; one Save
+    footer). Reached via the sidebar Settings row or the rail gear; exits via ✕, `Esc`
+    (priority over closing the clip; player shortcuts are inert behind the page), or opening
+    a clip. The open clip pauses and survives the round-trip. Field ids and the
+    validate/save/restart wiring are unchanged from milestone 9.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
@@ -176,6 +182,10 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   Opus audio, one sample description per track, no frame-accurate boundary re-encode yet. Exports
   are keyframe-aligned: in snaps backward to the previous sync sample and out snaps forward to the
   next sync sample/EOF, so the exported range can be wider than the numeric in/out request.
+- The main pane stacks `#review-empty` / `#review-viewer` / `#settings-page` on one grid cell.
+  Any `display:` rule on those views **defeats the `[hidden]` attribute** — every stacked view
+  needs an explicit `[hidden] { display: none }` restatement and an opaque background (the
+  empty state once bled through the settings page).
 - UI automation: occluded windows swallow synthesized clicks while `PrintWindow`
   (PW_RENDERFULLCONTENT) still captures the window content — reposition/topmost before
   clicking; `CopyFromScreen` shows black for accelerated webviews. If someone is at the

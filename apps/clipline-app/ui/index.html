@@ -34,30 +34,10 @@
         <div id="clips"></div>
       </section>
 
-      <details class="settings-fold">
-        <summary>Settings</summary>
-        <div class="settings">
-          <label><span>capture</span><select id="set-capture">
-            <option value="primary_monitor">primary monitor</option>
-            <option value="window_title">window title</option>
-          </select></label>
-          <label><span>window title</span><input id="set-window" spellcheck="false" /></label>
-          <label><span>buffer s</span><input id="set-buffer" type="number" min="10" max="1200" step="5" /></label>
-          <label><span>replay s</span><input id="set-replay" type="number" min="5" max="1200" step="5" /></label>
-          <label><span>bitrate Mbps</span><input id="set-bitrate" type="number" min="1" max="100" step="1" /></label>
-          <label><span>fps</span><select id="set-fps">
-            <option value="30">30</option>
-            <option value="60">60</option>
-            <option value="120">120</option>
-          </select></label>
-          <label><span>quota GiB</span><input id="set-quota" type="number" min="0" step="0.5" /></label>
-          <label><span>hotkey</span><input id="set-hotkey" spellcheck="false" /></label>
-          <div class="actions">
-            <button id="settings-save">Save Settings</button>
-            <span id="settings-status" class="hint"></span>
-          </div>
-        </div>
-      </details>
+      <button id="open-settings" class="sidebar-settings" title="Settings">
+        <svg viewBox="0 0 24 24"><path d="M19.4 13c.04-.33.07-.66.07-1s-.03-.67-.07-1l2.1-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.48 1a7.6 7.6 0 0 0-1.73-1l-.37-2.63A.5.5 0 0 0 13.93 2h-4a.5.5 0 0 0-.5.43l-.37 2.63c-.62.26-1.2.6-1.73 1l-2.48-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .11.64L4.53 11c-.04.33-.07.66-.07 1s.03.67.07 1l-2.1 1.65a.5.5 0 0 0-.12.64l2 3.46c.13.22.39.31.61.22l2.48-1c.53.4 1.1.74 1.73 1l.37 2.63c.04.25.25.43.5.43h4c.25 0 .46-.18.5-.43l.37-2.63a7.6 7.6 0 0 0 1.73-1l2.48 1c.22.09.48 0 .6-.22l2-3.46a.5.5 0 0 0-.11-.64L19.4 13zM11.93 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>
+        <span>Settings</span>
+      </button>
       </div>
 
       <div class="sidebar-rail">
@@ -165,6 +145,104 @@
           </div>
         </div>
       </div>
+
+      <section id="settings-page" class="settings-page" hidden>
+        <header class="settings-head">
+          <h1>Settings</h1>
+          <button id="settings-close" class="icon-button" title="Back (Esc)">
+            <svg viewBox="0 0 24 24"><path d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6z"/></svg>
+          </button>
+        </header>
+
+        <nav id="settings-tabs" class="settings-tabs">
+          <button class="tab active" data-tab="capture">Capture</button>
+          <button class="tab" data-tab="recording">Recording</button>
+          <button class="tab" data-tab="storage">Storage</button>
+          <button class="tab" data-tab="hotkeys">Hotkeys</button>
+        </nav>
+
+        <div class="settings-body">
+          <div class="settings-section" data-section="capture">
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Capture target</strong>
+                <span>What the recorder captures: the primary monitor, or a single window.</span>
+              </div>
+              <select id="set-capture">
+                <option value="primary_monitor">primary monitor</option>
+                <option value="window_title">window title</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Window title</strong>
+                <span>Title substring of the window to capture. Only used in window mode.</span>
+              </div>
+              <input id="set-window" spellcheck="false" />
+            </div>
+          </div>
+
+          <div class="settings-section" data-section="recording" hidden>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Buffer length</strong>
+                <span>Seconds of rolling history the replay buffer keeps in memory.</span>
+              </div>
+              <input id="set-buffer" type="number" min="10" max="1200" step="5" />
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Replay length</strong>
+                <span>Trailing seconds written to disk when you save a replay.</span>
+              </div>
+              <input id="set-replay" type="number" min="5" max="1200" step="5" />
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Bitrate (Mbps)</strong>
+                <span>H.264 video bitrate — higher means better quality and bigger files.</span>
+              </div>
+              <input id="set-bitrate" type="number" min="1" max="100" step="1" />
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Frame rate</strong>
+                <span>Capture and encode FPS.</span>
+              </div>
+              <select id="set-fps">
+                <option value="30">30</option>
+                <option value="60">60</option>
+                <option value="120">120</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="settings-section" data-section="storage" hidden>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Disk quota (GiB)</strong>
+                <span>Budget for saved clips — oldest clips are cleaned up after each save.</span>
+              </div>
+              <input id="set-quota" type="number" min="0" step="0.5" />
+            </div>
+          </div>
+
+          <div class="settings-section" data-section="hotkeys" hidden>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Save Replay</strong>
+                <span>Global shortcut — modifiers plus an F-key, e.g. Alt+F10 or Ctrl+Shift+F9.</span>
+              </div>
+              <input id="set-hotkey" spellcheck="false" />
+            </div>
+          </div>
+        </div>
+
+        <footer class="settings-actions">
+          <button id="settings-save" class="primary">Save Settings</button>
+          <span id="settings-status" class="hint"></span>
+        </footer>
+      </section>
     </main>
   </div>
 
