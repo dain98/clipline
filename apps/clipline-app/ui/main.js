@@ -767,6 +767,8 @@ function toggleSettings(open = !settingsOpen) {
     loadAudioDevices();
     loadVideoEncoders();
   }
+  // Closing discards unsaved edits by repainting from last-saved settings.
+  if (wasOpen && !settingsOpen && currentSettings) fillSettings(currentSettings);
   updateViews();
   renderVisibleSettingsSection();
 }
@@ -1174,6 +1176,7 @@ $("sidebar-toggle").addEventListener("click", toggleRail);
 $("rail-save").addEventListener("click", () => invoke("save_replay"));
 $("rail-settings").addEventListener("click", () => toggleSettings());
 $("open-settings").addEventListener("click", () => toggleSettings());
+$("settings-close").addEventListener("click", () => toggleSettings(false));
 $("set-hotkey").addEventListener("focus", beginHotkeyCapture);
 $("set-hotkey").addEventListener("click", beginHotkeyCapture);
 $("set-hotkey").addEventListener("keydown", recordHotkey);

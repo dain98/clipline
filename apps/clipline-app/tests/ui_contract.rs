@@ -98,6 +98,7 @@ fn review_player_owns_all_controls() {
         "id=\"set-quota\"",
         "id=\"set-hotkey\"",
         "id=\"settings-save\"",
+        "id=\"settings-close\"",
     ] {
         assert!(
             html.contains(required),
@@ -158,9 +159,15 @@ fn review_player_owns_all_controls() {
         !html.contains("settings-fold"),
         "the sidebar settings fold was replaced by #settings-page"
     );
+    // Reversed (2026-06-12, PR #5): the footer now carries an explicit Close
+    // button after Save, replacing the earlier "close only from the rail" rule.
+    let settings_save = html.find("id=\"settings-save\"").expect("settings save button");
+    let settings_close = html
+        .find("id=\"settings-close\"")
+        .expect("settings close button");
     assert!(
-        !html.contains("id=\"settings-close\""),
-        "the settings page closes from the bottom-left Settings control, not an extra X button"
+        settings_save < settings_close,
+        "Close must come after Save in the footer markup"
     );
 
     // Removed on purpose (2026-06-12): the path lives in #pmeta, and clicking
