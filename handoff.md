@@ -11,9 +11,9 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-12): a working tray recorder with persisted settings
+## Current state (2026-06-12): a working tray recorder with trim/export
 
-Nine milestones executed (plans in `docs/superpowers/plans/*.md` — fourteen plan docs, all
+Ten milestones executed (plans in `docs/superpowers/plans/*.md` — fifteen plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -36,6 +36,10 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
    seconds, bitrate, FPS, disk quota, and save hotkey. The in-app Settings panel validates and
    saves changes, restarts the recorder service with new recording options, rebinds the global
    hotkey, updates the tray label, and keeps the storage row on the active quota.
+10. **Trim/export editor** — the player overlay now has in/out controls and exports a sibling MP4
+    without touching the source clip. `clipline-mp4::trim_keyframe_aligned` parses Clipline's
+    finalized H.264/Opus MP4 tables, aligns start backward and end forward to video keyframes,
+    stream-copies selected samples into a fresh finalized MP4, and crops marker sidecars.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
@@ -51,9 +55,9 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 | `clipline-lol` | League Live Client adapter: client, dedupe, normalization, `poll_once` | httpmock integration + `markers_e2e` |
 | `clipline-buffer` | Replay ring of GOP segments (video + N audio tracks), byte eviction, `save_window` smart mode | unit tests |
 | `clipline-storage` | Saved-clip inventory, sidecar-aware size accounting, oldest-first quota GC with protected fresh saves | unit tests |
-| `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), multi-track h264+Opus, box walker, `movie_duration_s` | ffprobe + unit tests |
+| `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), multi-track h264+Opus, box walker, `movie_duration_s`, keyframe-aligned stream-copy trim | ffprobe + unit tests |
 | `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`) + neutral `annexb`/`opus`/`pcm`/`clock`/`avsync` | mocks on CI; CI-skipped device tests run real on the dev machine |
-| `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/player/settings UI | live e2e (screenshots in the session logs) |
+| `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/player/settings/editor UI | live e2e (screenshots in the session logs) |
 
 ## Machine setup (already done on this machine; for a fresh clone elsewhere)
 
@@ -128,6 +132,10 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 - Settings saves restart the recorder service immediately. Bad window-capture titles pass
   validation if non-empty, then surface as service init errors. Hotkey support is intentionally
   limited to modifiers plus F-keys (`Alt+F10`, `Ctrl+Alt+F10`, `Ctrl+Shift+F9`, etc.).
+- Trim/export is intentionally v1: finalized Clipline-authored MP4s only, H.264 video with optional
+  Opus audio, one sample description per track, no frame-accurate boundary re-encode yet. Exports
+  are keyframe-aligned: in snaps backward to the previous sync sample and out snaps forward to the
+  next sync sample/EOF, so the exported range can be wider than the numeric in/out request.
 - UI automation: occluded windows swallow synthesized clicks while `PrintWindow`
   (PW_RENDERFULLCONTENT) still captures the window content — reposition/topmost before
   clicking; `CopyFromScreen` shows black for accelerated webviews.
@@ -136,10 +144,10 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 
 ## What's next (rough value order; each gets its own plan)
 
-1. **Trim/export editor** (ddoc §11): keyframe-aligned stream-copy trim first (instant,
-   lossless, GOP-boundary) — the ring/muxer machinery mostly exists.
-2. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
+1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
    already carry importance.
+2. **Frame-accurate trim polish** (ddoc §11): re-encode only boundary GOPs, keep the current
+   stream-copy path as the instant/lossless mode.
 3. **FFmpeg encoder matrix** (ddoc §4: LGPL dynamic link): NVENC/QSV backends, AV1/HEVC,
    software x264 tier; the probe enum already models it.
 4. **Per-process audio loopback + mic track** (ddoc §10): multi-track muxing already works.

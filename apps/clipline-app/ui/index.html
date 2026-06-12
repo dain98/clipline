@@ -59,6 +59,12 @@
     #player.open { display: flex; }
     #player video { flex: 1; min-height: 0; width: 100%; background: black; border-radius: 8px; }
     #ptitle { font-size: 13px; margin-bottom: 8px; display: flex; justify-content: space-between; }
+    .editor {
+      display: grid; grid-template-columns: 96px 96px auto auto auto 1fr;
+      gap: 8px; align-items: end; margin-top: 10px;
+    }
+    .editor button { height: 32px; padding: 5px 10px; }
+    .editor .status { align-self: center; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #timeline {
       position: relative; height: 26px; margin-top: 10px; background: #171a20;
       border-radius: 6px; cursor: pointer;
@@ -110,6 +116,14 @@
   <div id="player">
     <div id="ptitle"><span id="pname"></span><button class="ghost" id="close">✕ close</button></div>
     <video id="video" controls></video>
+    <div class="editor">
+      <label><span>in s</span><input id="trim-start" type="number" min="0" step="0.1" /></label>
+      <label><span>out s</span><input id="trim-end" type="number" min="0" step="0.1" /></label>
+      <button class="ghost" id="trim-set-in">In</button>
+      <button class="ghost" id="trim-set-out">Out</button>
+      <button id="trim-export">Export</button>
+      <span class="hint status" id="trim-status"></span>
+    </div>
     <div id="timeline"><div id="progress"></div></div>
   </div>
 
@@ -236,6 +250,7 @@
       }
     }
 
+    let currentClip = null;
     const video = $("video");
     video.addEventListener("error", () => {
       const e = video.error;
@@ -243,15 +258,26 @@
     });
     video.addEventListener("loadedmetadata", () => {
       $("pname").textContent = `${$("pname").dataset.name} — ${video.duration.toFixed(1)}s loaded`;
+      if (currentClip && !Number($("trim-end").value)) setTrimBounds(0, video.duration);
     });
+    function setTrimBounds(start, end) {
+      const dur = Number.isFinite(video.duration) ? video.duration : end;
+      $("trim-start").max = dur;
+      $("trim-end").max = dur;
+      $("trim-start").value = Math.max(0, start).toFixed(1);
+      $("trim-end").value = Math.max(0, end).toFixed(1);
+    }
     function openPlayer(clip) {
+      currentClip = clip;
       $("pname").textContent = clip.name;
       $("pname").dataset.name = clip.name;
       video.src = convertFileSrc(clip.path);
       $("player").classList.add("open");
+      $("trim-status").textContent = "";
       const tl = $("timeline");
       tl.querySelectorAll(".tick").forEach((t) => t.remove());
       const dur = clip.duration_s ?? (clip.markers ? clip.markers.duration_s : null);
+      if (dur) setTrimBounds(0, dur);
       if (clip.markers && dur) {
         for (const m of clip.markers.markers) {
           const tick = document.createElement("div");
@@ -275,9 +301,37 @@
       };
       video.play();
     }
+    $("trim-set-in").addEventListener("click", () => {
+      const end = Number($("trim-end").value);
+      setTrimBounds(video.currentTime, Number.isFinite(end) ? end : video.duration);
+    });
+    $("trim-set-out").addEventListener("click", () => {
+      const start = Number($("trim-start").value);
+      setTrimBounds(Number.isFinite(start) ? start : 0, video.currentTime);
+    });
+    $("trim-export").addEventListener("click", async () => {
+      $("trim-status").textContent = "";
+      $("error").textContent = "";
+      if (!currentClip) return;
+      const start = Number($("trim-start").value);
+      const end = Number($("trim-end").value);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+        $("error").textContent = "trim out must be greater than in";
+        return;
+      }
+      try {
+        const exported = await invoke("export_clip", { path: currentClip.path, startS: start, endS: end });
+        $("trim-status").textContent = `${exported.name} · ${fmtDur(exported.aligned_start_s)}–${fmtDur(exported.aligned_end_s)}`;
+        $("notice").textContent = `exported ${fmtDur(exported.duration_s)} clip`;
+        await refresh();
+      } catch (e) {
+        $("error").textContent = e;
+      }
+    });
     $("close").addEventListener("click", () => {
       video.pause();
       video.src = "";
+      currentClip = null;
       $("player").classList.remove("open");
     });
 

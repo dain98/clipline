@@ -3,9 +3,11 @@
 //! directly — playback goes through the asset protocol.
 
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
-use clipline_events::ClipMarkers;
+use clipline_events::{ClipMarker, ClipMarkers};
+use clipline_mp4::trim_keyframe_aligned;
 use clipline_mp4::walker::movie_duration_s;
 use clipline_storage::storage_status as read_storage_status;
 
@@ -49,6 +51,17 @@ pub struct StorageInfo {
     pub total_bytes: u64,
     pub quota_bytes: Option<u64>,
     pub over_quota: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct ExportedClipInfo {
+    pub path: String,
+    pub name: String,
+    pub requested_start_s: f64,
+    pub requested_end_s: f64,
+    pub aligned_start_s: f64,
+    pub aligned_end_s: f64,
+    pub duration_s: f64,
 }
 
 #[tauri::command]
@@ -97,16 +110,42 @@ pub fn list_clips() -> Result<Vec<ClipInfo>, String> {
 
 #[tauri::command]
 pub fn delete_clip(path: String) -> Result<(), String> {
-    let dir = clips_dir()?.canonicalize().map_err(|e| e.to_string())?;
-    let target = Path::new(&path).canonicalize().map_err(|e| e.to_string())?;
-    if target.parent() != Some(dir.as_path())
-        || target.extension().and_then(|e| e.to_str()) != Some("mp4")
-    {
-        return Err("refusing to delete outside the clips directory".into());
-    }
+    let target = validate_clip_path(&path)?;
     std::fs::remove_file(&target).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(target.with_extension("markers.json"));
     Ok(())
+}
+
+#[tauri::command]
+pub fn export_clip(path: String, start_s: f64, end_s: f64) -> Result<ExportedClipInfo, String> {
+    let source = validate_clip_path(&path)?;
+    let input = std::fs::read(&source).map_err(|e| e.to_string())?;
+    let (output, info) =
+        trim_keyframe_aligned(&input, start_s, end_s).map_err(|e| e.to_string())?;
+    let target = unique_export_path(&source, info.aligned_start_s, info.aligned_end_s)?;
+    std::fs::write(&target, output).map_err(|e| e.to_string())?;
+
+    if let Some(markers) = read_markers(&source) {
+        let cropped = crop_markers(&markers, info.aligned_start_s, info.aligned_end_s);
+        if !cropped.markers.is_empty() {
+            let json = serde_json::to_string_pretty(&cropped).map_err(|e| e.to_string())?;
+            std::fs::write(target.with_extension("markers.json"), json)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(ExportedClipInfo {
+        path: target.display().to_string(),
+        name: target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        requested_start_s: info.requested_start_s,
+        requested_end_s: info.requested_end_s,
+        aligned_start_s: info.aligned_start_s,
+        aligned_end_s: info.aligned_end_s,
+        duration_s: info.duration_s,
+    })
 }
 
 #[tauri::command]
@@ -119,4 +158,146 @@ pub fn storage_status(settings: tauri::State<StorageSettings>) -> Result<Storage
         quota_bytes: status.quota_bytes,
         over_quota: status.is_over_quota(),
     })
+}
+
+fn validate_clip_path(path: &str) -> Result<PathBuf, String> {
+    let dir = clips_dir()?.canonicalize().map_err(|e| e.to_string())?;
+    let target = Path::new(path).canonicalize().map_err(|e| e.to_string())?;
+    if target.parent() != Some(dir.as_path())
+        || target.extension().and_then(|e| e.to_str()) != Some("mp4")
+    {
+        return Err("refusing to access a clip outside the clips directory".into());
+    }
+    Ok(target)
+}
+
+fn read_markers(path: &Path) -> Option<ClipMarkers> {
+    std::fs::read_to_string(path.with_extension("markers.json"))
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+}
+
+fn crop_markers(markers: &ClipMarkers, start_s: f64, end_s: f64) -> ClipMarkers {
+    let cropped = markers
+        .markers
+        .iter()
+        .filter(|m| m.t_s >= start_s && m.t_s < end_s)
+        .map(|m| ClipMarker {
+            t_s: m.t_s - start_s,
+            event: m.event.clone(),
+        })
+        .collect();
+    ClipMarkers {
+        recording_start_s: markers.recording_start_s + start_s,
+        duration_s: end_s - start_s,
+        markers: cropped,
+    }
+}
+
+fn unique_export_path(source: &Path, start_s: f64, end_s: f64) -> Result<PathBuf, String> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| "source clip has no parent directory".to_string())?;
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy())
+        .ok_or_else(|| "source clip has no file stem".to_string())?;
+    let start_ms = (start_s * 1000.0).round().max(0.0) as u64;
+    let end_ms = (end_s * 1000.0).round().max(0.0) as u64;
+    for suffix in 0..1000u32 {
+        let name = if suffix == 0 {
+            format!("{stem}_trim_{start_ms:06}_{end_ms:06}.mp4")
+        } else {
+            format!("{stem}_trim_{start_ms:06}_{end_ms:06}_{suffix}.mp4")
+        };
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("could not choose an unused export filename".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clipline_events::{EventKind, GameEvent, GameId};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "clipline-library-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn marker(t_s: f64) -> ClipMarker {
+        ClipMarker {
+            t_s,
+            event: GameEvent {
+                game_id: GameId::LeagueOfLegends,
+                kind: EventKind::ChampionKill,
+                actor: "Dain".into(),
+                victim: None,
+                assisters: Vec::new(),
+                subtype: None,
+                game_time_s: 0.0,
+                recording_offset_s: Some(10.0 + t_s),
+                importance: 7,
+                involves_local_player: true,
+            },
+        }
+    }
+
+    #[test]
+    fn crop_markers_rebases_times_and_recording_start() {
+        let markers = ClipMarkers {
+            recording_start_s: 10.0,
+            duration_s: 5.0,
+            markers: vec![marker(0.5), marker(1.5), marker(2.5)],
+        };
+
+        let cropped = crop_markers(&markers, 1.0, 2.0);
+
+        assert_eq!(cropped.markers.len(), 1);
+        assert!((cropped.markers[0].t_s - 0.5).abs() < 1e-9);
+        assert!((cropped.recording_start_s - 11.0).abs() < 1e-9);
+        assert!((cropped.duration_s - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unique_export_path_appends_suffix_when_needed() {
+        let dir = TestDir::new("export-name");
+        let source = dir.path().join("clip_1.mp4");
+        let first = dir.path().join("clip_1_trim_001000_002000.mp4");
+        std::fs::write(&source, b"source").unwrap();
+        std::fs::write(&first, b"existing").unwrap();
+
+        let path = unique_export_path(&source, 1.0, 2.0).unwrap();
+
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            "clip_1_trim_001000_002000_1.mp4"
+        );
+    }
 }
