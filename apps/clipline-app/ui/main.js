@@ -21,6 +21,7 @@ const {
   markerStyle,
   markerDigest,
   rulerMarks,
+  sessionGroups,
   formatClipTitle,
   keyIntent,
 } = PlayerCore;
@@ -145,7 +146,13 @@ function renderClips() {
     root.appendChild(hint);
     return;
   }
-  for (const c of clipsCache) root.appendChild(clipRow(c));
+  for (const group of sessionGroups(clipsCache)) {
+    const head = document.createElement("div");
+    head.className = "session-head";
+    head.textContent = group.label;
+    root.appendChild(head);
+    for (const c of group.clips) root.appendChild(clipRow(c));
+  }
 }
 
 /* ---- review player ---- */
@@ -395,6 +402,15 @@ async function copyPath() {
   }
 }
 
+async function openFolder() {
+  if (!currentClip) return;
+  try {
+    await invoke("reveal_clip", { path: currentClip.path });
+  } catch (e) {
+    $("error").textContent = e;
+  }
+}
+
 /* ---- backend events ---- */
 
 listen("status", (e) => {
@@ -478,6 +494,7 @@ $("volume-slider").addEventListener("input", () => {
 $("export-clip").addEventListener("click", exportTrim);
 $("delete-clip").addEventListener("click", () => deleteClip());
 $("copy-path").addEventListener("click", copyPath);
+$("open-folder").addEventListener("click", openFolder);
 $("close-review").addEventListener("click", closeReview);
 $("focus-toggle").addEventListener("click", toggleFocus);
 

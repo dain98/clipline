@@ -134,6 +134,15 @@ label span { white-space: nowrap; }
   padding: 14px 12px;
 }
 
+.session-head {
+  margin: 12px 2px 6px;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+.session-head:first-child { margin-top: 0; }
+
 .clip {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

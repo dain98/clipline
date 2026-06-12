@@ -12,10 +12,19 @@ use clipline_lol::{poll_once, EventTracker, LiveClient};
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
+/// What the poller tells the service: anchored events, plus the match
+/// boundaries it observes (the Live Client API only exists in-game, so
+/// connecting/losing it *is* the boundary signal).
+pub enum PollerMsg {
+    Event(GameEvent),
+    MatchStarted,
+    MatchEnded,
+}
+
 /// Spawn the poller. `base_url` overrides the local Live Client endpoint
 /// (mock servers in tests/demos); `recording_t0` is the wall-clock twin of
 /// the capture clock origin — sample them together.
-pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<GameEvent> {
+pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<PollerMsg> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("clipline-lol-poller".into())
@@ -38,6 +47,9 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<GameEv
                             Err(_) => tokio::time::sleep(RETRY_INTERVAL).await,
                         }
                     };
+                    if tx.send(PollerMsg::MatchStarted).is_err() {
+                        return; // service gone
+                    }
                     let mut tracker = EventTracker::default();
                     loop {
                         match poll_once(&client, &mut tracker, &local_player, recording_t0, 0.0)
@@ -45,7 +57,7 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<GameEv
                         {
                             Ok(events) => {
                                 for ev in events {
-                                    if tx.send(ev).is_err() {
+                                    if tx.send(PollerMsg::Event(ev)).is_err() {
                                         return; // service gone
                                     }
                                 }
@@ -53,6 +65,9 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<GameEv
                             Err(_) => break, // game ended — back to waiting
                         }
                         tokio::time::sleep(POLL_INTERVAL).await;
+                    }
+                    if tx.send(PollerMsg::MatchEnded).is_err() {
+                        return;
                     }
                 }
             });

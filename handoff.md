@@ -13,7 +13,7 @@ Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
 ## Current state (2026-06-12): a working tray recorder with a first-party review player
 
-Twelve milestones executed (plans in `docs/superpowers/plans/*.md` — eighteen plan docs, all
+Thirteen milestones executed (plans in `docs/superpowers/plans/*.md` — nineteen plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -57,6 +57,15 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     filename in the tooltip), focus mode (`F` hides the sidebar), live scrubbing
     (seek-throttled via the `seeked` event so WebView2 keeps painting; trim-handle drags
     ride the playhead and pause/resume playback).
+13. **Session folders** — saves land in `Videos\Clipline\<session>\`: one folder per recorder
+    run (label `YYYY-MM-DD HH-MM`, local time, fixed at service start) plus a dedicated
+    `… league` folder per detected LoL match (the poller now sends
+    `MatchStarted`/`MatchEnded`; `GameEnd` events also end the match session). Folders are
+    created lazily at save time; exports stay siblings so they inherit the folder; the
+    library groups by session with legacy root clips under "Earlier"; `reveal_clip` opens
+    Explorer with the clip selected; storage status/GC scan root + one level and delete
+    emptied session folders. assetProtocol needed a second glob
+    (`**/Videos/Clipline/**/*.mp4`) for subfolder playback.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window

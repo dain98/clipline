@@ -45,6 +45,7 @@ fn review_player_owns_all_controls() {
         "id=\"close-review\"",
         "id=\"ruler\"",
         "id=\"focus-toggle\"",
+        "id=\"open-folder\"",
     ] {
         assert!(
             html.contains(required),

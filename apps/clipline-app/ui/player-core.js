@@ -159,6 +159,27 @@ const PlayerCore = (() => {
     return marks;
   };
 
+  // Bucket clips by session folder; legacy root clips fall under "Earlier".
+  // Groups and the clips inside them sort newest-first.
+  const sessionGroups = (clips) => {
+    const order = [];
+    const byLabel = {};
+    for (const c of clips) {
+      const label = c.session ? c.session : "Earlier";
+      if (!byLabel[label]) {
+        byLabel[label] = [];
+        order.push(label);
+      }
+      byLabel[label].push(c);
+    }
+    const groups = order.map((label) => ({
+      label,
+      clips: byLabel[label].slice().sort((a, b) => b.modified_unix - a.modified_unix),
+    }));
+    groups.sort((a, b) => b.clips[0].modified_unix - a.clips[0].modified_unix);
+    return groups;
+  };
+
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
   const formatClipTitle = (month0, day, hours, minutes) => {
@@ -216,6 +237,7 @@ const PlayerCore = (() => {
     markerStyle,
     markerDigest,
     rulerMarks,
+    sessionGroups,
     formatClipTitle,
     keyIntent,
   };

@@ -11,10 +11,11 @@ use clipline_capture::windows::{
     d3d11, find_window_by_title, MftConfig, MftH264Encoder, WasapiLoopback, WgcCapture,
 };
 use clipline_capture::{even_dimensions, PipelineError, Recorder};
-use clipline_events::MarkerLog;
+use clipline_events::{EventKind, MarkerLog};
+use clipline_storage::sessions::{session_label, SessionTracker};
 use clipline_storage::{enforce_quota, storage_status};
 
-use crate::markers;
+use crate::markers::{self, PollerMsg};
 
 pub enum Cmd {
     Save,
@@ -145,6 +146,9 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
 
     let mut rec = Recorder::new(cap, encoder, opts.buffer_bytes).with_audio(Box::new(audio));
     let clips_dir = clips_dir()?;
+    // Saves land in a session folder: one per recorder run, with a dedicated
+    // folder per detected match. Folders are created lazily at save time.
+    let mut session = SessionTracker::new(local_session_label(false));
     let mut last_save_end: Option<f64> = None;
     let mut last_status = Instant::now();
 
@@ -157,8 +161,19 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             Err(e) => return Err(format!("recording: {e}")),
         }
 
-        while let Ok(event) = marker_rx.try_recv() {
-            marker_log.push(event);
+        while let Ok(msg) = marker_rx.try_recv() {
+            match msg {
+                PollerMsg::Event(event) => {
+                    // GameEnd means the match is over even while the Live
+                    // Client API lingers — stop attributing saves to it.
+                    if event.kind == EventKind::GameEnd {
+                        session.match_ended();
+                    }
+                    marker_log.push(event);
+                }
+                PollerMsg::MatchStarted => session.match_started(local_session_label(true)),
+                PollerMsg::MatchEnded => session.match_ended(),
+            }
         }
 
         if last_status.elapsed() >= Duration::from_secs(1) {
@@ -183,7 +198,14 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    let path = clips_dir.join(format!("clip_{stamp}.mp4"));
+                    let session_dir = clips_dir.join(session.current());
+                    if let Err(e) = std::fs::create_dir_all(&session_dir) {
+                        let _ = events.send(Event::Error {
+                            message: format!("create session folder {session_dir:?}: {e}"),
+                        });
+                        continue;
+                    }
+                    let path = session_dir.join(format!("clip_{stamp}.mp4"));
                     match save(&rec, &path, opts.replay_window_s, last_save_end) {
                         Ok((end, seconds)) => {
                             last_save_end = Some(end);
@@ -262,6 +284,21 @@ fn save(
         .save_replay(file, window_s, exclude_before_s)
         .map_err(|e| format!("save: {e}"))?;
     Ok((end, end - saved_from.unwrap_or(end)))
+}
+
+/// Session label from the local wall clock (folder names should match what
+/// the user's file explorer shows, not UTC).
+fn local_session_label(league_match: bool) -> String {
+    use chrono::{Datelike, Local, Timelike};
+    let now = Local::now();
+    session_label(
+        now.year(),
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        league_match,
+    )
 }
 
 pub(crate) fn clips_dir() -> Result<PathBuf, String> {

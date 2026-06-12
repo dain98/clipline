@@ -335,6 +335,32 @@ fn marker_digest_collapses_categories() {
 }
 
 #[test]
+fn session_groups_bucket_and_sort_by_newest() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"const C = [
+            { path: "c.mp4", session: "2026-06-12 14-30", modified_unix: 100 },
+            { path: "a.mp4", session: null, modified_unix: 50 },
+            { path: "d.mp4", session: "2026-06-12 14-30", modified_unix: 200 },
+            { path: "b.mp4", session: "2026-06-11 09-00", modified_unix: 150 },
+        ];"#,
+    ))
+    .expect("define clips");
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.sessionGroups(C).map(g => g.label)"),
+        r#"["2026-06-12 14-30","2026-06-11 09-00","Earlier"]"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.sessionGroups(C)[0].clips.map(c => c.path)"
+        ),
+        r#"["d.mp4","c.mp4"]"#
+    );
+    assert_eq!(eval_json(&mut ctx, "PlayerCore.sessionGroups([])"), "[]");
+}
+
+#[test]
 fn focus_mode_has_a_key() {
     let mut ctx = player_core_context();
     assert_eq!(
