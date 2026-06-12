@@ -1,123 +1,253 @@
 //! Tauri shell: tray, Alt+F10 global hotkey, status webview — all thin
 //! wiring around the recorder service thread.
 
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Mutex;
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Emitter, Manager};
-use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 use crate::service::{self, Cmd, Event, ServiceOptions};
+use crate::settings::{parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode};
 
-struct CmdChannel(Mutex<Sender<Cmd>>);
+struct RuntimeState(Mutex<RuntimeInner>);
 
-impl CmdChannel {
+struct TrayItems<R: Runtime> {
+    save_item: MenuItem<R>,
+}
+
+impl<R: Runtime> TrayItems<R> {
+    fn set_hotkey_label(&self, hotkey: &str) -> Result<(), String> {
+        self.save_item
+            .set_text(save_menu_text(hotkey))
+            .map_err(|e| e.to_string())
+    }
+}
+
+struct RuntimeInner {
+    tx: Sender<Cmd>,
+    settings: AppSettings,
+    lol_url: Option<String>,
+}
+
+impl RuntimeState {
+    fn new(tx: Sender<Cmd>, settings: AppSettings, lol_url: Option<String>) -> Self {
+        Self(Mutex::new(RuntimeInner {
+            tx,
+            settings,
+            lol_url,
+        }))
+    }
+
     fn send(&self, cmd: Cmd) {
-        if let Ok(tx) = self.0.lock() {
-            let _ = tx.send(cmd);
+        if let Ok(inner) = self.0.lock() {
+            let _ = inner.tx.send(cmd);
         }
+    }
+
+    fn settings(&self) -> AppSettings {
+        self.0
+            .lock()
+            .map(|inner| inner.settings.clone())
+            .unwrap_or_default()
+    }
+
+    fn active_shortcut_matches(&self, shortcut: &Shortcut) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|inner| parse_hotkey(&inner.settings.hotkey).ok())
+            .is_some_and(|active| &active == shortcut)
+    }
+
+    fn restart<R: Runtime>(&self, app: AppHandle<R>, settings: AppSettings) -> Result<(), String> {
+        let (old_tx, lol_url) = {
+            let inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            (inner.tx.clone(), inner.lol_url.clone())
+        };
+        let (tx, rx) = service::spawn(settings.to_service_options(lol_url.clone())?);
+        pump_events(app, rx);
+        let _ = old_tx.send(Cmd::Stop);
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        inner.tx = tx;
+        inner.settings = settings;
+        Ok(())
     }
 }
 
 #[tauri::command]
-fn save_replay(state: tauri::State<CmdChannel>) {
+fn save_replay(state: tauri::State<RuntimeState>) {
     state.send(Cmd::Save);
 }
 
+#[tauri::command]
+fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
+    state.settings()
+}
+
+#[tauri::command]
+fn save_settings<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<RuntimeState>,
+    tray_items: tauri::State<TrayItems<R>>,
+    storage_settings: tauri::State<crate::library::StorageSettings>,
+    mut settings: AppSettings,
+) -> Result<AppSettings, String> {
+    settings.hotkey = crate::settings::normalize_hotkey(&settings.hotkey)?;
+    settings.validate()?;
+
+    let old = state.settings();
+    if settings.hotkey != old.hotkey {
+        let old_shortcut = parse_hotkey(&old.hotkey)?;
+        let new_shortcut = parse_hotkey(&settings.hotkey)?;
+        app.global_shortcut()
+            .register(new_shortcut)
+            .map_err(|e| format!("register hotkey: {e}"))?;
+        if let Err(e) = app.global_shortcut().unregister(old_shortcut) {
+            let _ = app.global_shortcut().unregister(new_shortcut);
+            return Err(format!("replace hotkey: {e}"));
+        }
+    }
+
+    if let Err(e) = settings.save() {
+        if settings.hotkey != old.hotkey {
+            let _ = app
+                .global_shortcut()
+                .unregister(parse_hotkey(&settings.hotkey)?);
+            let _ = app.global_shortcut().register(parse_hotkey(&old.hotkey)?);
+        }
+        return Err(e);
+    }
+
+    let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
+    state.restart(app, settings.clone())?;
+    tray_items.set_hotkey_label(&settings.hotkey)?;
+    storage_settings.set_quota_bytes(quota_bytes);
+    Ok(settings)
+}
+
 pub fn run() {
-    let mut opts = ServiceOptions::default();
+    let mut settings = AppSettings::load_or_default();
     let args: Vec<String> = std::env::args().collect();
+    let mut lol_url = None::<String>;
     if let Some(i) = args.iter().position(|a| a == "--window") {
-        opts.window_title = args.get(i + 1).cloned();
+        if let Some(title) = args.get(i + 1) {
+            settings.capture_mode = CaptureMode::WindowTitle;
+            settings.window_title = title.clone();
+        }
     }
     if let Some(i) = args.iter().position(|a| a == "--lol-url") {
-        opts.lol_url = args.get(i + 1).cloned();
+        lol_url = args.get(i + 1).cloned();
     }
     if let Some(i) = args.iter().position(|a| a == "--disk-quota-gb") {
         match args
             .get(i + 1)
             .ok_or("missing --disk-quota-gb value")
-            .and_then(|v| parse_quota_gb(v))
+            .and_then(|v| parse_quota_gb(v).map(|_| v))
         {
-            Ok(quota) => opts.disk_quota_bytes = quota,
+            Ok(v) => {
+                if let Ok(gb) = v.parse::<f64>() {
+                    settings.disk_quota_gb = gb;
+                }
+            }
             Err(e) => eprintln!("invalid disk quota: {e}"),
         }
     }
+    if let Err(e) = settings.validate() {
+        eprintln!("invalid settings, using defaults: {e}");
+        settings = AppSettings::default();
+    }
 
-    let quota_bytes = opts.disk_quota_bytes;
-    let (cmd_tx, event_rx) = service::spawn(opts);
-    let quit_tx = cmd_tx.clone();
-    let hotkey_tx = cmd_tx.clone();
-    let alt_f10 = Shortcut::new(Some(Modifiers::ALT), Code::F10);
+    let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)
+        .unwrap_or(Some(service::DEFAULT_DISK_QUOTA_BYTES));
+    let (cmd_tx, event_rx) = service::spawn(
+        settings
+            .to_service_options(lol_url.clone())
+            .unwrap_or_else(|_| ServiceOptions::default()),
+    );
+    let hotkey =
+        parse_hotkey(&settings.hotkey).unwrap_or_else(|_| parse_hotkey("Alt+F10").unwrap());
 
     tauri::Builder::default()
-        .manage(CmdChannel(Mutex::new(cmd_tx)))
-        .manage(crate::library::StorageSettings { quota_bytes })
+        .manage(RuntimeState::new(cmd_tx, settings.clone(), lol_url))
+        .manage(crate::library::StorageSettings::new(quota_bytes))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |_app, shortcut, event| {
-                    if shortcut == &alt_f10 && event.state() == ShortcutState::Pressed {
-                        let _ = hotkey_tx.send(Cmd::Save);
+                    if event.state() == ShortcutState::Pressed {
+                        let state = _app.state::<RuntimeState>();
+                        if state.active_shortcut_matches(shortcut) {
+                            state.send(Cmd::Save);
+                        }
                     }
                 })
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
             save_replay,
+            get_settings,
+            save_settings,
             crate::library::list_clips,
             crate::library::delete_clip,
             crate::library::storage_status
         ])
         .setup(move |app| {
-            use tauri_plugin_global_shortcut::GlobalShortcutExt;
-            app.global_shortcut().register(alt_f10)?;
+            app.global_shortcut().register(hotkey)?;
 
-            let save_item =
-                MenuItem::with_id(app, "save", "Save Replay (Alt+F10)", true, None::<&str>)?;
+            let save_item = MenuItem::with_id(
+                app,
+                "save",
+                save_menu_text(&settings.hotkey),
+                true,
+                None::<&str>,
+            )?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&save_item, &quit_item])?;
+            app.manage(TrayItems {
+                save_item: save_item.clone(),
+            });
             TrayIconBuilder::with_id("clipline")
                 .icon(tray_icon())
                 .tooltip("Clipline — replay buffer")
                 .menu(&menu)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
-                    "save" => app.state::<CmdChannel>().send(Cmd::Save),
+                    "save" => app.state::<RuntimeState>().send(Cmd::Save),
                     "quit" => {
-                        app.state::<CmdChannel>().send(Cmd::Stop);
+                        app.state::<RuntimeState>().send(Cmd::Stop);
                         app.exit(0);
                     }
                     _ => {}
                 })
                 .build(app)?;
 
-            // Pump service events into the webview.
-            let handle = app.handle().clone();
-            std::thread::spawn(move || {
-                for event in event_rx {
-                    let _ = match &event {
-                        Event::Status { .. } => handle.emit("status", &event),
-                        Event::Saved { .. } => handle.emit("saved", &event),
-                        Event::Error { message } => handle.emit("error", message.clone()),
-                    };
-                }
-            });
+            pump_events(app.handle().clone(), event_rx);
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("build tauri app")
-        .run(move |_app, event| {
+        .run(move |app, event| {
             if let tauri::RunEvent::Exit = event {
-                let _ = quit_tx.send(Cmd::Stop);
+                app.state::<RuntimeState>().send(Cmd::Stop);
             }
         });
 }
 
-fn parse_quota_gb(raw: &str) -> Result<Option<u64>, &'static str> {
-    const GIB_BYTES: f64 = 1024.0 * 1024.0 * 1024.0;
+fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>) {
+    std::thread::spawn(move || {
+        for event in event_rx {
+            let _ = match &event {
+                Event::Status { .. } => handle.emit("status", &event),
+                Event::Saved { .. } => handle.emit("saved", &event),
+                Event::Error { message } => handle.emit("error", message.clone()),
+            };
+        }
+    });
+}
 
+fn parse_quota_gb(raw: &str) -> Result<Option<u64>, &'static str> {
     let gb = raw.parse::<f64>().map_err(|_| "expected a number of GiB")?;
     if !gb.is_finite() || gb < 0.0 {
         return Err("quota must be a non-negative finite number");
@@ -125,11 +255,11 @@ fn parse_quota_gb(raw: &str) -> Result<Option<u64>, &'static str> {
     if gb == 0.0 {
         return Ok(None);
     }
-    let bytes = gb * GIB_BYTES;
-    if bytes > u64::MAX as f64 {
-        return Err("quota is too large");
-    }
-    Ok(Some(bytes.round() as u64))
+    quota_bytes_from_gb(gb).map_err(|_| "quota is too large")
+}
+
+fn save_menu_text(hotkey: &str) -> String {
+    format!("Save Replay ({hotkey})")
 }
 
 /// Procedural 32x32 tray icon: a recording dot on a dark rounded square —

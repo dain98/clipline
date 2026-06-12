@@ -3,6 +3,7 @@
 //! directly — playback goes through the asset protocol.
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use clipline_events::ClipMarkers;
 use clipline_mp4::walker::movie_duration_s;
@@ -11,7 +12,25 @@ use clipline_storage::storage_status as read_storage_status;
 use crate::service::clips_dir;
 
 pub struct StorageSettings {
-    pub quota_bytes: Option<u64>,
+    quota_bytes: Mutex<Option<u64>>,
+}
+
+impl StorageSettings {
+    pub fn new(quota_bytes: Option<u64>) -> Self {
+        Self {
+            quota_bytes: Mutex::new(quota_bytes),
+        }
+    }
+
+    pub fn quota_bytes(&self) -> Option<u64> {
+        self.quota_bytes.lock().map(|q| *q).unwrap_or(None)
+    }
+
+    pub fn set_quota_bytes(&self, quota_bytes: Option<u64>) {
+        if let Ok(mut q) = self.quota_bytes.lock() {
+            *q = quota_bytes;
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -93,7 +112,7 @@ pub fn delete_clip(path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn storage_status(settings: tauri::State<StorageSettings>) -> Result<StorageInfo, String> {
     let status =
-        read_storage_status(&clips_dir()?, settings.quota_bytes).map_err(|e| e.to_string())?;
+        read_storage_status(&clips_dir()?, settings.quota_bytes()).map_err(|e| e.to_string())?;
     Ok(StorageInfo {
         clip_count: status.clip_count,
         total_bytes: status.total_bytes,

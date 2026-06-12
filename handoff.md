@@ -11,9 +11,9 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-12): a working tray recorder with storage GC
+## Current state (2026-06-12): a working tray recorder with persisted settings
 
-Eight milestones executed (plans in `docs/superpowers/plans/*.md` — thirteen plan docs, all
+Nine milestones executed (plans in `docs/superpowers/plans/*.md` — fourteen plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -32,9 +32,15 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
    marker sidecars, enforces a default 10 GiB oldest-first quota after saves, protects the
    just-saved clip, and surfaces usage/quota/clip count in the UI. `--disk-quota-gb 0` disables
    GC; any positive number sets the GiB cap.
+9. **Settings** — `%APPDATA%\Clipline\settings.json` persists capture target, buffer/replay
+   seconds, bitrate, FPS, disk quota, and save hotkey. The in-app Settings panel validates and
+   saves changes, restarts the recorder service with new recording options, rebinds the global
+   hotkey, updates the tray label, and keeps the storage row on the active quota.
 
-Run it: `cargo run -p clipline-app` (options: `--window <title substring>` to capture one
-window instead of the primary monitor, `--lol-url <url>` to point the marker poller at a mock).
+Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
+options still override startup behavior: `--window <title substring>` to capture one window
+instead of the primary monitor, `--lol-url <url>` to point the marker poller at a mock, and
+`--disk-quota-gb <n>` to override the saved quota for that launch).
 Useful examples: `record_smoke -- --seconds 5 --window <w> --audio` (full pipeline + sync
 report + ffprobe), `wgc_smoke` (capture only). Everything is verified live on this machine —
 real clips with matching A/V durations, real marker sidecars, real in-app playback.
@@ -47,7 +53,7 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 | `clipline-storage` | Saved-clip inventory, sidecar-aware size accounting, oldest-first quota GC with protected fresh saves | unit tests |
 | `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), multi-track h264+Opus, box walker, `movie_duration_s` | ffprobe + unit tests |
 | `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`) + neutral `annexb`/`opus`/`pcm`/`clock`/`avsync` | mocks on CI; CI-skipped device tests run real on the dev machine |
-| `apps/clipline-app` | Tauri 2 shell: service thread, hotkey, tray, status/library/player UI | live e2e (screenshots in the session logs) |
+| `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/player/settings UI | live e2e (screenshots in the session logs) |
 
 ## Machine setup (already done on this machine; for a fresh clone elsewhere)
 
@@ -119,6 +125,9 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   it and `0` disables it. GC deletes MP4s oldest-first with matching `.markers.json` sidecars,
   but intentionally refuses to delete the clip that was just saved even if that leaves the
   directory over budget.
+- Settings saves restart the recorder service immediately. Bad window-capture titles pass
+  validation if non-empty, then surface as service init errors. Hotkey support is intentionally
+  limited to modifiers plus F-keys (`Alt+F10`, `Ctrl+Alt+F10`, `Ctrl+Shift+F9`, etc.).
 - UI automation: occluded windows swallow synthesized clicks while `PrintWindow`
   (PW_RENDERFULLCONTENT) still captures the window content — reposition/topmost before
   clicking; `CopyFromScreen` shows black for accelerated webviews.
@@ -127,16 +136,14 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 
 ## What's next (rough value order; each gets its own plan)
 
-1. **Settings** (UI + persisted config): buffer length, bitrate, fps, capture target picker,
-   hotkey, replay window length. The service already takes `ServiceOptions`.
-2. **Trim/export editor** (ddoc §11): keyframe-aligned stream-copy trim first (instant,
+1. **Trim/export editor** (ddoc §11): keyframe-aligned stream-copy trim first (instant,
    lossless, GOP-boundary) — the ring/muxer machinery mostly exists.
-3. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
+2. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
    already carry importance.
-4. **FFmpeg encoder matrix** (ddoc §4: LGPL dynamic link): NVENC/QSV backends, AV1/HEVC,
+3. **FFmpeg encoder matrix** (ddoc §4: LGPL dynamic link): NVENC/QSV backends, AV1/HEVC,
    software x264 tier; the probe enum already models it.
-5. **Per-process audio loopback + mic track** (ddoc §10): multi-track muxing already works.
-6. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
+4. **Per-process audio loopback + mic track** (ddoc §10): multi-track muxing already works.
+5. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
    guidance (§8), WebView2-destroyed-when-minimized RAM trick (§4), installer/signing (§4).
 
 Also worth knowing: `Videos\Clipline` on this machine holds test clips from the milestone

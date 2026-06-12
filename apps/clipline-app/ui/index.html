@@ -23,6 +23,12 @@
     button:hover { background: #4181ff; }
     button.ghost { background: #23262e; color: #c2c8d6; padding: 5px 10px; }
     button.ghost:hover { background: #2c3039; }
+    input, select {
+      width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid #2c3039;
+      border-radius: 6px; background: #171a20; color: #e6e8ee; font: inherit;
+    }
+    label { display: grid; gap: 3px; min-width: 0; color: #8a90a0; font-size: 11.5px; }
+    label span { white-space: nowrap; }
     .hint { color: #8a90a0; font-size: 12px; }
     #error { color: #f0883e; font-size: 12px; min-height: 16px; margin: 4px 0; }
     #notice { color: #7ab8ff; font-size: 12px; min-height: 16px; margin: 4px 0; }
@@ -40,6 +46,12 @@
       background: #1d3450; color: #7ab8ff; font-size: 11px; padding: 1px 7px;
       border-radius: 9px; margin-left: 6px;
     }
+    .settings {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px;
+      padding: 10px 12px; background: #171a20; border-radius: 8px; margin-bottom: 8px;
+    }
+    .settings .wide { grid-column: 1 / -1; }
+    .settings .actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
     #player {
       position: fixed; inset: 0; background: rgba(6,8,11,0.96); display: none;
       flex-direction: column; padding: 18px; z-index: 10;
@@ -68,9 +80,29 @@
   <div class="row"><div id="dot" class="dot"></div><div id="state">starting…</div></div>
   <div class="row stat">buffered: <b id="buffered">0.0 s</b> · <b id="mb">0.0 MB</b> · <b id="segs">0</b> GOPs</div>
   <div class="row stat">storage: <b id="storage-used">0.0 MB</b> / <b id="storage-quota">10.0 GB</b> · <b id="storage-clips">0</b> clips</div>
-  <div class="row"><button id="save">Save Replay</button><span class="hint">hotkey: Alt+F10</span></div>
+  <div class="row"><button id="save">Save Replay</button><span class="hint" id="save-hotkey">hotkey: Alt+F10</span></div>
   <div id="notice"></div>
   <div id="error"></div>
+
+  <h2>Settings</h2>
+  <div class="settings">
+    <label><span>capture</span><select id="set-capture">
+      <option value="primary_monitor">primary monitor</option>
+      <option value="window_title">window title</option>
+    </select></label>
+    <label><span>window title</span><input id="set-window" spellcheck="false" /></label>
+    <label><span>buffer s</span><input id="set-buffer" type="number" min="10" max="1200" step="5" /></label>
+    <label><span>replay s</span><input id="set-replay" type="number" min="5" max="1200" step="5" /></label>
+    <label><span>bitrate Mbps</span><input id="set-bitrate" type="number" min="1" max="100" step="1" /></label>
+    <label><span>fps</span><select id="set-fps">
+      <option value="30">30</option>
+      <option value="60">60</option>
+      <option value="120">120</option>
+    </select></label>
+    <label><span>quota GiB</span><input id="set-quota" type="number" min="0" step="0.5" /></label>
+    <label><span>hotkey</span><input id="set-hotkey" spellcheck="false" /></label>
+    <div class="actions"><button class="ghost" id="settings-save">Save Settings</button><span class="hint" id="settings-status"></span></div>
+  </div>
 
   <h2>Library</h2>
   <div id="clips"></div>
@@ -118,6 +150,50 @@
       if (d < 5400) return `${Math.round(d / 60)}m ago`;
       return `${Math.round(d / 3600)}h ago`;
     };
+
+    function fillSettings(s) {
+      $("set-capture").value = s.capture_mode;
+      $("set-window").value = s.window_title ?? "";
+      $("set-buffer").value = s.buffer_seconds;
+      $("set-replay").value = s.replay_window_s;
+      $("set-bitrate").value = s.bitrate_mbps;
+      $("set-fps").value = s.fps;
+      $("set-quota").value = s.disk_quota_gb;
+      $("set-hotkey").value = s.hotkey;
+      $("save-hotkey").textContent = `hotkey: ${s.hotkey}`;
+      syncCaptureFields();
+    }
+
+    function readSettings() {
+      return {
+        capture_mode: $("set-capture").value,
+        window_title: $("set-window").value,
+        buffer_seconds: Number($("set-buffer").value),
+        replay_window_s: Number($("set-replay").value),
+        bitrate_mbps: Number($("set-bitrate").value),
+        fps: Number($("set-fps").value),
+        disk_quota_gb: Number($("set-quota").value),
+        hotkey: $("set-hotkey").value,
+      };
+    }
+
+    function syncCaptureFields() {
+      $("set-window").disabled = $("set-capture").value !== "window_title";
+    }
+
+    $("set-capture").addEventListener("change", syncCaptureFields);
+    $("settings-save").addEventListener("click", async () => {
+      $("settings-status").textContent = "";
+      $("error").textContent = "";
+      try {
+        const saved = await invoke("save_settings", { settings: readSettings() });
+        fillSettings(saved);
+        $("settings-status").textContent = "saved";
+        await refresh();
+      } catch (e) {
+        $("error").textContent = e;
+      }
+    });
 
     async function refresh() {
       await Promise.all([refreshClips(), refreshStorage()]);
@@ -205,6 +281,7 @@
       $("player").classList.remove("open");
     });
 
+    invoke("get_settings").then(fillSettings).catch((e) => $("error").textContent = e);
     refresh();
   </script>
 </body>
