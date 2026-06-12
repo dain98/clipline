@@ -96,6 +96,7 @@ fn review_player_owns_all_controls() {
         "id=\"set-quota\"",
         "id=\"set-hotkey\"",
         "id=\"settings-save\"",
+        "id=\"settings-close\"",
     ] {
         assert!(
             html.contains(required),
@@ -156,9 +157,13 @@ fn review_player_owns_all_controls() {
         !html.contains("settings-fold"),
         "the sidebar settings fold was replaced by #settings-page"
     );
+    let settings_save = html.find("id=\"settings-save\"").expect("settings save button");
+    let settings_close = html
+        .find("id=\"settings-close\"")
+        .expect("settings close button");
     assert!(
-        !html.contains("id=\"settings-close\""),
-        "the settings page closes from the bottom-left Settings control, not an extra X button"
+        settings_save < settings_close,
+        "settings close button should sit to the right of Save Settings"
     );
 
     // Removed on purpose (2026-06-12): the path lives in #pmeta, and clicking
