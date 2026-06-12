@@ -13,7 +13,7 @@ Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
 ## Current state (2026-06-12): a working tray recorder with a first-party review player
 
-Twenty milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-six plan docs, all
+Twenty-one milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-seven plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -120,6 +120,16 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     MB, or GOP diagnostics. The new `set_recording` Tauri command stops/starts the recorder from
     that status control. Stopping intentionally clears the rolling replay buffer, and internal
     settings restarts do not emit a stale stopped status.
+21. **Audio device controls + mic capture** — Capture settings now include Audio output and
+    Microphone controls. Users can keep system/output audio on or off, select default or explicit
+    render/capture endpoints, set output and mic gain from 0-200%, enable microphone capture, and
+    choose Mono mic handling with a checkbox. When output and mic are both enabled, the recorder
+    mixes them into one normal Opus track so the in-app player and regular video players hear both;
+    single-source output-only or mic-only captures still use the normal WASAPI Opus source. The mic
+    path accepts common WASAPI float/PCM formats and resamples to Opus' 48 kHz timeline. Capture
+    also has a live Test mic monitor: the button toggles to Stop testing, plays the selected mic
+    back through Web Audio, and shows a live level meter. Output audio remains enabled by default;
+    mic capture is opt-in for privacy.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
@@ -136,7 +146,7 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 | `clipline-buffer` | Replay ring of GOP segments (video + N audio tracks), byte eviction, `save_window` smart mode | unit tests |
 | `clipline-storage` | Saved-clip inventory, sidecar-aware size accounting, oldest-first quota GC with protected fresh saves | unit tests |
 | `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), multi-track h264+Opus, box walker, `movie_duration_s`, keyframe-aligned stream-copy trim | ffprobe + unit tests |
-| `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`) + neutral `annexb`/`opus`/`pcm`/`clock`/`avsync` | mocks on CI; CI-skipped device tests run real on the dev machine |
+| `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`) + neutral `annexb`/`opus`/`pcm`/`clock`/`avsync`; WASAPI covers selectable output loopback, mic capture, mic level testing, PCM decode, and resampling to 48 kHz | mocks on CI; CI-skipped device tests run real on the dev machine |
 | `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/settings plus the first-party review player | live e2e (screenshots in the session logs) + `player_core` (Boa) + `ui_contract` |
 
 ## Machine setup (already done on this machine; for a fresh clone elsewhere)
@@ -245,7 +255,7 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
    stream-copy path as the instant/lossless mode.
 3. **FFmpeg encoder matrix** (ddoc §4: LGPL dynamic link): NVENC/QSV backends, AV1/HEVC,
    software x264 tier; the probe enum already models it.
-4. **Per-process audio loopback + mic track** (ddoc §10): multi-track muxing already works.
+4. **Per-process audio loopback** (ddoc §10): system output + mic capture are in; per-game/process audio remains next.
 5. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
    guidance (§8), WebView2-destroyed-when-minimized RAM trick (§4), installer/signing (§4).
 

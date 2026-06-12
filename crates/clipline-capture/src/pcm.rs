@@ -30,7 +30,8 @@ impl LoopbackAssembler {
         let gap = pts_s - expected;
         if gap > GAP_TOLERANCE_S {
             let missing_pairs = (gap * SAMPLE_RATE).round() as usize;
-            self.buffered.extend(std::iter::repeat_n(0.0, missing_pairs * 2));
+            self.buffered
+                .extend(std::iter::repeat_n(0.0, missing_pairs * 2));
         }
         self.buffered.extend_from_slice(interleaved);
     }
@@ -54,6 +55,59 @@ pub fn extract_stereo(samples: &[f32], channels: u16) -> Vec<f32> {
     for frame in samples.chunks_exact(ch) {
         out.push(frame[0]);
         out.push(if ch >= 2 { frame[1] } else { frame[0] });
+    }
+    out
+}
+
+/// Average every source channel into a centered stereo pair.
+pub fn extract_mono_centered(samples: &[f32], channels: u16) -> Vec<f32> {
+    let ch = channels.max(1) as usize;
+    let mut out = Vec::with_capacity(samples.len() / ch * 2);
+    for frame in samples.chunks_exact(ch) {
+        let mono = frame.iter().sum::<f32>() / ch as f32;
+        out.push(mono);
+        out.push(mono);
+    }
+    out
+}
+
+pub fn apply_gain(samples: &mut [f32], gain: f32) {
+    for sample in samples {
+        *sample = (*sample * gain).clamp(-1.0, 1.0);
+    }
+}
+
+pub fn resample_stereo_linear(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    if samples.is_empty() || from_rate == 0 || to_rate == 0 {
+        return Vec::new();
+    }
+    if from_rate == to_rate {
+        return samples.to_vec();
+    }
+
+    let in_frames = samples.len() / 2;
+    if in_frames == 0 {
+        return Vec::new();
+    }
+    if in_frames == 1 {
+        return samples[..2].to_vec();
+    }
+
+    let out_frames =
+        ((in_frames as u64 * to_rate as u64) + (from_rate as u64 / 2)) / from_rate as u64;
+    let out_frames = out_frames.max(1) as usize;
+    let mut out = Vec::with_capacity(out_frames * 2);
+    let ratio = from_rate as f64 / to_rate as f64;
+    for i in 0..out_frames {
+        let src = i as f64 * ratio;
+        let a = src.floor() as usize;
+        let b = (a + 1).min(in_frames - 1);
+        let t = (src - a as f64) as f32;
+        for ch in 0..2 {
+            let av = samples[a * 2 + ch];
+            let bv = samples[b * 2 + ch];
+            out.push(av + (bv - av) * t);
+        }
     }
     out
 }
@@ -117,11 +171,46 @@ mod tests {
     #[test]
     fn extract_stereo_handles_channel_counts() {
         // Stereo passes through.
-        assert_eq!(extract_stereo(&[1.0, 2.0, 3.0, 4.0], 2), vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(
+            extract_stereo(&[1.0, 2.0, 3.0, 4.0], 2),
+            vec![1.0, 2.0, 3.0, 4.0]
+        );
         // 5.1 keeps front L/R.
         let six: Vec<f32> = (0..12).map(|i| i as f32).collect();
         assert_eq!(extract_stereo(&six, 6), vec![0.0, 1.0, 6.0, 7.0]);
         // Mono duplicates.
         assert_eq!(extract_stereo(&[0.5, 0.7], 1), vec![0.5, 0.5, 0.7, 0.7]);
+    }
+
+    #[test]
+    fn extract_mono_centered_averages_channels() {
+        assert_eq!(
+            extract_mono_centered(&[0.2, 0.6, -0.2, 0.2], 2),
+            vec![0.4, 0.4, 0.0, 0.0]
+        );
+        assert_eq!(
+            extract_mono_centered(&[0.5, 0.7], 1),
+            vec![0.5, 0.5, 0.7, 0.7]
+        );
+    }
+
+    #[test]
+    fn apply_gain_scales_and_clamps_samples() {
+        let mut samples = vec![-0.6, 0.25, 0.75];
+        apply_gain(&mut samples, 2.0);
+        assert_eq!(samples, vec![-1.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn resample_stereo_linear_preserves_stereo_pairs() {
+        let samples = vec![0.0, 1.0, 0.5, 0.5, 1.0, 0.0, 0.5, -0.5];
+        assert_eq!(resample_stereo_linear(&samples, 48_000, 48_000), samples);
+
+        let down = resample_stereo_linear(&samples, 48_000, 24_000);
+        assert_eq!(down, vec![0.0, 1.0, 1.0, 0.0]);
+
+        let up = resample_stereo_linear(&[0.0, 1.0, 1.0, 0.0], 24_000, 48_000);
+        assert_eq!(up.len(), 8);
+        assert_eq!(&up[..4], &[0.0, 1.0, 0.5, 0.5]);
     }
 }

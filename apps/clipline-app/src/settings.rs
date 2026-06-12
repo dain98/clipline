@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_global_shortcut::Shortcut;
 
-use crate::service::{CaptureRegion, CaptureSource, ServiceOptions};
+use crate::service::{
+    AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource, ServiceOptions,
+};
 
 const MAX_REPLAY_WINDOW_S: f64 = 120.0;
 
@@ -50,12 +52,74 @@ impl CaptureRegionSettings {
     }
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_volume() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AudioSettings {
+    #[serde(default = "default_enabled")]
+    pub output_enabled: bool,
+    #[serde(default)]
+    pub output_device_id: Option<String>,
+    #[serde(default = "default_volume")]
+    pub output_volume: f64,
+    #[serde(default)]
+    pub mic_enabled: bool,
+    #[serde(default)]
+    pub mic_device_id: Option<String>,
+    #[serde(default = "default_volume")]
+    pub mic_volume: f64,
+    #[serde(default)]
+    pub mic_channels: AudioChannelMode,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            output_enabled: true,
+            output_device_id: None,
+            output_volume: 1.0,
+            mic_enabled: false,
+            mic_device_id: None,
+            mic_volume: 1.0,
+            mic_channels: AudioChannelMode::Mono,
+        }
+    }
+}
+
+impl AudioSettings {
+    fn to_service_options(&self) -> AudioOptions {
+        AudioOptions {
+            output_enabled: self.output_enabled,
+            output_device_id: self
+                .output_device_id
+                .clone()
+                .filter(|id| !id.trim().is_empty()),
+            output_volume: self.output_volume,
+            mic_enabled: self.mic_enabled,
+            mic_device_id: self
+                .mic_device_id
+                .clone()
+                .filter(|id| !id.trim().is_empty()),
+            mic_volume: self.mic_volume,
+            mic_channels: self.mic_channels,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppSettings {
     pub capture_mode: CaptureMode,
     pub window_title: String,
     #[serde(default)]
     pub capture_region: CaptureRegionSettings,
+    #[serde(default)]
+    pub audio: AudioSettings,
     pub buffer_seconds: f64,
     pub replay_window_s: f64,
     pub bitrate_mbps: f64,
@@ -70,6 +134,7 @@ impl Default for AppSettings {
             capture_mode: CaptureMode::PrimaryMonitor,
             window_title: String::new(),
             capture_region: CaptureRegionSettings::default(),
+            audio: AudioSettings::default(),
             buffer_seconds: 120.0,
             replay_window_s: 60.0,
             bitrate_mbps: 12.0,
@@ -95,6 +160,8 @@ impl AppSettings {
                 return Err("capture region is too large".into());
             }
         }
+        validate_range("output volume", self.audio.output_volume, 0.0, 2.0)?;
+        validate_range("microphone volume", self.audio.mic_volume, 0.0, 2.0)?;
         validate_range("buffer seconds", self.buffer_seconds, 10.0, 20.0 * 60.0)?;
         validate_range(
             "replay seconds",
@@ -132,6 +199,7 @@ impl AppSettings {
             disk_quota_bytes: quota_bytes_from_gb(self.disk_quota_gb)?,
             fps: self.fps,
             bitrate_bps: (self.bitrate_mbps * 1_000_000.0).round() as u32,
+            audio: self.audio.to_service_options(),
         })
     }
 
@@ -140,6 +208,14 @@ impl AppSettings {
         let mut settings: Self = serde_json::from_str(&json).map_err(|e| e.to_string())?;
         settings.hotkey =
             normalize_hotkey(&settings.hotkey).unwrap_or_else(|_| AppSettings::default().hotkey);
+        settings.audio.output_device_id = settings
+            .audio
+            .output_device_id
+            .filter(|id| !id.trim().is_empty());
+        settings.audio.mic_device_id = settings
+            .audio
+            .mic_device_id
+            .filter(|id| !id.trim().is_empty());
         settings.replay_window_s = settings.replay_window_s.min(MAX_REPLAY_WINDOW_S);
         settings.buffer_seconds = settings.buffer_seconds.max(settings.replay_window_s);
         settings.validate()?;
@@ -315,6 +391,13 @@ mod tests {
         let settings = AppSettings::default();
 
         assert_eq!(settings.capture_mode, CaptureMode::PrimaryMonitor);
+        assert!(settings.audio.output_enabled);
+        assert_eq!(settings.audio.output_device_id, None);
+        assert_eq!(settings.audio.output_volume, 1.0);
+        assert!(!settings.audio.mic_enabled);
+        assert_eq!(settings.audio.mic_device_id, None);
+        assert_eq!(settings.audio.mic_volume, 1.0);
+        assert_eq!(settings.audio.mic_channels, AudioChannelMode::Mono);
         assert_eq!(settings.buffer_seconds, 120.0);
         assert_eq!(settings.replay_window_s, 60.0);
         assert_eq!(settings.bitrate_mbps, 12.0);
@@ -361,7 +444,31 @@ mod tests {
 
         assert_eq!(settings.capture_region.width, 1920);
         assert_eq!(settings.capture_region.height, 1080);
+        assert_eq!(settings.audio, AudioSettings::default());
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_out_of_range_audio_volume() {
+        let settings = AppSettings {
+            audio: AudioSettings {
+                output_volume: 2.1,
+                ..AudioSettings::default()
+            },
+            ..AppSettings::default()
+        };
+
+        assert!(settings.validate().is_err());
+
+        let settings = AppSettings {
+            audio: AudioSettings {
+                mic_volume: -0.1,
+                ..AudioSettings::default()
+            },
+            ..AppSettings::default()
+        };
+
+        assert!(settings.validate().is_err());
     }
 
     #[test]
@@ -474,7 +581,34 @@ mod tests {
         assert_eq!(opts.bitrate_bps, 12_000_000);
         assert_eq!(opts.disk_quota_bytes, Some(DEFAULT_DISK_QUOTA_BYTES));
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
+        assert_eq!(opts.audio, AudioOptions::default());
         assert!(opts.buffer_bytes >= 220 * 1024 * 1024);
+    }
+
+    #[test]
+    fn service_options_include_audio_settings() {
+        let settings = AppSettings {
+            audio: AudioSettings {
+                output_enabled: true,
+                output_device_id: Some("output-id".into()),
+                output_volume: 0.75,
+                mic_enabled: true,
+                mic_device_id: Some("mic-id".into()),
+                mic_volume: 1.5,
+                mic_channels: AudioChannelMode::Stereo,
+            },
+            ..AppSettings::default()
+        };
+
+        let opts = settings.to_service_options(None).unwrap();
+
+        assert!(opts.audio.output_enabled);
+        assert_eq!(opts.audio.output_device_id.as_deref(), Some("output-id"));
+        assert_eq!(opts.audio.output_volume, 0.75);
+        assert!(opts.audio.mic_enabled);
+        assert_eq!(opts.audio.mic_device_id.as_deref(), Some("mic-id"));
+        assert_eq!(opts.audio.mic_volume, 1.5);
+        assert_eq!(opts.audio.mic_channels, AudioChannelMode::Stereo);
     }
 
     #[test]

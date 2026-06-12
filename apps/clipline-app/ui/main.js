@@ -45,10 +45,15 @@ let clipsCache = [];
 let currentSettings = null;
 let recordingActive = true;
 let displays = [];
+let audioDevices = { outputs: [], inputs: [] };
 let regionState = { display_id: null, x: 0, y: 0, width: 1920, height: 1080 };
 let regionLayout = null;
 let regionDrag = null;
 let regionMenuDisplayId = null;
+let micTestRunning = false;
+let micAudioContext = null;
+let micAudioCursor = 0;
+let micAudioSources = [];
 let hotkeyCaptureActive = false;
 let trimStart = 0;
 let trimEnd = 0;
@@ -71,10 +76,16 @@ function clipMarkers() {
 /* ---- sidebar: status, settings, library ---- */
 
 function fillSettings(s) {
-  currentSettings = s;
+  const audio = { ...defaultAudioSettings(), ...(s.audio || {}) };
+  currentSettings = { ...s, audio };
   $("set-capture").value = s.capture_mode;
   $("set-window").value = s.window_title ?? "";
   regionState = s.capture_region ?? regionState;
+  $("set-output-enabled").checked = !!audio.output_enabled;
+  $("set-output-volume").value = String(Number.isFinite(audio.output_volume) ? audio.output_volume : 1);
+  $("set-mic-enabled").checked = !!audio.mic_enabled;
+  $("set-mic-volume").value = String(Number.isFinite(audio.mic_volume) ? audio.mic_volume : 1);
+  $("set-mic-mono").checked = (audio.mic_channels || "mono") === "mono";
   $("set-buffer").value = Math.max(120, Number(s.buffer_seconds) || 120);
   $("set-replay").value = Math.min(120, Number(s.replay_window_s) || 60);
   $("set-bitrate").value = qualityIndexForBitrate(s.bitrate_mbps);
@@ -84,6 +95,8 @@ function fillSettings(s) {
   $("save-hotkey").textContent = s.hotkey;
   endHotkeyCapture("Click the field to record a new shortcut.");
   syncCaptureFields();
+  renderAudioDeviceSelects();
+  syncAudioFields();
   syncRecordingFields();
   updateCaptureStatus();
 }
@@ -94,12 +107,33 @@ function readSettings() {
     capture_mode: $("set-capture").value,
     window_title: $("set-window").value,
     capture_region: regionState,
+    audio: {
+      output_enabled: $("set-output-enabled").checked,
+      output_device_id: selectedDeviceId("set-output-device"),
+      output_volume: Number($("set-output-volume").value),
+      mic_enabled: $("set-mic-enabled").checked,
+      mic_device_id: selectedDeviceId("set-mic-device"),
+      mic_volume: Number($("set-mic-volume").value),
+      mic_channels: $("set-mic-mono").checked ? "mono" : "stereo",
+    },
     buffer_seconds: Math.max(120, replay),
     replay_window_s: replay,
     bitrate_mbps: recordingQualityPreset(Number($("set-bitrate").value)).bitrate,
     fps: smoothnessPreset(Number($("set-fps").value)).fps,
     disk_quota_gb: Number($("set-quota").value),
     hotkey: $("set-hotkey").value,
+  };
+}
+
+function defaultAudioSettings() {
+  return {
+    output_enabled: true,
+    output_device_id: null,
+    output_volume: 1,
+    mic_enabled: false,
+    mic_device_id: null,
+    mic_volume: 1,
+    mic_channels: "mono",
   };
 }
 
@@ -118,6 +152,154 @@ function syncRecordingFields() {
   $("replay-summary").className = "setting-summary";
   $("quality-summary").textContent = `${quality.label} quality - ${quality.hint}.`;
   $("fps-summary").textContent = `${smoothness.label} - ${smoothness.hint}.`;
+}
+
+function volumeLabel(value) {
+  const pct = Math.round(Math.max(0, Math.min(2, Number(value) || 0)) * 100);
+  return `${pct}%`;
+}
+
+function selectedDeviceId(id) {
+  const value = $(id).value;
+  return value ? value : null;
+}
+
+function fillDeviceSelect(id, devices, defaultLabel, selectedId) {
+  const select = $(id);
+  const selected = selectedId || "";
+  select.replaceChildren();
+  const def = document.createElement("option");
+  def.value = "";
+  def.textContent = defaultLabel;
+  select.appendChild(def);
+  for (const device of devices) {
+    const opt = document.createElement("option");
+    opt.value = device.id;
+    opt.textContent = device.name + (device.is_default ? " (default)" : "");
+    select.appendChild(opt);
+  }
+  if (selected && !devices.some((device) => device.id === selected)) {
+    const stale = document.createElement("option");
+    stale.value = selected;
+    stale.textContent = "Unavailable device";
+    select.appendChild(stale);
+  }
+  select.value = selected;
+}
+
+function renderAudioDeviceSelects() {
+  const audio = currentSettings && currentSettings.audio ? currentSettings.audio : defaultAudioSettings();
+  fillDeviceSelect("set-output-device", audioDevices.outputs, "Default output device", audio.output_device_id);
+  fillDeviceSelect("set-mic-device", audioDevices.inputs, "Default microphone", audio.mic_device_id);
+}
+
+function syncAudioFields() {
+  const outputEnabled = $("set-output-enabled").checked;
+  $("set-output-device").disabled = !outputEnabled;
+  $("set-output-volume").disabled = !outputEnabled;
+  $("set-mic-device").disabled = micTestRunning;
+  $("set-mic-volume").disabled = micTestRunning;
+  $("set-mic-mono").disabled = micTestRunning;
+  $("test-mic").disabled = false;
+  $("test-mic").textContent = micTestRunning ? "Stop testing" : "Test mic";
+  $("output-volume-summary").textContent = volumeLabel($("set-output-volume").value);
+  $("mic-volume-summary").textContent = volumeLabel($("set-mic-volume").value);
+}
+
+function setMicTestStatus(message, level = 0) {
+  $("mic-test-status").textContent = message;
+  $("mic-meter-fill").style.width = `${Math.round(Math.max(0, Math.min(1, level)) * 100)}%`;
+}
+
+function micMeterLevel(result) {
+  const peak = Math.max(0, Number(result.peak) || 0);
+  const rms = Math.max(0, Number(result.rms) || 0);
+  return Math.min(1, Math.sqrt(Math.max(peak, rms * 3)));
+}
+
+function ensureMicAudioContext() {
+  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextCtor) throw new Error("Web Audio is unavailable");
+  if (!micAudioContext || micAudioContext.state === "closed") {
+    micAudioContext = new AudioContextCtor({ sampleRate: 48000 });
+  }
+  return micAudioContext;
+}
+
+async function startMicPlayback() {
+  const ctx = ensureMicAudioContext();
+  if (ctx.state === "suspended") await ctx.resume();
+  micAudioCursor = ctx.currentTime + 0.04;
+}
+
+function stopMicPlayback() {
+  for (const source of micAudioSources) {
+    try {
+      source.stop();
+    } catch (_) {
+      // Already ended.
+    }
+  }
+  micAudioSources = [];
+  micAudioCursor = 0;
+}
+
+function playMicSamples(samples) {
+  if (!micTestRunning || !samples || samples.length < 2) return;
+  const ctx = ensureMicAudioContext();
+  const frames = Math.floor(samples.length / 2);
+  const buffer = ctx.createBuffer(2, frames, 48000);
+  const left = buffer.getChannelData(0);
+  const right = buffer.getChannelData(1);
+  for (let i = 0; i < frames; i += 1) {
+    left[i] = Math.max(-1, Math.min(1, samples[i * 2] / 32768));
+    right[i] = Math.max(-1, Math.min(1, samples[i * 2 + 1] / 32768));
+  }
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(ctx.destination);
+  const startAt = Math.max(ctx.currentTime + 0.02, micAudioCursor || ctx.currentTime + 0.02);
+  source.start(startAt);
+  micAudioCursor = startAt + buffer.duration;
+  micAudioSources.push(source);
+  source.onended = () => {
+    micAudioSources = micAudioSources.filter((item) => item !== source);
+  };
+}
+
+function stopMicTestUi(message = "stopped") {
+  micTestRunning = false;
+  stopMicPlayback();
+  syncAudioFields();
+  setMicTestStatus(message, 0);
+}
+
+async function testMic() {
+  $("error").textContent = "";
+  if (micTestRunning) {
+    try {
+      await invoke("stop_microphone_test");
+    } catch (e) {
+      $("error").textContent = e;
+    }
+    stopMicTestUi("stopped");
+    return;
+  }
+
+  micTestRunning = true;
+  syncAudioFields();
+  setMicTestStatus("listening", 0);
+  try {
+    await startMicPlayback();
+    await invoke("start_microphone_test", {
+      deviceId: selectedDeviceId("set-mic-device"),
+      volume: Number($("set-mic-volume").value),
+      mono: $("set-mic-mono").checked,
+    });
+  } catch (e) {
+    stopMicTestUi("error");
+    $("error").textContent = e;
+  }
 }
 
 function updateCaptureStatus() {
@@ -223,6 +405,15 @@ async function loadDisplays() {
     renderRegionEditor();
   } catch (e) {
     $("region-display-label").textContent = "display list unavailable";
+    $("error").textContent = e;
+  }
+}
+
+async function loadAudioDevices() {
+  try {
+    audioDevices = await invoke("list_audio_devices");
+    renderAudioDeviceSelects();
+  } catch (e) {
     $("error").textContent = e;
   }
 }
@@ -784,12 +975,44 @@ listen("saved", (e) => {
 
 listen("error", (e) => { $("error").textContent = e.payload; });
 
+listen("mic-test", (e) => {
+  if (!micTestRunning) return;
+  const result = e.payload || {};
+  playMicSamples(result.samples || []);
+  const level = micMeterLevel(result);
+  const peakPct = Math.round(Math.max(0, Math.min(1, Number(result.peak) || 0)) * 100);
+  if (!result.sample_count) {
+    setMicTestStatus("no input", 0);
+  } else if (peakPct <= 1) {
+    setMicTestStatus("quiet", level);
+  } else {
+    setMicTestStatus(`${peakPct}%`, level);
+  }
+});
+
+listen("mic-test-error", (e) => {
+  stopMicTestUi("error");
+  $("error").textContent = e.payload;
+});
+
+listen("mic-test-stopped", () => {
+  if (micTestRunning) stopMicTestUi("stopped");
+});
+
 /* ---- wiring ---- */
 
 $("save").addEventListener("click", () => invoke("save_replay"));
 $("capture-status").addEventListener("click", toggleRecording);
 $("rail-status").addEventListener("click", toggleRecording);
 $("set-capture").addEventListener("change", syncCaptureFields);
+for (const id of ["set-output-enabled", "set-mic-enabled"]) {
+  $(id).addEventListener("change", syncAudioFields);
+}
+for (const id of ["set-output-volume", "set-mic-volume"]) {
+  $(id).addEventListener("input", syncAudioFields);
+  $(id).addEventListener("change", syncAudioFields);
+}
+$("test-mic").addEventListener("click", testMic);
 for (const id of ["set-buffer", "set-replay", "set-bitrate", "set-fps"]) {
   $(id).addEventListener("input", syncRecordingFields);
   $(id).addEventListener("change", syncRecordingFields);
@@ -958,4 +1181,5 @@ syncPlayState();
 syncVolume();
 invoke("get_settings").then(fillSettings).catch((e) => $("error").textContent = e);
 loadDisplays();
+loadAudioDevices();
 refresh();
