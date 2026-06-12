@@ -46,6 +46,7 @@ fn review_player_owns_all_controls() {
         "id=\"ruler\"",
         "id=\"focus-toggle\"",
         "id=\"open-folder\"",
+        "id=\"stage-overlay\"",
     ] {
         assert!(
             html.contains(required),
@@ -60,6 +61,26 @@ fn review_player_owns_all_controls() {
         transport < timeline,
         "transport row must precede the timeline in the deck"
     );
+
+    // Transport buttons carry SVG icons; text labels are a regression.
+    for id in [
+        "id=\"play-toggle\"",
+        "id=\"seek-back\"",
+        "id=\"seek-forward\"",
+        "id=\"prev-marker\"",
+        "id=\"next-marker\"",
+        "id=\"mute-toggle\"",
+    ] {
+        let start = html.find(id).expect("transport button exists");
+        let body_end = html[start..]
+            .find("</button>")
+            .map(|o| start + o)
+            .expect("button closes");
+        assert!(
+            html[start..body_end].contains("<svg"),
+            "{id} must render an SVG icon, not a text label"
+        );
+    }
 }
 
 #[test]

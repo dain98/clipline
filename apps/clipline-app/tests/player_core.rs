@@ -370,6 +370,18 @@ fn focus_mode_has_a_key() {
 }
 
 #[test]
+fn overlay_pins_while_paused_and_fades_when_idle() {
+    let mut ctx = player_core_context();
+    // Paused: always visible, no matter how stale the activity.
+    assert_eq!(eval(&mut ctx, "PlayerCore.overlayVisible(true, 999999)"), "true");
+    // Playing with fresh pointer activity: visible.
+    assert_eq!(eval(&mut ctx, "PlayerCore.overlayVisible(false, 500)"), "true");
+    // Playing and idle past the threshold: hidden.
+    assert_eq!(eval(&mut ctx, "PlayerCore.overlayVisible(false, 2500)"), "false");
+    assert_eq!(eval(&mut ctx, "PlayerCore.OVERLAY_HIDE_MS"), "2000");
+}
+
+#[test]
 fn shared_constants_are_exposed() {
     let mut ctx = player_core_context();
     assert_eq!(eval(&mut ctx, "PlayerCore.MIN_TRIM_GAP_S"), "0.1");

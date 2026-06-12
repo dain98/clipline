@@ -9,6 +9,7 @@ const {
   fmtDur,
   fmtTenths,
   fmtAgo,
+  overlayVisible,
   clampTime,
   percentFor,
   timelineTime,
@@ -173,6 +174,7 @@ function openClip(clip) {
   renderRuler();
   renderClips();
   paintTimeline();
+  noteActivity();
   video.play().catch(() => syncPlayState());
 }
 
@@ -210,8 +212,10 @@ function paintTimeline() {
 }
 
 // timeupdate fires ~4 Hz; animate the playhead per-frame while playing.
+// The same loop re-evaluates overlay fade (no timers to manage).
 function animatePlayhead() {
   paintTimeline();
+  updateOverlay();
   if (!video.paused && !video.ended) rafId = requestAnimationFrame(animatePlayhead);
 }
 
@@ -291,13 +295,30 @@ function togglePlay() {
 }
 
 function syncPlayState() {
-  $("play-toggle").textContent = video.paused ? "Play" : "Pause";
+  $("play-toggle").classList.toggle("playing", !video.paused);
   $("play-toggle").setAttribute("aria-pressed", String(!video.paused));
+  updateOverlay();
 }
 
 function syncVolume() {
-  $("mute-toggle").textContent = video.muted || video.volume === 0 ? "Unmute" : "Mute";
+  $("mute-toggle").classList.toggle("muted", video.muted || video.volume === 0);
   $("volume-slider").value = String(video.muted ? 0 : video.volume);
+}
+
+/* ---- overlay visibility (PlayerCore.overlayVisible policy) ---- */
+
+let lastActivityMs = 0;
+
+function noteActivity() {
+  lastActivityMs = performance.now();
+  updateOverlay();
+}
+
+function updateOverlay() {
+  const idleMs = performance.now() - lastActivityMs;
+  document
+    .querySelector(".stage")
+    .classList.toggle("idle", !overlayVisible(video.paused, idleMs));
 }
 
 function toggleMute() {
@@ -504,6 +525,15 @@ $("timeline").addEventListener("pointerdown", (ev) => {
   else startDrag("scrub", ev);
 });
 $("timeline").addEventListener("pointermove", moveDrag);
+
+const stage = document.querySelector(".stage");
+stage.addEventListener("pointermove", noteActivity);
+stage.addEventListener("pointerdown", noteActivity);
+stage.addEventListener("pointerleave", () => {
+  // Leaving the stage while playing hides the bar immediately.
+  lastActivityMs = -Infinity;
+  updateOverlay();
+});
 $("timeline").addEventListener("pointerup", endDrag);
 $("timeline").addEventListener("pointercancel", endDrag);
 $("timeline").addEventListener("lostpointercapture", endDrag);
@@ -515,6 +545,7 @@ document.addEventListener("keydown", (ev) => {
   const intent = keyIntent(ev.code, ev.shiftKey);
   if (!intent) return;
   ev.preventDefault();
+  noteActivity();
   switch (intent.kind) {
     case "toggle-play": togglePlay(); break;
     case "seek-by": seekBy(intent.seconds); break;

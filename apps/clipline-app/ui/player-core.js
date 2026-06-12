@@ -4,6 +4,10 @@
 const PlayerCore = (() => {
   const MIN_TRIM_GAP_S = 0.1;
   const MARKER_EPSILON_S = 0.05;
+  const OVERLAY_HIDE_MS = 2000;
+
+  // YouTube grammar: controls pin while paused, fade when playing and idle.
+  const overlayVisible = (paused, idleMs) => paused || idleMs < OVERLAY_HIDE_MS;
 
   const fmtBytes = (bytes) => {
     const mb = bytes / (1024 * 1024);
@@ -221,6 +225,8 @@ const PlayerCore = (() => {
   return {
     MIN_TRIM_GAP_S,
     MARKER_EPSILON_S,
+    OVERLAY_HIDE_MS,
+    overlayVisible,
     fmtBytes,
     fmtDur,
     fmtTenths,

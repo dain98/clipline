@@ -13,7 +13,7 @@ Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
 ## Current state (2026-06-12): a working tray recorder with a first-party review player
 
-Thirteen milestones executed (plans in `docs/superpowers/plans/*.md` — nineteen plan docs, all
+Fourteen milestones executed (plans in `docs/superpowers/plans/*.md` — twenty plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -66,6 +66,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     Explorer with the clip selected; storage status/GC scan root + one level and delete
     emptied session folders. assetProtocol needed a second glob
     (`**/Videos/Clipline/**/*.mp4`) for subfolder playback.
+14. **Stage overlay transport** — the transport row moved onto the video as a translucent
+    hover bar (gradient scrim, hand-authored inline SVG icons, no icon font/npm): pins while
+    paused, fades after 2 s idle while playing (`PlayerCore.overlayVisible`, evaluated from
+    the playhead rAF loop — no timers), hides on pointer-leave, wakes on pointer/keyboard.
+    Volume is an icon + hover-expanding slider. `ui_contract` now requires `<svg` inside
+    every transport button.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
