@@ -2,7 +2,7 @@
 //! pipeline is a synchronous pull loop on its own thread) talking to the
 //! shell over channels. No Tauri types in here.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -99,6 +99,8 @@ pub enum Event {
 
 pub struct ServiceOptions {
     pub capture_source: CaptureSource,
+    /// Root folder for saved media.
+    pub media_dir: PathBuf,
     /// Override the League Live Client endpoint (mock servers).
     pub lol_url: Option<String>,
     /// Save Replay trailing window (s).
@@ -118,6 +120,7 @@ impl Default for ServiceOptions {
     fn default() -> Self {
         Self {
             capture_source: CaptureSource::PrimaryMonitor,
+            media_dir: default_clips_dir(),
             lol_url: None,
             replay_window_s: 60.0,
             // ~2 min at 12 Mbps video + audio headroom.
@@ -217,7 +220,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     if let Some(audio) = audio_source_from_options(clock, &opts.audio, events) {
         rec = rec.with_audio(audio);
     }
-    let clips_dir = clips_dir()?;
+    let clips_dir = clips_dir(&opts.media_dir)?;
     // Saves land in a session folder: one per recorder run, with a dedicated
     // folder per detected match. Folders are created lazily at save time.
     let mut session = SessionTracker::new(local_session_label(false));
@@ -506,9 +509,16 @@ fn local_session_label(league_match: bool) -> String {
     )
 }
 
-pub(crate) fn clips_dir() -> Result<PathBuf, String> {
-    let home = std::env::var_os("USERPROFILE").ok_or("no USERPROFILE")?;
-    let dir = PathBuf::from(home).join("Videos").join("Clipline");
+pub(crate) fn default_clips_dir() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Videos")
+        .join("Clipline")
+}
+
+pub(crate) fn clips_dir(media_dir: &Path) -> Result<PathBuf, String> {
+    let dir = media_dir.to_path_buf();
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
     Ok(dir)
 }

@@ -93,6 +93,7 @@ function fillSettings(s) {
   $("set-bitrate").value = qualityIndexForBitrate(s.bitrate_mbps);
   $("set-fps").value = smoothnessIndexForFps(s.fps);
   $("set-quota").value = s.disk_quota_gb;
+  $("set-media-dir").value = s.media_dir ?? "";
   $("set-hotkey").value = s.hotkey;
   $("save-hotkey").textContent = s.hotkey;
   endHotkeyCapture("Click the field to record a new shortcut.");
@@ -123,6 +124,7 @@ function readSettings() {
     bitrate_mbps: recordingQualityPreset(Number($("set-bitrate").value)).bitrate,
     fps: smoothnessPreset(Number($("set-fps").value)).fps,
     disk_quota_gb: Number($("set-quota").value),
+    media_dir: $("set-media-dir").value.trim(),
     hotkey: $("set-hotkey").value,
   };
 }
@@ -592,6 +594,7 @@ async function refreshClips() {
   if (currentClip) {
     const fresh = clipsCache.find((clip) => clip.path === currentClip.path);
     if (fresh) currentClip = fresh;
+    else closeReview();
   }
 }
 
@@ -966,6 +969,20 @@ async function openFolder() {
   }
 }
 
+async function chooseMediaFolder() {
+  try {
+    const selected = await invoke("choose_media_folder", {
+      current: $("set-media-dir").value,
+    });
+    if (selected) {
+      $("set-media-dir").value = selected;
+      $("settings-status").textContent = "folder selected - save to apply";
+    }
+  } catch (e) {
+    $("error").textContent = e;
+  }
+}
+
 /* ---- backend events ---- */
 
 listen("status", (e) => {
@@ -1025,6 +1042,7 @@ for (const id of ["set-output-volume", "set-mic-volume"]) {
   $(id).addEventListener("change", syncAudioFields);
 }
 $("test-mic").addEventListener("click", testMic);
+$("choose-media-folder").addEventListener("click", chooseMediaFolder);
 for (const id of ["set-buffer", "set-replay", "set-bitrate", "set-fps"]) {
   $(id).addEventListener("input", syncRecordingFields);
   $(id).addEventListener("change", syncRecordingFields);

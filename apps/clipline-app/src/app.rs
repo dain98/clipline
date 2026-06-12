@@ -192,6 +192,25 @@ fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
 }
 
 #[tauri::command]
+fn choose_media_folder(
+    state: tauri::State<RuntimeState>,
+    current: Option<String>,
+) -> Result<Option<String>, String> {
+    let current_dir = current
+        .as_deref()
+        .and_then(|path| crate::settings::normalize_media_dir(path).ok())
+        .filter(|path| path.exists())
+        .or_else(|| state.settings().media_dir_path().ok())
+        .unwrap_or_else(service::default_clips_dir);
+
+    let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Media Folder");
+    if current_dir.exists() {
+        dialog = dialog.set_directory(current_dir);
+    }
+    Ok(dialog.pick_folder().map(|path| path.display().to_string()))
+}
+
+#[tauri::command]
 fn list_displays() -> Result<Vec<DisplayInfo>, String> {
     clipline_capture::windows::display::enumerate_displays()
         .map_err(|e| e.to_string())
@@ -317,6 +336,9 @@ fn save_settings<R: Runtime>(
 ) -> Result<AppSettings, String> {
     settings.hotkey = crate::settings::normalize_hotkey(&settings.hotkey)?;
     settings.validate()?;
+    let media_dir = settings.media_dir_path()?;
+    std::fs::create_dir_all(&media_dir)
+        .map_err(|e| format!("create media folder {media_dir:?}: {e}"))?;
 
     let old = state.settings();
     if settings.hotkey != old.hotkey {
@@ -345,6 +367,7 @@ fn save_settings<R: Runtime>(
     state.restart(app, settings.clone())?;
     tray_items.set_hotkey_label(&settings.hotkey)?;
     storage_settings.set_quota_bytes(quota_bytes);
+    storage_settings.set_media_dir(media_dir);
     Ok(settings)
 }
 
@@ -382,6 +405,9 @@ pub fn run() {
 
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)
         .unwrap_or(Some(service::DEFAULT_DISK_QUOTA_BYTES));
+    let media_dir = settings
+        .media_dir_path()
+        .unwrap_or_else(|_| service::default_clips_dir());
     let (cmd_tx, event_rx) = service::spawn(
         settings
             .to_service_options(lol_url.clone())
@@ -393,7 +419,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(RuntimeState::new(cmd_tx, settings.clone(), lol_url))
         .manage(MicTestState::default())
-        .manage(crate::library::StorageSettings::new(quota_bytes))
+        .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |_app, shortcut, event| {
@@ -410,6 +436,7 @@ pub fn run() {
             save_replay,
             set_recording,
             get_settings,
+            choose_media_folder,
             list_displays,
             list_audio_devices,
             start_microphone_test,
@@ -419,6 +446,7 @@ pub fn run() {
             crate::library::delete_clip,
             crate::library::export_clip,
             crate::library::reveal_clip,
+            crate::library::open_media_folder,
             crate::library::storage_status
         ])
         .setup(move |app| {

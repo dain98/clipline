@@ -13,7 +13,7 @@ Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
 ## Current state (2026-06-12): a working tray recorder with a first-party review player
 
-Twenty-one milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-seven plan docs, all
+Twenty-two milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-seven plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -130,11 +130,24 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     also has a live Test mic monitor: the button toggles to Stop testing, plays the selected mic
     back through Web Audio, and shows a live level meter. Output audio remains enabled by default;
     mic capture is opt-in for privacy.
+22. **Media folder settings + Explorer fixes** — Storage settings now has a Media folder path.
+    The recorder service, library listing, delete/export validation, storage quota/status, and
+    folder-opening commands all use the same persisted root instead of independently assuming
+    `Videos\Clipline`. The default is still `Videos\Clipline`; changing it restarts the recorder
+    and creates the folder before saving settings. The review header's folder button opens the
+    containing folder directly, and the Storage tab uses a native Choose Folder picker to set the
+    media root.
+
+> Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
+> resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
+> shape is a full-size clapper icon on the left, only for videos that are actually user-created
+> clips, likely after finishing a clearer labeling model.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
 instead of the primary monitor, `--lol-url <url>` to point the marker poller at a mock, and
-`--disk-quota-gb <n>` to override the saved quota for that launch).
+`--disk-quota-gb <n>` to override the saved quota for that launch). The media folder is now a
+saved Storage setting; changing it affects future library scans, saves, exports, and quota checks.
 Useful examples: `record_smoke -- --seconds 5 --window <w> --audio` (full pipeline + sync
 report + ffprobe), `wgc_smoke` (capture only). Everything is verified live on this machine —
 real clips with matching A/V durations, real marker sidecars, real in-app playback.
@@ -205,9 +218,9 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 **Tauri (v2)**
 - The webview **silently no-ops** (no events, no invoke) without
   `capabilities/default.json` granting `core:default`.
-- The assetProtocol scope **does not resolve `$VIDEO`** — use a plain glob
-  (`**/Videos/Clipline/*.mp4`). Diagnose media errors via a `video.onerror` handler; error
-  code 4 usually means the scope rejected the request, not a codec problem.
+- The assetProtocol scope **does not resolve `$VIDEO`** — use plain globs. With configurable
+  media folders the scope is currently `**/*.mp4`; diagnose media errors via a `video.onerror`
+  handler because error code 4 usually means the scope rejected the request, not a codec problem.
 - H.264+Opus MP4 plays natively in WebView2 — no native decode path needed until AV1/HEVC.
 - `tauri-build` requires `icons/icon.ico` (ours is ffmpeg-generated).
 
@@ -259,6 +272,6 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 5. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
    guidance (§8), WebView2-destroyed-when-minimized RAM trick (§4), installer/signing (§4).
 
-Also worth knowing: `Videos\Clipline` on this machine holds test clips from the milestone
+Also worth knowing: the default `Videos\Clipline` folder on this machine holds test clips from the milestone
 verifications (including `clip_1781160331.mp4` + sidecar — the marked test clip the library
 demos nicely). The app may still be running in the tray from the last session.

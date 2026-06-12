@@ -1,4 +1,4 @@
-//! Clip library commands: inventory of `Videos\Clipline` for the UI and
+//! Clip library commands: inventory of the configured media folder for the UI and
 //! a path-validated delete. The webview never touches the filesystem
 //! directly — playback goes through the asset protocol.
 
@@ -11,16 +11,18 @@ use clipline_mp4::trim_keyframe_aligned;
 use clipline_mp4::walker::movie_duration_s;
 use clipline_storage::storage_status as read_storage_status;
 
-use crate::service::clips_dir;
+use crate::service::{clips_dir, default_clips_dir};
 
 pub struct StorageSettings {
     quota_bytes: Mutex<Option<u64>>,
+    media_dir: Mutex<PathBuf>,
 }
 
 impl StorageSettings {
-    pub fn new(quota_bytes: Option<u64>) -> Self {
+    pub fn new(quota_bytes: Option<u64>, media_dir: PathBuf) -> Self {
         Self {
             quota_bytes: Mutex::new(quota_bytes),
+            media_dir: Mutex::new(media_dir),
         }
     }
 
@@ -32,6 +34,23 @@ impl StorageSettings {
         if let Ok(mut q) = self.quota_bytes.lock() {
             *q = quota_bytes;
         }
+    }
+
+    pub fn media_dir(&self) -> PathBuf {
+        self.media_dir
+            .lock()
+            .map(|dir| dir.clone())
+            .unwrap_or_else(|_| default_clips_dir())
+    }
+
+    pub fn set_media_dir(&self, media_dir: PathBuf) {
+        if let Ok(mut dir) = self.media_dir.lock() {
+            *dir = media_dir;
+        }
+    }
+
+    fn clips_dir(&self) -> Result<PathBuf, String> {
+        clips_dir(&self.media_dir())
     }
 }
 
@@ -67,8 +86,8 @@ pub struct ExportedClipInfo {
 }
 
 #[tauri::command]
-pub fn list_clips() -> Result<Vec<ClipInfo>, String> {
-    let dir = clips_dir()?;
+pub fn list_clips(settings: tauri::State<StorageSettings>) -> Result<Vec<ClipInfo>, String> {
+    let dir = settings.clips_dir()?;
     let mut clips = Vec::new();
     push_clips_from(&dir, None, &mut clips)?;
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
@@ -131,16 +150,21 @@ fn push_clips_from(
 }
 
 #[tauri::command]
-pub fn delete_clip(path: String) -> Result<(), String> {
-    let target = validate_clip_path(&path)?;
+pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
+    let target = validate_clip_path(&settings, &path)?;
     std::fs::remove_file(&target).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(target.with_extension("markers.json"));
     Ok(())
 }
 
 #[tauri::command]
-pub fn export_clip(path: String, start_s: f64, end_s: f64) -> Result<ExportedClipInfo, String> {
-    let source = validate_clip_path(&path)?;
+pub fn export_clip(
+    path: String,
+    start_s: f64,
+    end_s: f64,
+    settings: tauri::State<StorageSettings>,
+) -> Result<ExportedClipInfo, String> {
+    let source = validate_clip_path(&settings, &path)?;
     let input = std::fs::read(&source).map_err(|e| e.to_string())?;
     let (output, info) =
         trim_keyframe_aligned(&input, start_s, end_s).map_err(|e| e.to_string())?;
@@ -155,7 +179,6 @@ pub fn export_clip(path: String, start_s: f64, end_s: f64) -> Result<ExportedCli
                 .map_err(|e| e.to_string())?;
         }
     }
-
     Ok(ExportedClipInfo {
         path: target.display().to_string(),
         name: target
@@ -172,8 +195,8 @@ pub fn export_clip(path: String, start_s: f64, end_s: f64) -> Result<ExportedCli
 
 #[tauri::command]
 pub fn storage_status(settings: tauri::State<StorageSettings>) -> Result<StorageInfo, String> {
-    let status =
-        read_storage_status(&clips_dir()?, settings.quota_bytes()).map_err(|e| e.to_string())?;
+    let status = read_storage_status(&settings.clips_dir()?, settings.quota_bytes())
+        .map_err(|e| e.to_string())?;
     Ok(StorageInfo {
         clip_count: status.clip_count,
         total_bytes: status.total_bytes,
@@ -182,8 +205,11 @@ pub fn storage_status(settings: tauri::State<StorageSettings>) -> Result<Storage
     })
 }
 
-fn validate_clip_path(path: &str) -> Result<PathBuf, String> {
-    let dir = clips_dir()?.canonicalize().map_err(|e| e.to_string())?;
+fn validate_clip_path(settings: &StorageSettings, path: &str) -> Result<PathBuf, String> {
+    let dir = settings
+        .clips_dir()?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
     let target = Path::new(path).canonicalize().map_err(|e| e.to_string())?;
     // Legacy clips sit at the root; session clips one folder down.
     let parent_ok = target.parent() == Some(dir.as_path())
@@ -195,11 +221,23 @@ fn validate_clip_path(path: &str) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-pub fn reveal_clip(path: String) -> Result<(), String> {
-    let target = validate_clip_path(&path)?;
-    // Explorer wants `/select,<path>` as a single argument.
-    std::process::Command::new("explorer")
-        .arg(format!("/select,{}", target.display()))
+pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
+    let target = validate_clip_path(&settings, &path)?;
+    let dir = target
+        .parent()
+        .ok_or_else(|| "clip has no containing folder".to_string())?;
+    open_folder_path(dir)
+}
+
+#[tauri::command]
+pub fn open_media_folder(settings: tauri::State<StorageSettings>) -> Result<(), String> {
+    let dir = settings.clips_dir()?;
+    open_folder_path(&dir)
+}
+
+fn open_folder_path(dir: &Path) -> Result<(), String> {
+    std::process::Command::new("explorer.exe")
+        .arg(dir)
         .spawn()
         .map_err(|e| format!("open explorer: {e}"))?;
     Ok(())
