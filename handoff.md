@@ -1,187 +1,137 @@
-# Clipline — Windows Development Handoff
+# Clipline — Development Handoff
 
-> For a fresh Claude Code session (or human) continuing this project on a Windows machine.
-> **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is the
-> bridge: where the project stands, how it's built, and exactly what the Windows milestone needs.
+> For a fresh Claude Code session (or human) continuing this project.
+> **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
+> the bridge: where the project stands, how it's built, what bit us, and what's next.
 
 ## What this project is
 
 Clipline is an open-source, lightweight, ad-free game recorder for Windows (see `ddoc.md`):
 ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is the core
-architectural bet), automatic timeline event markers via the League of Legends Live Client Data
-API, Hybrid MP4 output, Rust core + Tauri UI planned.
+architectural bet), automatic timeline event markers via the League of Legends Live Client
+Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-10)
+## Current state (2026-06-11): a working tray recorder
 
-All platform-neutral logic is built, tested (71 tests), clippy-clean (`-D warnings` in CI), and
-validated against a real demuxer. CI runs `cargo test --workspace` + clippy on
-**ubuntu-latest and windows-latest** on every push — the whole workspace already compiles and
-passes on Windows runners.
+Seven milestones executed (plans in `docs/superpowers/plans/*.md` — twelve plan docs, all
+completed task-by-task with strict TDD; read any of them to see the conventions in action):
+
+1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
+2. **MFT H.264 encoder** — async hardware MFT (AMF on the dev box), GPU NV12 path, AVCC out
+3. **WASAPI loopback audio** — system audio → real Opus (audiopus), silence gap fill
+4. **A/V sync hardening** — stamp-derived MP4 timeline, one shared clock, `avsync` validator
+   (real-engine test: −8.3 ms total drift)
+5. **Tauri shell** — `apps/clipline-app`: tray app, replay-buffer service thread, **Alt+F10**
+   global hotkey → `Videos\Clipline\clip_<unix>.mp4`, smart no-overlap saves
+6. **Event markers** — League poller (1 Hz, quiet retry outside matches) → `MarkerLog` →
+   `<clip>.markers.json` sidecars re-based to clip time; mock-server verified end-to-end
+7. **Library + marker timeline** — clip list (duration/size/age/marker badge), in-app playback
+   (H.264+Opus `<video>` works in WebView2 via the asset protocol), marker ticks with
+   click-to-seek, path-validated delete
+
+Run it: `cargo run -p clipline-app` (options: `--window <title substring>` to capture one
+window instead of the primary monitor, `--lol-url <url>` to point the marker poller at a mock).
+Useful examples: `record_smoke -- --seconds 5 --window <w> --audio` (full pipeline + sync
+report + ffprobe), `wgc_smoke` (capture only). Everything is verified live on this machine —
+real clips with matching A/V durations, real marker sidecars, real in-app playback.
 
 | Crate | What it does | Verified by |
 |---|---|---|
-| `clipline-events` | Normalized event schema (ddoc §5) + game-clock→recording-timeline anchor math (pause-self-correcting) | unit tests |
-| `clipline-lol` | League adapter: `127.0.0.1:2999` client, EventID dedupe, normalization w/ local-player tagging, `poll_once` pipeline | httpmock integration tests |
-| `clipline-buffer` | Replay ring of GOP-aligned segments (video + N audio tracks), byte-budget eviction, keyframe-aligned `save_window` with smart no-overlap mode, RAM estimator | unit tests |
-| `clipline-mp4` | Hybrid MP4 muxer (ddoc §10): fragmented while recording, finalized to standard MP4 in place; multi-track (h264 `avc1`/`avcC` + Opus `Opus`/`dOps`); box walker for validation/recovery | **ffprobe** parses output: correct streams, frame counts, duration |
-| `clipline-capture` | `CaptureEngine`/`Encoder`/`AudioSource` traits, encoder probe (NVENC→AMF→QSV→x264, AV1→HEVC→H.264), `Recorder` pipeline (capture→encode→GOP segments→ring), `save_replay` → finalized A/V MP4 | mock-driven e2e + ffprobe |
+| `clipline-events` | Event schema (ddoc §5), game-clock→recording anchor math, `MarkerLog`/`ClipMarkers` sidecars | unit tests |
+| `clipline-lol` | League Live Client adapter: client, dedupe, normalization, `poll_once` | httpmock integration + `markers_e2e` |
+| `clipline-buffer` | Replay ring of GOP segments (video + N audio tracks), byte eviction, `save_window` smart mode | unit tests |
+| `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), multi-track h264+Opus, box walker, `movie_duration_s` | ffprobe + unit tests |
+| `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`) + neutral `annexb`/`opus`/`pcm`/`clock`/`avsync` | mocks on CI; CI-skipped device tests run real on the dev machine |
+| `apps/clipline-app` | Tauri 2 shell: service thread, hotkey, tray, status/library/player UI | live e2e (screenshots in the session logs) |
 
-Executed implementation plans (read these to see the conventions in action):
-`docs/superpowers/plans/*.md` — twelve so far, all completed task-by-task with TDD.
+## Machine setup (already done on this machine; for a fresh clone elsewhere)
 
-**Milestone 7 (library view + marker timeline) done 2026-06-11.** The app shows a clip
-library (name, duration via the new `clipline_mp4::walker::movie_duration_s`, size, age,
-marker-count badge), plays clips in the webview (H.264+Opus `<video>` works in WebView2 —
-verified live), and the player timeline renders marker ticks (hover detail, click-to-seek).
-Delete is path-validated and verified through the UI. Sharp edges learned: Tauri v2's
-assetProtocol scope **does not resolve `$VIDEO`** — use a plain glob
-(`**/Videos/Clipline/*.mp4`); the webview also silently no-ops without
-`capabilities/default.json` (core:default). UI automation note: occluded windows swallow
-synthesized clicks while `PrintWindow` still captures them — position the window first.
-Not yet: thumbnails, trim/export, disk quota/GC, settings UI.
+1. **Git identity** (repo-local, doesn't travel): `git config user.email "dain98@gmail.com"`,
+   `git config user.name "Dain"` — commits are authored by the personal account.
+2. **Remote/auth:** repo is `https://github.com/dain98/clipline.git` over **HTTPS** with gh as
+   credential helper (`gh auth setup-git`, account `dain98`). Don't switch to SSH — the
+   machine's agent key belongs to a different GitHub account.
+3. **Rust** stable + clippy. `cargo test --workspace` must be green before starting.
+4. **ffmpeg/ffprobe** (winget `Gyan.FFmpeg`) — the ffprobe e2e tests self-skip without it.
+   On this machine the binaries live under
+   `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-8.1.1-full_build\bin`
+   (fresh shells get them on PATH; long-lived shells may need the full path).
 
-**Milestone 6 (event markers) done 2026-06-11 — the differentiating feature is live.**
-While the app records, a poller thread hits the League Live Client API at 1 Hz (quiet 5 s
-retry while no game runs; `--lol-url` overrides for mocks), anchored events accumulate in
-`clipline_events::MarkerLog`, and Save Replay writes `<clip>.markers.json` (markers re-based
-to clip time) plus a marker count in the UI. The chain is CI-proven by
-`crates/clipline-lol/tests/markers_e2e.rs` (httpmock), and was verified against the real app
-with a local mock server: a DragonKill landed at t_s 2.15 s in the sidecar while an
-out-of-window kill was correctly excluded. Clock bridge: `recording_t0 = Instant::now()`
-sampled adjacent to `WgcCapture::new_clock()` (both QPC). Not yet: timeline UI rendering,
-auto-clip on importance, VALORANT OCR.
+## Development conventions (unchanged since day one — keep them)
 
-**Milestone 5 (Tauri shell) done 2026-06-11 — Clipline is now a usable tray recorder.**
-`apps/clipline-app` (`cargo run -p clipline-app [-- --window <title>]`): a windows-gated
-Tauri 2 app — recorder service thread (WGC + AMF + WASAPI on one clock, 120 s ring,
-`Recorder::step()` loop tolerating idle-screen timeouts) with **Alt+F10** global hotkey,
-tray menu, and a status webview. Saves land in `Videos\Clipline` with smart no-overlap.
-Verified live: two hotkey saves → 20.1 s clip (A/V durations equal to the millisecond) and a
-4.000 s no-overlap follow-up, both decode-clean. Non-Windows targets build a stub `main`
-(ubuntu CI needs no webkit2gtk). The neutral enabler: `Recorder::step()`/`finish_stream()`
-(save-while-recording). Not yet: installer/bundling, settings UI, event markers in clips,
-WebView2-destroyed-when-minimized.
+- **Plan-driven TDD.** Each milestone gets `docs/superpowers/plans/YYYY-MM-DD-<name>.md` with
+  complete code and bite-sized steps; execute strictly failing-test-first. Plans are committed
+  before execution; checkboxes stay unticked (repo convention).
+- **Commits:** conventional style (`feat(capture): …`), one logical change, trailer
+  `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>` when Claude authors.
+- **Quality gates per milestone:** workspace tests green, `cargo clippy --workspace
+  --all-targets` zero warnings, push, **CI green on ubuntu + windows**, handoff updated.
+- **Platform discipline:** neutral logic stays neutral (testable on both CI OSes); Windows
+  code behind `#[cfg(windows)]`; trait changes happen neutral-side first with tests; all
+  `unsafe` confined to `windows/` modules behind safe wrappers.
 
-**Windows progress: all four milestones done — the M0 platform layer is complete.**
-Milestones 1 (WGC capture), 2 (MFT H.264 encoder), 3 (WASAPI loopback audio), and 4 (A/V
-sync hardening) — see
-`docs/superpowers/plans/2026-06-10-clipline-wgc-capture.md`,
-`…-clipline-mft-encoder.md`, `2026-06-11-clipline-wasapi-loopback.md`, and
-`2026-06-11-clipline-av-sync.md`.
-The `#[cfg(windows)]` `windows/` module now holds: `WgcCapture`
-(`CaptureEngine`, monitor + window, GPU-side frames, QPC-anchored pts), `MftH264Encoder`
-(`Encoder`, async hardware MFT — AMF on the dev box — D3D-aware NV12 input, AVCC output,
-CleanPoint keyframes, SPS/PPS from sequence header or first IDR, drain via the new
-`Encoder::finish()`), `VideoConverter` (GPU BGRA→NV12 + scaling via D3D11 video processor),
-`mft_probe::enumerate()` (real ddoc §3 probe; reports Amf{Hevc,H264}+MfSoftware{H264} here),
-`WasapiLoopback` (`AudioSource`: default render endpoint in shared loopback, QPC-stamped
-drains, real Opus via `audiopus`), and `d3d11` device plumbing (one shared device for
-capture+encode, MT-protected). Platform-neutral additions: `annexb` (Annex B→AVCC, SPS/PPS
-extraction), `opus` (20 ms/960-sample frame encoder), `pcm` (`LoopbackAssembler` — continuity
-+ **silence gap fill**, required because loopback goes quiet when nothing renders and the MP4
-audio timeline is duration-cumulative), `LimitedCapture`, `Encoder::finish()`.
-**A/V sync (milestone 4):** the MP4 video timeline is derived from capture stamps at seal
-time (`duration[i] = pts[i+1] − pts[i]`, the sealing keyframe closes each GOP exactly —
-ddoc §6 "stamps, not cadence"; VRR-jitter mock test pins it); `avsync::validate_timeline`
-checks keyframe-led segments, video continuity, per-segment audio coverage, and cumulative
-drift against tolerances; the clock is an explicit constructor parameter
-(`WgcCapture::new_clock()` → shared by `*_on(device, …, clock)` and `WasapiLoopback::start`);
-the `Recorder` drops audio captured before the first video packet (the validator caught this
-for real: engine-init lead-in would have shifted video ~63 ms early). Real-engine device test
-(`real_engines_on_one_clock_produce_a_synced_timeline`) records WGC+AMF+WASAPI+Opus on one
-clock and validates: total drift −8.3 ms.
-**A/V end-to-end verified** via
-`cargo run -p clipline-capture --example record_smoke -- --seconds 5 --window <w> --audio`:
-5 s window capture → h264 (300 frames, 5.008 s) + opus (5.020 s), max inter-GOP gap 0.0 ms,
-total drift 11.7 ms; decode clean; audio volumedetect shows real content. ffmpeg is installed
-via winget (`Gyan.FFmpeg`) so the ffprobe e2e tests run for real locally. Sharp edges:
-WGC/MFT/WASAPI device tests are hard-skipped under `CI` (windows-2025 runners access-violate
-in WGC; no hardware encoder/audio endpoint); B-frames must stay disabled until the muxer
-grows ctts support; the loopback path requires a 48 kHz float mix format (resampler is a
-follow-up). **Next frontier (ddoc §15):** FFmpeg encoder matrix (NVENC/AMF/QSV, AV1/HEVC),
-per-process audio loopback, mic track, Tauri shell wiring hotkey → `save_replay`, and the
-continuous-recording second sink.
+## Sharp edges (each of these cost real debugging time — read before touching)
 
-## Machine setup (do this first on the Windows clone)
+**CI / testing**
+- Device tests (WGC, MFT, WASAPI, real-clock sync) are **hard-skipped under `CI`**:
+  windows-2025 runners report `IsSupported()==true` for WGC then access-violate inside the
+  capture component; they have no hardware encoder or audio endpoint. Local runs exercise
+  them for real — the dev machine (RX 6700 XT, 5120x1440 primary) is the test rig.
+- CI clippy can fail on lints a **warm local cache hides** — `cargo clean -p <crate>` before
+  trusting a local clippy pass on changed crates.
+- `clipline-app` keeps ubuntu CI webkit-free by gating *all* Tauri deps under
+  `[target.'cfg(windows)'.dependencies]` with a stub `main` elsewhere; `build.rs` gates
+  `tauri_build::build()` on `CARGO_CFG_WINDOWS`.
 
-1. **Git identity (repo-local config does not travel with a clone):**
-   ```
-   git config user.email "dain98@gmail.com"
-   git config user.name "Dain"
-   ```
-   All commits in this repo are authored as `Dain <dain98@gmail.com>` (personal account).
-2. **GitHub account:** the repo lives at `https://github.com/dain98/clipline` (personal account
-   `dain98`, NOT the company account). Make sure `gh auth status` shows dain98 active — or pin the
-   remote: `git remote set-url origin https://dain98@github.com/dain98/clipline.git`.
-3. **Rust:** `rustup` stable + clippy. Verify with `cargo test --workspace` — all tests must pass
-   before starting (the ffprobe e2e tests self-skip if ffprobe isn't installed; installing ffmpeg
-   and having the tests run for real is recommended).
+**Media pipeline**
+- `clipline-mp4` wants **4-byte length-prefixed NALs**; MFTs emit Annex B — `annexb.rs`
+  converts (and strips AUD/SPS/PPS). B-frames must stay **disabled** (no ctts in the muxer).
+- The MP4 timeline is **duration-cumulative**: video durations are re-derived from capture
+  stamps at GOP seal; audio gaps become silence (`pcm.rs`); audio recorded before the first
+  video packet is dropped (engine-init lead-in shifted video ~63 ms early before the fix —
+  `avsync::validate_timeline` caught it on its first real run).
+- WASAPI loopback requires a **48 kHz float mix format** (resampler is a follow-up); loopback
+  goes quiet when nothing renders — that's why the gap fill exists.
+- One D3D device and one `RelativeClock` must be shared across capture/encode/audio —
+  the constructors force it (`WgcCapture::new_clock()`, `*_on(device, …, clock)`).
+- H.264 hardware encoders cap near 4096 wide; the 5120-wide monitor scales to ≤2560
+  (`even_dimensions` + scale in service/smokes).
 
-## Development conventions
+**Tauri (v2)**
+- The webview **silently no-ops** (no events, no invoke) without
+  `capabilities/default.json` granting `core:default`.
+- The assetProtocol scope **does not resolve `$VIDEO`** — use a plain glob
+  (`**/Videos/Clipline/*.mp4`). Diagnose media errors via a `video.onerror` handler; error
+  code 4 usually means the scope rejected the request, not a codec problem.
+- H.264+Opus MP4 plays natively in WebView2 — no native decode path needed until AV1/HEVC.
+- `tauri-build` requires `icons/icon.ico` (ours is ffmpeg-generated).
 
-- **Plan-driven TDD.** Each milestone gets a plan in `docs/superpowers/plans/YYYY-MM-DD-<name>.md`
-  (complete code in the plan, bite-sized steps), executed strictly test-first: write failing test →
-  verify failure → implement → verify pass → commit. Look at any existing plan for the format.
-- **Commits:** conventional-commit style (`feat(capture): …`), one logical change each, ending with
-  the trailer `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>` (when Claude authors them).
-- **Quality gates per milestone:** `cargo test --workspace` green, `cargo clippy --workspace
-  --all-targets` zero warnings, push and confirm CI green on both OSes.
-- **Never break the platform-neutral tests.** Windows code goes behind `#[cfg(windows)]`; the
-  existing traits are the contract. If a trait needs to change, change it with tests on the
-  neutral side first.
+**Misc**
+- League Live Client testing without a match: `--lol-url` + the httpmock pattern in
+  `crates/clipline-lol/tests/markers_e2e.rs`; a tiny local mock server works against the
+  real app (see plan 2026-06-11-clipline-event-markers.md).
+- UI automation: occluded windows swallow synthesized clicks while `PrintWindow`
+  (PW_RENDERFULLCONTENT) still captures the window content — reposition/topmost before
+  clicking; `CopyFromScreen` shows black for accelerated webviews.
+- `ddoc.md` Caveats section lists every externally-verified Windows API claim with nuance —
+  check it before trusting API behavior.
 
-## Next milestone: the Windows platform layer
+## What's next (rough value order; each gets its own plan)
 
-Goal: real implementations behind the existing traits in `clipline-capture`, so `Recorder` +
-`save_replay` produce a real screen recording on a real GPU. Work top-down through these, one
-plan each (they're independently verifiable):
+1. **Disk quota + auto-GC** (ddoc §10): clips are ~3 MB/s; oldest-first GC with a configurable
+   cap, surfaced in the UI. Small, high leverage.
+2. **Settings** (UI + persisted config): buffer length, bitrate, fps, capture target picker,
+   hotkey, replay window length. The service already takes `ServiceOptions`.
+3. **Trim/export editor** (ddoc §11): keyframe-aligned stream-copy trim first (instant,
+   lossless, GOP-boundary) — the ring/muxer machinery mostly exists.
+4. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
+   already carry importance.
+5. **FFmpeg encoder matrix** (ddoc §4: LGPL dynamic link): NVENC/QSV backends, AV1/HEVC,
+   software x264 tier; the probe enum already models it.
+6. **Per-process audio loopback + mic track** (ddoc §10): multi-track muxing already works.
+7. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
+   guidance (§8), WebView2-destroyed-when-minimized RAM trick (§4), installer/signing (§4).
 
-1. ~~**WGC capture → `CaptureEngine`**~~ ✅ done 2026-06-10 (`crates/clipline-capture/src/windows/wgc.rs`)
-   - `windows` crate (windows-rs): `Direct3D11CaptureFramePool` + `GraphicsCaptureItem`
-     (monitor first, window capture second). Frames stay GPU-side
-     (`FrameData` gains a `Gpu(ID3D11Texture2D)` variant behind `#[cfg(windows)]`).
-   - Requirements from ddoc §3/§8: **no injection**, borderless-fullscreen guidance, display
-     capture fallback w/ warning. `IsBorderRequired` suppression needs Win11 (ddoc Caveats).
-   - Timestamps: WGC `SystemRelativeTime` → `pts_s` against capture start (QPC timebase —
-     ddoc §6 "Clocking & A/V sync").
-   - Verify: a windowed smoke binary that captures N frames and reports resolution/fps. Run
-     manually — CI runners have no interactive desktop session for WGC.
-2. ~~**Hardware encoder → `Encoder`**~~ ✅ done 2026-06-11 (`crates/clipline-capture/src/windows/mft.rs`)
-   - Recommended first path: **Media Foundation H.264 encoder** (`IMFTransform`, hardware MFT) —
-     no FFmpeg dependency yet, simplest route to validated end-to-end MP4s. The encoder probe
-     (`probe.rs`) gets a real `enumerate()` that lists available MFTs/backends.
-   - The ddoc §4 FFmpeg (LGPL, dynamic-link) decision still stands for the full matrix
-     (NVENC/AMF/QSV, AV1/HEVC) — that can be milestone +1; don't block on it.
-   - Must produce: SPS/PPS for `VideoTrackConfig` (strip from the MFT output / 
-     `MF_MT_MPEG_SEQUENCE_HEADER`), keyframe flags, length-prefixed NALs (MP4 stream format —
-     convert from Annex B if the MFT emits start codes).
-   - Verify: `Recorder` with WGC + MFT on the dev machine → `save_replay` → file plays in a real
-     player, ffprobe shows sane stream. That moment is the milestone exit criterion.
-3. ~~**WASAPI loopback → `AudioSource`**~~ ✅ done 2026-06-11 system loopback + real Opus (`crates/clipline-capture/src/windows/wasapi.rs`); per-process loopback still pending:
-   - System loopback first; per-process (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) second —
-     note ddoc Caveats: documented for build 20348+/Win11 but works on updated Win10 2004+;
-     `GetMixFormat`/`IsFormatSupported` return `E_NOTIMPL` on the process-loopback path, assume a
-     fixed format. Opus encoding: `audiopus`/`opus` crate (libopus) or defer encoding and store
-     PCM-in-Opus-clothing only for testing — real Opus before shipping.
-4. ~~**A/V sync hardening**~~ ✅ done 2026-06-11 — stamp-derived MP4 timeline, shared-clock
-   API, lead-in trimming, `avsync` validator + real-engine sync test (drift −8.3 ms).
-
-Useful references: robmikh's windows-rs capture samples (ddoc §4 cites them as the de-risk),
-Microsoft's ApplicationLoopback sample, `clipline-capture/src/mock.rs` for the contract each
-trait implementation must honor.
-
-## Things to know / sharp edges
-
-- The CI Windows runner compiles `#[cfg(windows)]` code and runs non-interactive tests, but it
-  has **no GPU encoder and no desktop session** — WGC/MFT runtime verification is manual on the
-  dev machine. Structure Windows code so logic (NAL conversion, format negotiation, timestamp
-  math) is unit-testable without devices, and only the thin device layer needs a human.
-- `clipline-mp4` expects **length-prefixed NALs** (avcC `lengthSizeMinusOne=3` → 4-byte
-  lengths). MFTs commonly emit Annex B. Convert and unit-test the converter.
-- The repo has zero `unsafe` so far; the Windows layer will need it (COM). Keep it confined to
-  the `windows/` modules with safe wrappers at the trait boundary.
-- League Live Client API testing needs a live League match (or the httpmock fixtures — see
-  `crates/clipline-lol/tests/`). The real endpoint is HTTPS with Riot's self-signed cert;
-  `LiveClient::default_local()` already handles that.
-- `ddoc.md` Caveats section lists every externally-verified fact with its source nuance — check
-  it before relying on a Windows API behavior claim.
+Also worth knowing: `Videos\Clipline` on this machine holds test clips from the milestone
+verifications (including `clip_1781160331.mp4` + sidecar — the marked test clip the library
+demos nicely). The app may still be running in the tray from the last session.
