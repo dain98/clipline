@@ -38,6 +38,12 @@ struct AudioDeviceLists {
     inputs: Vec<AudioDeviceInfo>,
 }
 
+#[derive(serde::Serialize)]
+struct VideoEncoderInfo {
+    id: &'static str,
+    name: &'static str,
+}
+
 #[derive(serde::Serialize, Clone)]
 // Tauri events are JSON, so the live monitor keeps 30 ms chunks as compact
 // i16 samples instead of shipping f32 PCM through IPC.
@@ -238,6 +244,52 @@ fn list_audio_devices() -> Result<AudioDeviceLists, String> {
 }
 
 #[tauri::command]
+fn list_video_encoders() -> Result<Vec<VideoEncoderInfo>, String> {
+    let capabilities =
+        clipline_capture::windows::mft_probe::enumerate().map_err(|e| e.to_string())?;
+    let mut encoders = Vec::new();
+    for capability in capabilities {
+        if !capability
+            .codecs
+            .contains(&clipline_capture::probe::Codec::H264)
+        {
+            continue;
+        }
+        let Some(info) = video_encoder_info(capability.backend) else {
+            continue;
+        };
+        if !encoders
+            .iter()
+            .any(|encoder: &VideoEncoderInfo| encoder.id == info.id)
+        {
+            encoders.push(info);
+        }
+    }
+    Ok(encoders)
+}
+
+fn video_encoder_info(
+    backend: clipline_capture::probe::EncoderBackend,
+) -> Option<VideoEncoderInfo> {
+    match backend {
+        clipline_capture::probe::EncoderBackend::Nvenc => Some(VideoEncoderInfo {
+            id: "nvenc_h264",
+            name: "NVIDIA NVENC H.264 (uses GPU)",
+        }),
+        clipline_capture::probe::EncoderBackend::Amf => Some(VideoEncoderInfo {
+            id: "amf_h264",
+            name: "AMD AMF H.264 (uses GPU)",
+        }),
+        clipline_capture::probe::EncoderBackend::QuickSync => Some(VideoEncoderInfo {
+            id: "quick_sync_h264",
+            name: "Intel Quick Sync H.264 (uses GPU)",
+        }),
+        clipline_capture::probe::EncoderBackend::X264
+        | clipline_capture::probe::EncoderBackend::MfSoftware => None,
+    }
+}
+
+#[tauri::command]
 fn start_microphone_test<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<MicTestState>,
@@ -412,6 +464,7 @@ pub fn run() {
             get_settings,
             list_displays,
             list_audio_devices,
+            list_video_encoders,
             start_microphone_test,
             stop_microphone_test,
             save_settings,

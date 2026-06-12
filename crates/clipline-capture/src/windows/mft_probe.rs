@@ -4,10 +4,10 @@
 
 use windows::core::GUID;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, MFStartup, MFTEnumEx, MFMediaType_Video, MFSTARTUP_FULL,
+    IMFActivate, MFMediaType_Video, MFStartup, MFTEnumEx, MFT_ENUM_HARDWARE_VENDOR_ID_Attribute,
+    MFVideoFormat_AV1, MFVideoFormat_H264, MFVideoFormat_HEVC, MFSTARTUP_FULL,
     MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_ENUM_FLAG_SYNCMFT, MFT_ENUM_HARDWARE_VENDOR_ID_Attribute, MFT_REGISTER_TYPE_INFO,
-    MFVideoFormat_AV1, MFVideoFormat_H264, MFVideoFormat_HEVC, MF_VERSION,
+    MFT_ENUM_FLAG_SYNCMFT, MFT_REGISTER_TYPE_INFO, MF_VERSION,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 
@@ -36,8 +36,10 @@ pub(crate) fn enum_activates(
     subtype: GUID,
     flags: windows::Win32::Media::MediaFoundation::MFT_ENUM_FLAG,
 ) -> windows::core::Result<Vec<IMFActivate>> {
-    let out_info =
-        MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype };
+    let out_info = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: subtype,
+    };
     let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
     let mut count = 0u32;
     // SAFETY: out-params receive a CoTaskMem array of COM pointers; we take
@@ -68,10 +70,18 @@ fn vendor_of(activate: &IMFActivate) -> Option<String> {
     // SAFETY: fixed-size out buffer; GetString writes at most buf.len() chars.
     unsafe {
         activate
-            .GetString(&MFT_ENUM_HARDWARE_VENDOR_ID_Attribute, &mut buf, Some(&mut len))
+            .GetString(
+                &MFT_ENUM_HARDWARE_VENDOR_ID_Attribute,
+                &mut buf,
+                Some(&mut len),
+            )
             .ok()?;
     }
     Some(String::from_utf16_lossy(&buf[..len as usize]))
+}
+
+pub(crate) fn backend_of(activate: &IMFActivate) -> Option<EncoderBackend> {
+    vendor_of(activate).and_then(|vendor| backend_for_vendor(&vendor))
 }
 
 /// MF-backed implementation of the ddoc §3 probe.
@@ -83,10 +93,11 @@ pub fn enumerate() -> windows::core::Result<Vec<EncoderCapability>> {
         (MFVideoFormat_HEVC, Codec::Hevc),
         (MFVideoFormat_H264, Codec::H264),
     ] {
-        for activate in
-            enum_activates(subtype, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER)?
-        {
-            let Some(backend) = vendor_of(&activate).and_then(|v| backend_for_vendor(&v)) else {
+        for activate in enum_activates(
+            subtype,
+            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+        )? {
+            let Some(backend) = backend_of(&activate) else {
                 continue;
             };
             match by_backend.iter_mut().find(|(b, _)| *b == backend) {
@@ -97,8 +108,11 @@ pub fn enumerate() -> windows::core::Result<Vec<EncoderCapability>> {
         }
     }
     // Software H.264 (sync MFT — Microsoft's encoder) as the last resort.
-    if !enum_activates(MFVideoFormat_H264, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER)?
-        .is_empty()
+    if !enum_activates(
+        MFVideoFormat_H264,
+        MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+    )?
+    .is_empty()
     {
         by_backend.push((EncoderBackend::MfSoftware, vec![Codec::H264]));
     }
@@ -135,7 +149,10 @@ mod tests {
     fn vendor_ids_map_to_backends() {
         assert_eq!(backend_for_vendor("VEN_10DE"), Some(EncoderBackend::Nvenc));
         assert_eq!(backend_for_vendor("VEN_1002"), Some(EncoderBackend::Amf));
-        assert_eq!(backend_for_vendor("VEN_8086"), Some(EncoderBackend::QuickSync));
+        assert_eq!(
+            backend_for_vendor("VEN_8086"),
+            Some(EncoderBackend::QuickSync)
+        );
         assert_eq!(backend_for_vendor("VEN_FFFF"), None);
     }
 }

@@ -25,6 +25,7 @@ use windows::Win32::Media::MediaFoundation::{
 use clipline_mp4::VideoTrackConfig;
 
 use crate::annexb::{annexb_to_avcc, extract_sps_pps};
+use crate::probe::EncoderBackend;
 use crate::traits::{EncodeError, EncodedPacket, Encoder, Frame, FrameData};
 use crate::windows::mft_probe;
 use crate::windows::nv12::{CropRect, VideoConverter};
@@ -33,6 +34,7 @@ use crate::windows::nv12::{CropRect, VideoConverter};
 /// the enum varies; the wire value is stable.
 const H264_PROFILE_HIGH: u32 = 100;
 
+#[derive(Debug, Clone, Copy)]
 pub struct MftConfig {
     /// Encode size; must already be even (`annexb::even_dimensions`).
     pub width: u32,
@@ -40,6 +42,8 @@ pub struct MftConfig {
     /// Nominal fps for media types + first-frame duration fallback.
     pub fps: u32,
     pub bitrate_bps: u32,
+    /// None means automatic hardware H.264 selection.
+    pub encoder_backend: Option<EncoderBackend>,
 }
 
 pub struct MftH264Encoder {
@@ -58,6 +62,30 @@ pub struct MftH264Encoder {
 
 fn backend(e: windows::core::Error) -> EncodeError {
     EncodeError::Backend(e.to_string())
+}
+
+fn h264_activate(
+    activates: &[windows::Win32::Media::MediaFoundation::IMFActivate],
+    requested: Option<EncoderBackend>,
+) -> Option<&windows::Win32::Media::MediaFoundation::IMFActivate> {
+    if let Some(requested) = requested {
+        return activates
+            .iter()
+            .find(|activate| mft_probe::backend_of(activate) == Some(requested));
+    }
+    for backend in [
+        EncoderBackend::Nvenc,
+        EncoderBackend::Amf,
+        EncoderBackend::QuickSync,
+    ] {
+        if let Some(activate) = activates
+            .iter()
+            .find(|activate| mft_probe::backend_of(activate) == Some(backend))
+        {
+            return Some(activate);
+        }
+    }
+    activates.first()
 }
 
 impl MftH264Encoder {
@@ -86,9 +114,14 @@ impl MftH264Encoder {
             MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
         )
         .map_err(backend)?;
-        let activate = activates
-            .first()
-            .ok_or_else(|| EncodeError::Backend("no hardware H.264 encoder MFT".into()))?;
+        let activate = h264_activate(&activates, cfg.encoder_backend).ok_or_else(|| {
+            match cfg.encoder_backend {
+                Some(backend) => {
+                    EncodeError::Backend(format!("selected H.264 encoder unavailable: {backend:?}"))
+                }
+                None => EncodeError::Backend("no hardware H.264 encoder MFT".into()),
+            }
+        })?;
         // SAFETY: activate is a valid IMFActivate from MFTEnumEx.
         let transform: IMFTransform = unsafe { activate.ActivateObject() }.map_err(backend)?;
 
@@ -482,6 +515,7 @@ mod tests {
             height: 360,
             fps: 30,
             bitrate_bps: 2_000_000,
+            encoder_backend: None,
         };
         let mut enc = match MftH264Encoder::new(&device, 640, 360, cfg) {
             Ok(e) => e,
