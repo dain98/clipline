@@ -38,14 +38,9 @@ struct AudioDeviceLists {
     inputs: Vec<AudioDeviceInfo>,
 }
 
-#[derive(serde::Serialize)]
-struct MicTestResult {
-    rms: f32,
-    peak: f32,
-    sample_count: usize,
-}
-
 #[derive(serde::Serialize, Clone)]
+// Tauri events are JSON, so the live monitor keeps 30 ms chunks as compact
+// i16 samples instead of shipping f32 PCM through IPC.
 struct MicMonitorEvent {
     rms: f32,
     peak: f32,
@@ -243,31 +238,6 @@ fn list_audio_devices() -> Result<AudioDeviceLists, String> {
 }
 
 #[tauri::command]
-fn test_microphone(
-    device_id: Option<String>,
-    volume: f64,
-    mono: bool,
-) -> Result<MicTestResult, String> {
-    let channels = if mono {
-        clipline_capture::windows::wasapi::WasapiChannelMode::Mono
-    } else {
-        clipline_capture::windows::wasapi::WasapiChannelMode::Stereo
-    };
-    clipline_capture::windows::wasapi::test_microphone_level(
-        device_id.as_deref(),
-        volume,
-        channels,
-        Duration::from_millis(900),
-    )
-    .map_err(|e| e.to_string())
-    .map(|level| MicTestResult {
-        rms: level.rms,
-        peak: level.peak,
-        sample_count: level.sample_count,
-    })
-}
-
-#[tauri::command]
 fn start_microphone_test<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<MicTestState>,
@@ -307,7 +277,10 @@ fn start_microphone_test<R: Runtime>(
                 let samples = chunk
                     .samples
                     .into_iter()
-                    .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+                    .map(|sample| {
+                        let scaled = (sample.clamp(-1.0, 1.0) * 32_768.0).round();
+                        scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                    })
                     .collect();
                 let _ = app.emit(
                     "mic-test",
@@ -439,7 +412,6 @@ pub fn run() {
             get_settings,
             list_displays,
             list_audio_devices,
-            test_microphone,
             start_microphone_test,
             stop_microphone_test,
             save_settings,

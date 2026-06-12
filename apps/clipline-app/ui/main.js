@@ -59,6 +59,8 @@ let trimStart = 0;
 let trimEnd = 0;
 let dragging = null;
 let rafId = 0;
+const MIC_MONITOR_START_DELAY_S = 0.02;
+const MIC_MONITOR_MAX_LATENCY_S = 0.25;
 
 function clipDuration() {
   if (Number.isFinite(video.duration) && video.duration > 0) return video.duration;
@@ -258,7 +260,15 @@ function playMicSamples(samples) {
   const source = ctx.createBufferSource();
   source.buffer = buffer;
   source.connect(ctx.destination);
-  const startAt = Math.max(ctx.currentTime + 0.02, micAudioCursor || ctx.currentTime + 0.02);
+  const nextStart = ctx.currentTime + MIC_MONITOR_START_DELAY_S;
+  if (
+    !micAudioCursor ||
+    micAudioCursor < nextStart ||
+    micAudioCursor - ctx.currentTime > MIC_MONITOR_MAX_LATENCY_S
+  ) {
+    micAudioCursor = nextStart;
+  }
+  const startAt = micAudioCursor;
   source.start(startAt);
   micAudioCursor = startAt + buffer.duration;
   micAudioSources.push(source);
@@ -698,9 +708,11 @@ function renderVisibleSettingsSection() {
 }
 
 function toggleSettings(open = !settingsOpen) {
+  const wasOpen = settingsOpen;
   settingsOpen = open;
   // The clip survives the round-trip; just don't play behind the page.
   if (settingsOpen && !video.paused) video.pause();
+  if (settingsOpen && !wasOpen) loadAudioDevices();
   updateViews();
   renderVisibleSettingsSection();
 }

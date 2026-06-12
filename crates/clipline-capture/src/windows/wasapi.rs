@@ -2,7 +2,6 @@
 //! (ddoc §10), QPC-stamped against the shared capture clock, assembled
 //! into 20 ms frames and Opus-encoded behind `AudioSource`.
 
-use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use windows::core::{PCWSTR, PWSTR};
@@ -24,17 +23,14 @@ use windows::Win32::System::Com::{
 use clipline_mp4::AudioTrackConfig;
 
 use crate::clock::RelativeClock;
-use crate::opus::{OpusFrameEncoder, FRAME_DURATION_S, FRAME_LEN};
+use crate::opus::{OpusFrameEncoder, FRAME_DURATION_S};
 use crate::pcm::{
-    apply_gain, extract_mono_centered, extract_stereo, resample_stereo_linear, LoopbackAssembler,
+    apply_gain, extract_mono_centered, extract_stereo, LoopbackAssembler, PcmFrame, PcmFrameMixer,
+    StereoResampler,
 };
 use crate::traits::{AudioPacket, AudioSource, CaptureError};
 
 const OPUS_SAMPLE_RATE: u32 = 48_000;
-const MIX_FRAME_EPSILON_S: f64 = FRAME_DURATION_S / 4.0;
-const MISSING_SOURCE_GRACE_S: f64 = FRAME_DURATION_S * 3.0;
-
-type PcmFrame = (f64, Vec<f32>);
 
 #[derive(Debug, Clone)]
 pub struct AudioDeviceInfo {
@@ -127,13 +123,13 @@ struct WasapiPcmCapture {
     capture: IAudioCaptureClient,
     clock: RelativeClock,
     channels: u16,
-    sample_rate: u32,
     sample_format: SampleFormat,
     mode: EndpointMode,
     volume: f32,
     level: AudioLevelAccumulator,
+    resampler: Option<StereoResampler>,
     assembler: LoopbackAssembler,
-    queue: VecDeque<PcmFrame>,
+    queue: std::collections::VecDeque<PcmFrame>,
 }
 
 pub struct WasapiLoopback {
@@ -144,9 +140,7 @@ pub struct WasapiLoopback {
 
 pub struct WasapiMixedLoopback {
     sources: Vec<WasapiPcmCapture>,
-    pending: Vec<VecDeque<PcmFrame>>,
-    source_ready_until_s: Vec<f64>,
-    mixed_until_s: f64,
+    mixer: PcmFrameMixer,
     opus: OpusFrameEncoder,
     queue: Vec<AudioPacket>,
 }
@@ -245,13 +239,14 @@ impl WasapiPcmCapture {
                 capture,
                 clock,
                 channels: mix.channels,
-                sample_rate: mix.sample_rate,
                 sample_format: mix.sample_format,
                 mode,
                 volume: (volume.clamp(0.0, 2.0)) as f32,
                 level: AudioLevelAccumulator::default(),
+                resampler: (mix.sample_rate != OPUS_SAMPLE_RATE)
+                    .then(|| StereoResampler::new(mix.sample_rate, OPUS_SAMPLE_RATE)),
                 assembler,
-                queue: VecDeque::new(),
+                queue: std::collections::VecDeque::new(),
             })
         }
     }
@@ -299,8 +294,8 @@ impl WasapiPcmCapture {
                 extract_mono_centered(samples, self.channels)
             }
         };
-        if self.sample_rate != OPUS_SAMPLE_RATE {
-            stereo = resample_stereo_linear(&stereo, self.sample_rate, OPUS_SAMPLE_RATE);
+        if let Some(resampler) = &mut self.resampler {
+            stereo = resampler.resample(&stereo);
         }
         apply_gain(&mut stereo, self.volume);
         self.level.add(&stereo);
@@ -437,64 +432,17 @@ impl WasapiMixedLoopback {
                 "mixed WASAPI source needs at least one input".into(),
             ));
         }
-        let source_count = sources.len();
-        let pending = (0..source_count).map(|_| VecDeque::new()).collect();
+        let mixer = PcmFrameMixer::new(sources.len());
         Ok(Self {
             sources,
-            pending,
-            source_ready_until_s: vec![0.0; source_count],
-            mixed_until_s: 0.0,
+            mixer,
             opus: OpusFrameEncoder::new().map_err(|e| CaptureError::Init(format!("opus: {e}")))?,
             queue: Vec::new(),
         })
     }
 
-    fn drop_consumed_frames(&mut self) {
-        for pending in &mut self.pending {
-            while pending
-                .front()
-                .is_some_and(|(pts_s, _)| pts_s + FRAME_DURATION_S <= self.mixed_until_s + 1e-9)
-            {
-                pending.pop_front();
-            }
-        }
-    }
-
-    fn next_pending_pts(&self) -> Option<f64> {
-        self.pending
-            .iter()
-            .filter_map(|pending| pending.front().map(|(pts_s, _)| *pts_s))
-            .min_by(|a, b| a.total_cmp(b))
-    }
-
     fn push_mixed_packets(&mut self, until_pts_s: f64) -> Result<(), CaptureError> {
-        self.drop_consumed_frames();
-        while let Some(pts_s) = self.next_pending_pts() {
-            if pts_s + FRAME_DURATION_S <= self.mixed_until_s + 1e-9 {
-                self.drop_consumed_frames();
-                continue;
-            }
-            let all_sources_ready = self.pending.iter().zip(&self.source_ready_until_s).all(
-                |(pending, &ready_until_s)| {
-                    source_ready_for_mix(pending, ready_until_s, pts_s, until_pts_s)
-                },
-            );
-            if !all_sources_ready {
-                break;
-            }
-            let mut frames = Vec::with_capacity(self.pending.len());
-            for pending in &mut self.pending {
-                let should_pop = pending.front().is_some_and(|(frame_pts_s, _)| {
-                    (*frame_pts_s - pts_s).abs() <= MIX_FRAME_EPSILON_S
-                });
-                let frame = if should_pop {
-                    Some(pending.pop_front().expect("checked front").1)
-                } else {
-                    None
-                };
-                frames.push(frame);
-            }
-            let frame = mix_optional_frames(&frames);
+        for (pts_s, frame) in self.mixer.pop_mixed_frames(until_pts_s) {
             let data = self
                 .opus
                 .encode_frame(&frame)
@@ -504,7 +452,6 @@ impl WasapiMixedLoopback {
                 pts_s,
                 duration_s: FRAME_DURATION_S,
             });
-            self.mixed_until_s = pts_s + FRAME_DURATION_S;
         }
         Ok(())
     }
@@ -512,17 +459,9 @@ impl WasapiMixedLoopback {
 
 impl AudioSource for WasapiMixedLoopback {
     fn poll_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
-        for ((source, pending), ready_until_s) in self
-            .sources
-            .iter_mut()
-            .zip(&mut self.pending)
-            .zip(&mut self.source_ready_until_s)
-        {
+        for (source_index, source) in self.sources.iter_mut().enumerate() {
             let frames = source.poll_frames(until_pts_s)?;
-            for (pts_s, _) in &frames {
-                *ready_until_s = ready_until_s.max(pts_s + FRAME_DURATION_S);
-            }
-            pending.extend(frames);
+            self.mixer.push_source_frames(source_index, frames);
         }
         self.push_mixed_packets(until_pts_s)?;
         let split = self
@@ -536,32 +475,6 @@ impl AudioSource for WasapiMixedLoopback {
     fn track_config(&self) -> AudioTrackConfig {
         self.opus.track_config()
     }
-}
-
-fn source_ready_for_mix(
-    pending: &VecDeque<PcmFrame>,
-    ready_until_s: f64,
-    target_pts_s: f64,
-    until_pts_s: f64,
-) -> bool {
-    if pending.front().is_some() {
-        return true;
-    }
-    ready_until_s >= target_pts_s + FRAME_DURATION_S - 1e-9
-        || until_pts_s >= target_pts_s + MISSING_SOURCE_GRACE_S
-}
-
-fn mix_optional_frames(frames: &[Option<Vec<f32>>]) -> Vec<f32> {
-    let mut mixed = vec![0.0; FRAME_LEN];
-    for frame in frames.iter().filter_map(|frame| frame.as_ref()) {
-        for (out, sample) in mixed.iter_mut().zip(frame.iter().copied()) {
-            *out += sample;
-        }
-    }
-    for sample in &mut mixed {
-        *sample = sample.clamp(-1.0, 1.0);
-    }
-    mixed
 }
 
 pub fn enumerate_audio_devices() -> Result<AudioDeviceList, CaptureError> {
@@ -603,7 +516,9 @@ fn endpoint_device(
     unsafe {
         if let Some(id) = device_id.filter(|id| !id.trim().is_empty()) {
             let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
-            enumerator.GetDevice(PCWSTR(wide.as_ptr()))
+            enumerator
+                .GetDevice(PCWSTR(wide.as_ptr()))
+                .or_else(|_| enumerator.GetDefaultAudioEndpoint(dataflow, eConsole))
         } else {
             enumerator.GetDefaultAudioEndpoint(dataflow, eConsole)
         }
@@ -832,46 +747,5 @@ mod tests {
             }
         };
         assert!(level.sample_count > 0, "microphone delivered samples");
-    }
-
-    #[test]
-    fn mixed_frames_sum_tracks_and_clamp() {
-        let mut output = vec![0.0; FRAME_LEN];
-        let mut mic = vec![0.0; FRAME_LEN];
-        output[0] = 0.75;
-        output[1] = -0.75;
-        mic[0] = 0.5;
-        mic[1] = -0.5;
-
-        let mixed = mix_optional_frames(&[Some(output), Some(mic), None]);
-
-        assert_eq!(mixed.len(), FRAME_LEN);
-        assert_eq!(mixed[0], 1.0);
-        assert_eq!(mixed[1], -1.0);
-        assert!(mixed[2..].iter().all(|&sample| sample == 0.0));
-    }
-
-    #[test]
-    fn mixed_source_waits_briefly_for_late_frames() {
-        let pending = VecDeque::new();
-
-        assert!(
-            !source_ready_for_mix(&pending, 0.0, 1.0, 1.02),
-            "missing source should not be treated as silence immediately"
-        );
-        assert!(
-            source_ready_for_mix(&pending, 0.0, 1.0, 1.08),
-            "missing source becomes silence after the grace window"
-        );
-    }
-
-    #[test]
-    fn mixed_source_accepts_sources_that_advanced_past_a_frame() {
-        let pending = VecDeque::new();
-
-        assert!(
-            source_ready_for_mix(&pending, 1.04, 1.0, 1.01),
-            "a source that advanced past the target will not deliver it later"
-        );
     }
 }
