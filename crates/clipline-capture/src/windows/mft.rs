@@ -68,29 +68,23 @@ fn h264_activate(
     activates: &[windows::Win32::Media::MediaFoundation::IMFActivate],
     requested: Option<EncoderBackend>,
 ) -> Option<&windows::Win32::Media::MediaFoundation::IMFActivate> {
-    if let Some(requested) = requested {
-        return activates
+    match requested {
+        // Forced backend: match on vendor ID. No fallback here — the app
+        // service layer decides whether to retry as Automatic.
+        Some(requested) => activates
             .iter()
-            .find(|activate| mft_probe::backend_of(activate) == Some(requested));
+            .find(|activate| mft_probe::backend_of(activate) == Some(requested)),
+        // Automatic: trust MFTEnumEx merit order (SORTANDFILTER). A fixed
+        // vendor priority risked preferring an adapter the capture D3D device
+        // can't bind, and the Automatic arm has no retry path in the service.
+        None => activates.first(),
     }
-    for backend in [
-        EncoderBackend::Nvenc,
-        EncoderBackend::Amf,
-        EncoderBackend::QuickSync,
-    ] {
-        if let Some(activate) = activates
-            .iter()
-            .find(|activate| mft_probe::backend_of(activate) == Some(backend))
-        {
-            return Some(activate);
-        }
-    }
-    activates.first()
 }
 
 impl MftH264Encoder {
-    /// `in_w`/`in_h` = capture frame size; `cfg` = encode parameters. The
-    /// first enumerated hardware H.264 MFT wins (MFTEnumEx sorts by merit).
+    /// `in_w`/`in_h` = capture frame size; `cfg` = encode parameters. With
+    /// `cfg.encoder_backend = None` the first enumerated hardware H.264 MFT
+    /// wins (MFTEnumEx sorts by merit); a set backend selects that vendor's MFT.
     pub fn new(
         device: &ID3D11Device,
         in_w: u32,

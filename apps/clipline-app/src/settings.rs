@@ -56,6 +56,19 @@ fn default_enabled() -> bool {
     true
 }
 
+/// Tolerate an unknown `video_encoder` value — a hand-edit, or a downgrade
+/// from a future build that adds an HEVC/AV1 option — by falling back to Auto
+/// instead of failing the whole-file parse. Mirrors how `hotkey` is repaired
+/// in `load_from`; reuses `VideoEncoder`'s own snake_case serde so the names
+/// can't drift from the enum.
+fn deserialize_video_encoder<'de, D>(deserializer: D) -> Result<VideoEncoder, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or(VideoEncoder::Auto))
+}
+
 fn default_volume() -> f64 {
     1.0
 }
@@ -124,7 +137,7 @@ pub struct AppSettings {
     pub replay_window_s: f64,
     pub bitrate_mbps: f64,
     pub fps: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_video_encoder")]
     pub video_encoder: VideoEncoder,
     pub disk_quota_gb: f64,
     pub hotkey: String,
@@ -536,6 +549,35 @@ mod tests {
         assert_eq!(settings.bitrate_mbps, 24.0);
         assert_eq!(settings.fps, 90);
         assert_eq!(settings.disk_quota_gb, 6.0);
+    }
+
+    #[test]
+    fn load_tolerates_unknown_video_encoder_without_resetting_settings() {
+        let dir = TestDir::new("unknown-encoder");
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "buffer_seconds": 120.0,
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 24.0,
+                "fps": 90,
+                "video_encoder": "hevc_av1_turbo",
+                "disk_quota_gb": 6.0,
+                "hotkey": "Alt+F9"
+            }"#,
+        )
+        .unwrap();
+
+        let settings = AppSettings::load_from(&path).unwrap();
+
+        assert_eq!(settings.video_encoder, VideoEncoder::Auto);
+        assert_eq!(settings.bitrate_mbps, 24.0);
+        assert_eq!(settings.fps, 90);
+        assert_eq!(settings.disk_quota_gb, 6.0);
+        assert_eq!(settings.hotkey, "Alt+F9");
     }
 
     #[test]

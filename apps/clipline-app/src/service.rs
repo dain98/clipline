@@ -240,7 +240,10 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         Err(e) if opts.video_encoder != VideoEncoder::Auto => {
             warn_user(
                 events,
-                format!("selected encoder unavailable; using Automatic: {e}"),
+                format!(
+                    "{:?} encoder unavailable; using Automatic instead: {e}",
+                    opts.video_encoder
+                ),
             );
             MftH264Encoder::new_with_crop(
                 &device,

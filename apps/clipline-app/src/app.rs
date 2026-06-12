@@ -592,4 +592,23 @@ mod tests {
         assert!(parse_quota_gb("-1").is_err());
         assert!(parse_quota_gb("nope").is_err());
     }
+
+    #[test]
+    fn encoder_info_ids_match_settings_serialization() {
+        use crate::service::VideoEncoder;
+        use clipline_capture::probe::EncoderBackend;
+
+        // The Settings dropdown sends VideoEncoderInfo.id; settings.rs maps it
+        // back through VideoEncoder's snake_case serde. If the two drift, a
+        // saved encoder silently shows "Unavailable encoder", so pin them.
+        for (backend, encoder) in [
+            (EncoderBackend::Nvenc, VideoEncoder::NvencH264),
+            (EncoderBackend::Amf, VideoEncoder::AmfH264),
+            (EncoderBackend::QuickSync, VideoEncoder::QuickSyncH264),
+        ] {
+            let info = video_encoder_info(backend).expect("hardware backend exposes encoder info");
+            let serialized = serde_json::to_string(&encoder).expect("encoder serializes");
+            assert_eq!(serialized, format!("\"{}\"", info.id));
+        }
+    }
 }
