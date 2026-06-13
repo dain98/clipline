@@ -121,8 +121,8 @@ function fillSettings(s) {
     replay_storage: replayStorage,
     games: { ...games, custom_games: customGames.map((game) => ({ ...game })) },
   };
-  $("set-capture").value = captureSettingsMode(s.capture_mode);
   regionState = s.capture_region ?? regionState;
+  renderCaptureTargetSelect();
   $("set-games-auto-detect").checked = !!games.auto_detect;
   $("set-output-enabled").checked = !!audio.output_enabled;
   $("set-output-volume").value = String(Number.isFinite(audio.output_volume) ? audio.output_volume : 1);
@@ -156,10 +156,11 @@ function fillSettings(s) {
 
 function readSettings() {
   const replay = Number($("set-replay").value);
+  const capture = selectedCaptureSettings();
   return {
-    capture_mode: $("set-capture").value,
+    capture_mode: capture.capture_mode,
     window_title: "",
-    capture_region: regionState,
+    capture_region: capture.capture_region,
     games: {
       auto_detect: $("set-games-auto-detect").checked,
       custom_games: customGames.map((game) => ({ ...game })),
@@ -236,14 +237,89 @@ function normalizeCustomGame(game) {
   };
 }
 
-function captureSettingsMode(mode) {
-  return mode === "display_region" ? "display_region" : "primary_monitor";
+function displayCaptureValue(display) {
+  return `display:${display.id}`;
+}
+
+function displayForCaptureValue(value) {
+  if (!String(value || "").startsWith("display:")) return null;
+  const id = String(value).slice("display:".length);
+  return displays.find((display) => display.id === id) || null;
+}
+
+function isFullDisplayRegion(region, display) {
+  return !!region && !!display
+    && region.display_id === display.id
+    && Number(region.x) === display.x
+    && Number(region.y) === display.y
+    && Number(region.width) === display.width
+    && Number(region.height) === display.height;
+}
+
+function captureSettingsValue(settings = currentSettings) {
+  if (settings && settings.capture_mode === "display_region") {
+    const display = displays.find((item) => isFullDisplayRegion(settings.capture_region, item));
+    return display ? displayCaptureValue(display) : "display_region";
+  }
+  const display = primaryDisplay();
+  return display ? displayCaptureValue(display) : "primary_monitor";
+}
+
+function displayLabel(display) {
+  const primary = display.is_primary ? " (primary)" : "";
+  return `${display.name}${primary} - ${display.width}x${display.height}`;
+}
+
+function renderCaptureTargetSelect() {
+  const select = $("set-capture");
+  const desired = captureSettingsValue();
+  select.replaceChildren();
+  if (displays.length) {
+    for (const display of displays) {
+      const option = document.createElement("option");
+      option.value = displayCaptureValue(display);
+      option.textContent = displayLabel(display);
+      select.appendChild(option);
+    }
+  } else {
+    const option = document.createElement("option");
+    option.value = "primary_monitor";
+    option.textContent = "Primary display";
+    select.appendChild(option);
+  }
+  const region = document.createElement("option");
+  region.value = "display_region";
+  region.textContent = "SET REGION";
+  select.appendChild(region);
+  select.value = Array.from(select.options).some((option) => option.value === desired)
+    ? desired
+    : captureSettingsValue({ capture_mode: "primary_monitor" });
+  syncCaptureFields();
+}
+
+function selectedCaptureSettings() {
+  const display = displayForCaptureValue($("set-capture").value);
+  if (display) {
+    return {
+      capture_mode: "display_region",
+      capture_region: regionForDisplay(display),
+    };
+  }
+  return {
+    capture_mode: $("set-capture").value === "display_region" ? "display_region" : "primary_monitor",
+    capture_region: regionState,
+  };
 }
 
 function syncCaptureFields() {
-  const mode = $("set-capture").value;
-  $("capture-region-editor").hidden = mode !== "display_region";
-  if (mode === "display_region") renderRegionEditor();
+  const display = displayForCaptureValue($("set-capture").value);
+  if (display) {
+    regionState = regionForDisplay(display);
+  }
+  const isEditableRegion = $("set-capture").value === "display_region";
+  $("capture-region-editor").hidden = !isEditableRegion;
+  if (isEditableRegion) renderRegionEditor();
+  updateCaptureStatus();
 }
 
 function syncRecordingFields() {
@@ -481,7 +557,7 @@ function updateCaptureStatus() {
   const source =
     activeDetectedGame && activeDetectedGame.active
       ? `Game: ${activeDetectedGame.name}`
-      : captureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
+      : fallbackCaptureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
   $("capture-status-label").textContent = recordingActive ? `Capturing ${source}` : "Recording stopped";
   $("capture-status").classList.toggle("stopped", !recordingActive);
   $("capture-status").setAttribute("aria-pressed", String(recordingActive));
@@ -489,6 +565,14 @@ function updateCaptureStatus() {
   $("rail-status").title = $("capture-status").title;
   $("save").disabled = !recordingActive;
   $("rail-save").disabled = !recordingActive;
+}
+
+function fallbackCaptureSourceLabel(settings) {
+  if (settings && settings.capture_mode === "display_region") {
+    const display = displays.find((item) => isFullDisplayRegion(settings.capture_region, item));
+    if (display) return `Display: ${display.name}`;
+  }
+  return captureSourceLabel(settings);
 }
 
 async function toggleRecording() {
@@ -580,6 +664,7 @@ async function loadDisplays() {
     if (!regionState.display_id && displays.length) {
       regionState = regionForDisplay(primaryDisplay());
     }
+    renderCaptureTargetSelect();
     renderRegionEditor();
   } catch (e) {
     $("region-display-label").textContent = "display list unavailable";

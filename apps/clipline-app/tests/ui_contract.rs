@@ -141,6 +141,16 @@ fn review_player_owns_all_controls() {
         "capture target must expose the display_region mode"
     );
     assert!(
+        !html.contains(">primary monitor<")
+            && main_js().contains("renderCaptureTargetSelect")
+            && main_js().contains("displayCaptureValue")
+            && main_js().contains("display:")
+            && html.contains(">SET REGION<")
+            && main_js().find("displayCaptureValue").unwrap()
+                < main_js().find("region.value = \"display_region\"").unwrap(),
+        "capture target must list available displays before the display-region option"
+    );
+    assert!(
         !html.contains("value=\"window_title\"") && !html.contains("id=\"set-window\""),
         "manual window-title capture was replaced by custom game detection"
     );

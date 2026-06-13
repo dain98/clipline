@@ -153,10 +153,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     `#stage-frame`, so WebView's `<video>` element cannot add top/bottom letterboxing when the
     available stage area is slightly off from the clip's aspect ratio. Custom game detection now
     owns per-window capture selection in the UI, so the old manual "Window title" capture target
-    was removed from Settings > Capture while backend/CLI compatibility remains. Each saved custom
-    game now persists its own recording-mode preference (`replays_only` default, `full_session`
-    selectable); the current recorder still uses the replay-buffer path, and the full-session file
-    sink remains the ddoc Goal 2 follow-up.
+    was removed from Settings > Capture while backend/CLI compatibility remains. The fallback
+    Capture target dropdown lists available displays first and keeps the editable Display region
+    option at the bottom; display selections persist as full-monitor display-region captures. Each
+    saved custom game now persists its own recording-mode preference (`replays_only` default,
+    `full_session` selectable); the current recorder still uses the replay-buffer path, and the
+    full-session file sink remains the ddoc Goal 2 follow-up.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
