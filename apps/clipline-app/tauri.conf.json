@@ -23,7 +23,8 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "**/*.mp4"
+          "**/Videos/Clipline/*.mp4",
+          "**/Videos/Clipline/**/*.mp4"
         ]
       }
     }

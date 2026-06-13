@@ -192,8 +192,8 @@ fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
 }
 
 #[tauri::command]
-fn choose_media_folder(
-    state: tauri::State<RuntimeState>,
+async fn choose_media_folder(
+    state: tauri::State<'_, RuntimeState>,
     current: Option<String>,
 ) -> Result<Option<String>, String> {
     let current_dir = current
@@ -203,11 +203,17 @@ fn choose_media_folder(
         .or_else(|| state.settings().media_dir_path().ok())
         .unwrap_or_else(service::default_clips_dir);
 
-    let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Media Folder");
-    if current_dir.exists() {
-        dialog = dialog.set_directory(current_dir);
-    }
-    Ok(dialog.pick_folder().map(|path| path.display().to_string()))
+    // Run the native modal off the main thread so recorder status and other
+    // IPC keep flowing while the picker is open.
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Media Folder");
+        if current_dir.exists() {
+            dialog = dialog.set_directory(current_dir);
+        }
+        dialog.pick_folder().map(|path| path.display().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -339,6 +345,11 @@ fn save_settings<R: Runtime>(
     let media_dir = settings.media_dir_path()?;
     std::fs::create_dir_all(&media_dir)
         .map_err(|e| format!("create media folder {media_dir:?}: {e}"))?;
+    // Extend the asset-protocol scope to the (possibly custom) root so the
+    // webview can play clips from it, without granting the whole disk.
+    app.asset_protocol_scope()
+        .allow_directory(&media_dir, true)
+        .map_err(|e| format!("scope media folder for playback: {e}"))?;
 
     let old = state.settings();
     if settings.hotkey != old.hotkey {
@@ -408,6 +419,7 @@ pub fn run() {
     let media_dir = settings
         .media_dir_path()
         .unwrap_or_else(|_| service::default_clips_dir());
+    let scope_dir = media_dir.clone();
     let (cmd_tx, event_rx) = service::spawn(
         settings
             .to_service_options(lol_url.clone())
@@ -451,6 +463,12 @@ pub fn run() {
         ])
         .setup(move |app| {
             app.global_shortcut().register(hotkey)?;
+            // Bound the asset protocol to the configured media folder so clips
+            // under a custom root play back, while the static config scope stays
+            // narrow (the default Videos/Clipline location).
+            if let Err(e) = app.asset_protocol_scope().allow_directory(&scope_dir, true) {
+                eprintln!("could not scope media folder {scope_dir:?} for playback: {e}");
+            }
 
             let save_item = MenuItem::with_id(
                 app,

@@ -372,4 +372,49 @@ mod tests {
             "clip_1_trim_001000_002000_1.mp4"
         );
     }
+
+    fn touch_mp4(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, b"\0\0\0\0").unwrap();
+    }
+
+    #[test]
+    fn validate_clip_path_accepts_root_and_session_clips() {
+        let dir = TestDir::new("validate-accept");
+        let root = dir.path().join("media");
+        let settings = StorageSettings::new(None, root.clone());
+
+        let legacy = root.join("clip.mp4");
+        touch_mp4(&legacy);
+        let session = root.join("2026-06-12").join("clip.mp4");
+        touch_mp4(&session);
+
+        assert!(validate_clip_path(&settings, legacy.to_str().unwrap()).is_ok());
+        assert!(validate_clip_path(&settings, session.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn validate_clip_path_rejects_escapes_and_non_mp4() {
+        let dir = TestDir::new("validate-reject");
+        let root = dir.path().join("media");
+        std::fs::create_dir_all(&root).unwrap();
+        let settings = StorageSettings::new(None, root.clone());
+
+        // Two folders below the root — deeper than a session clip.
+        let too_deep = root.join("a").join("b").join("clip.mp4");
+        touch_mp4(&too_deep);
+        assert!(validate_clip_path(&settings, too_deep.to_str().unwrap()).is_err());
+
+        // A sibling directory outside the configured root.
+        let outside = dir.path().join("elsewhere").join("clip.mp4");
+        touch_mp4(&outside);
+        assert!(validate_clip_path(&settings, outside.to_str().unwrap()).is_err());
+
+        // Correct location, wrong extension.
+        let not_mp4 = root.join("clip.txt");
+        touch_mp4(&not_mp4);
+        assert!(validate_clip_path(&settings, not_mp4.to_str().unwrap()).is_err());
+    }
 }

@@ -225,7 +225,13 @@ impl AppSettings {
             .audio
             .mic_device_id
             .filter(|id| !id.trim().is_empty());
-        settings.media_dir = settings.media_dir_path()?.display().to_string();
+        // A malformed media_dir (empty/relative hand-edit, partial write) must
+        // not nuke the whole settings file — degrade it to the default folder,
+        // mirroring the hotkey repair above.
+        settings.media_dir = settings
+            .media_dir_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| default_media_dir());
         settings.replay_window_s = settings.replay_window_s.min(MAX_REPLAY_WINDOW_S);
         settings.buffer_seconds = settings.buffer_seconds.max(settings.replay_window_s);
         settings.validate()?;
@@ -485,6 +491,35 @@ mod tests {
         };
 
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn load_heals_invalid_media_folder_without_resetting_settings() {
+        let dir = TestDir::new("heal-media-folder");
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "buffer_seconds": 120.0,
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 24.0,
+                "fps": 90,
+                "media_dir": "relative/not/allowed",
+                "disk_quota_gb": 6.0,
+                "hotkey": "Alt+F9"
+            }"#,
+        )
+        .unwrap();
+
+        let settings = AppSettings::load_from(&path).unwrap();
+
+        assert_eq!(settings.media_dir, default_media_dir());
+        assert_eq!(settings.bitrate_mbps, 24.0);
+        assert_eq!(settings.fps, 90);
+        assert_eq!(settings.disk_quota_gb, 6.0);
+        assert_eq!(settings.hotkey, "Alt+F9");
     }
 
     #[test]
