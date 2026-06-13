@@ -80,10 +80,13 @@ impl DiskReplayRing {
         self.bytes += stored.byte_len;
         self.segments.push_back(stored);
         while self.bytes > self.max_bytes && self.segments.len() > 1 {
-            if let Some(front) = self.segments.pop_front() {
-                self.bytes -= front.byte_len;
-                let _ = fs::remove_file(front.path);
-            }
+            let front = self
+                .segments
+                .front()
+                .expect("len > 1 implies a front segment exists");
+            fs::remove_file(&front.path)?;
+            let front = self.segments.pop_front().expect("front segment exists");
+            self.bytes -= front.byte_len;
         }
         Ok(())
     }

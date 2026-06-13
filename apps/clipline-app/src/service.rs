@@ -539,13 +539,24 @@ fn prepare_replay_storage(opts: &ServiceOptions) -> Result<Option<PathBuf>, Stri
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs();
-            let run_dir = dir.join(format!(
-                "clipline-replay-cache-{stamp}-{}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&run_dir)
-                .map_err(|e| format!("create replay cache run folder {run_dir:?}: {e}"))?;
+                .as_nanos();
+            let run_dir = (0u32..1024)
+                .find_map(|attempt| {
+                    let candidate = dir.join(format!(
+                        "clipline-replay-cache-{stamp}-{}-{attempt}",
+                        std::process::id()
+                    ));
+                    match std::fs::create_dir(&candidate) {
+                        Ok(()) => Some(Ok(candidate)),
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                        Err(e) => Some(Err(format!(
+                            "create replay cache run folder {candidate:?}: {e}"
+                        ))),
+                    }
+                })
+                .unwrap_or_else(|| {
+                    Err("create replay cache run folder: too many collisions".into())
+                })?;
             Ok(Some(run_dir))
         }
     }

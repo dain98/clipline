@@ -164,36 +164,43 @@ fn resident_private_pages(
 ) -> Result<u64, String> {
     const WS_VALID: usize = 1;
     const WS_SHARED: usize = 1 << 15;
+    const CHUNK_PAGES: usize = 4096;
 
     let pages = size.div_ceil(page_size);
     if pages == 0 {
         return Ok(0);
     }
 
-    let mut query: Vec<PSAPI_WORKING_SET_EX_INFORMATION> = (0..pages)
-        .map(|i| PSAPI_WORKING_SET_EX_INFORMATION {
-            VirtualAddress: (base + i * page_size) as *mut _,
-            VirtualAttributes: Default::default(),
-        })
-        .collect();
-    let bytes = query
-        .len()
-        .checked_mul(size_of::<PSAPI_WORKING_SET_EX_INFORMATION>())
-        .and_then(|n| u32::try_from(n).ok())
-        .ok_or_else(|| "working set query is too large".to_string())?;
+    let mut resident = 0u64;
+    let mut page = 0usize;
+    while page < pages {
+        let count = (pages - page).min(CHUNK_PAGES);
+        let mut query: Vec<PSAPI_WORKING_SET_EX_INFORMATION> = (0..count)
+            .map(|i| PSAPI_WORKING_SET_EX_INFORMATION {
+                VirtualAddress: (base + (page + i) * page_size) as *mut _,
+                VirtualAttributes: Default::default(),
+            })
+            .collect();
+        let bytes = query
+            .len()
+            .checked_mul(size_of::<PSAPI_WORKING_SET_EX_INFORMATION>())
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| "working set query chunk is too large".to_string())?;
 
-    let ok = unsafe { K32QueryWorkingSetEx(handle, query.as_mut_ptr().cast(), bytes) };
-    if ok == 0 {
-        return Ok(0);
+        let ok = unsafe { K32QueryWorkingSetEx(handle, query.as_mut_ptr().cast(), bytes) };
+        if ok != 0 {
+            resident += query
+                .iter()
+                .filter(|entry| {
+                    let flags = unsafe { entry.VirtualAttributes.Flags };
+                    flags & WS_VALID != 0 && flags & WS_SHARED == 0
+                })
+                .count() as u64;
+        }
+        page += count;
     }
 
-    Ok(query
-        .iter()
-        .filter(|entry| {
-            let flags = unsafe { entry.VirtualAttributes.Flags };
-            flags & WS_VALID != 0 && flags & WS_SHARED == 0
-        })
-        .count() as u64)
+    Ok(resident)
 }
 
 fn page_size() -> Result<usize, String> {

@@ -145,10 +145,10 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         self.finish_stream()
     }
 
-    pub fn ring(&self) -> &ReplayRing {
+    pub fn ring(&self) -> Option<&ReplayRing> {
         match &self.ring {
-            ReplayStorage::Memory(ring) => ring,
-            ReplayStorage::Disk(_) => panic!("disk replay storage does not expose ReplayRing"),
+            ReplayStorage::Memory(ring) => Some(ring),
+            ReplayStorage::Disk(_) => None,
         }
     }
 
@@ -404,7 +404,7 @@ mod tests {
             usize::MAX,
         );
         rec.run_to_end().unwrap();
-        let ring = rec.ring();
+        let ring = rec.ring().unwrap();
         assert_eq!(ring.len(), 3);
         for seg in ring.segments() {
             assert!(seg.starts_with_keyframe);
@@ -419,7 +419,7 @@ mod tests {
         // Budget for ~2 GOPs: the first of three must be evicted.
         let mut rec = Recorder::new(MockCapture::new(90, 30), MockEncoder::new(30, 30), 4 * 1024);
         rec.run_to_end().unwrap();
-        let ring = rec.ring();
+        let ring = rec.ring().unwrap();
         assert_eq!(ring.len(), 2);
         let first = ring.segments().next().unwrap();
         assert!((first.pts_start_s - 1.0).abs() < 1e-6, "GOP at t=0 evicted");
@@ -435,7 +435,7 @@ mod tests {
         )
         .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
         rec.run_to_end().unwrap();
-        let ring = rec.ring();
+        let ring = rec.ring().unwrap();
         assert_eq!(ring.len(), 3);
         for (i, seg) in ring.segments().enumerate() {
             assert_eq!(seg.audio.len(), 1, "one audio track");
@@ -461,7 +461,7 @@ mod tests {
         .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
 
         rec.run_to_end().unwrap();
-        for seg in rec.ring().segments() {
+        for seg in rec.ring().unwrap().segments() {
             assert_eq!(seg.audio.len(), 2, "system plus microphone tracks");
         }
 
@@ -573,7 +573,7 @@ mod tests {
         };
         let mut rec = Recorder::new(MockCapture::new(8, 30), enc, usize::MAX);
         rec.run_to_end().unwrap();
-        let segs: Vec<_> = rec.ring().segments().collect();
+        let segs: Vec<_> = rec.ring().unwrap().segments().collect();
         assert_eq!(segs.len(), 2);
         // Within a GOP: 10/30/10 ms gaps, NOT the encoder's flat 33.3 ms.
         let d: Vec<f64> = segs[0].samples.iter().map(|s| s.duration_s).collect();
@@ -600,7 +600,12 @@ mod tests {
         let mut rec = Recorder::new(MockCapture::new(30, 30), enc, usize::MAX);
         rec.run_to_end().unwrap();
         // All 30 frames present despite the encoder's one-frame latency.
-        let total: usize = rec.ring().segments().map(|s| s.samples.len()).sum();
+        let total: usize = rec
+            .ring()
+            .unwrap()
+            .segments()
+            .map(|s| s.samples.len())
+            .sum();
         assert_eq!(total, 30);
     }
 
@@ -641,7 +646,7 @@ mod tests {
             usize::MAX,
         );
         whole.run_to_end().unwrap();
-        assert_eq!(whole.ring().len(), rec.ring().len());
+        assert_eq!(whole.ring().unwrap().len(), rec.ring().unwrap().len());
     }
 
     /// Shifts a capture source's pts later — models the real lead-in
@@ -675,7 +680,7 @@ mod tests {
         let mut rec = Recorder::new(cap, MockEncoder::new(30, 30), usize::MAX)
             .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
         rec.run_to_end().unwrap();
-        let segs: Vec<_> = rec.ring().segments().collect();
+        let segs: Vec<_> = rec.ring().unwrap().segments().collect();
         assert_eq!(segs.len(), 2);
         // First segment: audio coverage matches video duration within one
         // 20 ms packet (the packet straddling the boundary is dropped).
@@ -699,7 +704,12 @@ mod tests {
             usize::MAX,
         );
         rec.run_to_end().unwrap();
-        let counts: Vec<usize> = rec.ring().segments().map(|s| s.samples.len()).collect();
+        let counts: Vec<usize> = rec
+            .ring()
+            .unwrap()
+            .segments()
+            .map(|s| s.samples.len())
+            .collect();
         assert_eq!(counts, vec![30, 15]);
     }
 }

@@ -612,6 +612,7 @@ pub fn run() {
                 ..
             } if label == "main" => {
                 api.prevent_close();
+                app.state::<MicTestState>().stop();
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.destroy();
                 }

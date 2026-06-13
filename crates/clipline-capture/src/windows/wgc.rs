@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{Interface, Result as WinResult};
 use windows::Foundation::TypedEventHandler;
@@ -299,22 +299,46 @@ impl FrameSender {
     }
 }
 
+impl Drop for FrameSender {
+    fn drop(&mut self) {
+        self.inner.ready.notify_all();
+    }
+}
+
 impl FrameReceiver {
     fn recv_timeout(&self, timeout: Duration) -> Result<QueuedFrame, RecvTimeoutError> {
-        let queue = self
+        let deadline = Instant::now() + timeout;
+        let mut queue = self
             .inner
             .queue
             .lock()
             .map_err(|_| RecvTimeoutError::Disconnected)?;
-        let (mut queue, result) = self
-            .inner
-            .ready
-            .wait_timeout_while(queue, timeout, |queue| queue.is_empty())
-            .map_err(|_| RecvTimeoutError::Disconnected)?;
-        if result.timed_out() && queue.is_empty() {
-            return Err(RecvTimeoutError::Timeout);
+        loop {
+            if let Some(frame) = queue.pop_front() {
+                return Ok(frame);
+            }
+            if Arc::strong_count(&self.inner) == 1 {
+                return Err(RecvTimeoutError::Disconnected);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(RecvTimeoutError::Timeout);
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let (next_queue, result) = self
+                .inner
+                .ready
+                .wait_timeout(queue, remaining)
+                .map_err(|_| RecvTimeoutError::Disconnected)?;
+            queue = next_queue;
+            if result.timed_out() && queue.is_empty() {
+                return if Arc::strong_count(&self.inner) == 1 {
+                    Err(RecvTimeoutError::Disconnected)
+                } else {
+                    Err(RecvTimeoutError::Timeout)
+                };
+            }
         }
-        queue.pop_front().ok_or(RecvTimeoutError::Disconnected)
     }
 }
 
@@ -463,6 +487,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn bounded_frame_queue_disconnects_when_sender_drops() {
+        let (tx, rx) = bounded_frame_channel(2);
+        drop(tx);
+
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Disconnected)
+        ));
+    }
+
     /// The milestone 4 exit test: video + audio on ONE clock, recorded by
     /// the real pipeline, validated by the tolerance-based avsync checks —
     /// the mock-pinned GOP discipline reproduced on real hardware.
@@ -519,7 +554,7 @@ mod tests {
         )
         .with_audio(Box::new(audio));
         rec.run_to_end().expect("record");
-        let segs: Vec<&clipline_buffer::Segment> = rec.ring().segments().collect();
+        let segs: Vec<&clipline_buffer::Segment> = rec.ring().unwrap().segments().collect();
         let report =
             crate::avsync::validate_timeline(&segs, &crate::avsync::SyncTolerances::default())
                 .expect("real-clock timeline within tolerances");
