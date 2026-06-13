@@ -38,11 +38,28 @@ use crate::windows::window::{window_client_crop_state, WindowClientCrop};
 const DEFAULT_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_QUEUE_CAPACITY: usize = 2;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum FrameCopyMode {
     Full,
     StaticRegion(CropRect),
-    WindowClient(isize),
+    WindowClient {
+        hwnd: isize,
+        cache: Arc<Mutex<Option<ClientCropCache>>>,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FrameGeometry {
+    content_width: i32,
+    content_height: i32,
+    source_width: u32,
+    source_height: u32,
+}
+
+#[derive(Clone, Copy)]
+struct ClientCropCache {
+    geometry: FrameGeometry,
+    crop: CropRect,
 }
 
 struct FramePoolState {
@@ -156,7 +173,10 @@ impl WgcCapture {
             item,
             device,
             clock,
-            FrameCopyMode::WindowClient(hwnd.0 as isize),
+            FrameCopyMode::WindowClient {
+                hwnd: hwnd.0 as isize,
+                cache: Arc::new(Mutex::new(None)),
+            },
         )
     }
 
@@ -270,7 +290,7 @@ fn on_frame_arrived(
             recreate_frame_pool_if_needed(pool, &device, &state, content_size)?;
             return Ok(());
         }
-        let Some(crop) = copy_rect_for_frame(copy_mode, content_size, source_w, source_h) else {
+        let Some(crop) = copy_rect_for_frame(&copy_mode, content_size, source_w, source_h) else {
             recreate_frame_pool_if_needed(pool, &device, &state, content_size)?;
             return Ok(());
         };
@@ -317,20 +337,38 @@ fn recreate_frame_pool_if_needed(
 }
 
 fn copy_rect_for_frame(
-    mode: FrameCopyMode,
+    mode: &FrameCopyMode,
     content_size: SizeInt32,
     source_w: u32,
     source_h: u32,
 ) -> Option<CropRect> {
     match mode {
         FrameCopyMode::Full => content_crop(content_size, source_w, source_h),
-        FrameCopyMode::StaticRegion(crop) => crop_in_frame(crop, source_w, source_h),
-        FrameCopyMode::WindowClient(raw_hwnd) => {
-            let hwnd = HWND(raw_hwnd as *mut core::ffi::c_void);
-            match window_client_crop_state(hwnd)? {
-                WindowClientCrop::Client(crop) => crop_in_frame(crop, source_w, source_h),
-                WindowClientCrop::FullFrame => content_crop(content_size, source_w, source_h),
+        FrameCopyMode::StaticRegion(crop) => crop.in_frame(source_w, source_h),
+        FrameCopyMode::WindowClient { hwnd, cache } => {
+            let geometry = FrameGeometry {
+                content_width: content_size.Width,
+                content_height: content_size.Height,
+                source_width: source_w,
+                source_height: source_h,
+            };
+            if let Ok(guard) = cache.lock() {
+                if let Some(cached) = *guard {
+                    if cached.geometry == geometry {
+                        return Some(cached.crop);
+                    }
+                }
             }
+
+            let hwnd = HWND(*hwnd as *mut core::ffi::c_void);
+            let crop = match window_client_crop_state(hwnd)? {
+                WindowClientCrop::Client(crop) => crop.in_frame(source_w, source_h)?,
+                WindowClientCrop::FullFrame => content_crop(content_size, source_w, source_h)?,
+            };
+            if let Ok(mut guard) = cache.lock() {
+                *guard = Some(ClientCropCache { geometry, crop });
+            }
+            Some(crop)
         }
     }
 }
@@ -338,25 +376,13 @@ fn copy_rect_for_frame(
 fn content_crop(size: SizeInt32, source_w: u32, source_h: u32) -> Option<CropRect> {
     let width = u32::try_from(size.Width).ok()?;
     let height = u32::try_from(size.Height).ok()?;
-    crop_in_frame(
-        CropRect {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        },
-        source_w,
-        source_h,
-    )
-}
-
-fn crop_in_frame(crop: CropRect, source_w: u32, source_h: u32) -> Option<CropRect> {
-    let right = crop.x.checked_add(crop.width)?;
-    let bottom = crop.y.checked_add(crop.height)?;
-    if crop.width < 2 || crop.height < 2 || right > source_w || bottom > source_h {
-        return None;
+    CropRect {
+        x: 0,
+        y: 0,
+        width,
+        height,
     }
-    Some(crop)
+    .in_frame(source_w, source_h)
 }
 
 fn content_size_exceeds_source(size: SizeInt32, source_w: u32, source_h: u32) -> bool {

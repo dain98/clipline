@@ -238,29 +238,15 @@ fn client_crop_from_rects(
     let frame_height = frame.bottom.checked_sub(frame.top)?;
     let x = client_origin.x.checked_sub(frame.left)?;
     let y = client_origin.y.checked_sub(frame.top)?;
-    if frame_width < 2
-        || frame_height < 2
-        || client_width < 2
-        || client_height < 2
-        || x < 0
-        || y < 0
-    {
-        return None;
-    }
-    let right = x.checked_add(client_width)?;
-    let bottom = y.checked_add(client_height)?;
-    if right > frame_width || bottom > frame_height {
-        return None;
-    }
-    if x == 0 && y == 0 && client_width == frame_width && client_height == frame_height {
+    let crop =
+        CropRect::from_i32_in_frame(x, y, client_width, client_height, frame_width, frame_height)?;
+    if crop.is_full_frame(
+        u32::try_from(frame_width).ok()?,
+        u32::try_from(frame_height).ok()?,
+    ) {
         return Some(WindowClientCrop::FullFrame);
     }
-    Some(WindowClientCrop::Client(CropRect {
-        x: x as u32,
-        y: y as u32,
-        width: client_width as u32,
-        height: client_height as u32,
-    }))
+    Some(WindowClientCrop::Client(crop))
 }
 
 #[cfg(test)]

@@ -27,6 +27,41 @@ pub struct CropRect {
 }
 
 impl CropRect {
+    pub fn in_frame(self, frame_width: u32, frame_height: u32) -> Option<Self> {
+        let right = self.x.checked_add(self.width)?;
+        let bottom = self.y.checked_add(self.height)?;
+        if self.width < 2 || self.height < 2 || right > frame_width || bottom > frame_height {
+            return None;
+        }
+        Some(self)
+    }
+
+    pub fn from_i32_in_frame(
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        frame_width: i32,
+        frame_height: i32,
+    ) -> Option<Self> {
+        if x < 0 || y < 0 {
+            return None;
+        }
+        let frame_width = u32::try_from(frame_width).ok()?;
+        let frame_height = u32::try_from(frame_height).ok()?;
+        Self {
+            x: u32::try_from(x).ok()?,
+            y: u32::try_from(y).ok()?,
+            width: u32::try_from(width).ok()?,
+            height: u32::try_from(height).ok()?,
+        }
+        .in_frame(frame_width, frame_height)
+    }
+
+    pub fn is_full_frame(self, frame_width: u32, frame_height: u32) -> bool {
+        self.x == 0 && self.y == 0 && self.width == frame_width && self.height == frame_height
+    }
+
     fn to_rect(self) -> RECT {
         RECT {
             left: self.x as i32,
