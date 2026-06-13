@@ -2,7 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tauri_plugin_global_shortcut::Shortcut;
 
 use crate::service::{
@@ -11,6 +12,16 @@ use crate::service::{
 };
 
 const MAX_REPLAY_WINDOW_S: f64 = 120.0;
+const MIN_REPLAY_WINDOW_S: f64 = 5.0;
+const MIN_BUFFER_SECONDS: f64 = 10.0;
+const MAX_BUFFER_SECONDS: f64 = 20.0 * 60.0;
+const MIN_BITRATE_MBPS: f64 = 1.0;
+const MAX_BITRATE_MBPS: f64 = 100.0;
+const MIN_AUDIO_VOLUME: f64 = 0.0;
+const MAX_AUDIO_VOLUME: f64 = 2.0;
+const MIN_CAPTURE_REGION_SIDE: u32 = 2;
+const MAX_CAPTURE_REGION_SIDE: u32 = 16_384;
+
 /// The replay ring holds the save window plus this margin (for keyframe
 /// alignment and eviction timing). Sizing the ring to the window - rather than
 /// a fixed 2 minutes - keeps memory proportional to what is actually saved.
@@ -47,6 +58,25 @@ impl Default for CaptureRegionSettings {
 }
 
 impl CaptureRegionSettings {
+    fn load_from_value(value: Option<&Value>) -> Self {
+        let defaults = Self::default();
+        let Some(object) = value.and_then(Value::as_object) else {
+            return defaults;
+        };
+
+        Self {
+            display_id: optional_string_field(object, "display_id").unwrap_or(defaults.display_id),
+            x: i32_field(object, "x").unwrap_or(defaults.x),
+            y: i32_field(object, "y").unwrap_or(defaults.y),
+            width: integer_field(object, "width")
+                .map(|value| clamp_u32(value, MIN_CAPTURE_REGION_SIDE, MAX_CAPTURE_REGION_SIDE))
+                .unwrap_or(defaults.width),
+            height: integer_field(object, "height")
+                .map(|value| clamp_u32(value, MIN_CAPTURE_REGION_SIDE, MAX_CAPTURE_REGION_SIDE))
+                .unwrap_or(defaults.height),
+        }
+    }
+
     fn to_service_region(&self) -> CaptureRegion {
         CaptureRegion {
             display_id: self.display_id.clone(),
@@ -112,6 +142,30 @@ impl Default for AudioSettings {
 }
 
 impl AudioSettings {
+    fn load_from_value(value: Option<&Value>) -> Self {
+        let defaults = Self::default();
+        let Some(object) = value.and_then(Value::as_object) else {
+            return defaults;
+        };
+
+        Self {
+            output_enabled: bool_field(object, "output_enabled").unwrap_or(defaults.output_enabled),
+            output_device_id: optional_string_field(object, "output_device_id")
+                .unwrap_or(defaults.output_device_id),
+            output_volume: f64_field(object, "output_volume")
+                .map(|value| value.clamp(MIN_AUDIO_VOLUME, MAX_AUDIO_VOLUME))
+                .unwrap_or(defaults.output_volume),
+            mic_enabled: bool_field(object, "mic_enabled").unwrap_or(defaults.mic_enabled),
+            mic_device_id: optional_string_field(object, "mic_device_id")
+                .unwrap_or(defaults.mic_device_id),
+            mic_volume: f64_field(object, "mic_volume")
+                .map(|value| value.clamp(MIN_AUDIO_VOLUME, MAX_AUDIO_VOLUME))
+                .unwrap_or(defaults.mic_volume),
+            mic_channels: deserialize_field(object, "mic_channels")
+                .unwrap_or(defaults.mic_channels),
+        }
+    }
+
     fn to_service_options(&self) -> AudioOptions {
         AudioOptions {
             output_enabled: self.output_enabled,
@@ -224,26 +278,50 @@ impl AppSettings {
             return Err("window title is required for window capture".into());
         }
         if matches!(self.capture_mode, CaptureMode::DisplayRegion) {
-            if self.capture_region.width < 2 || self.capture_region.height < 2 {
+            if self.capture_region.width < MIN_CAPTURE_REGION_SIDE
+                || self.capture_region.height < MIN_CAPTURE_REGION_SIDE
+            {
                 return Err("capture region must be at least 2x2 pixels".into());
             }
-            if self.capture_region.width > 16_384 || self.capture_region.height > 16_384 {
+            if self.capture_region.width > MAX_CAPTURE_REGION_SIDE
+                || self.capture_region.height > MAX_CAPTURE_REGION_SIDE
+            {
                 return Err("capture region is too large".into());
             }
         }
-        validate_range("output volume", self.audio.output_volume, 0.0, 2.0)?;
-        validate_range("microphone volume", self.audio.mic_volume, 0.0, 2.0)?;
-        validate_range("buffer seconds", self.buffer_seconds, 10.0, 20.0 * 60.0)?;
+        validate_range(
+            "output volume",
+            self.audio.output_volume,
+            MIN_AUDIO_VOLUME,
+            MAX_AUDIO_VOLUME,
+        )?;
+        validate_range(
+            "microphone volume",
+            self.audio.mic_volume,
+            MIN_AUDIO_VOLUME,
+            MAX_AUDIO_VOLUME,
+        )?;
+        validate_range(
+            "buffer seconds",
+            self.buffer_seconds,
+            MIN_BUFFER_SECONDS,
+            MAX_BUFFER_SECONDS,
+        )?;
         validate_range(
             "replay seconds",
             self.replay_window_s,
-            5.0,
+            MIN_REPLAY_WINDOW_S,
             MAX_REPLAY_WINDOW_S,
         )?;
         if self.replay_window_s > self.buffer_seconds {
             return Err("replay seconds cannot be longer than buffer seconds".into());
         }
-        validate_range("bitrate Mbps", self.bitrate_mbps, 1.0, 100.0)?;
+        validate_range(
+            "bitrate Mbps",
+            self.bitrate_mbps,
+            MIN_BITRATE_MBPS,
+            MAX_BITRATE_MBPS,
+        )?;
         if !matches!(self.fps, 30 | 60 | 90 | 120) {
             return Err("fps must be 30, 60, 90, or 120".into());
         }
@@ -289,31 +367,62 @@ impl AppSettings {
 
     pub fn load_from(path: &Path) -> Result<Self, String> {
         let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let mut settings: Self = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-        settings.hotkey =
-            normalize_hotkey(&settings.hotkey).unwrap_or_else(|_| AppSettings::default().hotkey);
-        settings.audio.output_device_id = settings
-            .audio
-            .output_device_id
-            .filter(|id| !id.trim().is_empty());
-        settings.audio.mic_device_id = settings
-            .audio
-            .mic_device_id
-            .filter(|id| !id.trim().is_empty());
-        // A malformed media_dir (empty/relative hand-edit, partial write) must
-        // not nuke the whole settings file — degrade it to the default folder,
-        // mirroring the hotkey repair above.
-        settings.media_dir = settings
-            .media_dir_path()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| default_media_dir());
-        settings.replay_window_s = settings.replay_window_s.min(MAX_REPLAY_WINDOW_S);
+        let value: Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "settings file must be a JSON object".to_string())?;
+        let settings = Self::load_from_object(object);
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    fn load_from_object(object: &Map<String, Value>) -> Self {
+        let defaults = Self::default();
+        let mut settings = Self {
+            capture_mode: deserialize_field(object, "capture_mode")
+                .unwrap_or_else(|| defaults.capture_mode.clone()),
+            window_title: string_field(object, "window_title")
+                .unwrap_or_else(|| defaults.window_title.clone()),
+            capture_region: CaptureRegionSettings::load_from_value(object.get("capture_region")),
+            audio: AudioSettings::load_from_value(object.get("audio")),
+            buffer_seconds: defaults.buffer_seconds,
+            replay_window_s: f64_field(object, "replay_window_s")
+                .map(|value| value.clamp(MIN_REPLAY_WINDOW_S, MAX_REPLAY_WINDOW_S))
+                .unwrap_or(defaults.replay_window_s),
+            bitrate_mbps: f64_field(object, "bitrate_mbps")
+                .map(|value| value.clamp(MIN_BITRATE_MBPS, MAX_BITRATE_MBPS))
+                .unwrap_or(defaults.bitrate_mbps),
+            fps: integer_field(object, "fps")
+                .map(repair_fps)
+                .unwrap_or(defaults.fps),
+            video_encoder: deserialize_field(object, "video_encoder")
+                .unwrap_or(defaults.video_encoder),
+            disk_quota_gb: f64_field(object, "disk_quota_gb")
+                .map(repair_disk_quota_gb)
+                .unwrap_or(defaults.disk_quota_gb),
+            media_dir: string_field(object, "media_dir")
+                .and_then(|raw| normalize_media_dir(&raw).ok())
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| defaults.media_dir.clone()),
+            // Added after this PR was written; load it the same repair-or-default
+            // way (a malformed value falls back to the default instead of failing
+            // the whole-file parse).
+            replay_storage: deserialize_field(object, "replay_storage").unwrap_or_default(),
+            hotkey: string_field(object, "hotkey")
+                .and_then(|raw| normalize_hotkey(&raw).ok())
+                .unwrap_or_else(|| defaults.hotkey.clone()),
+        };
+
         // Size the ring to the replay window (+ headroom), not whatever was
         // persisted. This migrates old fixed 120 s buffers down and keeps the
         // recording footprint proportional to what a save actually needs.
         settings.buffer_seconds = replay_buffer_seconds(&settings);
-        settings.validate()?;
-        Ok(settings)
+        if matches!(settings.capture_mode, CaptureMode::WindowTitle)
+            && settings.window_title.trim().is_empty()
+        {
+            settings.capture_mode = defaults.capture_mode;
+        }
+        settings
     }
 
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
@@ -464,6 +573,77 @@ pub fn normalize_media_dir(raw: &str) -> Result<PathBuf, String> {
         return Err("media folder must be an absolute path".into());
     }
     Ok(path)
+}
+
+fn deserialize_field<T>(object: &Map<String, Value>, key: &str) -> Option<T>
+where
+    T: DeserializeOwned,
+{
+    object
+        .get(key)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn bool_field(object: &Map<String, Value>, key: &str) -> Option<bool> {
+    object.get(key).and_then(Value::as_bool)
+}
+
+fn string_field(object: &Map<String, Value>, key: &str) -> Option<String> {
+    object.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn optional_string_field(object: &Map<String, Value>, key: &str) -> Option<Option<String>> {
+    match object.get(key)? {
+        Value::Null => Some(None),
+        Value::String(value) if value.trim().is_empty() => Some(None),
+        Value::String(value) => Some(Some(value.clone())),
+        _ => None,
+    }
+}
+
+fn f64_field(object: &Map<String, Value>, key: &str) -> Option<f64> {
+    object
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+}
+
+fn integer_field(object: &Map<String, Value>, key: &str) -> Option<i64> {
+    let value = object.get(key)?;
+    if let Some(value) = value.as_i64() {
+        return Some(value);
+    }
+    if let Some(value) = value.as_u64() {
+        return Some(value.min(i64::MAX as u64) as i64);
+    }
+    value.as_f64().and_then(|value| {
+        value
+            .is_finite()
+            .then(|| value.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64)
+    })
+}
+
+fn i32_field(object: &Map<String, Value>, key: &str) -> Option<i32> {
+    integer_field(object, key).map(|value| value.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+}
+
+fn clamp_u32(value: i64, min: u32, max: u32) -> u32 {
+    value.clamp(i64::from(min), i64::from(max)) as u32
+}
+
+fn repair_fps(value: i64) -> u32 {
+    const FPS_STOPS: [u32; 4] = [30, 60, 90, 120];
+    let value = clamp_u32(value, FPS_STOPS[0], *FPS_STOPS.last().unwrap());
+    FPS_STOPS
+        .into_iter()
+        .min_by_key(|candidate| value.abs_diff(*candidate))
+        .unwrap_or(AppSettings::default().fps)
+}
+
+fn repair_disk_quota_gb(value: f64) -> f64 {
+    const GIB_BYTES: u64 = 1024 * 1024 * 1024;
+    value.clamp(0.0, (u64::MAX / GIB_BYTES) as f64)
 }
 
 pub fn normalize_replay_cache_dir(raw: &str) -> Result<PathBuf, String> {
@@ -788,6 +968,76 @@ mod tests {
         assert_eq!(settings.fps, 90);
         assert_eq!(settings.disk_quota_gb, 6.0);
         assert_eq!(settings.hotkey, "Alt+F9");
+    }
+
+    #[test]
+    fn load_repairs_invalid_fields_without_resetting_valid_neighbors() {
+        let dir = TestDir::new("repair-invalid-fields");
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "capture_mode": "future_capture",
+                "window_title": "Keep this window title",
+                "capture_region": {
+                    "display_id": "\\\\.\\DISPLAY2",
+                    "x": 100,
+                    "y": 200,
+                    "width": 1,
+                    "height": 50000
+                },
+                "audio": {
+                    "output_enabled": false,
+                    "output_device_id": "speaker-id",
+                    "output_volume": 2.5,
+                    "mic_enabled": true,
+                    "mic_device_id": "   ",
+                    "mic_volume": -0.25,
+                    "mic_channels": "surround"
+                },
+                "buffer_seconds": 1.0,
+                "replay_window_s": 999.0,
+                "bitrate_mbps": 250.0,
+                "fps": 999,
+                "video_encoder": "av1_future",
+                "disk_quota_gb": -1.0,
+                "media_dir": "",
+                "hotkey": "F12"
+            }"#,
+        )
+        .unwrap();
+
+        let settings = AppSettings::load_from(&path).unwrap();
+
+        assert_eq!(settings.capture_mode, CaptureMode::PrimaryMonitor);
+        assert_eq!(settings.window_title, "Keep this window title");
+        assert_eq!(
+            settings.capture_region.display_id.as_deref(),
+            Some(r"\\.\DISPLAY2")
+        );
+        assert_eq!(settings.capture_region.x, 100);
+        assert_eq!(settings.capture_region.y, 200);
+        assert_eq!(settings.capture_region.width, 2);
+        assert_eq!(settings.capture_region.height, 16_384);
+        assert!(!settings.audio.output_enabled);
+        assert_eq!(
+            settings.audio.output_device_id.as_deref(),
+            Some("speaker-id")
+        );
+        assert_eq!(settings.audio.output_volume, 2.0);
+        assert!(settings.audio.mic_enabled);
+        assert_eq!(settings.audio.mic_device_id, None);
+        assert_eq!(settings.audio.mic_volume, 0.0);
+        assert_eq!(settings.audio.mic_channels, AudioChannelMode::Mono);
+        assert_eq!(settings.replay_window_s, 120.0);
+        assert_eq!(settings.buffer_seconds, 120.0 + 15.0);
+        assert_eq!(settings.bitrate_mbps, 100.0);
+        assert_eq!(settings.fps, 120);
+        assert_eq!(settings.video_encoder, VideoEncoder::Auto);
+        assert_eq!(settings.disk_quota_gb, 0.0);
+        assert_eq!(settings.media_dir, default_media_dir());
+        assert_eq!(settings.hotkey, "Alt+F10");
+        assert!(settings.validate().is_ok());
     }
 
     #[test]
