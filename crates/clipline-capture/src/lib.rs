@@ -19,6 +19,6 @@ pub use pcm::{extract_stereo, LoopbackAssembler};
 pub use pipeline::{PipelineError, Recorder};
 pub use probe::{select_encoder, Codec, EncoderBackend, EncoderCapability};
 pub use traits::{
-    AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket,
-    Encoder, Frame, FrameData,
+    AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket, Encoder,
+    Frame, FrameData,
 };

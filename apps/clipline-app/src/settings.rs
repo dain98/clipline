@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use tauri_plugin_global_shortcut::Shortcut;
 
 use crate::service::{
-    default_clips_dir, AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource, ServiceOptions,
-    VideoEncoder,
+    default_clips_dir, AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource,
+    ServiceOptions, VideoEncoder,
 };
 
 const MAX_REPLAY_WINDOW_S: f64 = 120.0;

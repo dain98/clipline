@@ -14,7 +14,11 @@ pub struct ReplayRing {
 
 impl ReplayRing {
     pub fn new(max_bytes: usize) -> Self {
-        Self { max_bytes, segments: VecDeque::new(), bytes: 0 }
+        Self {
+            max_bytes,
+            segments: VecDeque::new(),
+            bytes: 0,
+        }
     }
 
     pub fn push(&mut self, seg: Segment) {
@@ -127,11 +131,20 @@ mod tests {
     fn eviction_counts_audio_bytes() {
         let mut ring = ReplayRing::new(250);
         let mut s1 = seg(0.0, 2.0, 50, true);
-        s1.audio.push(crate::segment::TrackSamples { data: vec![0; 60], samples: vec![] });
+        s1.audio.push(crate::segment::TrackSamples {
+            data: vec![0; 60],
+            samples: vec![],
+        });
         let mut s2 = seg(2.0, 2.0, 50, true);
-        s2.audio.push(crate::segment::TrackSamples { data: vec![0; 60], samples: vec![] });
+        s2.audio.push(crate::segment::TrackSamples {
+            data: vec![0; 60],
+            samples: vec![],
+        });
         let mut s3 = seg(4.0, 2.0, 50, true);
-        s3.audio.push(crate::segment::TrackSamples { data: vec![0; 60], samples: vec![] });
+        s3.audio.push(crate::segment::TrackSamples {
+            data: vec![0; 60],
+            samples: vec![],
+        });
         ring.push(s1);
         ring.push(s2);
         ring.push(s3); // 330 bytes total > 250 → evict front

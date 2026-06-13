@@ -2,9 +2,7 @@ use std::io::Cursor;
 use std::process::Command;
 
 use clipline_mp4::walker::{children, find, walk};
-use clipline_mp4::{
-    AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
-};
+use clipline_mp4::{AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig};
 
 fn tracks() -> Vec<TrackConfig> {
     vec![

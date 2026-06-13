@@ -22,10 +22,7 @@ impl TrackSamples {
     }
 }
 
-fn slice_samples<'a>(
-    data: &'a [u8],
-    samples: &'a [SampleInfo],
-) -> impl Iterator<Item = &'a [u8]> {
+fn slice_samples<'a>(data: &'a [u8], samples: &'a [SampleInfo]) -> impl Iterator<Item = &'a [u8]> {
     let mut offset = 0usize;
     samples.iter().map(move |s| {
         let start = offset;
@@ -80,14 +77,29 @@ mod tests {
             duration_s: 0.1,
             data: b"AAAABBBCC".to_vec(),
             samples: vec![
-                SampleInfo { size: 4, duration_s: 0.04, is_sync: true },
-                SampleInfo { size: 3, duration_s: 0.03, is_sync: false },
-                SampleInfo { size: 2, duration_s: 0.03, is_sync: false },
+                SampleInfo {
+                    size: 4,
+                    duration_s: 0.04,
+                    is_sync: true,
+                },
+                SampleInfo {
+                    size: 3,
+                    duration_s: 0.03,
+                    is_sync: false,
+                },
+                SampleInfo {
+                    size: 2,
+                    duration_s: 0.03,
+                    is_sync: false,
+                },
             ],
             audio: Vec::new(),
         };
         let slices: Vec<&[u8]> = seg.sample_slices().collect();
-        assert_eq!(slices, vec![b"AAAA".as_slice(), b"BBB".as_slice(), b"CC".as_slice()]);
+        assert_eq!(
+            slices,
+            vec![b"AAAA".as_slice(), b"BBB".as_slice(), b"CC".as_slice()]
+        );
     }
 
     #[test]
@@ -99,8 +111,14 @@ mod tests {
             data: vec![0; 100],
             samples: vec![],
             audio: vec![
-                TrackSamples { data: vec![0; 30], samples: vec![] },
-                TrackSamples { data: vec![0; 20], samples: vec![] },
+                TrackSamples {
+                    data: vec![0; 30],
+                    samples: vec![],
+                },
+                TrackSamples {
+                    data: vec![0; 20],
+                    samples: vec![],
+                },
             ],
         };
         assert_eq!(seg.byte_len(), 150);
@@ -111,8 +129,16 @@ mod tests {
         let t = TrackSamples {
             data: b"XXYYY".to_vec(),
             samples: vec![
-                SampleInfo { size: 2, duration_s: 0.02, is_sync: true },
-                SampleInfo { size: 3, duration_s: 0.02, is_sync: true },
+                SampleInfo {
+                    size: 2,
+                    duration_s: 0.02,
+                    is_sync: true,
+                },
+                SampleInfo {
+                    size: 3,
+                    duration_s: 0.02,
+                    is_sync: true,
+                },
             ],
         };
         let slices: Vec<&[u8]> = t.sample_slices().collect();

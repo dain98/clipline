@@ -56,7 +56,10 @@ fn finalized_file_reads_as_standard_mp4() {
     let moov = find(&boxes, b"moov").unwrap();
     let buf_ref = &buf;
     let moov_kids = children(buf_ref, moov);
-    assert!(find(&moov_kids, b"mvex").is_none(), "final moov is not fragmented");
+    assert!(
+        find(&moov_kids, b"mvex").is_none(),
+        "final moov is not fragmented"
+    );
 
     // stsz lists 6 samples; co64 chunk offsets point at real sample bytes.
     let stsz = find_deep(buf_ref, moov, b"stsz").expect("stsz");
@@ -68,8 +71,7 @@ fn finalized_file_reads_as_standard_mp4() {
     let p = co64.payload_offset as usize;
     let entry_count = u32::from_be_bytes(buf[p + 4..p + 8].try_into().unwrap());
     assert_eq!(entry_count, 2, "one chunk per fragment");
-    let first_chunk =
-        u64::from_be_bytes(buf[p + 8..p + 16].try_into().unwrap()) as usize;
+    let first_chunk = u64::from_be_bytes(buf[p + 8..p + 16].try_into().unwrap()) as usize;
     assert_eq!(&buf[first_chunk..first_chunk + 11], b"sample-0000");
 
     // stss marks samples 1 and 4 as sync.
@@ -77,8 +79,14 @@ fn finalized_file_reads_as_standard_mp4() {
     let p = stss.payload_offset as usize;
     let n = u32::from_be_bytes(buf[p + 4..p + 8].try_into().unwrap());
     assert_eq!(n, 2);
-    assert_eq!(u32::from_be_bytes(buf[p + 8..p + 12].try_into().unwrap()), 1);
-    assert_eq!(u32::from_be_bytes(buf[p + 12..p + 16].try_into().unwrap()), 4);
+    assert_eq!(
+        u32::from_be_bytes(buf[p + 8..p + 12].try_into().unwrap()),
+        1
+    );
+    assert_eq!(
+        u32::from_be_bytes(buf[p + 12..p + 16].try_into().unwrap()),
+        4
+    );
 }
 
 /// Depth-first search for a fourcc under a container box.

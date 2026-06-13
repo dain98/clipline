@@ -45,7 +45,11 @@ pub enum SyncViolation {
     #[error("segment {segment} starts {gap_s:.4}s away from the previous end")]
     VideoGap { segment: usize, gap_s: f64 },
     #[error("segment {segment} audio track {track} skewed {skew_s:.4}s vs video")]
-    AudioSegmentSkew { segment: usize, track: usize, skew_s: f64 },
+    AudioSegmentSkew {
+        segment: usize,
+        track: usize,
+        skew_s: f64,
+    },
     #[error("audio track {track} drifted {drift_s:.4}s vs video over the recording")]
     TotalDrift { track: usize, drift_s: f64 },
 }
@@ -72,7 +76,10 @@ pub fn validate_timeline(
             let gap = (seg.pts_start_s - end).abs();
             report.max_video_gap_s = report.max_video_gap_s.max(gap);
             if gap > tol.max_video_gap_s {
-                return Err(SyncViolation::VideoGap { segment: i, gap_s: seg.pts_start_s - end });
+                return Err(SyncViolation::VideoGap {
+                    segment: i,
+                    gap_s: seg.pts_start_s - end,
+                });
             }
         }
         prev_end = Some(seg.pts_end_s());
@@ -85,11 +92,17 @@ pub fn validate_timeline(
             let skew = covered - seg.duration_s;
             // The final segment's audio may legitimately run short (the
             // last poll lags video); it must never run long.
-            let violating = if last { skew > tol.max_audio_segment_skew_s } else {
+            let violating = if last {
+                skew > tol.max_audio_segment_skew_s
+            } else {
                 skew.abs() > tol.max_audio_segment_skew_s
             };
             if violating {
-                return Err(SyncViolation::AudioSegmentSkew { segment: i, track: t, skew_s: skew });
+                return Err(SyncViolation::AudioSegmentSkew {
+                    segment: i,
+                    track: t,
+                    skew_s: skew,
+                });
             }
             if !last {
                 report.max_audio_segment_skew_s = report.max_audio_segment_skew_s.max(skew.abs());
@@ -103,7 +116,10 @@ pub fn validate_timeline(
         // beyond tolerance is only ok in the final-segment lag sense —
         // bound the magnitude either way.
         if drift.abs() > tol.max_total_drift_s {
-            return Err(SyncViolation::TotalDrift { track: t, drift_s: drift });
+            return Err(SyncViolation::TotalDrift {
+                track: t,
+                drift_s: drift,
+            });
         }
     }
     Ok(report)
@@ -117,8 +133,12 @@ mod tests {
     use clipline_buffer::{SampleInfo, Segment, TrackSamples};
 
     fn mock_recording() -> Vec<Segment> {
-        let mut rec = Recorder::new(MockCapture::new(90, 30), MockEncoder::new(30, 30), usize::MAX)
-            .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+        let mut rec = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        )
+        .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
         rec.run_to_end().unwrap();
         rec.ring().segments().cloned().collect()
     }
@@ -142,7 +162,11 @@ mod tests {
             duration_s: n as f64 * frame_s,
             data: vec![0; n],
             samples: (0..n)
-                .map(|_| SampleInfo { size: 1, duration_s: frame_s, is_sync: false })
+                .map(|_| SampleInfo {
+                    size: 1,
+                    duration_s: frame_s,
+                    is_sync: false,
+                })
                 .collect(),
             audio: Vec::new(),
         }
@@ -161,8 +185,10 @@ mod tests {
     #[test]
     fn rejects_inter_segment_video_gap() {
         // Second segment starts 50 ms after the first ends.
-        let segs =
-            [video_seg(0.0, 30, 1.0 / 30.0, true), video_seg(1.05, 30, 1.0 / 30.0, true)];
+        let segs = [
+            video_seg(0.0, 30, 1.0 / 30.0, true),
+            video_seg(1.05, 30, 1.0 / 30.0, true),
+        ];
         let refs: Vec<&Segment> = segs.iter().collect();
         match validate_timeline(&refs, &SyncTolerances::default()) {
             Err(SyncViolation::VideoGap { segment: 1, gap_s }) => {
@@ -179,7 +205,11 @@ mod tests {
         let mut first = video_seg(0.0, 30, 1.0 / 30.0, true);
         let mut track = TrackSamples::default();
         for _ in 0..40 {
-            track.samples.push(SampleInfo { size: 1, duration_s: 0.02, is_sync: true });
+            track.samples.push(SampleInfo {
+                size: 1,
+                duration_s: 0.02,
+                is_sync: true,
+            });
             track.data.push(0);
         }
         first.audio.push(track);
@@ -188,8 +218,15 @@ mod tests {
         let segs = [first, second];
         let refs: Vec<&Segment> = segs.iter().collect();
         match validate_timeline(&refs, &SyncTolerances::default()) {
-            Err(SyncViolation::AudioSegmentSkew { segment: 0, track: 0, skew_s }) => {
-                assert!((skew_s + 0.2).abs() < 1e-9, "audio 200 ms short, got {skew_s}");
+            Err(SyncViolation::AudioSegmentSkew {
+                segment: 0,
+                track: 0,
+                skew_s,
+            }) => {
+                assert!(
+                    (skew_s + 0.2).abs() < 1e-9,
+                    "audio 200 ms short, got {skew_s}"
+                );
             }
             other => panic!("expected AudioSegmentSkew, got {other:?}"),
         }
@@ -201,20 +238,31 @@ mod tests {
         let mut seg = video_seg(0.0, 30, 1.0 / 30.0, true);
         let mut track = TrackSamples::default();
         for _ in 0..40 {
-            track.samples.push(SampleInfo { size: 1, duration_s: 0.02, is_sync: true });
+            track.samples.push(SampleInfo {
+                size: 1,
+                duration_s: 0.02,
+                is_sync: true,
+            });
             track.data.push(0);
         }
         seg.audio.push(track);
         let segs = [seg];
         let refs: Vec<&Segment> = segs.iter().collect();
         // Total drift tolerance must absorb the 200 ms shortfall for this test.
-        let tol = SyncTolerances { max_total_drift_s: 0.3, ..Default::default() };
+        let tol = SyncTolerances {
+            max_total_drift_s: 0.3,
+            ..Default::default()
+        };
         validate_timeline(&refs, &tol).expect("short tail tolerated");
         // …but audio LONGER than the segment is a violation even at the end.
         let mut seg2 = video_seg(0.0, 30, 1.0 / 30.0, true);
         let mut long = TrackSamples::default();
         for _ in 0..60 {
-            long.samples.push(SampleInfo { size: 1, duration_s: 0.02, is_sync: true });
+            long.samples.push(SampleInfo {
+                size: 1,
+                duration_s: 0.02,
+                is_sync: true,
+            });
             long.data.push(0);
         }
         seg2.audio.push(long);

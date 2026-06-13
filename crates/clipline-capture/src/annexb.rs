@@ -20,7 +20,10 @@ pub fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
     }
     let mut units = Vec::with_capacity(starts.len());
     for (idx, &(payload, _)) in starts.iter().enumerate() {
-        let end = starts.get(idx + 1).map(|&(_, code)| code).unwrap_or(data.len());
+        let end = starts
+            .get(idx + 1)
+            .map(|&(_, code)| code)
+            .unwrap_or(data.len());
         if payload < end {
             units.push(&data[payload..end]);
         }
@@ -80,7 +83,11 @@ mod tests {
         // Alternate 4-byte and 3-byte start codes to exercise both.
         let mut out = Vec::new();
         for (i, u) in units.iter().enumerate() {
-            out.extend_from_slice(if i % 2 == 0 { &[0, 0, 0, 1][..] } else { &[0, 0, 1][..] });
+            out.extend_from_slice(if i % 2 == 0 {
+                &[0, 0, 0, 1][..]
+            } else {
+                &[0, 0, 1][..]
+            });
             out.extend_from_slice(u);
         }
         out
@@ -118,7 +125,10 @@ mod tests {
         let au = annexb(&[AUD, SPS, PPS, SEI, IDR]);
         let (sps2, pps2) = extract_sps_pps(&au).expect("in-band");
         assert_eq!((sps2.as_slice(), pps2.as_slice()), (SPS, PPS));
-        assert!(extract_sps_pps(&annexb(&[IDR])).is_none(), "no parameter sets");
+        assert!(
+            extract_sps_pps(&annexb(&[IDR])).is_none(),
+            "no parameter sets"
+        );
     }
 
     #[test]

@@ -3,8 +3,8 @@ use std::io::{self, Seek, SeekFrom, Write};
 use crate::boxes::{full_box, mp4_box, Payload};
 use crate::fragment::{fragment_multi, FragSample, TrackRun};
 use crate::init::{
-    audio_trak_with_tables, free_placeholder, ftyp, moov_init_multi, mvhd,
-    video_trak_with_tables, TrackConfig, VideoTrackConfig, MOVIE_TIMESCALE,
+    audio_trak_with_tables, free_placeholder, ftyp, moov_init_multi, mvhd, video_trak_with_tables,
+    TrackConfig, VideoTrackConfig, MOVIE_TIMESCALE,
 };
 
 /// Per-track bookkeeping for the final moov.
