@@ -267,7 +267,16 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     if let Some(audio) = audio_source_from_options(clock, &opts.audio, events) {
         rec = rec.with_audio(audio);
     }
-    let clips_dir = clips_dir(&opts.media_dir)?;
+    let (clips_dir, fell_back) = clips_dir_resolved(&opts.media_dir, default_clips_dir)?;
+    if fell_back {
+        warn_user(
+            events,
+            format!(
+                "media folder {:?} is unavailable; saving to {:?} instead",
+                opts.media_dir, clips_dir
+            ),
+        );
+    }
     // Saves land in a session folder: one per recorder run, with a dedicated
     // folder per detected match. Folders are created lazily at save time.
     let mut session = SessionTracker::new(local_session_label(false));
@@ -565,7 +574,86 @@ pub(crate) fn default_clips_dir() -> PathBuf {
 }
 
 pub(crate) fn clips_dir(media_dir: &Path) -> Result<PathBuf, String> {
-    let dir = media_dir.to_path_buf();
+    clips_dir_resolved(media_dir, default_clips_dir).map(|(dir, _)| dir)
+}
+
+/// Resolve the directory clips are actually written to. The configured folder
+/// is used when it can be created; otherwise `fallback` is, so an unplugged
+/// external drive degrades to the default folder instead of killing recording
+/// and emptying the library. The bool is true when the fallback was taken, so
+/// callers with a UI channel can warn the user.
+pub(crate) fn clips_dir_resolved(
+    media_dir: &Path,
+    fallback: impl FnOnce() -> PathBuf,
+) -> Result<(PathBuf, bool), String> {
+    if std::fs::create_dir_all(media_dir).is_ok() {
+        return Ok((media_dir.to_path_buf(), false));
+    }
+    let dir = fallback();
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
-    Ok(dir)
+    Ok((dir, true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "clipline-service-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn clips_dir_uses_configured_root_when_creatable() {
+        let dir = TestDir::new("configured-root");
+        let configured = dir.path().join("media");
+
+        let (resolved, fell_back) =
+            clips_dir_resolved(&configured, || panic!("must not fall back")).unwrap();
+
+        assert!(!fell_back);
+        assert_eq!(resolved, configured);
+        assert!(configured.is_dir());
+    }
+
+    #[test]
+    fn clips_dir_falls_back_when_configured_root_is_unusable() {
+        let dir = TestDir::new("unusable-root");
+        // A directory cannot be created under a regular file, so this stands in
+        // for an unreachable root (e.g. an unplugged drive).
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+        let unusable = blocker.join("clipline");
+        let fallback = dir.path().join("fallback");
+
+        let (resolved, fell_back) =
+            clips_dir_resolved(&unusable, || fallback.clone()).unwrap();
+
+        assert!(fell_back);
+        assert_eq!(resolved, fallback);
+        assert!(fallback.is_dir());
+    }
 }
