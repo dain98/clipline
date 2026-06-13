@@ -39,12 +39,6 @@ struct AudioDeviceLists {
     inputs: Vec<AudioDeviceInfo>,
 }
 
-#[derive(serde::Serialize)]
-struct VideoEncoderInfo {
-    id: &'static str,
-    name: &'static str,
-}
-
 #[derive(serde::Serialize, Clone)]
 struct GameDetectionEvent {
     active: bool,
@@ -122,6 +116,9 @@ struct RuntimeInner {
     settings: AppSettings,
     lol_url: Option<String>,
     active_game: Option<DetectedGame>,
+    /// Codecs WebView2 can decode, reported by the frontend. Drives the
+    /// recorder's Automatic selection; H.264 is the always-safe default.
+    decodable_codecs: Vec<service::Codec>,
 }
 
 impl RuntimeState {
@@ -131,7 +128,40 @@ impl RuntimeState {
             settings,
             lol_url,
             active_game: None,
+            decodable_codecs: vec![service::Codec::H264],
         }))
+    }
+
+    /// Replace the decodable-codec set from the frontend's canPlayType probe.
+    /// Unknown keys are ignored; H.264 is always retained as the safe floor.
+    fn set_decodable_codecs(&self, keys: &[String]) {
+        let mut codecs = vec![service::Codec::H264];
+        for key in keys {
+            match key.as_str() {
+                "hevc" if !codecs.contains(&service::Codec::Hevc) => {
+                    codecs.push(service::Codec::Hevc)
+                }
+                "av1" if !codecs.contains(&service::Codec::Av1) => codecs.push(service::Codec::Av1),
+                _ => {}
+            }
+        }
+        if let Ok(mut inner) = self.0.lock() {
+            inner.decodable_codecs = codecs;
+        }
+    }
+
+    /// Build service options for the current settings with the reported
+    /// decodable codecs injected. Caller holds the lock.
+    fn options(inner: &RuntimeInner) -> Result<service::ServiceOptions, String> {
+        let mut opts = inner.settings.to_service_options(inner.lol_url.clone())?;
+        opts.decodable_codecs = inner.decodable_codecs.clone();
+        if let Some(game) = &inner.active_game {
+            opts.capture_source = service::CaptureSource::WindowHandle {
+                hwnd: game.hwnd,
+                title: game.window_title.clone(),
+            };
+        }
+        Ok(opts)
     }
 
     fn send(&self, cmd: Cmd) -> bool {
@@ -170,7 +200,7 @@ impl RuntimeState {
             }
             inner.settings = settings;
             if inner.tx.is_some() {
-                let (tx, rx) = service::spawn(service_options(&inner)?);
+                let (tx, rx) = service::spawn(Self::options(&inner)?);
                 inner.tx = Some(tx);
                 pump_events(app.clone(), rx);
             }
@@ -203,7 +233,7 @@ impl RuntimeState {
             if inner.tx.is_some() {
                 return Ok(true);
             }
-            let (tx, rx) = service::spawn(service_options(&inner)?);
+            let (tx, rx) = service::spawn(Self::options(&inner)?);
             inner.tx = Some(tx);
             rx
         };
@@ -236,7 +266,7 @@ impl RuntimeState {
             inner.active_game = detected;
             let old_tx = inner.tx.clone();
             if inner.tx.is_some() {
-                let (tx, rx) = service::spawn(service_options(&inner)?);
+                let (tx, rx) = service::spawn(Self::options(&inner)?);
                 inner.tx = Some(tx);
                 pump_events(app.clone(), rx);
             }
@@ -248,17 +278,6 @@ impl RuntimeState {
         let _ = app.emit("game-detection", event);
         Ok(())
     }
-}
-
-fn service_options(inner: &RuntimeInner) -> Result<ServiceOptions, String> {
-    let mut opts = inner.settings.to_service_options(inner.lol_url.clone())?;
-    if let Some(game) = &inner.active_game {
-        opts.capture_source = service::CaptureSource::WindowHandle {
-            hwnd: game.hwnd,
-            title: game.window_title.clone(),
-        };
-    }
-    Ok(opts)
 }
 
 fn active_game_still_configured(settings: &AppSettings, active: Option<&DetectedGame>) -> bool {
@@ -384,29 +403,12 @@ fn list_audio_devices() -> Result<AudioDeviceLists, String> {
         })
 }
 
+/// Every encoder this machine can use, for the Settings dropdown. Each
+/// option carries its codec key so the frontend can flag codecs the in-app
+/// player cannot decode.
 #[tauri::command]
-fn list_video_encoders() -> Result<Vec<VideoEncoderInfo>, String> {
-    let capabilities =
-        clipline_capture::windows::mft_probe::enumerate().map_err(|e| e.to_string())?;
-    let mut encoders = Vec::new();
-    for capability in capabilities {
-        if !capability
-            .codecs
-            .contains(&clipline_capture::probe::Codec::H264)
-        {
-            continue;
-        }
-        let Some(info) = video_encoder_info(capability.backend) else {
-            continue;
-        };
-        if !encoders
-            .iter()
-            .any(|encoder: &VideoEncoderInfo| encoder.id == info.id)
-        {
-            encoders.push(info);
-        }
-    }
-    Ok(encoders)
+fn probe_encoders() -> Vec<service::EncoderOption> {
+    service::available_encoder_options()
 }
 
 #[tauri::command]
@@ -414,25 +416,12 @@ fn list_game_windows() -> Vec<GameWindowInfo> {
     crate::games::list_game_windows()
 }
 
-fn video_encoder_info(
-    backend: clipline_capture::probe::EncoderBackend,
-) -> Option<VideoEncoderInfo> {
-    match backend {
-        clipline_capture::probe::EncoderBackend::Nvenc => Some(VideoEncoderInfo {
-            id: "nvenc_h264",
-            name: "NVIDIA NVENC H.264 (uses GPU)",
-        }),
-        clipline_capture::probe::EncoderBackend::Amf => Some(VideoEncoderInfo {
-            id: "amf_h264",
-            name: "AMD AMF H.264 (uses GPU)",
-        }),
-        clipline_capture::probe::EncoderBackend::QuickSync => Some(VideoEncoderInfo {
-            id: "quick_sync_h264",
-            name: "Intel Quick Sync H.264 (uses GPU)",
-        }),
-        clipline_capture::probe::EncoderBackend::X264
-        | clipline_capture::probe::EncoderBackend::MfSoftware => None,
-    }
+/// The frontend reports which codecs WebView2 can decode (canPlayType) so
+/// Automatic selection never records a clip the review player can't show.
+/// Takes effect on the next recorder (re)start.
+#[tauri::command]
+fn report_decode_support(state: tauri::State<RuntimeState>, codecs: Vec<String>) {
+    state.set_decodable_codecs(&codecs);
 }
 
 #[tauri::command]
@@ -625,7 +614,8 @@ pub fn run() {
             choose_replay_cache_folder,
             list_displays,
             list_audio_devices,
-            list_video_encoders,
+            probe_encoders,
+            report_decode_support,
             list_game_windows,
             memory_status,
             start_microphone_test,
@@ -843,24 +833,5 @@ mod tests {
     fn quota_parser_rejects_negative_or_non_numeric_values() {
         assert!(parse_quota_gb("-1").is_err());
         assert!(parse_quota_gb("nope").is_err());
-    }
-
-    #[test]
-    fn encoder_info_ids_match_settings_serialization() {
-        use crate::service::VideoEncoder;
-        use clipline_capture::probe::EncoderBackend;
-
-        // The Settings dropdown sends VideoEncoderInfo.id; settings.rs maps it
-        // back through VideoEncoder's snake_case serde. If the two drift, a
-        // saved encoder silently shows "Unavailable encoder", so pin them.
-        for (backend, encoder) in [
-            (EncoderBackend::Nvenc, VideoEncoder::NvencH264),
-            (EncoderBackend::Amf, VideoEncoder::AmfH264),
-            (EncoderBackend::QuickSync, VideoEncoder::QuickSyncH264),
-        ] {
-            let info = video_encoder_info(backend).expect("hardware backend exposes encoder info");
-            let serialized = serde_json::to_string(&encoder).expect("encoder serializes");
-            assert_eq!(serialized, format!("\"{}\"", info.id));
-        }
     }
 }

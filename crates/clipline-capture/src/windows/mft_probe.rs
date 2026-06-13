@@ -1,17 +1,18 @@
-//! Real encoder probing (ddoc §3) via MFTEnumEx: which hardware vendors
-//! offer encoder MFTs for which codecs, plus the Microsoft software H.264
-//! MFT as the last-resort tier.
+//! Real H.264 encoder probing (ddoc §4) via MFTEnumEx: which hardware
+//! vendors offer an H.264 encoder MFT, plus the Microsoft software H.264
+//! MFT as the last-resort tier. This is the proven zero-copy path; it only
+//! reports H.264 because `MftH264Encoder` only implements H.264. Hardware
+//! AV1/HEVC on the same silicon is surfaced by the FFmpeg probe instead.
 
 use windows::core::GUID;
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, MFMediaType_Video, MFStartup, MFTEnumEx, MFT_ENUM_HARDWARE_VENDOR_ID_Attribute,
-    MFVideoFormat_AV1, MFVideoFormat_H264, MFVideoFormat_HEVC, MFSTARTUP_FULL,
-    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_ENUM_FLAG_SYNCMFT, MFT_REGISTER_TYPE_INFO, MF_VERSION,
+    MFVideoFormat_H264, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
+    MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_REGISTER_TYPE_INFO, MF_VERSION,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 
-use crate::probe::{Codec, EncoderBackend, EncoderCapability};
+use crate::probe::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
 
 /// PCI vendor id (as MFT_ENUM_HARDWARE_VENDOR_ID reports it) → backend.
 pub fn backend_for_vendor(vendor: &str) -> Option<EncoderBackend> {
@@ -84,29 +85,29 @@ pub(crate) fn backend_of(activate: &IMFActivate) -> Option<EncoderBackend> {
     vendor_of(activate).and_then(|vendor| backend_for_vendor(&vendor))
 }
 
-/// MF-backed implementation of the ddoc §3 probe.
+/// MF-backed implementation of the ddoc §4 probe — H.264 only, since that
+/// is all `MftH264Encoder` implements.
 pub fn enumerate() -> windows::core::Result<Vec<EncoderCapability>> {
     ensure_mf_started()?;
-    let mut by_backend: Vec<(EncoderBackend, Vec<Codec>)> = Vec::new();
-    for (subtype, codec) in [
-        (MFVideoFormat_AV1, Codec::Av1),
-        (MFVideoFormat_HEVC, Codec::Hevc),
-        (MFVideoFormat_H264, Codec::H264),
-    ] {
-        for activate in enum_activates(
-            subtype,
-            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
-        )? {
-            let Some(backend) = backend_of(&activate) else {
-                continue;
-            };
-            match by_backend.iter_mut().find(|(b, _)| *b == backend) {
-                Some((_, codecs)) if !codecs.contains(&codec) => codecs.push(codec),
-                Some(_) => {}
-                None => by_backend.push((backend, vec![codec])),
+    let mut backends: Vec<EncoderBackend> = Vec::new();
+    for activate in enum_activates(
+        MFVideoFormat_H264,
+        MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+    )? {
+        if let Some(backend) = backend_of(&activate) {
+            if !backends.contains(&backend) {
+                backends.push(backend);
             }
         }
     }
+    let mut caps: Vec<EncoderCapability> = backends
+        .into_iter()
+        .map(|backend| EncoderCapability {
+            api: EncoderApi::Mft,
+            backend,
+            codecs: vec![Codec::H264],
+        })
+        .collect();
     // Software H.264 (sync MFT — Microsoft's encoder) as the last resort.
     if !enum_activates(
         MFVideoFormat_H264,
@@ -114,12 +115,13 @@ pub fn enumerate() -> windows::core::Result<Vec<EncoderCapability>> {
     )?
     .is_empty()
     {
-        by_backend.push((EncoderBackend::MfSoftware, vec![Codec::H264]));
+        caps.push(EncoderCapability {
+            api: EncoderApi::Mft,
+            backend: EncoderBackend::MfSoftware,
+            codecs: vec![Codec::H264],
+        });
     }
-    Ok(by_backend
-        .into_iter()
-        .map(|(backend, codecs)| EncoderCapability { backend, codecs })
-        .collect())
+    Ok(caps)
 }
 
 #[cfg(test)]

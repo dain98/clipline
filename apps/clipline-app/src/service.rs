@@ -7,13 +7,18 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
 
-use clipline_capture::probe::EncoderBackend;
-use clipline_capture::traits::{AudioSource, CaptureError, FrameData};
+use clipline_capture::ffmpeg;
+use clipline_capture::ffmpeg_encoder::FfmpegVideoEncoder;
+use clipline_capture::probe::{
+    rank_encoders, EncoderApi, EncoderBackend, EncoderCandidate, EncoderCapability,
+    EncoderPreference,
+};
+use clipline_capture::traits::{AudioSource, CaptureError, Encoder, FrameData};
 use clipline_capture::windows::nv12::CropRect;
 use clipline_capture::windows::wasapi::{WasapiChannelMode, WasapiMixedLoopback};
 use clipline_capture::windows::{
-    d3d11, find_window_by_title, window_from_raw_handle, MftConfig, MftH264Encoder, WasapiLoopback,
-    WgcCapture,
+    d3d11, find_window_by_title, mft_probe, window_from_raw_handle, ID3D11Device, MftConfig,
+    MftH264Encoder, WasapiLoopback, WgcCapture,
 };
 use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
@@ -24,6 +29,10 @@ use clipline_storage::{enforce_quota, storage_status};
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 use crate::markers::{self, PollerMsg};
+
+/// Re-exported so the app layer can name codecs without its own
+/// clipline-capture import.
+pub use clipline_capture::probe::Codec;
 
 const LOW_REPLAY_CACHE_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -57,25 +66,150 @@ pub enum AudioChannelMode {
     Stereo,
 }
 
+/// The user's encoder choice. `Auto` follows the ddoc §4 merit order
+/// restricted to player-decodable codecs; the explicit variants force a
+/// (backend, codec) pair (still falling back through Auto if it can't open).
+/// Legacy saved values (`auto`, `nvenc_h264`, `amf_h264`, `quick_sync_h264`)
+/// still deserialize.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoEncoder {
     #[default]
     Auto,
     NvencH264,
+    NvencHevc,
+    NvencAv1,
     AmfH264,
+    AmfHevc,
+    AmfAv1,
     QuickSyncH264,
+    QuickSyncHevc,
+    QuickSyncAv1,
+    SvtAv1,
 }
 
 impl VideoEncoder {
-    fn backend(self) -> Option<EncoderBackend> {
+    fn preference(self) -> EncoderPreference {
+        let (backend, codec) = match self {
+            Self::Auto => return EncoderPreference::Auto,
+            Self::NvencH264 => (EncoderBackend::Nvenc, Codec::H264),
+            Self::NvencHevc => (EncoderBackend::Nvenc, Codec::Hevc),
+            Self::NvencAv1 => (EncoderBackend::Nvenc, Codec::Av1),
+            Self::AmfH264 => (EncoderBackend::Amf, Codec::H264),
+            Self::AmfHevc => (EncoderBackend::Amf, Codec::Hevc),
+            Self::AmfAv1 => (EncoderBackend::Amf, Codec::Av1),
+            Self::QuickSyncH264 => (EncoderBackend::QuickSync, Codec::H264),
+            Self::QuickSyncHevc => (EncoderBackend::QuickSync, Codec::Hevc),
+            Self::QuickSyncAv1 => (EncoderBackend::QuickSync, Codec::Av1),
+            Self::SvtAv1 => (EncoderBackend::SvtAv1, Codec::Av1),
+        };
+        EncoderPreference::Explicit { backend, codec }
+    }
+
+    /// The settings/serde id (snake_case). Kept in lockstep with the
+    /// `serde(rename_all = "snake_case")` derive by a test.
+    fn id(self) -> &'static str {
         match self {
-            Self::Auto => None,
-            Self::NvencH264 => Some(EncoderBackend::Nvenc),
-            Self::AmfH264 => Some(EncoderBackend::Amf),
-            Self::QuickSyncH264 => Some(EncoderBackend::QuickSync),
+            Self::Auto => "auto",
+            Self::NvencH264 => "nvenc_h264",
+            Self::NvencHevc => "nvenc_hevc",
+            Self::NvencAv1 => "nvenc_av1",
+            Self::AmfH264 => "amf_h264",
+            Self::AmfHevc => "amf_hevc",
+            Self::AmfAv1 => "amf_av1",
+            Self::QuickSyncH264 => "quick_sync_h264",
+            Self::QuickSyncHevc => "quick_sync_hevc",
+            Self::QuickSyncAv1 => "quick_sync_av1",
+            Self::SvtAv1 => "svt_av1",
         }
     }
+
+    /// The explicit variant for a (backend, codec) pair, if Clipline exposes
+    /// it as a user choice. `None` for combinations with no settings id
+    /// (e.g. `MfSoftware`, or SvtAv1 paired with a non-AV1 codec).
+    fn from_parts(backend: EncoderBackend, codec: Codec) -> Option<Self> {
+        Some(match (backend, codec) {
+            (EncoderBackend::Nvenc, Codec::H264) => Self::NvencH264,
+            (EncoderBackend::Nvenc, Codec::Hevc) => Self::NvencHevc,
+            (EncoderBackend::Nvenc, Codec::Av1) => Self::NvencAv1,
+            (EncoderBackend::Amf, Codec::H264) => Self::AmfH264,
+            (EncoderBackend::Amf, Codec::Hevc) => Self::AmfHevc,
+            (EncoderBackend::Amf, Codec::Av1) => Self::AmfAv1,
+            (EncoderBackend::QuickSync, Codec::H264) => Self::QuickSyncH264,
+            (EncoderBackend::QuickSync, Codec::Hevc) => Self::QuickSyncHevc,
+            (EncoderBackend::QuickSync, Codec::Av1) => Self::QuickSyncAv1,
+            (EncoderBackend::SvtAv1, Codec::Av1) => Self::SvtAv1,
+            _ => return None,
+        })
+    }
+}
+
+/// The settings id string for a codec, matching the frontend's decode-probe
+/// keys ("h264"/"hevc"/"av1").
+pub fn codec_id(codec: Codec) -> &'static str {
+    match codec {
+        Codec::Av1 => "av1",
+        Codec::Hevc => "hevc",
+        Codec::H264 => "h264",
+    }
+}
+
+/// One selectable encoder for the Settings dropdown.
+#[derive(serde::Serialize)]
+pub struct EncoderOption {
+    /// VideoEncoder settings id (e.g. "amf_hevc").
+    pub id: String,
+    /// Human label (e.g. "AMD AMF · HEVC").
+    pub name: String,
+    /// Codec key the frontend matches against its decode-capability probe.
+    pub codec: String,
+}
+
+/// The encoders this machine can actually use, as Settings options. Dedupes
+/// the same (backend, codec) offered by both MFT and FFmpeg, ordered by the
+/// ddoc merit/preference order.
+pub fn available_encoder_options() -> Vec<EncoderOption> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut options = Vec::new();
+    for cap in encoder_capabilities() {
+        for &codec in &cap.codecs {
+            let Some(encoder) = VideoEncoder::from_parts(cap.backend, codec) else {
+                continue;
+            };
+            if !seen.insert(encoder.id()) {
+                continue;
+            }
+            let candidate = EncoderCandidate {
+                api: cap.api,
+                backend: cap.backend,
+                codec,
+            };
+            options.push(EncoderOption {
+                id: encoder.id().to_string(),
+                name: encoder_label(candidate),
+                codec: codec_id(codec).to_string(),
+            });
+        }
+    }
+    options
+}
+
+/// A short, human-readable label for the active encoder, shown in the
+/// sidebar status (e.g. "AMD AMF · H.264" or "Software · AV1").
+pub fn encoder_label(candidate: EncoderCandidate) -> String {
+    let backend = match candidate.backend {
+        EncoderBackend::Nvenc => "NVIDIA NVENC",
+        EncoderBackend::Amf => "AMD AMF",
+        EncoderBackend::QuickSync => "Intel Quick Sync",
+        EncoderBackend::SvtAv1 => "Software",
+        EncoderBackend::MfSoftware => "Software",
+    };
+    let codec = match candidate.codec {
+        Codec::Av1 => "AV1",
+        Codec::Hevc => "HEVC",
+        Codec::H264 => "H.264",
+    };
+    format!("{backend} · {codec}")
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -121,6 +255,9 @@ pub enum Event {
         segments: usize,
         buffered_s: f64,
         buffered_mb: f64,
+        /// Active encoder label (e.g. "AMD AMF · H.264"); empty when stopped.
+        #[serde(default)]
+        encoder: String,
     },
     Saved {
         path: String,
@@ -154,6 +291,10 @@ pub struct ServiceOptions {
     pub fps: u32,
     pub bitrate_bps: u32,
     pub video_encoder: VideoEncoder,
+    /// Codecs the in-app review player can decode. `Auto` is restricted to
+    /// these so we never record a clip the user can't play back. The
+    /// frontend reports the real set (canPlayType); H.264 is always safe.
+    pub decodable_codecs: Vec<Codec>,
     pub audio: AudioOptions,
 }
 
@@ -173,6 +314,7 @@ impl Default for ServiceOptions {
             fps: 60,
             bitrate_bps: 12_000_000,
             video_encoder: VideoEncoder::Auto,
+            decodable_codecs: vec![Codec::H264],
             audio: AudioOptions::default(),
         }
     }
@@ -262,37 +404,8 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         (source_h as f64 * scale).round() as u32,
     );
 
-    let cfg = MftConfig {
-        width: enc_w,
-        height: enc_h,
-        fps: opts.fps,
-        bitrate_bps: opts.bitrate_bps,
-        encoder_backend: opts.video_encoder.backend(),
-    };
-    let encoder = match MftH264Encoder::new_with_crop(&device, in_w, in_h, cfg, crop) {
-        Ok(encoder) => encoder,
-        Err(e) if opts.video_encoder != VideoEncoder::Auto => {
-            warn_user(
-                events,
-                format!(
-                    "{:?} encoder unavailable; using Automatic instead: {e}",
-                    opts.video_encoder
-                ),
-            );
-            MftH264Encoder::new_with_crop(
-                &device,
-                in_w,
-                in_h,
-                MftConfig {
-                    encoder_backend: None,
-                    ..cfg
-                },
-                crop,
-            )
-            .map_err(|e| init(&e))?
-        }
-        Err(e) => return Err(init(&e)),
-    };
+    let (encoder, active) = build_encoder(&device, &opts, in_w, in_h, crop, enc_w, enc_h, events)?;
+    let encoder_status = encoder_label(active);
 
     let replay_cache_dir = prepare_replay_storage(&opts)?;
     let replay_storage = match &opts.replay_storage {
@@ -368,6 +481,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                 segments: rec.ring_len(),
                 buffered_s: rec.buffered_span_s(),
                 buffered_mb: rec.ring_bytes() as f64 / (1024.0 * 1024.0),
+                encoder: encoder_status.clone(),
             });
             if replay_cache_dir.is_some() {
                 ensure_replay_cache_free_space(&opts)?;
@@ -538,6 +652,144 @@ fn warn_user(events: &Sender<Event>, message: String) {
     let _ = events.send(Event::Error { message });
 }
 
+/// Combined MFT + FFmpeg capabilities. Probing is hardware-stable per
+/// process, so it is computed once and reused across recorder restarts
+/// (the FFmpeg probe test-encodes, which is too slow to repeat per save).
+fn encoder_capabilities() -> &'static [EncoderCapability] {
+    use std::sync::OnceLock;
+    static CAPS: OnceLock<Vec<EncoderCapability>> = OnceLock::new();
+    CAPS.get_or_init(|| {
+        let mut caps = mft_probe::enumerate().unwrap_or_default();
+        caps.extend(ffmpeg::probe());
+        caps
+    })
+}
+
+/// Build the recorder's video encoder by walking the ranked candidate list
+/// until one opens. Returns the boxed encoder and the candidate that won so
+/// the caller can report it. Warns the user once if an explicit choice could
+/// not be honored and Auto fallback was used instead.
+#[allow(clippy::too_many_arguments)]
+fn build_encoder(
+    device: &ID3D11Device,
+    opts: &ServiceOptions,
+    in_w: u32,
+    in_h: u32,
+    crop: Option<CropRect>,
+    enc_w: u32,
+    enc_h: u32,
+    events: &Sender<Event>,
+) -> Result<(Box<dyn Encoder>, EncoderCandidate), String> {
+    let preference = opts.video_encoder.preference();
+    let candidates = rank_encoders(encoder_capabilities(), &opts.decodable_codecs, preference);
+    if candidates.is_empty() {
+        return Err("init: no usable video encoder found on this system".into());
+    }
+
+    let explicit_target = match preference {
+        EncoderPreference::Explicit { backend, codec } => Some((backend, codec)),
+        EncoderPreference::Auto => None,
+    };
+    let ffmpeg_path = ffmpeg::locate();
+    let mut last_err = String::new();
+    for candidate in &candidates {
+        match open_candidate(
+            *candidate,
+            device,
+            opts,
+            in_w,
+            in_h,
+            crop,
+            enc_w,
+            enc_h,
+            &ffmpeg_path,
+        ) {
+            Ok(encoder) => {
+                // If the user forced a specific encoder/codec and we ended up
+                // on a different one — whether the choice failed to open or
+                // was never offered (so it isn't even in `candidates`) — tell
+                // them we downgraded.
+                if let Some((backend, codec)) = explicit_target {
+                    if candidate.backend != backend || candidate.codec != codec {
+                        let reason = if last_err.is_empty() {
+                            "not available on this system".to_string()
+                        } else {
+                            last_err.clone()
+                        };
+                        warn_user(
+                            events,
+                            format!(
+                                "{:?} encoder unavailable ({reason}); using {} instead",
+                                opts.video_encoder,
+                                encoder_label(*candidate)
+                            ),
+                        );
+                    }
+                }
+                return Ok((encoder, *candidate));
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    Err(format!(
+        "init: no video encoder could be opened: {last_err}"
+    ))
+}
+
+/// Construct one candidate encoder. MFT uses the zero-copy GPU H.264 path;
+/// FFmpeg converts BGRA→NV12 on the GPU and pipes it. `MfSoftware` is modeled
+/// by the probe but not yet instantiable, so it is skipped (the walk moves on).
+#[allow(clippy::too_many_arguments)]
+fn open_candidate(
+    candidate: EncoderCandidate,
+    device: &ID3D11Device,
+    opts: &ServiceOptions,
+    in_w: u32,
+    in_h: u32,
+    crop: Option<CropRect>,
+    enc_w: u32,
+    enc_h: u32,
+    ffmpeg_path: &Option<PathBuf>,
+) -> Result<Box<dyn Encoder>, String> {
+    match candidate.api {
+        EncoderApi::Mft => {
+            if candidate.backend == EncoderBackend::MfSoftware {
+                return Err("software H.264 MFT is not yet wired".into());
+            }
+            let cfg = MftConfig {
+                width: enc_w,
+                height: enc_h,
+                fps: opts.fps,
+                bitrate_bps: opts.bitrate_bps,
+                encoder_backend: Some(candidate.backend),
+            };
+            MftH264Encoder::new_with_crop(device, in_w, in_h, cfg, crop)
+                .map(|e| Box::new(e) as Box<dyn Encoder>)
+                .map_err(|e| e.to_string())
+        }
+        EncoderApi::Ffmpeg => {
+            let ffmpeg = ffmpeg_path
+                .as_deref()
+                .ok_or_else(|| "ffmpeg not located".to_string())?;
+            FfmpegVideoEncoder::new_on(
+                device,
+                ffmpeg,
+                candidate.backend,
+                candidate.codec,
+                in_w,
+                in_h,
+                crop,
+                enc_w,
+                enc_h,
+                opts.fps,
+                opts.bitrate_bps,
+            )
+            .map(|e| Box::new(e) as Box<dyn Encoder>)
+            .map_err(|e| e.to_string())
+        }
+    }
+}
+
 fn prepare_replay_storage(opts: &ServiceOptions) -> Result<Option<PathBuf>, String> {
     match &opts.replay_storage {
         ReplayStorageOptions::Memory => Ok(None),
@@ -621,11 +873,12 @@ fn send_stopped(events: &Sender<Event>) {
         segments: 0,
         buffered_s: 0.0,
         buffered_mb: 0.0,
+        encoder: String::new(),
     });
 }
 
 fn save(
-    rec: &Recorder<WgcCapture, MftH264Encoder>,
+    rec: &Recorder<WgcCapture, Box<dyn Encoder>>,
     path: &PathBuf,
     window_s: f64,
     exclude_before_s: Option<f64>,
@@ -737,6 +990,47 @@ fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn video_encoder_id_matches_serde_serialization() {
+        // The Settings dropdown sends EncoderOption.id; settings.rs maps it
+        // back through VideoEncoder's snake_case serde. id() must stay in
+        // lockstep with that derive, including the new codec variants.
+        for enc in [
+            VideoEncoder::Auto,
+            VideoEncoder::NvencH264,
+            VideoEncoder::NvencHevc,
+            VideoEncoder::NvencAv1,
+            VideoEncoder::AmfH264,
+            VideoEncoder::AmfHevc,
+            VideoEncoder::AmfAv1,
+            VideoEncoder::QuickSyncH264,
+            VideoEncoder::QuickSyncHevc,
+            VideoEncoder::QuickSyncAv1,
+            VideoEncoder::SvtAv1,
+        ] {
+            let serialized = serde_json::to_string(&enc).unwrap();
+            assert_eq!(serialized, format!("\"{}\"", enc.id()));
+        }
+    }
+
+    #[test]
+    fn from_parts_round_trips_through_preference() {
+        // Every explicit option maps back to the same (backend, codec).
+        for (backend, codec) in [
+            (EncoderBackend::Amf, Codec::Hevc),
+            (EncoderBackend::Nvenc, Codec::Av1),
+            (EncoderBackend::SvtAv1, Codec::Av1),
+        ] {
+            let enc = VideoEncoder::from_parts(backend, codec).unwrap();
+            assert_eq!(
+                enc.preference(),
+                EncoderPreference::Explicit { backend, codec }
+            );
+        }
+        assert!(VideoEncoder::from_parts(EncoderBackend::MfSoftware, Codec::H264).is_none());
+        assert!(VideoEncoder::from_parts(EncoderBackend::SvtAv1, Codec::H264).is_none());
+    }
 
     struct TestDir(PathBuf);
 

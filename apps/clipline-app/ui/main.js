@@ -59,6 +59,10 @@ let videoEncoders = [];
 let customGames = [];
 let gameWindows = [];
 let activeDetectedGame = null;
+// Codecs WebView2 can decode in the review player (H.264 always; HEVC/AV1
+// probed at startup). Drives the playback caveat and the recorder's
+// Automatic-codec policy via report_decode_support.
+let decodableCodecs = ["h264"];
 let regionState = { display_id: null, x: 0, y: 0, width: 1920, height: 1080 };
 let regionLayout = null;
 let regionDrag = null;
@@ -332,10 +336,16 @@ function syncRecordingFields() {
   syncRangeProgress($("set-fps"));
   $("replay-summary").textContent = `Save Replay writes the last ${settingDurationLabel(replay)}.`;
   $("replay-summary").className = "setting-summary";
-  $("encoder-summary").textContent =
-    encoder.id === "auto"
-      ? "Clipline chooses the best available H.264 GPU encoder."
-      : `${encoder.name} is used for new recordings.`;
+  const encoderSummary = $("encoder-summary");
+  if (encoder.id === "auto") {
+    encoderSummary.textContent =
+      "Clipline picks the best available encoder the review player can decode.";
+    encoderSummary.classList.remove("warn");
+  } else {
+    const caveat = PlayerCore.encoderCodecCaveat(encoder.codec, decodableCodecs);
+    encoderSummary.textContent = caveat || `${encoder.name} is used for new recordings.`;
+    encoderSummary.classList.toggle("warn", Boolean(caveat));
+  }
   $("quality-summary").textContent = `${quality.label} quality - ${quality.hint}.`;
   $("fps-summary").textContent = `${smoothness.label} - ${smoothness.hint}.`;
   syncReplayStorageFields();
@@ -416,7 +426,8 @@ function renderVideoEncoderSelect() {
   for (const encoder of videoEncoders) {
     const opt = document.createElement("option");
     opt.value = encoder.id;
-    opt.textContent = encoder.name;
+    const caveat = PlayerCore.encoderCodecCaveat(encoder.codec, decodableCodecs);
+    opt.textContent = caveat ? `${encoder.name} (limited playback)` : encoder.name;
     select.appendChild(opt);
   }
   if (selected !== "auto" && !videoEncoders.some((encoder) => encoder.id === selected)) {
@@ -681,17 +692,33 @@ async function loadAudioDevices() {
   }
 }
 
+// Probe which codecs this WebView2 can actually decode and report them so
+// Automatic recording never produces a clip the review player can't show.
+function probeDecodableCodecs() {
+  const probe = document.createElement("video");
+  const supported = ["h264"];
+  for (const { codec, mime } of PlayerCore.videoDecodeProbes()) {
+    const verdict = probe.canPlayType(mime);
+    if (verdict === "probably" || verdict === "maybe") supported.push(codec);
+  }
+  decodableCodecs = supported;
+}
+
 async function loadVideoEncoders() {
+  probeDecodableCodecs();
   try {
-    videoEncoders = await invoke("list_video_encoders");
-    renderVideoEncoderSelect();
-    if (currentSettings) syncRecordingFields();
+    await invoke("report_decode_support", { codecs: decodableCodecs });
+  } catch (e) {
+    // Reporting is best-effort; the recorder defaults to H.264-safe Automatic.
+  }
+  try {
+    videoEncoders = await invoke("probe_encoders");
   } catch (e) {
     videoEncoders = [];
-    renderVideoEncoderSelect();
-    if (currentSettings) syncRecordingFields();
     $("error").textContent = e;
   }
+  renderVideoEncoderSelect();
+  if (currentSettings) syncRecordingFields();
 }
 
 function gameNameFromWindow(win) {

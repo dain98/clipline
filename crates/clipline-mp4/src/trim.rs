@@ -6,7 +6,8 @@ use std::path::Path;
 
 use crate::walker::{children, find, walk, BoxInfo};
 use crate::{
-    AudioTrackConfig, FragSample, HybridMp4Writer, SourceSample, TrackConfig, VideoTrackConfig,
+    AudioTrackConfig, FragSample, HybridMp4Writer, SourceSample, TrackConfig, VideoCodecParams,
+    VideoTrackConfig,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -399,28 +400,48 @@ fn parse_video_stsd(
     entry: &BoxInfo,
     timescale: u32,
 ) -> Result<TrackConfig, TrimError> {
-    if &entry.fourcc != b"avc1" {
-        return Err(TrimError::Unsupported(format!(
-            "unsupported video sample entry {}",
-            fourcc_str(&entry.fourcc)
-        )));
-    }
     let p = entry.payload_offset as usize;
     let entry_end = box_end(entry)?;
     if p + 78 > entry_end {
-        return Err(TrimError::Corrupt("truncated avc1 sample entry".into()));
+        return Err(TrimError::Corrupt("truncated visual sample entry".into()));
     }
     let width = read_u16(input, p + 24)?;
     let height = read_u16(input, p + 26)?;
-    let avcc = find_box_between(input, p + 78, entry_end, b"avcC")?
-        .ok_or_else(|| TrimError::Unsupported("missing avcC".into()))?;
-    let (sps, pps) = parse_avcc(input, &avcc)?;
+    // The codec configuration box follows the 78-byte VisualSampleEntry
+    // shell, which is identical for avc1/hvc1/av01.
+    let codec = match &entry.fourcc {
+        b"avc1" => {
+            let avcc = find_box_between(input, p + 78, entry_end, b"avcC")?
+                .ok_or_else(|| TrimError::Unsupported("missing avcC".into()))?;
+            let (sps, pps) = parse_avcc(input, &avcc)?;
+            VideoCodecParams::H264 { sps, pps }
+        }
+        b"hvc1" | b"hev1" => {
+            let hvcc = find_box_between(input, p + 78, entry_end, b"hvcC")?
+                .ok_or_else(|| TrimError::Unsupported("missing hvcC".into()))?;
+            let (vps, sps, pps) = parse_hvcc(input, &hvcc)?;
+            VideoCodecParams::Hevc { vps, sps, pps }
+        }
+        b"av01" => {
+            let av1c = find_box_between(input, p + 78, entry_end, b"av1C")?
+                .ok_or_else(|| TrimError::Unsupported("missing av1C".into()))?;
+            let sequence_header_obu = parse_av1c(input, &av1c)?;
+            VideoCodecParams::Av1 {
+                sequence_header_obu,
+            }
+        }
+        other => {
+            return Err(TrimError::Unsupported(format!(
+                "unsupported video sample entry {}",
+                fourcc_str(other)
+            )))
+        }
+    };
     Ok(TrackConfig::Video(VideoTrackConfig {
         width,
         height,
         timescale,
-        sps,
-        pps,
+        codec,
     }))
 }
 
@@ -481,6 +502,66 @@ fn parse_avcc(input: &[u8], avcc: &BoxInfo) -> Result<(Vec<u8>, Vec<u8>), TrimEr
     pos += 2;
     let pps = read_slice(input, pos, pps_len, end)?.to_vec();
     Ok((sps.unwrap(), pps))
+}
+
+/// (VPS, SPS, PPS) raw NAL units recovered from an `hvcC` record.
+type HevcParamSets = (Vec<u8>, Vec<u8>, Vec<u8>);
+
+/// Recover the first VPS/SPS/PPS NAL from an `hvcC` NAL-array section.
+fn parse_hvcc(input: &[u8], hvcc: &BoxInfo) -> Result<HevcParamSets, TrimError> {
+    let p = hvcc.payload_offset as usize;
+    let end = box_end(hvcc)?;
+    // The fixed configuration prefix is 22 bytes; numOfArrays is the 23rd.
+    if p + 23 > end {
+        return Err(TrimError::Corrupt("truncated hvcC".into()));
+    }
+    let num_arrays = input[p + 22];
+    let mut pos = p + 23;
+    let mut vps = None;
+    let mut sps = None;
+    let mut pps = None;
+    for _ in 0..num_arrays {
+        let nal_type = *input
+            .get(pos)
+            .ok_or_else(|| TrimError::Corrupt("truncated hvcC array header".into()))?
+            & 0x3F;
+        pos += 1;
+        let num_nalus = read_u16(input, pos)?;
+        pos += 2;
+        for i in 0..num_nalus {
+            let len = read_u16(input, pos)? as usize;
+            pos += 2;
+            let data = read_slice(input, pos, len, end)?.to_vec();
+            pos += len;
+            if i == 0 {
+                match nal_type {
+                    32 => vps = Some(data),
+                    33 => sps = Some(data),
+                    34 => pps = Some(data),
+                    _ => {}
+                }
+            }
+        }
+    }
+    match (vps, sps, pps) {
+        (Some(vps), Some(sps), Some(pps)) => Ok((vps, sps, pps)),
+        _ => Err(TrimError::Unsupported("hvcC missing VPS/SPS/PPS".into())),
+    }
+}
+
+/// The `av1C` configOBUs payload is the sequence-header OBU verbatim.
+fn parse_av1c(input: &[u8], av1c: &BoxInfo) -> Result<Vec<u8>, TrimError> {
+    let p = av1c.payload_offset as usize;
+    let end = box_end(av1c)?;
+    // 4-byte fixed configuration record, then configOBUs.
+    if p + 4 > end {
+        return Err(TrimError::Corrupt("truncated av1C".into()));
+    }
+    let obu = read_slice(input, p + 4, end - (p + 4), end)?.to_vec();
+    if obu.is_empty() {
+        return Err(TrimError::Unsupported("av1C has no configOBUs".into()));
+    }
+    Ok(obu)
 }
 
 fn parse_sample_table(input: &[u8], stbl: &BoxInfo) -> Result<Vec<SampleRecord>, TrimError> {
@@ -829,13 +910,13 @@ mod tests {
 
     fn tracks() -> Vec<TrackConfig> {
         vec![
-            TrackConfig::Video(VideoTrackConfig {
-                width: 128,
-                height: 72,
-                timescale: 90_000,
-                sps: vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
-                pps: vec![0x68, 0xEE, 0x38, 0x80],
-            }),
+            TrackConfig::Video(VideoTrackConfig::h264(
+                128,
+                72,
+                90_000,
+                vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+                vec![0x68, 0xEE, 0x38, 0x80],
+            )),
             TrackConfig::Audio(AudioTrackConfig {
                 channels: 2,
                 sample_rate: 48_000,
@@ -909,6 +990,81 @@ mod tests {
         assert!(out.windows(6).any(|w| w == b"V00000"));
         assert!(out.windows(6).any(|w| w == b"V00019"));
         assert!(!out.windows(6).any(|w| w == b"V00020"));
+    }
+
+    // Real x265 / SVT-AV1 parameter sets (128x72) so the round-trip parses
+    // genuine hvcC / av1C records, not just placeholder bytes.
+    const HEVC_VPS: &[u8] = &[0x40, 0x01, 0x0C, 0x01, 0xFF, 0xFF, 0x01];
+    const HEVC_SPS: &[u8] = &[
+        0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x03, 0x00, 0x1E, 0xA0, 0x10, 0x20, 0x49, 0x65, 0x95, 0x9A, 0x49, 0x32, 0xBC, 0x05, 0xA0,
+        0x20, 0x00, 0x00, 0x03, 0x00, 0x20, 0x00, 0x00, 0x03, 0x03, 0xC1,
+    ];
+    const HEVC_PPS: &[u8] = &[0x44, 0x01, 0xC1, 0x72, 0xB4, 0x22, 0x40];
+    const AV1_SEQ_OBU: &[u8] = &[
+        0x0A, 0x0A, 0x00, 0x00, 0x00, 0x03, 0x37, 0xF8, 0xE3, 0x57, 0xCC, 0x02,
+    ];
+
+    fn single_video_fixture(codec: VideoCodecParams) -> Vec<u8> {
+        let cfg = vec![TrackConfig::Video(VideoTrackConfig {
+            width: 128,
+            height: 72,
+            timescale: 90_000,
+            codec,
+        })];
+        let mut w = HybridMp4Writer::new_multi(Cursor::new(Vec::new()), cfg).unwrap();
+        for second in 0..3 {
+            w.write_fragment_multi(&[&video_gop(second * 10)]).unwrap();
+        }
+        w.finalize().unwrap().into_inner()
+    }
+
+    #[test]
+    fn trims_hevc_clip_recovering_parameter_sets() {
+        let fixture = single_video_fixture(VideoCodecParams::Hevc {
+            vps: HEVC_VPS.to_vec(),
+            sps: HEVC_SPS.to_vec(),
+            pps: HEVC_PPS.to_vec(),
+        });
+        let (out, info) = trim_keyframe_aligned(&fixture, 0.4, 1.2).unwrap();
+        let movie = parse_movie(&out).unwrap();
+        assert_eq!(info.aligned_start_s, 0.0);
+        assert_eq!(info.aligned_end_s, 2.0);
+        assert_eq!(movie.tracks[0].samples.len(), 20);
+        match &movie.tracks[0].cfg {
+            TrackConfig::Video(VideoTrackConfig {
+                codec: VideoCodecParams::Hevc { vps, sps, pps },
+                ..
+            }) => {
+                assert_eq!(vps.as_slice(), HEVC_VPS);
+                assert_eq!(sps.as_slice(), HEVC_SPS);
+                assert_eq!(pps.as_slice(), HEVC_PPS);
+            }
+            other => panic!("expected HEVC track, got {other:?}"),
+        }
+        assert!(out.windows(4).any(|w| w == b"hvc1"));
+    }
+
+    #[test]
+    fn trims_av1_clip_recovering_sequence_header() {
+        let fixture = single_video_fixture(VideoCodecParams::Av1 {
+            sequence_header_obu: AV1_SEQ_OBU.to_vec(),
+        });
+        let (out, info) = trim_keyframe_aligned(&fixture, 0.4, 1.2).unwrap();
+        let movie = parse_movie(&out).unwrap();
+        assert_eq!(info.aligned_end_s, 2.0);
+        assert_eq!(movie.tracks[0].samples.len(), 20);
+        match &movie.tracks[0].cfg {
+            TrackConfig::Video(VideoTrackConfig {
+                codec:
+                    VideoCodecParams::Av1 {
+                        sequence_header_obu,
+                    },
+                ..
+            }) => assert_eq!(sequence_header_obu.as_slice(), AV1_SEQ_OBU),
+            other => panic!("expected AV1 track, got {other:?}"),
+        }
+        assert!(out.windows(4).any(|w| w == b"av01"));
     }
 
     #[test]
