@@ -740,10 +740,26 @@ label span { white-space: nowrap; }
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 10px;
+  row-gap: 8px;
 }
 
 .custom-game .check-line {
   justify-content: center;
+}
+
+.custom-game-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.custom-game-mode {
+  grid-column: 2 / 4;
+  width: min(100%, 320px);
+}
+
+.custom-game-mode span {
+  font-size: 12px;
 }
 
 .custom-game-remove {

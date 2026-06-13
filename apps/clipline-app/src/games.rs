@@ -130,6 +130,7 @@ mod tests {
             exe_name: "game.exe".into(),
             process_path: Some(r"C:\Games\Test\game.exe".into()),
             window_title: "Test Game".into(),
+            recording_mode: Default::default(),
         }
     }
 
@@ -152,7 +153,6 @@ mod tests {
     fn detects_first_enabled_custom_game_by_process_path() {
         let settings = GameSettings {
             auto_detect: true,
-            recording_mode: Default::default(),
             custom_games: vec![game()],
         };
         let detected = detect_active_game_from_windows(
@@ -174,7 +174,6 @@ mod tests {
     fn falls_back_to_exe_name_when_path_is_unavailable() {
         let settings = GameSettings {
             auto_detect: true,
-            recording_mode: Default::default(),
             custom_games: vec![game()],
         };
         let detected = detect_active_game_from_windows(
@@ -202,7 +201,6 @@ mod tests {
         assert!(detect_active_game_from_windows(
             &GameSettings {
                 auto_detect: true,
-                recording_mode: Default::default(),
                 custom_games: vec![disabled],
             },
             windows.clone(),
@@ -211,7 +209,6 @@ mod tests {
         assert!(detect_active_game_from_windows(
             &GameSettings {
                 auto_detect: false,
-                recording_mode: Default::default(),
                 custom_games: vec![game()],
             },
             windows,

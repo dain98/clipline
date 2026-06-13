@@ -125,7 +125,6 @@ function fillSettings(s) {
   $("set-window").value = s.window_title ?? "";
   regionState = s.capture_region ?? regionState;
   $("set-games-auto-detect").checked = !!games.auto_detect;
-  setGameRecordingMode(games.recording_mode);
   $("set-output-enabled").checked = !!audio.output_enabled;
   $("set-output-volume").value = String(Number.isFinite(audio.output_volume) ? audio.output_volume : 1);
   $("set-mic-enabled").checked = !!audio.mic_enabled;
@@ -164,7 +163,6 @@ function readSettings() {
     capture_region: regionState,
     games: {
       auto_detect: $("set-games-auto-detect").checked,
-      recording_mode: selectedGameRecordingMode(),
       custom_games: customGames.map((game) => ({ ...game })),
     },
     audio: {
@@ -219,25 +217,12 @@ function defaultReplayStorageSettings() {
 function defaultGameSettings() {
   return {
     auto_detect: true,
-    recording_mode: "replays_only",
     custom_games: [],
   };
 }
 
 function normalizeGameRecordingMode(mode) {
   return mode === "full_session" ? "full_session" : "replays_only";
-}
-
-function setGameRecordingMode(mode) {
-  const value = normalizeGameRecordingMode(mode);
-  document.querySelectorAll("input[name='game-recording-mode']").forEach((input) => {
-    input.checked = input.value === value;
-  });
-}
-
-function selectedGameRecordingMode() {
-  const checked = document.querySelector("input[name='game-recording-mode']:checked");
-  return normalizeGameRecordingMode(checked && checked.value);
 }
 
 function normalizeCustomGame(game) {
@@ -248,6 +233,7 @@ function normalizeCustomGame(game) {
     exe_name: String(game.exe_name || "").trim(),
     process_path: game.process_path ? String(game.process_path).trim() : null,
     window_title: String(game.window_title || "").trim(),
+    recording_mode: normalizeGameRecordingMode(game.recording_mode),
   };
 }
 
@@ -635,6 +621,35 @@ function customGameId(name) {
   return `custom-${slug}-${Date.now()}`;
 }
 
+function gameRecordingModeControl(game, index) {
+  const control = document.createElement("div");
+  control.className = "segmented-control custom-game-mode";
+  control.setAttribute("role", "radiogroup");
+  control.setAttribute("aria-label", `${game.name} recording mode`);
+  const selectedMode = normalizeGameRecordingMode(game.recording_mode);
+  [
+    ["replays_only", "Replays only"],
+    ["full_session", "Full session"],
+  ].forEach(([value, label]) => {
+    const option = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = `custom-game-recording-mode-${index}`;
+    input.value = value;
+    input.checked = selectedMode === value;
+    input.addEventListener("change", () => {
+      if (input.checked) {
+        customGames[index] = { ...customGames[index], recording_mode: value };
+      }
+    });
+    const text = document.createElement("span");
+    text.textContent = label;
+    option.append(input, text);
+    control.appendChild(option);
+  });
+  return control;
+}
+
 function renderCustomGames() {
   const root = $("custom-games");
   root.replaceChildren();
@@ -660,6 +675,7 @@ function renderCustomGames() {
     enabled.appendChild(checkbox);
 
     const meta = document.createElement("div");
+    meta.className = "custom-game-meta";
     const name = document.createElement("strong");
     name.textContent = game.name;
     const info = document.createElement("span");
@@ -677,7 +693,7 @@ function renderCustomGames() {
       renderCustomGames();
     });
 
-    row.append(enabled, meta, remove);
+    row.append(enabled, meta, remove, gameRecordingModeControl(game, index));
     root.appendChild(row);
   });
 }
@@ -743,6 +759,7 @@ function addCustomGameFromWindow(win) {
     exe_name: win.exe_name || "",
     process_path: win.exe_path || null,
     window_title: win.title || "",
+    recording_mode: "replays_only",
   }));
   hideGameWindowPicker();
   renderCustomGames();

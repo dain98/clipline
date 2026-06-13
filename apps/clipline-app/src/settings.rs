@@ -110,6 +110,8 @@ pub struct CustomGameSettings {
     pub process_path: Option<String>,
     #[serde(default)]
     pub window_title: String,
+    #[serde(default)]
+    pub recording_mode: GameRecordingMode,
 }
 
 impl CustomGameSettings {
@@ -143,23 +145,48 @@ pub enum GameRecordingMode {
     ReplaysOnly,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct GameSettings {
     #[serde(default = "default_enabled")]
     pub auto_detect: bool,
     #[serde(default)]
-    pub recording_mode: GameRecordingMode,
-    #[serde(default)]
     pub custom_games: Vec<CustomGameSettings>,
+}
+
+#[derive(Deserialize)]
+struct GameSettingsWire {
+    #[serde(default = "default_enabled")]
+    auto_detect: bool,
+    #[serde(default, rename = "recording_mode")]
+    legacy_recording_mode: Option<GameRecordingMode>,
+    #[serde(default)]
+    custom_games: Vec<CustomGameSettings>,
 }
 
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
             auto_detect: true,
-            recording_mode: GameRecordingMode::ReplaysOnly,
             custom_games: Vec::new(),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for GameSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut wire = GameSettingsWire::deserialize(deserializer)?;
+        if let Some(mode) = wire.legacy_recording_mode {
+            for game in &mut wire.custom_games {
+                game.recording_mode = mode;
+            }
+        }
+        Ok(Self {
+            auto_detect: wire.auto_detect,
+            custom_games: wire.custom_games,
+        })
     }
 }
 
@@ -674,10 +701,6 @@ mod tests {
 
         assert_eq!(settings.capture_mode, CaptureMode::PrimaryMonitor);
         assert!(settings.games.auto_detect);
-        assert_eq!(
-            settings.games.recording_mode,
-            GameRecordingMode::ReplaysOnly
-        );
         assert!(settings.games.custom_games.is_empty());
         assert!(settings.audio.output_enabled);
         assert_eq!(settings.audio.output_device_id, None);
@@ -740,6 +763,72 @@ mod tests {
         assert_eq!(settings.media_dir, default_media_dir());
         assert_eq!(settings.video_encoder, VideoEncoder::Auto);
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn legacy_custom_games_default_to_replays_only() {
+        let json = r#"{
+            "capture_mode": "primary_monitor",
+            "window_title": "",
+            "buffer_seconds": 120.0,
+            "replay_window_s": 60.0,
+            "bitrate_mbps": 12.0,
+            "fps": 60,
+            "disk_quota_gb": 10.0,
+            "hotkey": "Alt+F10",
+            "games": {
+                "auto_detect": true,
+                "custom_games": [{
+                    "id": "custom-test",
+                    "name": "Test Game",
+                    "enabled": true,
+                    "exe_name": "game.exe",
+                    "process_path": "C:\\Games\\Test\\game.exe",
+                    "window_title": "Test Game"
+                }]
+            }
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            settings.games.custom_games[0].recording_mode,
+            GameRecordingMode::ReplaysOnly
+        );
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn legacy_global_game_recording_mode_migrates_to_custom_games() {
+        let json = r#"{
+            "capture_mode": "primary_monitor",
+            "window_title": "",
+            "buffer_seconds": 120.0,
+            "replay_window_s": 60.0,
+            "bitrate_mbps": 12.0,
+            "fps": 60,
+            "disk_quota_gb": 10.0,
+            "hotkey": "Alt+F10",
+            "games": {
+                "auto_detect": true,
+                "recording_mode": "full_session",
+                "custom_games": [{
+                    "id": "custom-test",
+                    "name": "Test Game",
+                    "enabled": true,
+                    "exe_name": "game.exe",
+                    "process_path": "C:\\Games\\Test\\game.exe",
+                    "window_title": "Test Game"
+                }]
+            }
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            settings.games.custom_games[0].recording_mode,
+            GameRecordingMode::FullSession
+        );
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert!(saved["games"].get("recording_mode").is_none());
     }
 
     #[test]
@@ -1030,7 +1119,6 @@ mod tests {
             hotkey: "Ctrl+Alt+F9".into(),
             games: GameSettings {
                 auto_detect: true,
-                recording_mode: GameRecordingMode::FullSession,
                 custom_games: vec![CustomGameSettings {
                     id: "custom-notepad".into(),
                     name: "Notepad".into(),
@@ -1038,6 +1126,7 @@ mod tests {
                     exe_name: "notepad.exe".into(),
                     process_path: Some(r"C:\Windows\System32\notepad.exe".into()),
                     window_title: "Untitled - Notepad".into(),
+                    recording_mode: GameRecordingMode::FullSession,
                 }],
             },
             ..AppSettings::default()
@@ -1054,7 +1143,6 @@ mod tests {
         let settings = AppSettings {
             games: GameSettings {
                 auto_detect: true,
-                recording_mode: GameRecordingMode::ReplaysOnly,
                 custom_games: vec![CustomGameSettings {
                     id: "custom-empty".into(),
                     name: "Mystery".into(),
@@ -1062,6 +1150,7 @@ mod tests {
                     exe_name: " ".into(),
                     process_path: None,
                     window_title: " ".into(),
+                    recording_mode: GameRecordingMode::ReplaysOnly,
                 }],
             },
             ..AppSettings::default()
