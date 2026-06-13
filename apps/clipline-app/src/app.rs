@@ -539,6 +539,7 @@ pub fn run() {
             crate::library::delete_clip,
             crate::library::export_clip,
             crate::library::reveal_clip,
+            crate::library::copy_clip_to_clipboard,
             crate::library::open_media_folder,
             crate::library::storage_status
         ])
