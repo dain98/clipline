@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clipline_capture::ffmpeg;
 use clipline_capture::ffmpeg_encoder::FfmpegVideoEncoder;
 use clipline_capture::probe::{
-    rank_encoders, Codec, EncoderApi, EncoderBackend, EncoderCandidate, EncoderCapability,
+    rank_encoders, EncoderApi, EncoderBackend, EncoderCandidate, EncoderCapability,
     EncoderPreference,
 };
 use clipline_capture::traits::{AudioSource, CaptureError, Encoder, FrameData};
@@ -25,6 +25,10 @@ use clipline_storage::sessions::{session_label, SessionTracker};
 use clipline_storage::{enforce_quota, storage_status};
 
 use crate::markers::{self, PollerMsg};
+
+/// Re-exported so the app layer can name codecs without its own
+/// clipline-capture import.
+pub use clipline_capture::probe::Codec;
 
 pub enum Cmd {
     Save,
@@ -94,6 +98,89 @@ impl VideoEncoder {
         };
         EncoderPreference::Explicit { backend, codec }
     }
+
+    /// The settings/serde id (snake_case). Kept in lockstep with the
+    /// `serde(rename_all = "snake_case")` derive by a test.
+    fn id(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::NvencH264 => "nvenc_h264",
+            Self::NvencHevc => "nvenc_hevc",
+            Self::NvencAv1 => "nvenc_av1",
+            Self::AmfH264 => "amf_h264",
+            Self::AmfHevc => "amf_hevc",
+            Self::AmfAv1 => "amf_av1",
+            Self::QuickSyncH264 => "quick_sync_h264",
+            Self::QuickSyncHevc => "quick_sync_hevc",
+            Self::QuickSyncAv1 => "quick_sync_av1",
+            Self::SvtAv1 => "svt_av1",
+        }
+    }
+
+    /// The explicit variant for a (backend, codec) pair, if Clipline exposes
+    /// it as a user choice. `None` for combinations with no settings id
+    /// (e.g. `MfSoftware`, or SvtAv1 paired with a non-AV1 codec).
+    fn from_parts(backend: EncoderBackend, codec: Codec) -> Option<Self> {
+        Some(match (backend, codec) {
+            (EncoderBackend::Nvenc, Codec::H264) => Self::NvencH264,
+            (EncoderBackend::Nvenc, Codec::Hevc) => Self::NvencHevc,
+            (EncoderBackend::Nvenc, Codec::Av1) => Self::NvencAv1,
+            (EncoderBackend::Amf, Codec::H264) => Self::AmfH264,
+            (EncoderBackend::Amf, Codec::Hevc) => Self::AmfHevc,
+            (EncoderBackend::Amf, Codec::Av1) => Self::AmfAv1,
+            (EncoderBackend::QuickSync, Codec::H264) => Self::QuickSyncH264,
+            (EncoderBackend::QuickSync, Codec::Hevc) => Self::QuickSyncHevc,
+            (EncoderBackend::QuickSync, Codec::Av1) => Self::QuickSyncAv1,
+            (EncoderBackend::SvtAv1, Codec::Av1) => Self::SvtAv1,
+            _ => return None,
+        })
+    }
+}
+
+/// The settings id string for a codec, matching the frontend's decode-probe
+/// keys ("h264"/"hevc"/"av1").
+pub fn codec_id(codec: Codec) -> &'static str {
+    match codec {
+        Codec::Av1 => "av1",
+        Codec::Hevc => "hevc",
+        Codec::H264 => "h264",
+    }
+}
+
+/// One selectable encoder for the Settings dropdown.
+#[derive(serde::Serialize)]
+pub struct EncoderOption {
+    /// VideoEncoder settings id (e.g. "amf_hevc").
+    pub id: String,
+    /// Human label (e.g. "AMD AMF · HEVC").
+    pub name: String,
+    /// Codec key the frontend matches against its decode-capability probe.
+    pub codec: String,
+}
+
+/// The encoders this machine can actually use, as Settings options. Dedupes
+/// the same (backend, codec) offered by both MFT and FFmpeg, ordered by the
+/// ddoc merit/preference order.
+pub fn available_encoder_options() -> Vec<EncoderOption> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut options = Vec::new();
+    for cap in encoder_capabilities() {
+        for &codec in &cap.codecs {
+            let Some(encoder) = VideoEncoder::from_parts(cap.backend, codec) else {
+                continue;
+            };
+            if !seen.insert(encoder.id()) {
+                continue;
+            }
+            let candidate = EncoderCandidate { api: cap.api, backend: cap.backend, codec };
+            options.push(EncoderOption {
+                id: encoder.id().to_string(),
+                name: encoder_label(candidate),
+                codec: codec_id(codec).to_string(),
+            });
+        }
+    }
+    options
 }
 
 /// A short, human-readable label for the active encoder, shown in the
@@ -757,6 +844,47 @@ fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn video_encoder_id_matches_serde_serialization() {
+        // The Settings dropdown sends EncoderOption.id; settings.rs maps it
+        // back through VideoEncoder's snake_case serde. id() must stay in
+        // lockstep with that derive, including the new codec variants.
+        for enc in [
+            VideoEncoder::Auto,
+            VideoEncoder::NvencH264,
+            VideoEncoder::NvencHevc,
+            VideoEncoder::NvencAv1,
+            VideoEncoder::AmfH264,
+            VideoEncoder::AmfHevc,
+            VideoEncoder::AmfAv1,
+            VideoEncoder::QuickSyncH264,
+            VideoEncoder::QuickSyncHevc,
+            VideoEncoder::QuickSyncAv1,
+            VideoEncoder::SvtAv1,
+        ] {
+            let serialized = serde_json::to_string(&enc).unwrap();
+            assert_eq!(serialized, format!("\"{}\"", enc.id()));
+        }
+    }
+
+    #[test]
+    fn from_parts_round_trips_through_preference() {
+        // Every explicit option maps back to the same (backend, codec).
+        for (backend, codec) in [
+            (EncoderBackend::Amf, Codec::Hevc),
+            (EncoderBackend::Nvenc, Codec::Av1),
+            (EncoderBackend::SvtAv1, Codec::Av1),
+        ] {
+            let enc = VideoEncoder::from_parts(backend, codec).unwrap();
+            assert_eq!(
+                enc.preference(),
+                EncoderPreference::Explicit { backend, codec }
+            );
+        }
+        assert!(VideoEncoder::from_parts(EncoderBackend::MfSoftware, Codec::H264).is_none());
+        assert!(VideoEncoder::from_parts(EncoderBackend::SvtAv1, Codec::H264).is_none());
+    }
 
     struct TestDir(PathBuf);
 

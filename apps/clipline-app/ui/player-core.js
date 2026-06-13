@@ -403,11 +403,34 @@ const PlayerCore = (() => {
     return next;
   };
 
+  // --- Encoder codec playback support (Settings) ---
+  // Codecs the in-app review player may need an OS extension to decode.
+  // H.264 always plays in WebView2; HEVC/AV1 are probed at runtime via
+  // canPlayType. The mime strings name concrete profiles the muxer emits.
+  const VIDEO_DECODE_PROBES = [
+    { codec: "hevc", mime: 'video/mp4; codecs="hvc1.1.6.L93.B0"' },
+    { codec: "av1", mime: 'video/mp4; codecs="av01.0.04M.08"' },
+  ];
+
+  const videoDecodeProbes = () => VIDEO_DECODE_PROBES.map((p) => ({ ...p }));
+
+  // One-line caveat shown under the encoder dropdown when the selected
+  // encoder's codec is not in the set the player can decode; null otherwise.
+  const encoderCodecCaveat = (codecKey, decodableCodecs) => {
+    if (!codecKey || codecKey === "h264") return null;
+    if ((decodableCodecs || []).includes(codecKey)) return null;
+    const name =
+      codecKey === "hevc" ? "HEVC" : codecKey === "av1" ? "AV1" : String(codecKey).toUpperCase();
+    return `${name} may not play in the in-app review player on this PC. The clip still records and opens in other players.`;
+  };
+
   return {
     MIN_TRIM_GAP_S,
     MARKER_EPSILON_S,
     OVERLAY_HIDE_MS,
     overlayVisible,
+    videoDecodeProbes,
+    encoderCodecCaveat,
     fmtBytes,
     fmtDur,
     fmtTenths,

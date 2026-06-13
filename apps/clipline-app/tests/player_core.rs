@@ -47,6 +47,31 @@ fn fmt_dur_carries_seconds_into_minutes() {
 }
 
 #[test]
+fn encoder_caveat_only_warns_for_undecodable_non_h264_codecs() {
+    let mut ctx = player_core_context();
+    // H.264 always plays — never a caveat, regardless of the decodable set.
+    assert_eq!(eval(&mut ctx, "PlayerCore.encoderCodecCaveat('h264', [])"), "null");
+    // HEVC/AV1 warn when not in the decodable set...
+    assert!(eval(&mut ctx, "PlayerCore.encoderCodecCaveat('hevc', ['h264'])").contains("HEVC"));
+    assert!(eval(&mut ctx, "PlayerCore.encoderCodecCaveat('av1', ['h264'])").contains("AV1"));
+    // ...and stay quiet once the player reports it can decode them.
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.encoderCodecCaveat('av1', ['h264','av1'])"),
+        "null"
+    );
+}
+
+#[test]
+fn video_decode_probes_cover_hevc_and_av1_mp4_profiles() {
+    let mut ctx = player_core_context();
+    let codecs = eval_json(&mut ctx, "PlayerCore.videoDecodeProbes().map(p => p.codec)");
+    assert_eq!(codecs, "[\"hevc\",\"av1\"]");
+    // Each probe is a concrete mp4 codec query for canPlayType.
+    assert!(eval(&mut ctx, "PlayerCore.videoDecodeProbes()[0].mime").contains("hvc1"));
+    assert!(eval(&mut ctx, "PlayerCore.videoDecodeProbes()[1].mime").contains("av01"));
+}
+
+#[test]
 fn fmt_tenths_keeps_a_tenth_and_carries() {
     let mut ctx = player_core_context();
     assert_eq!(eval(&mut ctx, "PlayerCore.fmtTenths(0)"), "0:00.0");
