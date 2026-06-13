@@ -698,6 +698,11 @@ label span { white-space: nowrap; }
   font-size: 12px;
 }
 
+/* Amber caveat for an encoder/codec the review player may not decode. */
+.setting-summary.warn {
+  color: var(--amber, #e0a23a);
+}
+
 .slider-scale {
   position: relative;
   height: 25px;

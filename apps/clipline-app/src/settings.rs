@@ -279,6 +279,10 @@ impl AppSettings {
             fps: self.fps,
             bitrate_bps: (self.bitrate_mbps * 1_000_000.0).round() as u32,
             video_encoder: self.video_encoder,
+            // Codecs the in-app player can decode are reported by the frontend
+            // at spawn (see app.rs); H.264 is the always-safe default so Auto
+            // never records an unplayable clip if that probe hasn't run.
+            decodable_codecs: vec![clipline_capture::probe::Codec::H264],
             audio: self.audio.to_service_options(),
         })
     }

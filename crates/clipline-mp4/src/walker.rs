@@ -138,13 +138,13 @@ mod tests {
     /// Finalized writer output with `n` samples of `dur` ticks at 90 kHz.
     fn finalized_file_with(n: u32, dur: u32) -> Vec<u8> {
         use crate::{FragSample, HybridMp4Writer, VideoTrackConfig};
-        let cfg = VideoTrackConfig {
-            width: 64,
-            height: 64,
-            timescale: 90_000,
-            sps: vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
-            pps: vec![0x68, 0xEE, 0x38, 0x80],
-        };
+        let cfg = VideoTrackConfig::h264(
+            64,
+            64,
+            90_000,
+            vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+            vec![0x68, 0xEE, 0x38, 0x80],
+        );
         let mut w = HybridMp4Writer::new(std::io::Cursor::new(Vec::new()), cfg).unwrap();
         let samples: Vec<FragSample> = (0..n)
             .map(|i| FragSample {

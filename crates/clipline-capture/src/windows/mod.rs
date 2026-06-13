@@ -16,6 +16,10 @@ pub use wasapi::WasapiLoopback;
 pub use wgc::WgcCapture;
 pub use window::find_window_by_title;
 
+/// Re-export so downstream crates (the app) can name the shared D3D11 device
+/// type without taking their own pinned `windows` dependency.
+pub use windows::Win32::Graphics::Direct3D11::ID3D11Device;
+
 /// The capture-clock origin: QPC now, in the 100 ns units shared by WGC
 /// `SystemRelativeTime` and WASAPI QPC positions (ddoc §6).
 pub fn qpc_now_ticks_100ns() -> windows::core::Result<i64> {

@@ -13,7 +13,7 @@ Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
 ## Current state (2026-06-12): a working tray recorder with a first-party review player
 
-Twenty-two milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-seven plan docs, all
+Twenty-three milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-eight plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -137,6 +137,26 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     and creates the folder before saving settings. The review header's folder button opens the
     containing folder directly, and the Storage tab uses a native Choose Folder picker to set the
     media root.
+23. **FFmpeg encoder matrix** (ddoc §4) — recording is no longer MFT-H.264-only. `clipline-mp4`
+    is codec-aware (`VideoTrackConfig::{h264,hevc,av1}` → `avc1`/avcC, `hvc1`/hvcC, `av01`/av1C;
+    HEVC PTL parsed from the SPS, AV1 profile/level/tier from the sequence-header OBU; trim is
+    codec-agnostic). `clipline-capture` gained neutral `hevc`/`av1` bitstream modules and an
+    FFmpeg **subprocess** encoder: `FfmpegVideoEncoder` spawns a bundled `ffmpeg.exe`, pipes NV12
+    in (GPU frames are converted BGRA→NV12 on the GPU via the existing `VideoConverter` then read
+    back through a staging texture), and a reader thread frames the elementary stream into access
+    units (`framing.rs`: Annex B by VCL NAL for H.264/HEVC, IVF temporal units for AV1). The probe
+    (`ffmpeg.rs`) locates `ffmpeg.exe` and reports `{h264,hevc,av1}_{nvenc,amf,qsv}` + `libsvtav1`
+    by parsing `-encoders` and test-encoding each hardware encoder. `probe.rs` now carries an
+    `EncoderApi` axis (Mft vs Ffmpeg) and `rank_encoders(caps, decodable, preference)` — backend
+    merit, then codec preference, MFT preferred over FFmpeg for the same combo, Auto restricted to
+    player-decodable codecs. The recorder walks the ranked candidates until one opens (behind
+    `Box<dyn Encoder>`), reports the active encoder in the sidebar status, and warns on explicit
+    fallback. Settings has one Encoder dropdown listing the machine's real backend×codec combos;
+    the UI probes WebView2 (`canPlayType`) for HEVC/AV1, marks undecodable codecs "(limited
+    playback)", and reports the decodable set so Automatic never records an unplayable clip.
+    **The subprocess approach was chosen over linking libavcodec** (deliberate revision of the
+    plan): zero unsafe FFI, version-robust, cleanest LGPL boundary. Decisions, sharp edges, and
+    the not-yet-done parts are below.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -158,8 +178,8 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 | `clipline-lol` | League Live Client adapter: client, dedupe, normalization, `poll_once` | httpmock integration + `markers_e2e` |
 | `clipline-buffer` | Replay ring of GOP segments (video + N audio tracks), byte eviction, `save_window` smart mode | unit tests |
 | `clipline-storage` | Saved-clip inventory, sidecar-aware size accounting, oldest-first quota GC with protected fresh saves | unit tests |
-| `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), multi-track h264+Opus, box walker, `movie_duration_s`, keyframe-aligned stream-copy trim | ffprobe + unit tests |
-| `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`) + neutral `annexb`/`opus`/`pcm`/`clock`/`avsync`; WASAPI covers selectable output loopback, mic capture, mic level testing, PCM decode, and resampling to 48 kHz | mocks on CI; CI-skipped device tests run real on the dev machine |
+| `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), **codec-aware** (H.264/HEVC/AV1: avc1/hvc1/av01 + avcC/hvcC/av1C), multi-track + Opus, box walker, `movie_duration_s`, codec-agnostic keyframe-aligned stream-copy trim | ffprobe + unit tests |
+| `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`) + the **FFmpeg subprocess encoder** (`ffmpeg`, `ffmpeg_encoder`, `framing`) + neutral `annexb`/`hevc`/`av1`/`opus`/`pcm`/`clock`/`avsync`/`probe`; WASAPI covers selectable output loopback, mic capture, mic level testing, PCM decode, and resampling to 48 kHz | mocks on CI; CI-skipped device + ffmpeg tests run real on the dev machine |
 | `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/settings plus the first-party review player | live e2e (screenshots in the session logs) + `player_core` (Boa) + `ui_contract` |
 
 ## Machine setup (already done on this machine; for a fresh clone elsewhere)
@@ -215,6 +235,28 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 - H.264 hardware encoders cap near 4096 wide; the 5120-wide monitor scales to ≤2560
   (`even_dimensions` + scale in service/smokes).
 
+**FFmpeg encoder tier (milestone 23)**
+- It's a **subprocess**, never linked. `FfmpegVideoEncoder` spawns `ffmpeg.exe`; killing the
+  recorder drops the child (Drop closes stdin + joins the reader). CI has no bundled ffmpeg, so
+  `ffmpeg::probe()` returns empty and the live encoder test (`tests/ffmpeg_encode.rs`) self-skips;
+  everything stays MFT-only there. The neutral bits (probe parsing, `framing.rs`, codec boxes)
+  are fully unit-tested on both CI OSes.
+- Ship an **lgpl-shared** build (BtbN) under `%APPDATA%\Clipline\ffmpeg` — it has SVT-AV1 + GPU
+  encoders but **no libx264/libx265**, so no software H.264/HEVC. The dev box has it installed
+  there; the search order (`CLIPLINE_FFMPEG` override → exe dir → that folder → PATH) means it
+  wins over any GPL PATH ffmpeg. Attribution: `THIRD-PARTY-NOTICES.md`.
+- AMF **rejects tiny resolutions** (`Init() failed with error 5` at 128×72) — the probe
+  test-encodes at 640×360. SVT-AV1 **errors on `-maxrate`/`-bufsize`** (exit -22): CBR capping is
+  hardware-only; SVT-AV1 gets `-b:v` + `-preset 8` (VBR-ish; the ring evicts by bytes anyway).
+- Access-unit framing assumes **one slice per picture** (the hardware-encoder default at our
+  resolutions). H.264/HEVC keyframes are detected from the bitstream (IDR / IRAP); **AV1 keyframes
+  are positional** (`frame_index % gop_frames == 0`) because IVF carries no keyframe flag — so
+  scene-cut keyframes must stay disabled (they are: fixed `-g`, no scenecut flags).
+- `EncoderBackend::MfSoftware` is modeled by the probe but **not instantiable** — `MftH264Encoder`
+  only enumerates hardware MFTs. The candidate walk skips it; wiring the sync software MFT (CPU
+  input, no D3D manager) is a follow-up. With no hardware H.264 and no ffmpeg, recording errors
+  (same as before this milestone).
+
 **Tauri (v2)**
 - The webview **silently no-ops** (no events, no invoke) without
   `capabilities/default.json` granting `core:default`.
@@ -266,8 +308,12 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
    already carry importance.
 2. **Frame-accurate trim polish** (ddoc §11): re-encode only boundary GOPs, keep the current
    stream-copy path as the instant/lossless mode.
-3. **FFmpeg encoder matrix** (ddoc §4: LGPL dynamic link): NVENC/QSV backends, AV1/HEVC,
-   software x264 tier; the probe enum already models it.
+3. **In-app HEVC/AV1 playback** (ddoc §11): the encoder matrix (milestone 23) can record HEVC/AV1,
+   but WebView2 can't decode them without OS extensions — Automatic avoids them and explicit picks
+   warn. A native FFmpeg decode path feeding frames to the review player would close that gap.
+   Smaller follow-ups from milestone 23: wire the Microsoft software H.264 MFT (the only
+   software H.264 under LGPL), bundle the lgpl-shared ffmpeg into the installer, and revisit
+   NVENC/QSV arg tuning (only AMF + SVT-AV1 were verified live on this RDNA2 box).
 4. **Per-process audio loopback** (ddoc §10): system output + mic capture are in; per-game/process audio remains next.
 5. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
    guidance (§8), WebView2-destroyed-when-minimized RAM trick (§4), installer/signing (§4).
