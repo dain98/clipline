@@ -4,13 +4,13 @@ use clipline_mp4::walker::{children, find, walk};
 use clipline_mp4::{FragSample, HybridMp4Writer, VideoTrackConfig};
 
 fn cfg() -> VideoTrackConfig {
-    VideoTrackConfig {
-        width: 64,
-        height: 64,
-        timescale: 90_000,
-        sps: vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
-        pps: vec![0x68, 0xEE, 0x38, 0x80],
-    }
+    VideoTrackConfig::h264(
+        64,
+        64,
+        90_000,
+        vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+        vec![0x68, 0xEE, 0x38, 0x80],
+    )
 }
 
 fn gop(start: u32) -> Vec<FragSample> {

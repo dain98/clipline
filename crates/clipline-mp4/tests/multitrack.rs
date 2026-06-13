@@ -8,13 +8,13 @@ use clipline_mp4::{
 
 fn tracks() -> Vec<TrackConfig> {
     vec![
-        TrackConfig::Video(VideoTrackConfig {
-            width: 128,
-            height: 128,
-            timescale: 90_000,
-            sps: vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
-            pps: vec![0x68, 0xEE, 0x38, 0x80],
-        }),
+        TrackConfig::Video(VideoTrackConfig::h264(
+            128,
+            128,
+            90_000,
+            vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+            vec![0x68, 0xEE, 0x38, 0x80],
+        )),
         TrackConfig::Audio(AudioTrackConfig {
             channels: 2,
             sample_rate: 48_000,

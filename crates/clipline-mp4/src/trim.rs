@@ -310,13 +310,9 @@ fn parse_video_stsd(
     let avcc = find_box_between(input, p + 78, entry_end, b"avcC")?
         .ok_or_else(|| TrimError::Unsupported("missing avcC".into()))?;
     let (sps, pps) = parse_avcc(input, &avcc)?;
-    Ok(TrackConfig::Video(VideoTrackConfig {
-        width,
-        height,
-        timescale,
-        sps,
-        pps,
-    }))
+    Ok(TrackConfig::Video(VideoTrackConfig::h264(
+        width, height, timescale, sps, pps,
+    )))
 }
 
 fn parse_audio_stsd(input: &[u8], entry: &BoxInfo) -> Result<TrackConfig, TrimError> {
@@ -724,13 +720,13 @@ mod tests {
 
     fn tracks() -> Vec<TrackConfig> {
         vec![
-            TrackConfig::Video(VideoTrackConfig {
-                width: 128,
-                height: 72,
-                timescale: 90_000,
-                sps: vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
-                pps: vec![0x68, 0xEE, 0x38, 0x80],
-            }),
+            TrackConfig::Video(VideoTrackConfig::h264(
+                128,
+                72,
+                90_000,
+                vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+                vec![0x68, 0xEE, 0x38, 0x80],
+            )),
             TrackConfig::Audio(AudioTrackConfig {
                 channels: 2,
                 sample_rate: 48_000,

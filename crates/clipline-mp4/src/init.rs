@@ -5,16 +5,46 @@ pub const MOVIE_TIMESCALE: u32 = 1000;
 /// Identity transformation matrix for mvhd/tkhd.
 const MATRIX: [u32; 9] = [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000];
 
-/// H.264 video track parameters. `sps`/`pps` are single raw NAL units
-/// (no start codes / length prefixes).
+/// Codec-specific decoder configuration for the video sample entry
+/// (ddoc §4 encoder matrix: AV1 / HEVC / H.264). Parameter sets are raw
+/// NAL units (no start codes / length prefixes); the AV1 sequence header
+/// is a full OBU (header + size field + payload).
+#[derive(Debug, Clone)]
+pub enum VideoCodecParams {
+    H264 { sps: Vec<u8>, pps: Vec<u8> },
+    Hevc { vps: Vec<u8>, sps: Vec<u8>, pps: Vec<u8> },
+    Av1 { sequence_header_obu: Vec<u8> },
+}
+
+/// Video track parameters.
 #[derive(Debug, Clone)]
 pub struct VideoTrackConfig {
     pub width: u16,
     pub height: u16,
     /// Media timescale (e.g. 90_000); sample durations use these ticks.
     pub timescale: u32,
-    pub sps: Vec<u8>,
-    pub pps: Vec<u8>,
+    pub codec: VideoCodecParams,
+}
+
+impl VideoTrackConfig {
+    pub fn h264(width: u16, height: u16, timescale: u32, sps: Vec<u8>, pps: Vec<u8>) -> Self {
+        Self { width, height, timescale, codec: VideoCodecParams::H264 { sps, pps } }
+    }
+
+    pub fn hevc(
+        width: u16,
+        height: u16,
+        timescale: u32,
+        vps: Vec<u8>,
+        sps: Vec<u8>,
+        pps: Vec<u8>,
+    ) -> Self {
+        Self { width, height, timescale, codec: VideoCodecParams::Hevc { vps, sps, pps } }
+    }
+
+    pub fn av1(width: u16, height: u16, timescale: u32, sequence_header_obu: Vec<u8>) -> Self {
+        Self { width, height, timescale, codec: VideoCodecParams::Av1 { sequence_header_obu } }
+    }
 }
 
 /// Opus audio track parameters (ddoc §4/§10). Track timescale = sample rate.
@@ -272,11 +302,20 @@ fn stsd(cfg: &VideoTrackConfig) -> Vec<u8> {
     let mut p = Payload::new();
     p.u32(1); // entry_count
     let mut payload = p.into_vec();
-    payload.extend(avc1(cfg));
+    let (fourcc, codec_box) = match &cfg.codec {
+        VideoCodecParams::H264 { sps, pps } => (*b"avc1", avcc(sps, pps)),
+        VideoCodecParams::Hevc { vps, sps, pps } => (*b"hvc1", crate::hvcc::hvcc(vps, sps, pps)),
+        VideoCodecParams::Av1 { sequence_header_obu } => {
+            (*b"av01", crate::av1c::av1c(sequence_header_obu))
+        }
+    };
+    payload.extend(visual_sample_entry(fourcc, cfg.width, cfg.height, codec_box));
     full_box(*b"stsd", 0, 0, payload)
 }
 
-fn avc1(cfg: &VideoTrackConfig) -> Vec<u8> {
+/// The VisualSampleEntry shell shared by avc1/hvc1/av01 — only the fourcc
+/// and the trailing codec configuration box differ.
+fn visual_sample_entry(fourcc: [u8; 4], width: u16, height: u16, codec_box: Vec<u8>) -> Vec<u8> {
     let mut p = Payload::new();
     p.bytes(&[0; 6]) // reserved
         .u16(1) // data_reference_index
@@ -285,8 +324,8 @@ fn avc1(cfg: &VideoTrackConfig) -> Vec<u8> {
         .u32(0)
         .u32(0)
         .u32(0) // pre_defined
-        .u16(cfg.width)
-        .u16(cfg.height)
+        .u16(width)
+        .u16(height)
         .u32(0x0048_0000) // horizresolution 72dpi
         .u32(0x0048_0000) // vertresolution
         .u32(0) // reserved
@@ -295,23 +334,23 @@ fn avc1(cfg: &VideoTrackConfig) -> Vec<u8> {
         .u16(0x0018) // depth
         .u16(0xFFFF); // pre_defined = -1
     let mut payload = p.into_vec();
-    payload.extend(avcc(cfg));
-    mp4_box(*b"avc1", payload)
+    payload.extend(codec_box);
+    mp4_box(fourcc, payload)
 }
 
-fn avcc(cfg: &VideoTrackConfig) -> Vec<u8> {
+fn avcc(sps: &[u8], pps: &[u8]) -> Vec<u8> {
     let mut p = Payload::new();
     p.u8(1) // configurationVersion
-        .u8(cfg.sps.get(1).copied().unwrap_or(0)) // AVCProfileIndication
-        .u8(cfg.sps.get(2).copied().unwrap_or(0)) // profile_compatibility
-        .u8(cfg.sps.get(3).copied().unwrap_or(0)) // AVCLevelIndication
+        .u8(sps.get(1).copied().unwrap_or(0)) // AVCProfileIndication
+        .u8(sps.get(2).copied().unwrap_or(0)) // profile_compatibility
+        .u8(sps.get(3).copied().unwrap_or(0)) // AVCLevelIndication
         .u8(0xFF) // lengthSizeMinusOne = 3
         .u8(0xE1) // 1 SPS
-        .u16(cfg.sps.len() as u16)
-        .bytes(&cfg.sps)
+        .u16(sps.len() as u16)
+        .bytes(sps)
         .u8(1) // 1 PPS
-        .u16(cfg.pps.len() as u16)
-        .bytes(&cfg.pps);
+        .u16(pps.len() as u16)
+        .bytes(pps);
     mp4_box(*b"avcC", p.into_vec())
 }
 
@@ -337,13 +376,13 @@ mod tests {
     use crate::walker::{children, find, walk};
 
     fn cfg() -> VideoTrackConfig {
-        VideoTrackConfig {
-            width: 1920,
-            height: 1080,
-            timescale: 90_000,
-            sps: vec![0x67, 0x64, 0x00, 0x28, 0xAA],
-            pps: vec![0x68, 0xEE, 0x3C, 0x80],
-        }
+        VideoTrackConfig::h264(
+            1920,
+            1080,
+            90_000,
+            vec![0x67, 0x64, 0x00, 0x28, 0xAA],
+            vec![0x68, 0xEE, 0x3C, 0x80],
+        )
     }
 
     #[test]
@@ -436,5 +475,34 @@ mod tests {
         assert!(buf
             .windows(8)
             .any(|w| w == [0x07, 0x80, 0, 0, 0x04, 0x38, 0, 0]));
+    }
+
+    #[test]
+    fn hevc_config_yields_hvc1_sample_entry_with_hvcc() {
+        let cfg = VideoTrackConfig::hevc(
+            128,
+            72,
+            90_000,
+            vec![0x40, 0x01, 0x0C],
+            vec![0x42, 0x01, 0x01],
+            vec![0x44, 0x01, 0xC1],
+        );
+        let buf = moov_init(&cfg);
+        assert!(buf.windows(4).any(|w| w == b"hvc1"));
+        assert!(buf.windows(4).any(|w| w == b"hvcC"));
+        assert!(!buf.windows(4).any(|w| w == b"avc1"));
+        assert!(!buf.windows(4).any(|w| w == b"avcC"));
+    }
+
+    #[test]
+    fn av1_config_yields_av01_sample_entry_with_av1c() {
+        let seq = vec![0x0A, 0x02, 0x4B, 0x00];
+        let cfg = VideoTrackConfig::av1(128, 72, 90_000, seq.clone());
+        let buf = moov_init(&cfg);
+        assert!(buf.windows(4).any(|w| w == b"av01"));
+        assert!(buf.windows(4).any(|w| w == b"av1C"));
+        assert!(!buf.windows(4).any(|w| w == b"avc1"));
+        // The sequence header OBU is embedded verbatim as configOBUs.
+        assert!(buf.windows(seq.len()).any(|w| w == seq.as_slice()));
     }
 }
