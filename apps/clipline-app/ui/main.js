@@ -135,6 +135,8 @@ function readSettings() {
       mic_volume: Number($("set-mic-volume").value),
       mic_channels: $("set-mic-mono").checked ? "mono" : "stereo",
     },
+    // Ring holds the save window plus 15 s headroom (mirrors BUFFER_HEADROOM_S
+    // in settings.rs) - not a fixed 2 minutes.
     buffer_seconds: replay + 15,
     replay_window_s: replay,
     video_encoder: $("set-encoder").value,

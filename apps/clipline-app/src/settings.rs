@@ -11,6 +11,9 @@ use crate::service::{
 };
 
 const MAX_REPLAY_WINDOW_S: f64 = 120.0;
+/// The replay ring holds the save window plus this margin (for keyframe
+/// alignment and eviction timing). Sizing the ring to the window - rather than
+/// a fixed 2 minutes - keeps memory proportional to what is actually saved.
 pub const BUFFER_HEADROOM_S: f64 = 15.0;
 const DEFAULT_REPLAY_CACHE_QUOTA_GB: f64 = 2.0;
 
@@ -200,8 +203,8 @@ impl Default for AppSettings {
             window_title: String::new(),
             capture_region: CaptureRegionSettings::default(),
             audio: AudioSettings::default(),
-            replay_window_s: 60.0,
             buffer_seconds: 60.0 + BUFFER_HEADROOM_S,
+            replay_window_s: 60.0,
             bitrate_mbps: 12.0,
             fps: 60,
             video_encoder: VideoEncoder::Auto,
@@ -301,6 +304,9 @@ impl AppSettings {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| default_media_dir());
         settings.replay_window_s = settings.replay_window_s.min(MAX_REPLAY_WINDOW_S);
+        // Size the ring to the replay window (+ headroom), not whatever was
+        // persisted. This migrates old fixed 120 s buffers down and keeps the
+        // recording footprint proportional to what a save actually needs.
         settings.buffer_seconds = replay_buffer_seconds(&settings);
         settings.validate()?;
         Ok(settings)
@@ -710,7 +716,9 @@ mod tests {
         let settings = AppSettings::load_from(&path).unwrap();
 
         assert_eq!(settings.replay_window_s, 120.0);
-        assert_eq!(settings.buffer_seconds, 135.0);
+        // Buffer is recomputed from the (clamped) window + headroom, not kept
+        // at the legacy 300 s.
+        assert_eq!(settings.buffer_seconds, 120.0 + 15.0);
     }
 
     #[test]
@@ -831,8 +839,10 @@ mod tests {
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
         assert_eq!(opts.audio, AudioOptions::default());
         assert_eq!(opts.replay_storage, ReplayStorageOptions::Memory);
-        assert!(opts.buffer_bytes < 160 * 1024 * 1024);
-        assert!(opts.buffer_bytes > 100 * 1024 * 1024);
+        // Ring tracks the 60 s window + 15 s headroom at 12 Mbps (~146 MB),
+        // not the old fixed 120 s (~234 MB).
+        assert!(opts.buffer_bytes >= 120 * 1024 * 1024);
+        assert!(opts.buffer_bytes < 180 * 1024 * 1024);
     }
 
     #[test]
