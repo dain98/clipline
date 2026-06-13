@@ -13,20 +13,13 @@ use clipline_events::{ClipMarker, ClipMarkers};
 use clipline_mp4::trim_keyframe_aligned_file;
 use clipline_mp4::walker::movie_duration_s;
 use clipline_storage::storage_status as read_storage_status;
-use windows_sys::Win32::Foundation::HANDLE;
-use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
-};
+use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+use windows_sys::Win32::System::DataExchange::{CloseClipboard, OpenClipboard, SetClipboardData};
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows_sys::Win32::System::Ole::CF_HDROP;
 use windows_sys::Win32::UI::Shell::DROPFILES;
 
 use crate::service::{clips_dir, default_clips_dir};
-
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn GlobalFree(hmem: HANDLE) -> HANDLE;
-}
 
 pub struct StorageSettings {
     quota_bytes: Mutex<Option<u64>>,
@@ -273,7 +266,7 @@ fn open_folder_path(dir: &Path) -> Result<(), String> {
 }
 
 fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
-    let payload = dropfiles_payload(path)?;
+    let payload = dropfiles_payload(path);
     let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, payload.len()) };
     if handle.is_null() {
         return Err(last_os_error("allocate clipboard memory"));
@@ -281,10 +274,11 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
 
     let mem = unsafe { GlobalLock(handle) };
     if mem.is_null() {
+        let err = last_os_error("lock clipboard memory");
         unsafe {
             GlobalFree(handle);
         }
-        return Err(last_os_error("lock clipboard memory"));
+        return Err(err);
     }
     unsafe {
         ptr::copy_nonoverlapping(payload.as_ptr(), mem.cast::<u8>(), payload.len());
@@ -296,9 +290,8 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
         return Err(last_os_error("open clipboard"));
     }
     let _close = ClipboardClose;
-    if unsafe { EmptyClipboard() } == 0 {
-        return Err(last_os_error("empty clipboard"));
-    }
+    // CF_HDROP can be replaced format-by-format. Avoid EmptyClipboard so a
+    // rare SetClipboardData failure does not discard the user's clipboard.
     if unsafe { SetClipboardData(CF_HDROP as u32, transfer.handle()) }.is_null() {
         return Err(last_os_error("set clipboard data"));
     }
@@ -306,11 +299,9 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn dropfiles_payload(path: &Path) -> Result<Vec<u8>, String> {
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0, 0]).collect();
-    if wide.len() < 2 {
-        return Err("clip path is empty".into());
-    }
+fn dropfiles_payload(path: &Path) -> Vec<u8> {
+    let mut wide = shell_clipboard_path_wide(path);
+    wide.extend([0, 0]);
 
     let header_len = size_of::<DROPFILES>();
     let byte_len = header_len + wide.len() * size_of::<u16>();
@@ -329,7 +320,30 @@ fn dropfiles_payload(path: &Path) -> Result<Vec<u8>, String> {
             wide.len() * size_of::<u16>(),
         );
     }
-    Ok(payload)
+    payload
+}
+
+fn shell_clipboard_path_wide(path: &Path) -> Vec<u16> {
+    const BACKSLASH: u16 = b'\\' as u16;
+    const QUESTION: u16 = b'?' as u16;
+    const U: u16 = b'U' as u16;
+    const N: u16 = b'N' as u16;
+    const C: u16 = b'C' as u16;
+    const VERBATIM: [u16; 4] = [BACKSLASH, BACKSLASH, QUESTION, BACKSLASH];
+    const VERBATIM_UNC: [u16; 8] = [
+        BACKSLASH, BACKSLASH, QUESTION, BACKSLASH, U, N, C, BACKSLASH,
+    ];
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.starts_with(&VERBATIM_UNC) {
+        let mut plain = vec![BACKSLASH, BACKSLASH];
+        plain.extend_from_slice(&wide[VERBATIM_UNC.len()..]);
+        plain
+    } else if wide.starts_with(&VERBATIM) {
+        wide[VERBATIM.len()..].to_vec()
+    } else {
+        wide
+    }
 }
 
 fn last_os_error(action: &str) -> String {
@@ -337,11 +351,11 @@ fn last_os_error(action: &str) -> String {
 }
 
 struct ClipboardTransfer {
-    handle: HANDLE,
+    handle: HGLOBAL,
 }
 
 impl ClipboardTransfer {
-    fn new(handle: HANDLE) -> Self {
+    fn new(handle: HGLOBAL) -> Self {
         Self { handle }
     }
 
@@ -568,23 +582,29 @@ mod tests {
     }
 
     #[test]
-    fn dropfiles_payload_is_unicode_double_nul_terminated() {
-        let path = Path::new(r"C:\Users\dain\Videos\Clipline\clip.mp4");
-        let payload = dropfiles_payload(path).unwrap();
-        let header_len = size_of::<DROPFILES>();
+    fn dropfiles_payload_strips_verbatim_prefix_and_marks_unicode() {
+        let path = Path::new(r"\\?\C:\Users\dain\Videos\Clipline\clïp 雪.mp4");
+        let payload = dropfiles_payload(path);
+        let p_files = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
 
-        assert_eq!(
-            u32::from_le_bytes(payload[0..4].try_into().unwrap()),
-            header_len as u32
-        );
+        assert_eq!(p_files, size_of::<DROPFILES>());
+        assert_eq!(i32::from_le_bytes(payload[12..16].try_into().unwrap()), 0);
         assert_eq!(i32::from_le_bytes(payload[16..20].try_into().unwrap()), 1);
 
-        let path_units: Vec<u16> = payload[header_len..]
+        let path_units: Vec<u16> = payload[p_files..]
             .chunks_exact(2)
             .map(|pair| u16::from_le_bytes(pair.try_into().unwrap()))
             .collect();
         assert_eq!(&path_units[path_units.len() - 2..], &[0, 0]);
         let decoded = String::from_utf16(&path_units[..path_units.len() - 2]).unwrap();
-        assert_eq!(decoded, path.to_string_lossy());
+        assert_eq!(decoded, r"C:\Users\dain\Videos\Clipline\clïp 雪.mp4");
+    }
+
+    #[test]
+    fn shell_clipboard_path_wide_converts_verbatim_unc_paths() {
+        let path = Path::new(r"\\?\UNC\nas\clips\clïp 雪.mp4");
+        let decoded = String::from_utf16(&shell_clipboard_path_wide(path)).unwrap();
+
+        assert_eq!(decoded, r"\\nas\clips\clïp 雪.mp4");
     }
 }

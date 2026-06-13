@@ -852,6 +852,7 @@ function closeReview() {
   video.load();
   currentClip = null;
   updateViews();
+  $("deck-status").textContent = "";
   $("stage-note").textContent = "";
   $("timeline").querySelectorAll(".tick").forEach((t) => t.remove());
   renderClips();
@@ -1143,10 +1144,12 @@ async function copyClipToClipboard() {
   if (!currentClip) return;
   $("copy-clip").disabled = true;
   $("error").textContent = "";
+  $("deck-status").textContent = "";
   try {
     await invoke("copy_clip_to_clipboard", { path: currentClip.path });
     $("deck-status").textContent = "clip copied to clipboard";
   } catch (e) {
+    $("deck-status").textContent = "";
     $("error").textContent = e;
   } finally {
     $("copy-clip").disabled = false;
