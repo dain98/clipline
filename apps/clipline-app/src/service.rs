@@ -936,8 +936,7 @@ mod tests {
         let unusable = blocker.join("clipline");
         let fallback = dir.path().join("fallback");
 
-        let (resolved, fell_back) =
-            clips_dir_resolved(&unusable, || fallback.clone()).unwrap();
+        let (resolved, fell_back) = clips_dir_resolved(&unusable, || fallback.clone()).unwrap();
 
         assert!(fell_back);
         assert_eq!(resolved, fallback);

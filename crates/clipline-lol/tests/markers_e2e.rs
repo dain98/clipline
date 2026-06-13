@@ -9,7 +9,11 @@ use clipline_lol::{poll_once, EventTracker, LiveClient};
 use httpmock::prelude::*;
 use serde_json::json;
 
-fn mount(server: &MockServer, game_time: f64, events: serde_json::Value) -> Vec<httpmock::Mock<'_>> {
+fn mount(
+    server: &MockServer,
+    game_time: f64,
+    events: serde_json::Value,
+) -> Vec<httpmock::Mock<'_>> {
     vec![
         server.mock(|when, then| {
             when.method(GET).path("/liveclientdata/gamestats");
@@ -44,7 +48,10 @@ async fn polled_events_land_in_the_saved_clip_sidecar() {
     let mut tracker = EventTracker::default();
     let mut log = MarkerLog::new();
 
-    for ev in poll_once(&client, &mut tracker, "Me", t0, 0.0).await.unwrap() {
+    for ev in poll_once(&client, &mut tracker, "Me", t0, 0.0)
+        .await
+        .unwrap()
+    {
         log.push(ev);
     }
 
@@ -62,19 +69,30 @@ async fn polled_events_land_in_the_saved_clip_sidecar() {
               "KillerName": "Me", "DragonType": "Infernal", "Assisters": [] }
         ]),
     );
-    for ev in poll_once(&client, &mut tracker, "Me", t0, 0.0).await.unwrap() {
+    for ev in poll_once(&client, &mut tracker, "Me", t0, 0.0)
+        .await
+        .unwrap()
+    {
         log.push(ev);
     }
     assert_eq!(log.len(), 2, "both events anchored and logged");
 
     // Save Replay over recording window [90 s, 150 s).
     let clip = log.clip_markers(90.0, 150.0);
-    assert_eq!(clip.markers.len(), 1, "early kill excluded, dragon included");
+    assert_eq!(
+        clip.markers.len(),
+        1,
+        "early kill excluded, dragon included"
+    );
     let dragon = &clip.markers[0];
     assert_eq!(dragon.event.kind, EventKind::DragonKill);
     assert_eq!(dragon.event.subtype.as_deref(), Some("Infernal"));
     // offset ≈ 95 s (mock polls run in microseconds) → clip time ≈ 5 s.
-    assert!((4.5..=5.5).contains(&dragon.t_s), "clip time {} not near 5.0", dragon.t_s);
+    assert!(
+        (4.5..=5.5).contains(&dragon.t_s),
+        "clip time {} not near 5.0",
+        dragon.t_s
+    );
 
     // The sidecar document round-trips with the data intact.
     let json = serde_json::to_string_pretty(&clip).unwrap();

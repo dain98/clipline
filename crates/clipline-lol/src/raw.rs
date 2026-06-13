@@ -78,7 +78,10 @@ mod tests {
 
         let multi = &data.events[2];
         assert_eq!(multi.kill_streak, Some(2));
-        assert!(multi.assisters.is_empty(), "missing Assisters defaults to empty");
+        assert!(
+            multi.assisters.is_empty(),
+            "missing Assisters defaults to empty"
+        );
 
         let dragon = &data.events[3];
         assert_eq!(dragon.dragon_type.as_deref(), Some("Earth"));

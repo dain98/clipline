@@ -33,7 +33,10 @@ impl LiveClient {
             .danger_accept_invalid_certs(true)
             .timeout(Duration::from_secs(2))
             .build()?;
-        Ok(Self { base: base.into(), http })
+        Ok(Self {
+            base: base.into(),
+            http,
+        })
     }
 
     /// Client against the real local game endpoint.

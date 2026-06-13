@@ -15,8 +15,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use clipline_capture::CaptureEngine;
 
     let args: Vec<String> = std::env::args().collect();
-    let arg = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
-    let frames: u32 = arg("--frames").map(|v| v.parse()).transpose()?.unwrap_or(120);
+    let arg = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let frames: u32 = arg("--frames")
+        .map(|v| v.parse())
+        .transpose()?
+        .unwrap_or(120);
 
     let mut cap = match arg("--window") {
         Some(needle) => {
@@ -48,12 +56,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let span = pts.last().unwrap_or(&0.0) - pts.first().unwrap_or(&0.0);
-    let fps = if span > 0.0 { (pts.len() as f64 - 1.0) / span } else { 0.0 };
+    let fps = if span > 0.0 {
+        (pts.len() as f64 - 1.0) / span
+    } else {
+        0.0
+    };
     let deltas: Vec<f64> = pts.windows(2).map(|w| w[1] - w[0]).collect();
-    let (min_d, max_d) =
-        deltas.iter().fold((f64::MAX, 0.0f64), |(lo, hi), d| (lo.min(*d), hi.max(*d)));
+    let (min_d, max_d) = deltas
+        .iter()
+        .fold((f64::MAX, 0.0f64), |(lo, hi), d| (lo.min(*d), hi.max(*d)));
 
-    println!("captured {} frames @ {}x{}", pts.len(), resolution.0, resolution.1);
+    println!(
+        "captured {} frames @ {}x{}",
+        pts.len(),
+        resolution.0,
+        resolution.1
+    );
     println!(
         "pts span {span:.3}s -> {fps:.1} fps (frame gap {:.1}-{:.1} ms)",
         min_d * 1e3,

@@ -19,7 +19,10 @@ pub async fn poll_once(
     // Anchor first, paired with the wall clock at the moment of sampling.
     // Re-sampling every poll lets game-clock pauses self-correct (ddoc §5).
     let game_time_s = client.game_time_s().await?;
-    let anchor = ClockAnchor { game_time_s, sampled_at: Instant::now() };
+    let anchor = ClockAnchor {
+        game_time_s,
+        sampled_at: Instant::now(),
+    };
 
     let data = client.event_data().await?;
     let events = tracker

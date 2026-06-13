@@ -55,6 +55,7 @@ fn review_player_owns_all_controls() {
         "id=\"open-folder\"",
         "id=\"stage-overlay\"",
         "id=\"sidebar-toggle\"",
+        "id=\"memory-usage\"",
         "id=\"capture-status\"",
         "id=\"capture-status-label\"",
         "id=\"rail-dot\"",
@@ -188,7 +189,9 @@ fn review_player_owns_all_controls() {
     );
     // Reversed (2026-06-12, PR #5): the footer now carries an explicit Close
     // button after Save, replacing the earlier "close only from the rail" rule.
-    let settings_save = html.find("id=\"settings-save\"").expect("settings save button");
+    let settings_save = html
+        .find("id=\"settings-save\"")
+        .expect("settings save button");
     let settings_close = html
         .find("id=\"settings-close\"")
         .expect("settings close button");
@@ -262,8 +265,7 @@ fn no_native_browser_dialogs() {
 #[test]
 fn controls_have_custom_range_and_scrollbar_skin() {
     let css = styles_css();
-    let js =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/main.js")).unwrap();
+    let js = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/main.js")).unwrap();
 
     assert!(
         css.contains("::-webkit-slider-thumb") && css.contains("::-moz-range-thumb"),
@@ -281,6 +283,26 @@ fn controls_have_custom_range_and_scrollbar_skin() {
         css.contains("background-position: right 12px center")
             && css.contains("-webkit-appearance: none"),
         "select arrows should use the app inset instead of the native edge-hugging arrow"
+    );
+}
+
+#[test]
+fn shell_shows_live_memory_usage() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    assert!(
+        html.contains("id=\"memory-usage\"") && html.contains("Using -- RAM"),
+        "sidebar chrome must include the RAM indicator placeholder"
+    );
+    assert!(
+        js.contains("memory_status") && js.contains("setInterval(refreshMemoryUsage, 2000)"),
+        "memory indicator must poll the backend command on a short interval"
+    );
+    assert!(
+        css.contains(".memory-usage") && css.contains("font-variant-numeric: tabular-nums"),
+        "memory usage should have stable numeric styling in the top-left chrome"
     );
 }
 

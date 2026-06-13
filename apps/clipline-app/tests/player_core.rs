@@ -520,6 +520,23 @@ fn clip_titles_use_twelve_hour_time() {
 }
 
 #[test]
+fn clip_kind_distinguishes_trims_from_replays() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.clipKind('clip_20260612_212006.mp4')"),
+        "replay"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.clipKind('clip_20260612_212006_trim_001000_002000.mp4')"
+        ),
+        "trim"
+    );
+    assert_eq!(eval(&mut ctx, "PlayerCore.clipKind('')"), "replay");
+}
+
+#[test]
 fn marker_digest_collapses_categories() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(

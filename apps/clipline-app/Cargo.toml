@@ -20,6 +20,12 @@ tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-global-shortcut = "2"
 chrono = "0.4.45"
 rfd = "0.15"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -3,7 +3,13 @@
 // file to event plumbing and rendering.
 const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+const appWindow = window.__TAURI__.window.getCurrentWindow();
 const $ = (id) => document.getElementById(id);
+
+// Custom window chrome — the native title bar is disabled (decorations: false).
+$("win-min").addEventListener("click", () => appWindow.minimize());
+$("win-max").addEventListener("click", () => appWindow.toggleMaximize());
+$("win-close").addEventListener("click", () => appWindow.close());
 const {
   fmtBytes,
   fmtDur,
@@ -24,6 +30,7 @@ const {
   rulerMarks,
   sessionGroups,
   formatClipTitle,
+  clipKind,
   keyIntent,
   hotkeyFromKeyEvent,
   displayMapLayout,
@@ -93,7 +100,7 @@ function fillSettings(s) {
   $("set-mic-enabled").checked = !!audio.mic_enabled;
   $("set-mic-volume").value = String(Number.isFinite(audio.mic_volume) ? audio.mic_volume : 1);
   $("set-mic-mono").checked = (audio.mic_channels || "mono") === "mono";
-  $("set-buffer").value = Math.max(120, Number(s.buffer_seconds) || 120);
+  $("set-buffer").value = Number(s.buffer_seconds) || 75;
   $("set-replay").value = Math.min(120, Number(s.replay_window_s) || 60);
   $("set-encoder").value = s.video_encoder || "auto";
   $("set-bitrate").value = qualityIndexForBitrate(s.bitrate_mbps);
@@ -126,7 +133,9 @@ function readSettings() {
       mic_volume: Number($("set-mic-volume").value),
       mic_channels: $("set-mic-mono").checked ? "mono" : "stereo",
     },
-    buffer_seconds: Math.max(120, replay),
+    // Ring holds the save window plus 15 s headroom (mirrors BUFFER_HEADROOM_S
+    // in settings.rs) — not a fixed 2 minutes.
+    buffer_seconds: replay + 15,
     replay_window_s: replay,
     video_encoder: $("set-encoder").value,
     bitrate_mbps: recordingQualityPreset(Number($("set-bitrate").value)).bitrate,
@@ -683,6 +692,15 @@ async function refreshStorage() {
   $("storage-clips").textContent = s.clip_count;
 }
 
+async function refreshMemoryUsage() {
+  try {
+    const s = await invoke("memory_status");
+    $("memory-usage").textContent = `Using ${fmtBytes(s.working_set_bytes)} RAM`;
+  } catch (_) {
+    $("memory-usage").textContent = "Using -- RAM";
+  }
+}
+
 async function refreshClips() {
   clipsCache = await invoke("list_clips");
   renderClips();
@@ -693,11 +711,27 @@ async function refreshClips() {
   }
 }
 
+// Leading icon per clip kind. Static markup (no clip data) — innerHTML is safe.
+const CLIP_KIND_ICONS = {
+  replay:
+    '<svg viewBox="0 0 24 24"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>',
+  trim:
+    '<svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm0 12c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3z"/></svg>',
+};
+const CLIP_KIND_LABELS = { replay: "Buffered replay", trim: "Trimmed export" };
+
 // Clip names come from disk; build rows with textContent, never innerHTML.
 function clipRow(c) {
   const el = document.createElement("div");
   el.className = "clip" + (currentClip && currentClip.path === c.path ? " active" : "");
   el.title = c.name;
+
+  const kind = clipKind(c.name);
+  const icon = document.createElement("div");
+  icon.className = "clip-kind " + kind;
+  icon.title = CLIP_KIND_LABELS[kind];
+  // Static per-kind markup, no clip data — innerHTML is safe here.
+  icon.innerHTML = CLIP_KIND_ICONS[kind];
 
   const meta = document.createElement("div");
   const name = document.createElement("div");
@@ -731,7 +765,7 @@ function clipRow(c) {
     deleteClip(c.path);
   });
 
-  el.append(meta, del);
+  el.append(icon, meta, del);
   return el;
 }
 
@@ -1325,3 +1359,5 @@ loadDisplays();
 loadAudioDevices();
 loadVideoEncoders();
 refresh();
+refreshMemoryUsage();
+setInterval(refreshMemoryUsage, 2000);

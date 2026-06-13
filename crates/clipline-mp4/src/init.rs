@@ -58,7 +58,11 @@ pub struct AudioTrackConfig {
 
 pub fn ftyp() -> Vec<u8> {
     let mut p = Payload::new();
-    p.bytes(b"isom").u32(512).bytes(b"isom").bytes(b"iso6").bytes(b"mp41");
+    p.bytes(b"isom")
+        .u32(512)
+        .bytes(b"isom")
+        .bytes(b"iso6")
+        .bytes(b"mp41");
     mp4_box(*b"ftyp", p.into_vec())
 }
 
@@ -205,7 +209,8 @@ pub fn audio_trak_with_tables(
 
 fn tkhd(track_id: u32, duration_movie_ts: u64, volume: u16, width: u16, height: u16) -> Vec<u8> {
     let mut p = Payload::new();
-    p.u32(0).u32(0) // creation/modification
+    p.u32(0)
+        .u32(0) // creation/modification
         .u32(track_id)
         .u32(0) // reserved
         .u32(duration_movie_ts as u32)
@@ -232,13 +237,21 @@ fn mdia_generic(
     stbl_tail: Vec<u8>,
 ) -> Vec<u8> {
     let mut p = Payload::new();
-    p.u32(0).u32(0).u32(timescale).u32(duration_media_ts as u32)
+    p.u32(0)
+        .u32(0)
+        .u32(timescale)
+        .u32(duration_media_ts as u32)
         .u16(0x55C4) // language: und
         .u16(0);
     let mdhd = full_box(*b"mdhd", 0, 0, p.into_vec());
 
     let mut h = Payload::new();
-    h.u32(0).bytes(&handler).u32(0).u32(0).u32(0).bytes(handler_name);
+    h.u32(0)
+        .bytes(&handler)
+        .u32(0)
+        .u32(0)
+        .u32(0)
+        .bytes(handler_name);
     let hdlr = full_box(*b"hdlr", 0, 0, h.into_vec());
 
     let url = full_box(*b"url ", 0, 1, vec![]); // self-contained
@@ -369,7 +382,6 @@ pub(crate) fn empty_stbl_tail() -> Vec<u8> {
     out
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,7 +421,11 @@ mod tests {
     }
 
     fn audio_cfg() -> AudioTrackConfig {
-        AudioTrackConfig { channels: 2, sample_rate: 48_000, pre_skip: 312 }
+        AudioTrackConfig {
+            channels: 2,
+            sample_rate: 48_000,
+            pre_skip: 312,
+        }
     }
 
     #[test]
@@ -446,10 +462,7 @@ mod tests {
 
     #[test]
     fn multi_track_moov_has_one_trak_and_trex_per_track() {
-        let tracks = vec![
-            TrackConfig::Video(cfg()),
-            TrackConfig::Audio(audio_cfg()),
-        ];
+        let tracks = vec![TrackConfig::Video(cfg()), TrackConfig::Audio(audio_cfg())];
         let buf = moov_init_multi(&tracks);
         let top = walk(&buf);
         let kids = children(&buf, &top[0]);

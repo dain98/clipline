@@ -51,7 +51,14 @@ pub fn fragment_multi(sequence: u32, runs: &[TrackRun<'_>]) -> Vec<u8> {
 
 /// Single-track fragment (track 1) — the original API.
 pub fn fragment(sequence: u32, base_decode_time: u64, samples: &[FragSample]) -> Vec<u8> {
-    fragment_multi(sequence, &[TrackRun { track_id: 1, base_decode_time, samples }])
+    fragment_multi(
+        sequence,
+        &[TrackRun {
+            track_id: 1,
+            base_decode_time,
+            samples,
+        }],
+    )
 }
 
 fn build_moof_multi(sequence: u32, runs: &[TrackRun<'_>], data_offsets: &[i32]) -> Vec<u8> {
@@ -78,11 +85,10 @@ fn traf(run: &TrackRun<'_>, data_offset: i32) -> Vec<u8> {
     let mut trun_p = Payload::new();
     trun_p.u32(run.samples.len() as u32).i32(data_offset);
     for s in run.samples {
-        trun_p.u32(s.duration).u32(s.data.len() as u32).u32(if s.is_sync {
-            FLAG_SYNC
-        } else {
-            FLAG_NON_SYNC
-        });
+        trun_p
+            .u32(s.duration)
+            .u32(s.data.len() as u32)
+            .u32(if s.is_sync { FLAG_SYNC } else { FLAG_NON_SYNC });
     }
     let trun = full_box(*b"trun", 0, 0x000701, trun_p.into_vec());
 
@@ -99,8 +105,16 @@ mod tests {
 
     fn samples() -> Vec<FragSample> {
         vec![
-            FragSample { data: b"KEYFRAME".to_vec(), duration: 1500, is_sync: true },
-            FragSample { data: b"delta1".to_vec(), duration: 1500, is_sync: false },
+            FragSample {
+                data: b"KEYFRAME".to_vec(),
+                duration: 1500,
+                is_sync: true,
+            },
+            FragSample {
+                data: b"delta1".to_vec(),
+                duration: 1500,
+                is_sync: false,
+            },
         ]
     }
 
@@ -126,20 +140,33 @@ mod tests {
         let trun = find(&traf_kids, b"trun").unwrap();
         // trun payload: version/flags(4) sample_count(4) data_offset(4)…
         let p = trun.payload_offset as usize;
-        let data_offset =
-            i32::from_be_bytes(buf[p + 8..p + 12].try_into().unwrap()) as u64;
+        let data_offset = i32::from_be_bytes(buf[p + 8..p + 12].try_into().unwrap()) as u64;
         // default-base-is-moof: offset is relative to moof start (= 0 here).
-        assert_eq!(&buf[data_offset as usize..data_offset as usize + 8], b"KEYFRAME");
+        assert_eq!(
+            &buf[data_offset as usize..data_offset as usize + 8],
+            b"KEYFRAME"
+        );
     }
 
     #[test]
     fn multi_track_fragment_has_one_traf_per_track() {
         let video = samples();
-        let audio =
-            vec![FragSample { data: b"OPUSPKT1".to_vec(), duration: 960, is_sync: true }];
+        let audio = vec![FragSample {
+            data: b"OPUSPKT1".to_vec(),
+            duration: 960,
+            is_sync: true,
+        }];
         let runs = [
-            TrackRun { track_id: 1, base_decode_time: 0, samples: &video },
-            TrackRun { track_id: 2, base_decode_time: 0, samples: &audio },
+            TrackRun {
+                track_id: 1,
+                base_decode_time: 0,
+                samples: &video,
+            },
+            TrackRun {
+                track_id: 2,
+                base_decode_time: 0,
+                samples: &audio,
+            },
         ];
         let buf = fragment_multi(9, &runs);
         let boxes = walk(&buf);
@@ -149,8 +176,9 @@ mod tests {
 
         // Each traf's trun data_offset points at that track's first byte
         // within the shared mdat.
-        for (traf, expected) in
-            trafs.iter().zip([b"KEYFRAME".as_slice(), b"OPUSPKT1".as_slice()])
+        for (traf, expected) in trafs
+            .iter()
+            .zip([b"KEYFRAME".as_slice(), b"OPUSPKT1".as_slice()])
         {
             let tk = children(&buf, traf);
             let trun = find(&tk, b"trun").unwrap();

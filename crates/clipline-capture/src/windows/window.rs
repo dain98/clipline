@@ -11,7 +11,10 @@ struct Search {
 }
 
 pub fn find_window_by_title(needle: &str) -> Option<HWND> {
-    let mut search = Search { needle_lower: needle.to_lowercase(), found: None };
+    let mut search = Search {
+        needle_lower: needle.to_lowercase(),
+        found: None,
+    };
     // SAFETY: the callback only runs during this call; lparam points at
     // `search`, which outlives it. EnumWindows returns Err when the
     // callback stops enumeration early — our found case, not an error.

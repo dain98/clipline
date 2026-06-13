@@ -27,6 +27,6 @@ pub use probe::{
     EncoderPreference,
 };
 pub use traits::{
-    AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket,
-    Encoder, Frame, FrameData,
+    AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket, Encoder,
+    Frame, FrameData,
 };

@@ -38,6 +38,11 @@ struct AudioDeviceLists {
     inputs: Vec<AudioDeviceInfo>,
 }
 
+#[tauri::command]
+fn memory_status() -> Result<crate::memory::MemoryStatus, String> {
+    crate::memory::current_process_tree_memory()
+}
+
 #[derive(serde::Serialize, Clone)]
 // Tauri events are JSON, so the live monitor keeps 30 ms chunks as compact
 // i16 samples instead of shipping f32 PCM through IPC.
@@ -502,6 +507,7 @@ pub fn run() {
             list_audio_devices,
             probe_encoders,
             report_decode_support,
+            memory_status,
             start_microphone_test,
             stop_microphone_test,
             save_settings,

@@ -1,8 +1,8 @@
 use clipline_mp4::{AudioTrackConfig, VideoTrackConfig};
 
 use crate::traits::{
-    AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket,
-    Encoder, Frame, FrameData,
+    AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket, Encoder,
+    Frame, FrameData,
 };
 
 /// Deterministic frame source: `total` frames at `fps`.
@@ -14,7 +14,11 @@ pub struct MockCapture {
 
 impl MockCapture {
     pub fn new(total: u64, fps: u32) -> Self {
-        Self { total, fps, produced: 0 }
+        Self {
+            total,
+            fps,
+            produced: 0,
+        }
     }
 }
 
@@ -25,7 +29,10 @@ impl CaptureEngine for MockCapture {
         }
         let pts_s = self.produced as f64 / self.fps as f64;
         self.produced += 1;
-        Ok(Some(Frame { pts_s, data: FrameData::Cpu(vec![0u8; 16]) }))
+        Ok(Some(Frame {
+            pts_s,
+            data: FrameData::Cpu(vec![0u8; 16]),
+        }))
     }
 }
 
@@ -39,7 +46,11 @@ pub struct MockEncoder {
 
 impl MockEncoder {
     pub fn new(gop_len: u64, fps: u32) -> Self {
-        Self { gop_len, fps, count: 0 }
+        Self {
+            gop_len,
+            fps,
+            count: 0,
+        }
     }
 }
 
@@ -77,7 +88,10 @@ pub struct LimitedCapture<C: CaptureEngine> {
 
 impl<C: CaptureEngine> LimitedCapture<C> {
     pub fn new(inner: C, frames: u64) -> Self {
-        Self { inner, remaining: frames }
+        Self {
+            inner,
+            remaining: frames,
+        }
     }
 }
 
@@ -103,7 +117,11 @@ pub struct MockAudioSource {
 
 impl MockAudioSource {
     pub fn new(sample_rate: u32, packet_ms: u32) -> Self {
-        Self { sample_rate, packet_ms, next_index: 0 }
+        Self {
+            sample_rate,
+            packet_ms,
+            next_index: 0,
+        }
     }
 }
 
@@ -118,14 +136,22 @@ impl AudioSource for MockAudioSource {
             }
             let mut data = format!("P{:05}", self.next_index).into_bytes();
             data.resize(40, 0xAA);
-            out.push(AudioPacket { data, pts_s: pts, duration_s: dur });
+            out.push(AudioPacket {
+                data,
+                pts_s: pts,
+                duration_s: dur,
+            });
             self.next_index += 1;
         }
         Ok(out)
     }
 
     fn track_config(&self) -> AudioTrackConfig {
-        AudioTrackConfig { channels: 2, sample_rate: self.sample_rate, pre_skip: 312 }
+        AudioTrackConfig {
+            channels: 2,
+            sample_rate: self.sample_rate,
+            pre_skip: 312,
+        }
     }
 }
 
@@ -161,7 +187,10 @@ mod tests {
     #[test]
     fn mock_encoder_packets_carry_pts_and_duration() {
         let mut enc = MockEncoder::new(30, 30);
-        let frame = Frame { pts_s: 1.5, data: FrameData::Cpu(vec![0; 4]) };
+        let frame = Frame {
+            pts_s: 1.5,
+            data: FrameData::Cpu(vec![0; 4]),
+        };
         let pkts = enc.encode(&frame).unwrap();
         assert_eq!(pkts.len(), 1);
         assert_eq!(pkts[0].pts_s, 1.5);
