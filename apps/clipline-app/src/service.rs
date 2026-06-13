@@ -344,40 +344,28 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let recording_t0 = Instant::now();
     let marker_rx = markers::spawn(opts.lol_url.clone(), recording_t0);
     let mut marker_log = MarkerLog::new();
-    let (mut cap, crop) = match &opts.capture_source {
+    let mut cap = match &opts.capture_source {
         CaptureSource::WindowTitle(needle) => {
             let hwnd = find_window_by_title(needle)
                 .ok_or_else(|| format!("no visible window matching {needle:?}"))?;
-            (
-                WgcCapture::for_window_client_on(device.clone(), hwnd, clock)
-                    .map_err(|e| init(&e))?,
-                None,
-            )
+            WgcCapture::for_window_client_on(device.clone(), hwnd, clock).map_err(|e| init(&e))?
         }
         CaptureSource::WindowHandle { hwnd, title } => {
             let hwnd = window_from_raw_handle(*hwnd)
                 .ok_or_else(|| format!("game window {title:?} is no longer available"))?;
-            (
-                WgcCapture::for_window_client_on(device.clone(), hwnd, clock)
-                    .map_err(|e| init(&e))?,
-                None,
-            )
+            WgcCapture::for_window_client_on(device.clone(), hwnd, clock).map_err(|e| init(&e))?
         }
-        CaptureSource::PrimaryMonitor => (
-            WgcCapture::primary_monitor_on(device.clone(), clock).map_err(|e| init(&e))?,
-            None,
-        ),
+        CaptureSource::PrimaryMonitor => {
+            WgcCapture::primary_monitor_on(device.clone(), clock).map_err(|e| init(&e))?
+        }
         CaptureSource::DisplayRegion(region) => {
             let display = clipline_capture::windows::display::display_handle_by_id(
                 region.display_id.as_deref(),
             )
             .map_err(|e| init(&e))?;
             let crop = crop_for_region(region, &display.info)?;
-            (
-                WgcCapture::for_monitor_region_on(device.clone(), display.handle, clock, crop)
-                    .map_err(|e| init(&e))?,
-                None,
-            )
+            WgcCapture::for_monitor_region_on(device.clone(), display.handle, clock, crop)
+                .map_err(|e| init(&e))?
         }
     };
 
@@ -390,21 +378,17 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         return Err("expected a GPU frame".into());
     };
     let (in_w, in_h) = d3d11::texture_size(tex);
-    let crop = usable_crop_in_frame(crop, in_w, in_h);
-    let (source_w, source_h) = crop
-        .map(|crop| (crop.width, crop.height))
-        .unwrap_or((in_w, in_h));
-    let scale = if source_w > 2560 {
-        2560.0 / source_w as f64
+    let scale = if in_w > 2560 {
+        2560.0 / in_w as f64
     } else {
         1.0
     };
     let (enc_w, enc_h) = even_dimensions(
-        (source_w as f64 * scale).round() as u32,
-        (source_h as f64 * scale).round() as u32,
+        (in_w as f64 * scale).round() as u32,
+        (in_h as f64 * scale).round() as u32,
     );
 
-    let (encoder, active) = build_encoder(&device, &opts, in_w, in_h, crop, enc_w, enc_h, events)?;
+    let (encoder, active) = build_encoder(&device, &opts, in_w, in_h, enc_w, enc_h, events)?;
     let encoder_status = encoder_label(active);
 
     let replay_cache_dir = prepare_replay_storage(&opts)?;
@@ -675,7 +659,6 @@ fn build_encoder(
     opts: &ServiceOptions,
     in_w: u32,
     in_h: u32,
-    crop: Option<CropRect>,
     enc_w: u32,
     enc_h: u32,
     events: &Sender<Event>,
@@ -699,7 +682,6 @@ fn build_encoder(
             opts,
             in_w,
             in_h,
-            crop,
             enc_w,
             enc_h,
             &ffmpeg_path,
@@ -746,7 +728,6 @@ fn open_candidate(
     opts: &ServiceOptions,
     in_w: u32,
     in_h: u32,
-    crop: Option<CropRect>,
     enc_w: u32,
     enc_h: u32,
     ffmpeg_path: &Option<PathBuf>,
@@ -763,7 +744,7 @@ fn open_candidate(
                 bitrate_bps: opts.bitrate_bps,
                 encoder_backend: Some(candidate.backend),
             };
-            MftH264Encoder::new_with_crop(device, in_w, in_h, cfg, crop)
+            MftH264Encoder::new(device, in_w, in_h, cfg)
                 .map(|e| Box::new(e) as Box<dyn Encoder>)
                 .map_err(|e| e.to_string())
         }
@@ -778,7 +759,7 @@ fn open_candidate(
                 candidate.codec,
                 in_w,
                 in_h,
-                crop,
+                None,
                 enc_w,
                 enc_h,
                 opts.fps,
@@ -918,21 +899,6 @@ fn crop_for_region(
         width: region.width,
         height: region.height,
     })
-}
-
-fn usable_crop_in_frame(crop: Option<CropRect>, in_w: u32, in_h: u32) -> Option<CropRect> {
-    let crop = crop?;
-    let right = crop.x.checked_add(crop.width)?;
-    let bottom = crop.y.checked_add(crop.height)?;
-    if crop.width < 2
-        || crop.height < 2
-        || right > in_w
-        || bottom > in_h
-        || (crop.x == 0 && crop.y == 0 && crop.width == in_w && crop.height == in_h)
-    {
-        return None;
-    }
-    Some(crop)
 }
 
 /// Session label from the local wall clock (folder names should match what
@@ -1108,41 +1074,5 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
 
         assert!(!is_within_temp(&outside, &temp_root));
-    }
-
-    #[test]
-    fn usable_crop_keeps_crop_inside_frame() {
-        let crop = CropRect {
-            x: 8,
-            y: 31,
-            width: 784,
-            height: 461,
-        };
-
-        assert_eq!(usable_crop_in_frame(Some(crop), 800, 500), Some(crop));
-    }
-
-    #[test]
-    fn usable_crop_drops_crop_outside_frame() {
-        let crop = CropRect {
-            x: 8,
-            y: 31,
-            width: 900,
-            height: 461,
-        };
-
-        assert_eq!(usable_crop_in_frame(Some(crop), 800, 500), None);
-    }
-
-    #[test]
-    fn usable_crop_drops_full_frame_crop() {
-        let crop = CropRect {
-            x: 0,
-            y: 0,
-            width: 800,
-            height: 500,
-        };
-
-        assert_eq!(usable_crop_in_frame(Some(crop), 800, 500), None);
     }
 }

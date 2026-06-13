@@ -190,24 +190,32 @@ impl RuntimeState {
     }
 
     fn restart<R: Runtime>(&self, app: AppHandle<R>, settings: AppSettings) -> Result<(), String> {
-        let (old_tx, cleared_active_game) = {
+        let (old_tx, next_options, cleared_active_game) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            let old_tx = inner.tx.clone();
+            let old_tx = inner.tx.take();
             let cleared_active_game = inner.active_game.is_some()
                 && !active_game_still_configured(&settings, inner.active_game.as_ref());
             if cleared_active_game {
                 inner.active_game = None;
             }
             inner.settings = settings;
-            if inner.tx.is_some() {
-                let (tx, rx) = service::spawn(Self::options(&inner)?);
-                inner.tx = Some(tx);
-                pump_events(app.clone(), rx);
-            }
-            (old_tx, cleared_active_game)
+            let next_options = if old_tx.is_some() {
+                Some(Self::options(&inner)?)
+            } else {
+                None
+            };
+            (old_tx, next_options, cleared_active_game)
         };
         if let Some(tx) = old_tx {
             let _ = tx.send(Cmd::Stop { announce: false });
+        }
+        if let Some(options) = next_options {
+            let (tx, rx) = service::spawn(options);
+            {
+                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+                inner.tx = Some(tx);
+            }
+            pump_events(app.clone(), rx);
         }
         if cleared_active_game {
             let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
@@ -258,25 +266,49 @@ impl RuntimeState {
         detected: Option<DetectedGame>,
     ) -> Result<(), String> {
         let event = GameDetectionEvent::from_detected(detected.as_ref());
-        let old_tx = {
+        let (old_tx, next_options, emit_event) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            if inner.active_game == detected {
-                return Ok(());
+            if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
+                if inner.active_game != detected {
+                    inner.active_game = detected;
+                    (None, None, true)
+                } else {
+                    (None, None, false)
+                }
+            } else {
+                inner.active_game = detected;
+                let old_tx = inner.tx.take();
+                let next_options = if old_tx.is_some() {
+                    Some(Self::options(&inner)?)
+                } else {
+                    None
+                };
+                (old_tx, next_options, true)
             }
-            inner.active_game = detected;
-            let old_tx = inner.tx.clone();
-            if inner.tx.is_some() {
-                let (tx, rx) = service::spawn(Self::options(&inner)?);
-                inner.tx = Some(tx);
-                pump_events(app.clone(), rx);
-            }
-            old_tx
         };
         if let Some(tx) = old_tx {
             let _ = tx.send(Cmd::Stop { announce: false });
         }
-        let _ = app.emit("game-detection", event);
+        if let Some(options) = next_options {
+            let (tx, rx) = service::spawn(options);
+            {
+                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+                inner.tx = Some(tx);
+            }
+            pump_events(app.clone(), rx);
+        }
+        if emit_event {
+            let _ = app.emit("game-detection", event);
+        }
         Ok(())
+    }
+}
+
+fn same_game_window(current: Option<&DetectedGame>, next: Option<&DetectedGame>) -> bool {
+    match (current, next) {
+        (Some(current), Some(next)) => current.id == next.id && current.hwnd == next.hwnd,
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -625,6 +657,7 @@ pub fn run() {
             crate::library::delete_clip,
             crate::library::export_clip,
             crate::library::reveal_clip,
+            crate::library::copy_clip_to_clipboard,
             crate::library::open_media_folder,
             crate::library::storage_status
         ])
@@ -833,5 +866,28 @@ mod tests {
     fn quota_parser_rejects_negative_or_non_numeric_values() {
         assert!(parse_quota_gb("-1").is_err());
         assert!(parse_quota_gb("nope").is_err());
+    }
+
+    #[test]
+    fn detected_game_identity_ignores_volatile_window_title() {
+        let current = DetectedGame {
+            id: "custom-game".into(),
+            name: "Game".into(),
+            hwnd: 42,
+            window_title: "Loading".into(),
+            process_id: 7,
+            exe_name: "game.exe".into(),
+        };
+        let updated_title = DetectedGame {
+            window_title: "Paused".into(),
+            ..current.clone()
+        };
+        let different_window = DetectedGame {
+            hwnd: 43,
+            ..current.clone()
+        };
+
+        assert!(same_game_window(Some(&current), Some(&updated_title)));
+        assert!(!same_game_window(Some(&current), Some(&different_window)));
     }
 }

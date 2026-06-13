@@ -16,7 +16,7 @@ use windows::Graphics::Capture::{
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
-use windows::Win32::Foundation::{HWND, POINT, RPC_E_CHANGED_MODE};
+use windows::Win32::Foundation::{E_FAIL, HWND, POINT, RPC_E_CHANGED_MODE};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY};
@@ -30,7 +30,7 @@ use crate::clock::RelativeClock;
 use crate::traits::{CaptureEngine, CaptureError, Frame, FrameData};
 use crate::windows::d3d11;
 use crate::windows::nv12::CropRect;
-use crate::windows::window::window_client_crop;
+use crate::windows::window::{window_client_crop_state, WindowClientCrop};
 
 /// Default `next_frame` wait. WGC only delivers on screen updates, so an
 /// idle desktop can legitimately go quiet; recorders that need cadence
@@ -299,9 +299,9 @@ fn recreate_frame_pool_if_needed(
     state: &Arc<Mutex<FramePoolState>>,
     size: SizeInt32,
 ) -> WinResult<()> {
-    let Ok(mut state) = state.lock() else {
-        return Ok(());
-    };
+    let mut state = state
+        .lock()
+        .map_err(|_| windows::core::Error::new(E_FAIL, "frame pool state lock poisoned"))?;
     if state.size == size || !size_has_area(size) {
         return Ok(());
     }
@@ -327,9 +327,10 @@ fn copy_rect_for_frame(
         FrameCopyMode::StaticRegion(crop) => crop_in_frame(crop, source_w, source_h),
         FrameCopyMode::WindowClient(raw_hwnd) => {
             let hwnd = HWND(raw_hwnd as *mut core::ffi::c_void);
-            window_client_crop(hwnd)
-                .and_then(|crop| crop_in_frame(crop, source_w, source_h))
-                .or_else(|| content_crop(content_size, source_w, source_h))
+            match window_client_crop_state(hwnd)? {
+                WindowClientCrop::Client(crop) => crop_in_frame(crop, source_w, source_h),
+                WindowClientCrop::FullFrame => content_crop(content_size, source_w, source_h),
+            }
         }
     }
 }

@@ -59,6 +59,7 @@ let videoEncoders = [];
 let customGames = [];
 let gameWindows = [];
 let activeDetectedGame = null;
+let captureTargetDirty = false;
 // Codecs WebView2 can decode in the review player (H.264 always; HEVC/AV1
 // probed at startup). Drives the playback caveat and the recorder's
 // Automatic-codec policy via report_decode_support.
@@ -126,6 +127,7 @@ function fillSettings(s) {
     games: { ...games, custom_games: customGames.map((game) => ({ ...game })) },
   };
   regionState = s.capture_region ?? regionState;
+  captureTargetDirty = false;
   renderCaptureTargetSelect();
   $("set-games-auto-detect").checked = !!games.auto_detect;
   $("set-output-enabled").checked = !!audio.output_enabled;
@@ -161,10 +163,17 @@ function fillSettings(s) {
 function readSettings() {
   const replay = Number($("set-replay").value);
   const capture = selectedCaptureSettings();
+  const preserveLegacyWindow =
+    !captureTargetDirty
+    && currentSettings
+    && currentSettings.capture_mode === "window_title"
+    && String(currentSettings.window_title || "").trim().length > 0;
   return {
-    capture_mode: capture.capture_mode,
-    window_title: "",
-    capture_region: capture.capture_region,
+    capture_mode: preserveLegacyWindow ? "window_title" : capture.capture_mode,
+    window_title: preserveLegacyWindow ? currentSettings.window_title : "",
+    capture_region: preserveLegacyWindow
+      ? (currentSettings.capture_region || capture.capture_region)
+      : capture.capture_region,
     games: {
       auto_detect: $("set-games-auto-detect").checked,
       custom_games: customGames.map((game) => ({ ...game })),
@@ -1176,6 +1185,7 @@ function closeReview() {
   video.load();
   currentClip = null;
   updateViews();
+  $("deck-status").textContent = "";
   $("stage-note").textContent = "";
   $("timeline").querySelectorAll(".tick").forEach((t) => t.remove());
   renderClips();
@@ -1468,6 +1478,22 @@ async function openFolder() {
   }
 }
 
+async function copyClipToClipboard() {
+  if (!currentClip) return;
+  $("copy-clip").disabled = true;
+  $("error").textContent = "";
+  $("deck-status").textContent = "";
+  try {
+    await invoke("copy_clip_to_clipboard", { path: currentClip.path });
+    $("deck-status").textContent = "clip copied to clipboard";
+  } catch (e) {
+    $("deck-status").textContent = "";
+    $("error").textContent = e;
+  } finally {
+    $("copy-clip").disabled = false;
+  }
+}
+
 async function chooseMediaFolder() {
   try {
     const selected = await invoke("choose_media_folder", {
@@ -1552,7 +1578,10 @@ listen("game-detection", (e) => {
 $("save").addEventListener("click", () => invoke("save_replay"));
 $("capture-status").addEventListener("click", toggleRecording);
 $("rail-status").addEventListener("click", toggleRecording);
-$("set-capture").addEventListener("change", syncCaptureFields);
+$("set-capture").addEventListener("change", () => {
+  captureTargetDirty = true;
+  syncCaptureFields();
+});
 for (const id of ["set-output-enabled", "set-mic-enabled"]) {
   $(id).addEventListener("change", syncAudioFields);
 }
@@ -1671,6 +1700,7 @@ $("volume-slider").addEventListener("input", () => {
 $("export-clip").addEventListener("click", exportTrim);
 $("delete-clip").addEventListener("click", () => deleteClip());
 $("open-folder").addEventListener("click", openFolder);
+$("copy-clip").addEventListener("click", copyClipToClipboard);
 
 $("sidebar-toggle").addEventListener("click", toggleRail);
 $("rail-save").addEventListener("click", () => invoke("save_replay"));

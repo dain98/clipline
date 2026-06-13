@@ -49,7 +49,7 @@ pub fn list_game_windows() -> Vec<GameWindowInfo> {
 }
 
 pub fn detect_active_game(settings: &GameSettings) -> Option<DetectedGame> {
-    if !settings.auto_detect {
+    if !has_enabled_custom_games(settings) {
         return None;
     }
     detect_active_game_from_windows(settings, enumerate_capturable_windows())
@@ -86,6 +86,10 @@ fn best_window_for_game<'a>(
         .filter_map(|window| match_score(game, window).map(|score| (score, window)))
         .max_by_key(|(score, window)| (*score, window.title.len()))
         .map(|(_, window)| window)
+}
+
+fn has_enabled_custom_games(settings: &GameSettings) -> bool {
+    settings.auto_detect && settings.custom_games.iter().any(|game| game.enabled)
 }
 
 fn match_score(game: &CustomGameSettings, window: &CapturableWindow) -> Option<u16> {
@@ -214,5 +218,24 @@ mod tests {
             windows,
         )
         .is_none());
+    }
+
+    #[test]
+    fn no_enabled_games_can_skip_window_enumeration() {
+        assert!(!has_enabled_custom_games(&GameSettings {
+            auto_detect: true,
+            custom_games: Vec::new(),
+        }));
+        assert!(!has_enabled_custom_games(&GameSettings {
+            auto_detect: true,
+            custom_games: vec![CustomGameSettings {
+                enabled: false,
+                ..game()
+            }],
+        }));
+        assert!(has_enabled_custom_games(&GameSettings {
+            auto_detect: true,
+            custom_games: vec![game()],
+        }));
     }
 }

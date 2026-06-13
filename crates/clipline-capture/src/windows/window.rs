@@ -33,6 +33,12 @@ pub struct CapturableWindow {
     pub exe_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowClientCrop {
+    Client(CropRect),
+    FullFrame,
+}
+
 pub fn find_window_by_title(needle: &str) -> Option<HWND> {
     let mut search = Search {
         needle_lower: needle.to_lowercase(),
@@ -77,6 +83,13 @@ pub fn enumerate_capturable_windows() -> Vec<CapturableWindow> {
 }
 
 pub fn window_client_crop(hwnd: HWND) -> Option<CropRect> {
+    match window_client_crop_state(hwnd)? {
+        WindowClientCrop::Client(crop) => Some(crop),
+        WindowClientCrop::FullFrame => None,
+    }
+}
+
+pub fn window_client_crop_state(hwnd: HWND) -> Option<WindowClientCrop> {
     // SAFETY: `hwnd` is a borrowed OS handle. The calls below are read-only
     // window-manager queries used to describe the visible client area.
     unsafe {
@@ -220,7 +233,7 @@ fn client_crop_from_rects(
     client_origin: POINT,
     client_width: i32,
     client_height: i32,
-) -> Option<CropRect> {
+) -> Option<WindowClientCrop> {
     let frame_width = frame.right.checked_sub(frame.left)?;
     let frame_height = frame.bottom.checked_sub(frame.top)?;
     let x = client_origin.x.checked_sub(frame.left)?;
@@ -240,14 +253,14 @@ fn client_crop_from_rects(
         return None;
     }
     if x == 0 && y == 0 && client_width == frame_width && client_height == frame_height {
-        return None;
+        return Some(WindowClientCrop::FullFrame);
     }
-    Some(CropRect {
+    Some(WindowClientCrop::Client(CropRect {
         x: x as u32,
         y: y as u32,
         width: client_width as u32,
         height: client_height as u32,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -282,7 +295,10 @@ mod tests {
         };
         let origin = POINT { x: 100, y: 200 };
 
-        assert_eq!(client_crop_from_rects(frame, origin, 800, 500), None);
+        assert_eq!(
+            client_crop_from_rects(frame, origin, 800, 500),
+            Some(WindowClientCrop::FullFrame)
+        );
     }
 
     #[test]
@@ -297,12 +313,12 @@ mod tests {
 
         assert_eq!(
             client_crop_from_rects(frame, origin, 784, 461),
-            Some(CropRect {
+            Some(WindowClientCrop::Client(CropRect {
                 x: 8,
                 y: 31,
                 width: 784,
                 height: 461,
-            })
+            }))
         );
     }
 
