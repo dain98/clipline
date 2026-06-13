@@ -46,6 +46,7 @@ let currentSettings = null;
 let recordingActive = true;
 let displays = [];
 let audioDevices = { outputs: [], inputs: [] };
+let videoEncoders = [];
 let regionState = { display_id: null, x: 0, y: 0, width: 1920, height: 1080 };
 let regionLayout = null;
 let regionDrag = null;
@@ -90,6 +91,7 @@ function fillSettings(s) {
   $("set-mic-mono").checked = (audio.mic_channels || "mono") === "mono";
   $("set-buffer").value = Math.max(120, Number(s.buffer_seconds) || 120);
   $("set-replay").value = Math.min(120, Number(s.replay_window_s) || 60);
+  $("set-encoder").value = s.video_encoder || "auto";
   $("set-bitrate").value = qualityIndexForBitrate(s.bitrate_mbps);
   $("set-fps").value = smoothnessIndexForFps(s.fps);
   $("set-quota").value = s.disk_quota_gb;
@@ -98,6 +100,7 @@ function fillSettings(s) {
   endHotkeyCapture("Click the field to record a new shortcut.");
   syncCaptureFields();
   renderAudioDeviceSelects();
+  renderVideoEncoderSelect();
   syncAudioFields();
   syncRecordingFields();
   updateCaptureStatus();
@@ -120,6 +123,7 @@ function readSettings() {
     },
     buffer_seconds: Math.max(120, replay),
     replay_window_s: replay,
+    video_encoder: $("set-encoder").value,
     bitrate_mbps: recordingQualityPreset(Number($("set-bitrate").value)).bitrate,
     fps: smoothnessPreset(Number($("set-fps").value)).fps,
     disk_quota_gb: Number($("set-quota").value),
@@ -148,6 +152,7 @@ function syncCaptureFields() {
 
 function syncRecordingFields() {
   const replay = Number($("set-replay").value);
+  const encoder = selectedVideoEncoder();
   const quality = recordingQualityPreset(Number($("set-bitrate").value));
   const smoothness = smoothnessPreset(Number($("set-fps").value));
   syncRangeProgress($("set-replay"));
@@ -155,6 +160,10 @@ function syncRecordingFields() {
   syncRangeProgress($("set-fps"));
   $("replay-summary").textContent = `Save Replay writes the last ${settingDurationLabel(replay)}.`;
   $("replay-summary").className = "setting-summary";
+  $("encoder-summary").textContent =
+    encoder.id === "auto"
+      ? "Clipline chooses the best available H.264 GPU encoder."
+      : `${encoder.name} is used for new recordings.`;
   $("quality-summary").textContent = `${quality.label} quality - ${quality.hint}.`;
   $("fps-summary").textContent = `${smoothness.label} - ${smoothness.hint}.`;
 }
@@ -208,6 +217,35 @@ function renderAudioDeviceSelects() {
   const audio = currentSettings && currentSettings.audio ? currentSettings.audio : defaultAudioSettings();
   fillDeviceSelect("set-output-device", audioDevices.outputs, "Default output device", audio.output_device_id);
   fillDeviceSelect("set-mic-device", audioDevices.inputs, "Default microphone", audio.mic_device_id);
+}
+
+function renderVideoEncoderSelect() {
+  const select = $("set-encoder");
+  const selected = currentSettings && currentSettings.video_encoder ? currentSettings.video_encoder : "auto";
+  select.replaceChildren();
+  const automatic = document.createElement("option");
+  automatic.value = "auto";
+  automatic.textContent = "Automatic (recommended)";
+  select.appendChild(automatic);
+  for (const encoder of videoEncoders) {
+    const opt = document.createElement("option");
+    opt.value = encoder.id;
+    opt.textContent = encoder.name;
+    select.appendChild(opt);
+  }
+  if (selected !== "auto" && !videoEncoders.some((encoder) => encoder.id === selected)) {
+    const stale = document.createElement("option");
+    stale.value = selected;
+    stale.textContent = "Unavailable encoder";
+    select.appendChild(stale);
+  }
+  select.value = selected;
+}
+
+function selectedVideoEncoder() {
+  const id = $("set-encoder").value || "auto";
+  if (id === "auto") return { id, name: "Automatic (recommended)" };
+  return videoEncoders.find((encoder) => encoder.id === id) || { id, name: "Unavailable encoder" };
 }
 
 function syncAudioFields() {
@@ -441,6 +479,19 @@ async function loadAudioDevices() {
     audioDevices = await invoke("list_audio_devices");
     renderAudioDeviceSelects();
   } catch (e) {
+    $("error").textContent = e;
+  }
+}
+
+async function loadVideoEncoders() {
+  try {
+    videoEncoders = await invoke("list_video_encoders");
+    renderVideoEncoderSelect();
+    if (currentSettings) syncRecordingFields();
+  } catch (e) {
+    videoEncoders = [];
+    renderVideoEncoderSelect();
+    if (currentSettings) syncRecordingFields();
     $("error").textContent = e;
   }
 }
@@ -729,7 +780,12 @@ function toggleSettings(open = !settingsOpen) {
   settingsOpen = open;
   // The clip survives the round-trip; just don't play behind the page.
   if (settingsOpen && !video.paused) video.pause();
-  if (settingsOpen && !wasOpen) loadAudioDevices();
+  if (settingsOpen && !wasOpen) {
+    loadAudioDevices();
+    loadVideoEncoders();
+  }
+  // Closing discards unsaved edits by repainting from last-saved settings.
+  if (wasOpen && !settingsOpen && currentSettings) fillSettings(currentSettings);
   updateViews();
   renderVisibleSettingsSection();
 }
@@ -1049,15 +1105,9 @@ for (const id of ["set-output-volume", "set-mic-volume"]) {
   });
 }
 $("test-mic").addEventListener("click", testMic);
-for (const id of ["set-buffer", "set-replay", "set-bitrate", "set-fps"]) {
-  $(id).addEventListener("input", () => {
-    syncRangeProgress($(id));
-    syncRecordingFields();
-  });
-  $(id).addEventListener("change", () => {
-    syncRangeProgress($(id));
-    syncRecordingFields();
-  });
+for (const id of ["set-buffer", "set-replay", "set-encoder", "set-bitrate", "set-fps"]) {
+  $(id).addEventListener("input", syncRecordingFields);
+  $(id).addEventListener("change", syncRecordingFields);
 }
 document.querySelectorAll("[data-replay-preset]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -1152,6 +1202,7 @@ $("sidebar-toggle").addEventListener("click", toggleRail);
 $("rail-save").addEventListener("click", () => invoke("save_replay"));
 $("rail-settings").addEventListener("click", () => toggleSettings());
 $("open-settings").addEventListener("click", () => toggleSettings());
+$("settings-close").addEventListener("click", () => toggleSettings(false));
 $("set-hotkey").addEventListener("focus", beginHotkeyCapture);
 $("set-hotkey").addEventListener("click", beginHotkeyCapture);
 $("set-hotkey").addEventListener("keydown", recordHotkey);
@@ -1227,4 +1278,5 @@ syncAllRangeProgress();
 invoke("get_settings").then(fillSettings).catch((e) => $("error").textContent = e);
 loadDisplays();
 loadAudioDevices();
+loadVideoEncoders();
 refresh();

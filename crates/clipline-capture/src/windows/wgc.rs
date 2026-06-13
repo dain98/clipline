@@ -366,6 +366,7 @@ mod tests {
             height: 360,
             fps: 60,
             bitrate_bps: 2_000_000,
+            encoder_backend: None,
         };
         // Pull one frame to learn the capture size, then hand the engine on.
         let mut cap = cap;

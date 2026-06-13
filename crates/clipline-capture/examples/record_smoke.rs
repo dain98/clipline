@@ -50,7 +50,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("capture {in_w}x{in_h} -> encode {enc_w}x{enc_h} @ {FPS} fps");
 
-    let cfg = MftConfig { width: enc_w, height: enc_h, fps: FPS, bitrate_bps: 12_000_000 };
+    let cfg = MftConfig {
+        width: enc_w,
+        height: enc_h,
+        fps: FPS,
+        bitrate_bps: 12_000_000,
+        encoder_backend: None,
+    };
     let encoder = MftH264Encoder::new(&device, in_w, in_h, cfg)?;
 
     let started = std::time::Instant::now();
