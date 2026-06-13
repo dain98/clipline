@@ -53,6 +53,7 @@ fn review_player_owns_all_controls() {
         "id=\"delete-clip\"",
         "id=\"ruler\"",
         "id=\"open-folder\"",
+        "id=\"stage-frame\"",
         "id=\"stage-overlay\"",
         "id=\"sidebar-toggle\"",
         "id=\"memory-usage\"",
@@ -116,6 +117,16 @@ fn review_player_owns_all_controls() {
         "id=\"set-replay-disk-quota\"",
         "id=\"replay-disk-estimate\"",
         "id=\"set-replay-disk-ack\"",
+        "data-tab=\"games\"",
+        "data-section=\"games\"",
+        "id=\"set-games-auto-detect\"",
+        "id=\"supported-games\"",
+        "id=\"custom-games\"",
+        "id=\"add-custom-game\"",
+        "id=\"game-window-picker\"",
+        "id=\"refresh-game-windows\"",
+        "id=\"game-window-list\"",
+        "id=\"game-detection-status\"",
         "id=\"set-hotkey\"",
         "id=\"settings-save\"",
         "id=\"settings-close\"",
@@ -197,6 +208,10 @@ fn review_player_owns_all_controls() {
             ),
         "disk replay buffer settings must carry explicit advanced SSD-wear warnings"
     );
+    assert!(
+        html.contains(">Games<") && html.contains("Add Custom Game"),
+        "settings must expose the Games tab and custom game action"
+    );
 
     // Settings is a page in the main pane now, not a sidebar fold.
     assert!(
@@ -235,6 +250,10 @@ fn review_player_owns_all_controls() {
     assert!(
         transport < timeline,
         "transport row must precede the timeline in the deck"
+    );
+    assert!(
+        styles_css().contains(".stage-frame") && main_js().contains("updateStageFrame"),
+        "the review stage must size an aspect-locked frame around the video"
     );
 
     // Icon buttons carry SVG icons; text labels are a regression.
@@ -320,6 +339,24 @@ fn shell_shows_live_memory_usage() {
         css.contains(".memory-usage") && css.contains("font-variant-numeric: tabular-nums"),
         "memory usage should have stable numeric styling in the top-left chrome"
     );
+}
+
+#[test]
+fn games_ui_wires_detection_commands() {
+    let js = main_js();
+
+    for required in [
+        "list_game_windows",
+        "game-detection",
+        "renderCustomGames",
+        "refreshGameWindows",
+        "customGames",
+    ] {
+        assert!(
+            js.contains(required),
+            "main.js must wire the custom game workflow through {required}"
+        );
+    }
 }
 
 #[test]

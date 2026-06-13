@@ -11,6 +11,7 @@ use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
+use crate::games::{DetectedGame, GameWindowInfo};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode};
 
@@ -42,6 +43,36 @@ struct AudioDeviceLists {
 struct VideoEncoderInfo {
     id: &'static str,
     name: &'static str,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct GameDetectionEvent {
+    active: bool,
+    name: Option<String>,
+    window_title: Option<String>,
+    process_id: Option<u32>,
+    exe_name: Option<String>,
+}
+
+impl GameDetectionEvent {
+    fn from_detected(detected: Option<&DetectedGame>) -> Self {
+        match detected {
+            Some(game) => Self {
+                active: true,
+                name: Some(game.name.clone()),
+                window_title: Some(game.window_title.clone()),
+                process_id: Some(game.process_id),
+                exe_name: Some(game.exe_name.clone()),
+            },
+            None => Self {
+                active: false,
+                name: None,
+                window_title: None,
+                process_id: None,
+                exe_name: None,
+            },
+        }
+    }
 }
 
 #[tauri::command]
@@ -90,6 +121,7 @@ struct RuntimeInner {
     tx: Option<Sender<Cmd>>,
     settings: AppSettings,
     lol_url: Option<String>,
+    active_game: Option<DetectedGame>,
 }
 
 impl RuntimeState {
@@ -98,6 +130,7 @@ impl RuntimeState {
             tx: Some(tx),
             settings,
             lol_url,
+            active_game: None,
         }))
     }
 
@@ -127,19 +160,27 @@ impl RuntimeState {
     }
 
     fn restart<R: Runtime>(&self, app: AppHandle<R>, settings: AppSettings) -> Result<(), String> {
-        let old_tx = {
+        let (old_tx, cleared_active_game) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             let old_tx = inner.tx.clone();
-            if inner.tx.is_some() {
-                let (tx, rx) = service::spawn(settings.to_service_options(inner.lol_url.clone())?);
-                inner.tx = Some(tx);
-                pump_events(app, rx);
+            let cleared_active_game = inner.active_game.is_some()
+                && !active_game_still_configured(&settings, inner.active_game.as_ref());
+            if cleared_active_game {
+                inner.active_game = None;
             }
             inner.settings = settings;
-            old_tx
+            if inner.tx.is_some() {
+                let (tx, rx) = service::spawn(service_options(&inner)?);
+                inner.tx = Some(tx);
+                pump_events(app.clone(), rx);
+            }
+            (old_tx, cleared_active_game)
         };
         if let Some(tx) = old_tx {
             let _ = tx.send(Cmd::Stop { announce: false });
+        }
+        if cleared_active_game {
+            let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
         }
         Ok(())
     }
@@ -162,8 +203,7 @@ impl RuntimeState {
             if inner.tx.is_some() {
                 return Ok(true);
             }
-            let (tx, rx) =
-                service::spawn(inner.settings.to_service_options(inner.lol_url.clone())?);
+            let (tx, rx) = service::spawn(service_options(&inner)?);
             inner.tx = Some(tx);
             rx
         };
@@ -181,6 +221,54 @@ impl RuntimeState {
         }
         Ok(false)
     }
+
+    fn set_detected_game<R: Runtime>(
+        &self,
+        app: AppHandle<R>,
+        detected: Option<DetectedGame>,
+    ) -> Result<(), String> {
+        let event = GameDetectionEvent::from_detected(detected.as_ref());
+        let old_tx = {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            if inner.active_game == detected {
+                return Ok(());
+            }
+            inner.active_game = detected;
+            let old_tx = inner.tx.clone();
+            if inner.tx.is_some() {
+                let (tx, rx) = service::spawn(service_options(&inner)?);
+                inner.tx = Some(tx);
+                pump_events(app.clone(), rx);
+            }
+            old_tx
+        };
+        if let Some(tx) = old_tx {
+            let _ = tx.send(Cmd::Stop { announce: false });
+        }
+        let _ = app.emit("game-detection", event);
+        Ok(())
+    }
+}
+
+fn service_options(inner: &RuntimeInner) -> Result<ServiceOptions, String> {
+    let mut opts = inner.settings.to_service_options(inner.lol_url.clone())?;
+    if let Some(game) = &inner.active_game {
+        opts.capture_source = service::CaptureSource::WindowHandle {
+            hwnd: game.hwnd,
+            title: game.window_title.clone(),
+        };
+    }
+    Ok(opts)
+}
+
+fn active_game_still_configured(settings: &AppSettings, active: Option<&DetectedGame>) -> bool {
+    let Some(active) = active else { return true };
+    settings.games.auto_detect
+        && settings
+            .games
+            .custom_games
+            .iter()
+            .any(|game| game.enabled && game.id == active.id)
 }
 
 #[tauri::command]
@@ -319,6 +407,11 @@ fn list_video_encoders() -> Result<Vec<VideoEncoderInfo>, String> {
         }
     }
     Ok(encoders)
+}
+
+#[tauri::command]
+fn list_game_windows() -> Vec<GameWindowInfo> {
+    crate::games::list_game_windows()
 }
 
 fn video_encoder_info(
@@ -533,6 +626,7 @@ pub fn run() {
             list_displays,
             list_audio_devices,
             list_video_encoders,
+            list_game_windows,
             memory_status,
             start_microphone_test,
             stop_microphone_test,
@@ -601,6 +695,7 @@ pub fn run() {
                 .build(app)?;
 
             pump_events(app.handle().clone(), event_rx);
+            spawn_game_detector(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -629,6 +724,31 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
+    std::thread::Builder::new()
+        .name("clipline-game-detector".into())
+        .spawn(move || {
+            let mut last_error = None::<String>;
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                let settings = app.state::<RuntimeState>().settings();
+                let detected = crate::games::detect_active_game(&settings.games);
+                match app
+                    .state::<RuntimeState>()
+                    .set_detected_game(app.clone(), detected)
+                {
+                    Ok(()) => last_error = None,
+                    Err(e) if last_error.as_deref() != Some(e.as_str()) => {
+                        last_error = Some(e.clone());
+                        let _ = app.emit("error", format!("game detection: {e}"));
+                    }
+                    Err(_) => {}
+                }
+            }
+        })
+        .expect("spawn game detector thread");
 }
 
 fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {

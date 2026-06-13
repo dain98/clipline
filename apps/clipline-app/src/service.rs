@@ -12,7 +12,8 @@ use clipline_capture::traits::{AudioSource, CaptureError, FrameData};
 use clipline_capture::windows::nv12::CropRect;
 use clipline_capture::windows::wasapi::{WasapiChannelMode, WasapiMixedLoopback};
 use clipline_capture::windows::{
-    d3d11, find_window_by_title, MftConfig, MftH264Encoder, WasapiLoopback, WgcCapture,
+    d3d11, find_window_by_title, window_from_raw_handle, MftConfig, MftH264Encoder, WasapiLoopback,
+    WgcCapture,
 };
 use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
@@ -44,6 +45,7 @@ pub struct CaptureRegion {
 pub enum CaptureSource {
     PrimaryMonitor,
     WindowTitle(String),
+    WindowHandle { hwnd: isize, title: String },
     DisplayRegion(CaptureRegion),
 }
 
@@ -205,7 +207,17 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             let hwnd = find_window_by_title(needle)
                 .ok_or_else(|| format!("no visible window matching {needle:?}"))?;
             (
-                WgcCapture::for_window_on(device.clone(), hwnd, clock).map_err(|e| init(&e))?,
+                WgcCapture::for_window_client_on(device.clone(), hwnd, clock)
+                    .map_err(|e| init(&e))?,
+                None,
+            )
+        }
+        CaptureSource::WindowHandle { hwnd, title } => {
+            let hwnd = window_from_raw_handle(*hwnd)
+                .ok_or_else(|| format!("game window {title:?} is no longer available"))?;
+            (
+                WgcCapture::for_window_client_on(device.clone(), hwnd, clock)
+                    .map_err(|e| init(&e))?,
                 None,
             )
         }
@@ -236,7 +248,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         return Err("expected a GPU frame".into());
     };
     let (in_w, in_h) = d3d11::texture_size(tex);
-    validate_crop_in_frame(crop, in_w, in_h)?;
+    let crop = usable_crop_in_frame(crop, in_w, in_h);
     let (source_w, source_h) = crop
         .map(|crop| (crop.width, crop.height))
         .unwrap_or((in_w, in_h));
@@ -655,15 +667,19 @@ fn crop_for_region(
     })
 }
 
-fn validate_crop_in_frame(crop: Option<CropRect>, in_w: u32, in_h: u32) -> Result<(), String> {
-    let Some(crop) = crop else { return Ok(()) };
-    if crop.x + crop.width > in_w || crop.y + crop.height > in_h {
-        return Err(format!(
-            "capture region {}x{} at {}, {} exceeds captured frame {}x{}",
-            crop.width, crop.height, crop.x, crop.y, in_w, in_h
-        ));
+fn usable_crop_in_frame(crop: Option<CropRect>, in_w: u32, in_h: u32) -> Option<CropRect> {
+    let crop = crop?;
+    let right = crop.x.checked_add(crop.width)?;
+    let bottom = crop.y.checked_add(crop.height)?;
+    if crop.width < 2
+        || crop.height < 2
+        || right > in_w
+        || bottom > in_h
+        || (crop.x == 0 && crop.y == 0 && crop.width == in_w && crop.height == in_h)
+    {
+        return None;
     }
-    Ok(())
+    Some(crop)
 }
 
 /// Session label from the local wall clock (folder names should match what
@@ -798,5 +814,41 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
 
         assert!(!is_within_temp(&outside, &temp_root));
+    }
+
+    #[test]
+    fn usable_crop_keeps_crop_inside_frame() {
+        let crop = CropRect {
+            x: 8,
+            y: 31,
+            width: 784,
+            height: 461,
+        };
+
+        assert_eq!(usable_crop_in_frame(Some(crop), 800, 500), Some(crop));
+    }
+
+    #[test]
+    fn usable_crop_drops_crop_outside_frame() {
+        let crop = CropRect {
+            x: 8,
+            y: 31,
+            width: 900,
+            height: 461,
+        };
+
+        assert_eq!(usable_crop_in_frame(Some(crop), 800, 500), None);
+    }
+
+    #[test]
+    fn usable_crop_drops_full_frame_crop() {
+        let crop = CropRect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 500,
+        };
+
+        assert_eq!(usable_crop_in_frame(Some(crop), 800, 500), None);
     }
 }

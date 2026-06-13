@@ -36,14 +36,16 @@ impl CropRect {
     }
 }
 
-/// One converter per recording: input size is fixed by the capture item,
-/// output size by the encoder configuration (already even-rounded).
+/// One converter per recording. The MP4 output size stays fixed, but window
+/// captures can resize, so the video processor is rebuilt when input changes.
 pub struct VideoConverter {
     device: ID3D11Device,
     video_context: ID3D11VideoContext,
     video_device: ID3D11VideoDevice,
     processor: ID3D11VideoProcessor,
     enumerator: ID3D11VideoProcessorEnumerator,
+    in_width: u32,
+    in_height: u32,
     out_width: u32,
     out_height: u32,
     source_rect: Option<RECT>,
@@ -71,32 +73,16 @@ impl VideoConverter {
         let video_device: ID3D11VideoDevice = device.cast()?;
         // SAFETY: trivial getter on a valid device.
         let video_context: ID3D11VideoContext = unsafe { device.GetImmediateContext()? }.cast()?;
-        let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
-            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-            InputFrameRate: DXGI_RATIONAL {
-                Numerator: 60,
-                Denominator: 1,
-            },
-            InputWidth: in_w,
-            InputHeight: in_h,
-            OutputFrameRate: DXGI_RATIONAL {
-                Numerator: 60,
-                Denominator: 1,
-            },
-            OutputWidth: out_w,
-            OutputHeight: out_h,
-            Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
-        };
-        // SAFETY: desc is fully initialized; out-params are valid.
-        let enumerator = unsafe { video_device.CreateVideoProcessorEnumerator(&desc)? };
-        // SAFETY: enumerator is valid; rate-conversion caps index 0 always exists.
-        let processor = unsafe { video_device.CreateVideoProcessor(&enumerator, 0)? };
+        let (enumerator, processor) =
+            create_video_processor(&video_device, in_w, in_h, out_w, out_h)?;
         Ok(Self {
             device: device.clone(),
             video_context,
             video_device,
             processor,
             enumerator,
+            in_width: in_w,
+            in_height: in_h,
             out_width: out_w,
             out_height: out_h,
             source_rect: crop.map(CropRect::to_rect),
@@ -106,6 +92,20 @@ impl VideoConverter {
     /// Convert one BGRA texture into a freshly allocated NV12 texture
     /// (the encoder holds frames asynchronously; pooling is a follow-up).
     pub fn convert(&mut self, bgra: &ID3D11Texture2D) -> WinResult<ID3D11Texture2D> {
+        let (in_width, in_height) = d3d11::texture_size(bgra);
+        if (in_width, in_height) != (self.in_width, self.in_height) {
+            let (enumerator, processor) = create_video_processor(
+                &self.video_device,
+                in_width,
+                in_height,
+                self.out_width,
+                self.out_height,
+            )?;
+            self.enumerator = enumerator;
+            self.processor = processor;
+            self.in_width = in_width;
+            self.in_height = in_height;
+        }
         let out = d3d11::create_nv12_texture(&self.device, self.out_width, self.out_height)?;
 
         let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
@@ -178,6 +178,36 @@ impl VideoConverter {
         result?;
         Ok(out)
     }
+}
+
+fn create_video_processor(
+    video_device: &ID3D11VideoDevice,
+    in_w: u32,
+    in_h: u32,
+    out_w: u32,
+    out_h: u32,
+) -> WinResult<(ID3D11VideoProcessorEnumerator, ID3D11VideoProcessor)> {
+    let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+        InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+        InputFrameRate: DXGI_RATIONAL {
+            Numerator: 60,
+            Denominator: 1,
+        },
+        InputWidth: in_w,
+        InputHeight: in_h,
+        OutputFrameRate: DXGI_RATIONAL {
+            Numerator: 60,
+            Denominator: 1,
+        },
+        OutputWidth: out_w,
+        OutputHeight: out_h,
+        Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    };
+    // SAFETY: desc is fully initialized; out-params are valid.
+    let enumerator = unsafe { video_device.CreateVideoProcessorEnumerator(&desc)? };
+    // SAFETY: enumerator is valid; rate-conversion caps index 0 always exists.
+    let processor = unsafe { video_device.CreateVideoProcessor(&enumerator, 0)? };
+    Ok((enumerator, processor))
 }
 
 #[cfg(test)]

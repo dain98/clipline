@@ -14,7 +14,10 @@ pub mod window;
 pub use mft::{MftConfig, MftH264Encoder};
 pub use wasapi::WasapiLoopback;
 pub use wgc::WgcCapture;
-pub use window::find_window_by_title;
+pub use window::{
+    enumerate_capturable_windows, find_window_by_title, window_client_crop, window_from_raw_handle,
+    CapturableWindow,
+};
 
 /// The capture-clock origin: QPC now, in the 100 ns units shared by WGC
 /// `SystemRelativeTime` and WASAPI QPC positions (ddoc §6).

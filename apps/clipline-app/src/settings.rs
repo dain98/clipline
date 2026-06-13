@@ -1,5 +1,6 @@
 //! Persisted application settings and mapping to recorder service options.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -97,6 +98,68 @@ pub struct AudioSettings {
     pub mic_channels: AudioChannelMode,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustomGameSettings {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub exe_name: String,
+    #[serde(default)]
+    pub process_path: Option<String>,
+    #[serde(default)]
+    pub window_title: String,
+}
+
+impl CustomGameSettings {
+    fn normalize(&mut self) {
+        self.id = self.id.trim().to_string();
+        self.name = self.name.trim().to_string();
+        self.exe_name = self.exe_name.trim().to_string();
+        self.window_title = self.window_title.trim().to_string();
+        self.process_path = self
+            .process_path
+            .take()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty());
+    }
+
+    fn has_match_identity(&self) -> bool {
+        !self.exe_name.trim().is_empty()
+            || self
+                .process_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+            || !self.window_title.trim().is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GameSettings {
+    #[serde(default = "default_enabled")]
+    pub auto_detect: bool,
+    #[serde(default)]
+    pub custom_games: Vec<CustomGameSettings>,
+}
+
+impl Default for GameSettings {
+    fn default() -> Self {
+        Self {
+            auto_detect: true,
+            custom_games: Vec::new(),
+        }
+    }
+}
+
+impl GameSettings {
+    fn normalize(&mut self) {
+        for game in &mut self.custom_games {
+            game.normalize();
+        }
+    }
+}
+
 impl Default for AudioSettings {
     fn default() -> Self {
         Self {
@@ -181,6 +244,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub capture_region: CaptureRegionSettings,
     #[serde(default)]
+    pub games: GameSettings,
+    #[serde(default)]
     pub audio: AudioSettings,
     pub buffer_seconds: f64,
     pub replay_window_s: f64,
@@ -202,6 +267,7 @@ impl Default for AppSettings {
             capture_mode: CaptureMode::PrimaryMonitor,
             window_title: String::new(),
             capture_region: CaptureRegionSettings::default(),
+            games: GameSettings::default(),
             audio: AudioSettings::default(),
             buffer_seconds: 60.0 + BUFFER_HEADROOM_S,
             replay_window_s: 60.0,
@@ -231,6 +297,7 @@ impl AppSettings {
                 return Err("capture region is too large".into());
             }
         }
+        self.validate_games()?;
         validate_range("output volume", self.audio.output_volume, 0.0, 2.0)?;
         validate_range("microphone volume", self.audio.mic_volume, 0.0, 2.0)?;
         validate_range("buffer seconds", self.buffer_seconds, 10.0, 20.0 * 60.0)?;
@@ -296,6 +363,7 @@ impl AppSettings {
             .audio
             .mic_device_id
             .filter(|id| !id.trim().is_empty());
+        settings.games.normalize();
         // A malformed media_dir (empty/relative hand-edit, partial write) must
         // not nuke the whole settings file — degrade it to the default folder,
         // mirroring the hotkey repair above.
@@ -315,6 +383,7 @@ impl AppSettings {
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
         let mut settings = self.clone();
         settings.hotkey = normalize_hotkey(&settings.hotkey)?;
+        settings.games.normalize();
         settings.media_dir = settings.media_dir_path()?.display().to_string();
         if matches!(settings.replay_storage.mode, ReplayStorageMode::Disk) {
             settings.replay_storage.disk_dir =
@@ -353,6 +422,29 @@ impl AppSettings {
             || same_or_nested_path(&media_dir, &cache_dir)
         {
             return Err("replay cache folder must be separate from the media folder".into());
+        }
+        Ok(())
+    }
+
+    fn validate_games(&self) -> Result<(), String> {
+        let mut ids = HashSet::new();
+        for game in &self.games.custom_games {
+            let id = game.id.trim();
+            if id.is_empty() {
+                return Err("custom game id is required".into());
+            }
+            if !ids.insert(id.to_ascii_lowercase()) {
+                return Err(format!("custom game id {id:?} is duplicated"));
+            }
+            if game.name.trim().is_empty() {
+                return Err("custom game name is required".into());
+            }
+            if !game.has_match_identity() {
+                return Err(format!(
+                    "custom game {:?} needs a process or window identity",
+                    game.name
+                ));
+            }
         }
         Ok(())
     }
@@ -570,6 +662,8 @@ mod tests {
         let settings = AppSettings::default();
 
         assert_eq!(settings.capture_mode, CaptureMode::PrimaryMonitor);
+        assert!(settings.games.auto_detect);
+        assert!(settings.games.custom_games.is_empty());
         assert!(settings.audio.output_enabled);
         assert_eq!(settings.audio.output_device_id, None);
         assert_eq!(settings.audio.output_volume, 1.0);
@@ -627,6 +721,7 @@ mod tests {
         assert_eq!(settings.capture_region.width, 1920);
         assert_eq!(settings.capture_region.height, 1080);
         assert_eq!(settings.audio, AudioSettings::default());
+        assert_eq!(settings.games, GameSettings::default());
         assert_eq!(settings.media_dir, default_media_dir());
         assert_eq!(settings.video_encoder, VideoEncoder::Auto);
         assert!(settings.validate().is_ok());
@@ -918,6 +1013,17 @@ mod tests {
         let settings = AppSettings {
             bitrate_mbps: 18.0,
             hotkey: "Ctrl+Alt+F9".into(),
+            games: GameSettings {
+                auto_detect: true,
+                custom_games: vec![CustomGameSettings {
+                    id: "custom-notepad".into(),
+                    name: "Notepad".into(),
+                    enabled: true,
+                    exe_name: "notepad.exe".into(),
+                    process_path: Some(r"C:\Windows\System32\notepad.exe".into()),
+                    window_title: "Untitled - Notepad".into(),
+                }],
+            },
             ..AppSettings::default()
         };
 
@@ -925,6 +1031,26 @@ mod tests {
         let loaded = AppSettings::load_from(&path).unwrap();
 
         assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn validation_rejects_custom_game_without_match_identity() {
+        let settings = AppSettings {
+            games: GameSettings {
+                auto_detect: true,
+                custom_games: vec![CustomGameSettings {
+                    id: "custom-empty".into(),
+                    name: "Mystery".into(),
+                    enabled: true,
+                    exe_name: " ".into(),
+                    process_path: None,
+                    window_title: " ".into(),
+                }],
+            },
+            ..AppSettings::default()
+        };
+
+        assert!(settings.validate().is_err());
     }
 
     #[test]
