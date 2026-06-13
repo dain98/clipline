@@ -2,6 +2,7 @@ pub mod annexb;
 pub mod av1;
 pub mod avsync;
 pub mod clock;
+pub mod ffmpeg;
 pub mod hevc;
 pub mod mock;
 pub mod opus;
