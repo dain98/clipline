@@ -38,6 +38,12 @@ struct AudioDeviceLists {
     inputs: Vec<AudioDeviceInfo>,
 }
 
+#[derive(serde::Serialize)]
+struct VideoEncoderInfo {
+    id: &'static str,
+    name: &'static str,
+}
+
 #[derive(serde::Serialize, Clone)]
 // Tauri events are JSON, so the live monitor keeps 30 ms chunks as compact
 // i16 samples instead of shipping f32 PCM through IPC.
@@ -263,6 +269,52 @@ fn list_audio_devices() -> Result<AudioDeviceLists, String> {
 }
 
 #[tauri::command]
+fn list_video_encoders() -> Result<Vec<VideoEncoderInfo>, String> {
+    let capabilities =
+        clipline_capture::windows::mft_probe::enumerate().map_err(|e| e.to_string())?;
+    let mut encoders = Vec::new();
+    for capability in capabilities {
+        if !capability
+            .codecs
+            .contains(&clipline_capture::probe::Codec::H264)
+        {
+            continue;
+        }
+        let Some(info) = video_encoder_info(capability.backend) else {
+            continue;
+        };
+        if !encoders
+            .iter()
+            .any(|encoder: &VideoEncoderInfo| encoder.id == info.id)
+        {
+            encoders.push(info);
+        }
+    }
+    Ok(encoders)
+}
+
+fn video_encoder_info(
+    backend: clipline_capture::probe::EncoderBackend,
+) -> Option<VideoEncoderInfo> {
+    match backend {
+        clipline_capture::probe::EncoderBackend::Nvenc => Some(VideoEncoderInfo {
+            id: "nvenc_h264",
+            name: "NVIDIA NVENC H.264 (uses GPU)",
+        }),
+        clipline_capture::probe::EncoderBackend::Amf => Some(VideoEncoderInfo {
+            id: "amf_h264",
+            name: "AMD AMF H.264 (uses GPU)",
+        }),
+        clipline_capture::probe::EncoderBackend::QuickSync => Some(VideoEncoderInfo {
+            id: "quick_sync_h264",
+            name: "Intel Quick Sync H.264 (uses GPU)",
+        }),
+        clipline_capture::probe::EncoderBackend::X264
+        | clipline_capture::probe::EncoderBackend::MfSoftware => None,
+    }
+}
+
+#[tauri::command]
 fn start_microphone_test<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<MicTestState>,
@@ -451,6 +503,7 @@ pub fn run() {
             choose_media_folder,
             list_displays,
             list_audio_devices,
+            list_video_encoders,
             start_microphone_test,
             stop_microphone_test,
             save_settings,
@@ -584,5 +637,24 @@ mod tests {
     fn quota_parser_rejects_negative_or_non_numeric_values() {
         assert!(parse_quota_gb("-1").is_err());
         assert!(parse_quota_gb("nope").is_err());
+    }
+
+    #[test]
+    fn encoder_info_ids_match_settings_serialization() {
+        use crate::service::VideoEncoder;
+        use clipline_capture::probe::EncoderBackend;
+
+        // The Settings dropdown sends VideoEncoderInfo.id; settings.rs maps it
+        // back through VideoEncoder's snake_case serde. If the two drift, a
+        // saved encoder silently shows "Unavailable encoder", so pin them.
+        for (backend, encoder) in [
+            (EncoderBackend::Nvenc, VideoEncoder::NvencH264),
+            (EncoderBackend::Amf, VideoEncoder::AmfH264),
+            (EncoderBackend::QuickSync, VideoEncoder::QuickSyncH264),
+        ] {
+            let info = video_encoder_info(backend).expect("hardware backend exposes encoder info");
+            let serialized = serde_json::to_string(&encoder).expect("encoder serializes");
+            assert_eq!(serialized, format!("\"{}\"", info.id));
+        }
     }
 }

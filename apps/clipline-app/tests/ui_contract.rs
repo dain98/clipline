@@ -14,6 +14,11 @@ fn main_js() -> String {
     fs::read_to_string(path).expect("read ui/main.js")
 }
 
+fn styles_css() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/styles.css");
+    fs::read_to_string(path).expect("read ui/styles.css")
+}
+
 #[test]
 fn review_player_owns_all_controls() {
     let html = index_html();
@@ -89,6 +94,8 @@ fn review_player_owns_all_controls() {
         "id=\"region-align-menu\"",
         "id=\"region-display-menu\"",
         "id=\"set-buffer\"",
+        "id=\"set-encoder\"",
+        "id=\"encoder-summary\"",
         "id=\"set-replay\"",
         "id=\"replay-summary\"",
         "id=\"replay-scale\"",
@@ -103,6 +110,7 @@ fn review_player_owns_all_controls() {
         "id=\"set-quota\"",
         "id=\"set-hotkey\"",
         "id=\"settings-save\"",
+        "id=\"settings-close\"",
     ] {
         assert!(
             html.contains(required),
@@ -178,9 +186,15 @@ fn review_player_owns_all_controls() {
         !html.contains("settings-fold"),
         "the sidebar settings fold was replaced by #settings-page"
     );
+    // Reversed (2026-06-12, PR #5): the footer now carries an explicit Close
+    // button after Save, replacing the earlier "close only from the rail" rule.
+    let settings_save = html.find("id=\"settings-save\"").expect("settings save button");
+    let settings_close = html
+        .find("id=\"settings-close\"")
+        .expect("settings close button");
     assert!(
-        !html.contains("id=\"settings-close\""),
-        "the settings page closes from the bottom-left Settings control, not an extra X button"
+        settings_save < settings_close,
+        "Close must come after Save in the footer markup"
     );
 
     // Removed on purpose (2026-06-12): the path lives in #pmeta, and clicking
@@ -243,6 +257,31 @@ fn no_native_browser_dialogs() {
             "main.js must not call native {banned}…) — use the in-app dialog"
         );
     }
+}
+
+#[test]
+fn controls_have_custom_range_and_scrollbar_skin() {
+    let css = styles_css();
+    let js =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/main.js")).unwrap();
+
+    assert!(
+        css.contains("::-webkit-slider-thumb") && css.contains("::-moz-range-thumb"),
+        "range inputs should use Clipline slider styling instead of native defaults"
+    );
+    assert!(
+        css.contains("::-webkit-scrollbar-thumb") && css.contains("scrollbar-color"),
+        "scrollable areas should use the app scrollbar styling"
+    );
+    assert!(
+        css.contains("--range-progress") && js.contains("syncRangeProgress"),
+        "slider fill must stay synced to the current value"
+    );
+    assert!(
+        css.contains("background-position: right 12px center")
+            && css.contains("-webkit-appearance: none"),
+        "select arrows should use the app inset instead of the native edge-hugging arrow"
+    );
 }
 
 #[test]

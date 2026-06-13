@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use clipline_capture::probe::EncoderBackend;
 use clipline_capture::traits::{AudioSource, CaptureError, FrameData};
 use clipline_capture::windows::nv12::CropRect;
 use clipline_capture::windows::wasapi::{WasapiChannelMode, WasapiMixedLoopback};
@@ -46,6 +47,27 @@ pub enum AudioChannelMode {
     #[default]
     Mono,
     Stereo,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoEncoder {
+    #[default]
+    Auto,
+    NvencH264,
+    AmfH264,
+    QuickSyncH264,
+}
+
+impl VideoEncoder {
+    fn backend(self) -> Option<EncoderBackend> {
+        match self {
+            Self::Auto => None,
+            Self::NvencH264 => Some(EncoderBackend::Nvenc),
+            Self::AmfH264 => Some(EncoderBackend::Amf),
+            Self::QuickSyncH264 => Some(EncoderBackend::QuickSync),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,6 +133,7 @@ pub struct ServiceOptions {
     pub disk_quota_bytes: Option<u64>,
     pub fps: u32,
     pub bitrate_bps: u32,
+    pub video_encoder: VideoEncoder,
     pub audio: AudioOptions,
 }
 
@@ -128,6 +151,7 @@ impl Default for ServiceOptions {
             disk_quota_bytes: Some(DEFAULT_DISK_QUOTA_BYTES),
             fps: 60,
             bitrate_bps: 12_000_000,
+            video_encoder: VideoEncoder::Auto,
             audio: AudioOptions::default(),
         }
     }
@@ -212,9 +236,32 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         height: enc_h,
         fps: opts.fps,
         bitrate_bps: opts.bitrate_bps,
+        encoder_backend: opts.video_encoder.backend(),
     };
-    let encoder =
-        MftH264Encoder::new_with_crop(&device, in_w, in_h, cfg, crop).map_err(|e| init(&e))?;
+    let encoder = match MftH264Encoder::new_with_crop(&device, in_w, in_h, cfg, crop) {
+        Ok(encoder) => encoder,
+        Err(e) if opts.video_encoder != VideoEncoder::Auto => {
+            warn_user(
+                events,
+                format!(
+                    "{:?} encoder unavailable; using Automatic instead: {e}",
+                    opts.video_encoder
+                ),
+            );
+            MftH264Encoder::new_with_crop(
+                &device,
+                in_w,
+                in_h,
+                MftConfig {
+                    encoder_backend: None,
+                    ..cfg
+                },
+                crop,
+            )
+            .map_err(|e| init(&e))?
+        }
+        Err(e) => return Err(init(&e)),
+    };
 
     let mut rec = Recorder::new(cap, encoder, opts.buffer_bytes);
     if let Some(audio) = audio_source_from_options(clock, &opts.audio, events) {
@@ -375,7 +422,7 @@ fn audio_source_from_options(
         ) {
             Ok(audio) => Some(Box::new(audio)),
             Err(e) => {
-                warn_audio(
+                warn_user(
                     events,
                     format!("mixed audio unavailable; trying single-source fallback: {e}"),
                 );
@@ -406,7 +453,7 @@ fn audio_source_from_options(
         ) {
             Ok(audio) => Some(Box::new(audio)),
             Err(e) => {
-                warn_audio(events, format!("output audio unavailable; continuing: {e}"));
+                warn_user(events, format!("output audio unavailable; continuing: {e}"));
                 None
             }
         },
@@ -418,7 +465,7 @@ fn audio_source_from_options(
         ) {
             Ok(audio) => Some(Box::new(audio)),
             Err(e) => {
-                warn_audio(events, format!("microphone unavailable; continuing: {e}"));
+                warn_user(events, format!("microphone unavailable; continuing: {e}"));
                 None
             }
         },
@@ -426,7 +473,7 @@ fn audio_source_from_options(
     }
 }
 
-fn warn_audio(events: &Sender<Event>, message: String) {
+fn warn_user(events: &Sender<Event>, message: String) {
     let _ = events.send(Event::Error { message });
 }
 

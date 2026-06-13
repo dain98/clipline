@@ -272,6 +272,16 @@
             <input id="set-buffer" type="hidden" value="120" />
             <div class="setting-row">
               <div class="setting-info">
+                <strong>Hardware encoder</strong>
+                <span>GPU encoder used for new recordings.</span>
+              </div>
+              <div class="recording-control">
+                <select id="set-encoder"></select>
+                <span id="encoder-summary" class="setting-summary"></span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
                 <strong>Save length</strong>
                 <span>How much recent footage each replay saves.</span>
               </div>
@@ -359,7 +369,8 @@
         </div>
 
         <footer class="settings-actions">
-          <button id="settings-save" class="primary">Save Settings</button>
+          <button id="settings-save" type="button" class="primary">Save Settings</button>
+          <button id="settings-close" type="button">Close</button>
           <span id="settings-status" class="hint"></span>
         </footer>
       </section>
