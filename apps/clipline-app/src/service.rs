@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
 
 use clipline_capture::probe::EncoderBackend;
 use clipline_capture::traits::{AudioSource, CaptureError, FrameData};
@@ -13,12 +14,17 @@ use clipline_capture::windows::wasapi::{WasapiChannelMode, WasapiMixedLoopback};
 use clipline_capture::windows::{
     d3d11, find_window_by_title, MftConfig, MftH264Encoder, WasapiLoopback, WgcCapture,
 };
-use clipline_capture::{even_dimensions, PipelineError, Recorder, RelativeClock};
+use clipline_capture::{
+    even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
+};
 use clipline_events::{EventKind, MarkerLog};
 use clipline_storage::sessions::{session_label, SessionTracker};
 use clipline_storage::{enforce_quota, storage_status};
+use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 use crate::markers::{self, PollerMsg};
+
+const LOW_REPLAY_CACHE_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 pub enum Cmd {
     Save,
@@ -95,6 +101,16 @@ impl Default for AudioOptions {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ReplayStorageOptions {
+    #[default]
+    Memory,
+    Disk {
+        dir: PathBuf,
+        quota_bytes: u64,
+    },
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
@@ -129,6 +145,8 @@ pub struct ServiceOptions {
     pub replay_window_s: f64,
     /// Ring budget in bytes.
     pub buffer_bytes: usize,
+    /// Where the rolling replay buffer stores encoded GOP segments.
+    pub replay_storage: ReplayStorageOptions,
     /// Saved clip disk quota. None disables save-time GC.
     pub disk_quota_bytes: Option<u64>,
     pub fps: u32,
@@ -148,6 +166,7 @@ impl Default for ServiceOptions {
             replay_window_s: 60.0,
             // ~2 min at 12 Mbps video + audio headroom.
             buffer_bytes: 220 * 1024 * 1024,
+            replay_storage: ReplayStorageOptions::Memory,
             disk_quota_bytes: Some(DEFAULT_DISK_QUOTA_BYTES),
             fps: 60,
             bitrate_bps: 12_000_000,
@@ -201,9 +220,9 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             .map_err(|e| init(&e))?;
             let crop = crop_for_region(region, &display.info)?;
             (
-                WgcCapture::for_monitor_on(device.clone(), display.handle, clock)
+                WgcCapture::for_monitor_region_on(device.clone(), display.handle, clock, crop)
                     .map_err(|e| init(&e))?,
-                Some(crop),
+                None,
             )
         }
     };
@@ -263,7 +282,20 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         Err(e) => return Err(init(&e)),
     };
 
-    let mut rec = Recorder::new(cap, encoder, opts.buffer_bytes);
+    let replay_cache_dir = prepare_replay_storage(&opts)?;
+    let replay_storage = match &opts.replay_storage {
+        ReplayStorageOptions::Memory => ReplayStorageConfig::Memory {
+            max_bytes: opts.buffer_bytes,
+        },
+        ReplayStorageOptions::Disk { quota_bytes, .. } => ReplayStorageConfig::Disk {
+            max_bytes: usize::try_from(*quota_bytes).unwrap_or(usize::MAX),
+            dir: replay_cache_dir
+                .clone()
+                .ok_or_else(|| "disk replay cache was not prepared".to_string())?,
+        },
+    };
+    let mut rec = Recorder::new_with_replay_storage(cap, encoder, replay_storage)
+        .map_err(|e| format!("replay cache: {e}"))?;
     if let Some(audio) = audio_source_from_options(clock, &opts.audio, events) {
         rec = rec.with_audio(audio);
     }
@@ -319,17 +351,15 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
 
         if last_status.elapsed() >= Duration::from_secs(1) {
             last_status = Instant::now();
-            let (mut span, mut first_pts) = (0.0f64, None::<f64>);
-            for seg in rec.ring().segments() {
-                first_pts.get_or_insert(seg.pts_start_s);
-                span = seg.pts_end_s() - first_pts.unwrap();
-            }
             let _ = events.send(Event::Status {
                 recording: true,
-                segments: rec.ring().len(),
-                buffered_s: span,
-                buffered_mb: rec.ring().bytes() as f64 / (1024.0 * 1024.0),
+                segments: rec.ring_len(),
+                buffered_s: rec.buffered_span_s(),
+                buffered_mb: rec.ring_bytes() as f64 / (1024.0 * 1024.0),
             });
+            if replay_cache_dir.is_some() {
+                ensure_replay_cache_free_space(&opts)?;
+            }
         }
 
         loop {
@@ -496,6 +526,83 @@ fn warn_user(events: &Sender<Event>, message: String) {
     let _ = events.send(Event::Error { message });
 }
 
+fn prepare_replay_storage(opts: &ServiceOptions) -> Result<Option<PathBuf>, String> {
+    match &opts.replay_storage {
+        ReplayStorageOptions::Memory => Ok(None),
+        ReplayStorageOptions::Disk { dir, quota_bytes } => {
+            if *quota_bytes < 256 * 1024 * 1024 {
+                return Err("replay cache quota is too small".into());
+            }
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("create replay cache folder {dir:?}: {e}"))?;
+            ensure_replay_cache_free_space(opts)?;
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let run_dir = (0u32..1024)
+                .find_map(|attempt| {
+                    let candidate = dir.join(format!(
+                        "clipline-replay-cache-{stamp}-{}-{attempt}",
+                        std::process::id()
+                    ));
+                    match std::fs::create_dir(&candidate) {
+                        Ok(()) => Some(Ok(candidate)),
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                        Err(e) => Some(Err(format!(
+                            "create replay cache run folder {candidate:?}: {e}"
+                        ))),
+                    }
+                })
+                .unwrap_or_else(|| {
+                    Err("create replay cache run folder: too many collisions".into())
+                })?;
+            Ok(Some(run_dir))
+        }
+    }
+}
+
+fn ensure_replay_cache_free_space(opts: &ServiceOptions) -> Result<(), String> {
+    let ReplayStorageOptions::Disk { dir, .. } = &opts.replay_storage else {
+        return Ok(());
+    };
+    let free = available_space_bytes(dir)?;
+    if free < LOW_REPLAY_CACHE_DISK_RESERVE_BYTES {
+        return Err(format!(
+            "replay cache disk is low: {} MiB free, need at least 2048 MiB",
+            free / (1024 * 1024)
+        ));
+    }
+    Ok(())
+}
+
+fn available_space_bytes(path: &Path) -> Result<u64, String> {
+    let mut wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    if wide.len() == 1 {
+        wide = OsStr::new(".")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+    }
+    let mut free = 0u64;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(format!("could not read free space for {path:?}"));
+    }
+    Ok(free)
+}
+
 fn send_stopped(events: &Sender<Event>) {
     let _ = events.send(Event::Status {
         recording: false,
@@ -511,10 +618,9 @@ fn save(
     window_s: f64,
     exclude_before_s: Option<f64>,
 ) -> Result<(f64, f64), String> {
-    let saved_from = {
-        let segs = rec.ring().save_window(window_s, exclude_before_s);
-        segs.first().map(|s| s.pts_start_s)
-    };
+    let saved_from = rec
+        .save_window_bounds(window_s, exclude_before_s)
+        .map(|(start, _)| start);
     let file = std::fs::File::create(path).map_err(|e| format!("create {path:?}: {e}"))?;
     let (_, end) = rec
         .save_replay(file, window_s, exclude_before_s)

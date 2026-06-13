@@ -87,7 +87,8 @@ function clipMarkers() {
 
 function fillSettings(s) {
   const audio = { ...defaultAudioSettings(), ...(s.audio || {}) };
-  currentSettings = { ...s, audio };
+  const replayStorage = { ...defaultReplayStorageSettings(), ...(s.replay_storage || {}) };
+  currentSettings = { ...s, audio, replay_storage: replayStorage };
   $("set-capture").value = s.capture_mode;
   $("set-window").value = s.window_title ?? "";
   regionState = s.capture_region ?? regionState;
@@ -96,13 +97,17 @@ function fillSettings(s) {
   $("set-mic-enabled").checked = !!audio.mic_enabled;
   $("set-mic-volume").value = String(Number.isFinite(audio.mic_volume) ? audio.mic_volume : 1);
   $("set-mic-mono").checked = (audio.mic_channels || "mono") === "mono";
-  $("set-buffer").value = Number(s.buffer_seconds) || 75;
+  $("set-buffer").value = Number(s.buffer_seconds) || ((Number(s.replay_window_s) || 60) + 15);
   $("set-replay").value = Math.min(120, Number(s.replay_window_s) || 60);
   $("set-encoder").value = s.video_encoder || "auto";
   $("set-bitrate").value = qualityIndexForBitrate(s.bitrate_mbps);
   $("set-fps").value = smoothnessIndexForFps(s.fps);
   $("set-quota").value = s.disk_quota_gb;
   $("set-media-dir").value = s.media_dir ?? "";
+  $("set-replay-disk-enabled").checked = replayStorage.mode === "disk";
+  $("set-replay-disk-dir").value = replayStorage.disk_dir || "";
+  $("set-replay-disk-quota").value = replayStorage.disk_quota_gb ?? 2;
+  $("set-replay-disk-ack").checked = !!replayStorage.disk_acknowledged;
   $("set-hotkey").value = s.hotkey;
   $("save-hotkey").textContent = s.hotkey;
   endHotkeyCapture("Click the field to record a new shortcut.");
@@ -111,6 +116,7 @@ function fillSettings(s) {
   renderVideoEncoderSelect();
   syncAudioFields();
   syncRecordingFields();
+  syncReplayStorageFields();
   updateCaptureStatus();
 }
 
@@ -130,7 +136,7 @@ function readSettings() {
       mic_channels: $("set-mic-mono").checked ? "mono" : "stereo",
     },
     // Ring holds the save window plus 15 s headroom (mirrors BUFFER_HEADROOM_S
-    // in settings.rs) — not a fixed 2 minutes.
+    // in settings.rs) - not a fixed 2 minutes.
     buffer_seconds: replay + 15,
     replay_window_s: replay,
     video_encoder: $("set-encoder").value,
@@ -138,6 +144,12 @@ function readSettings() {
     fps: smoothnessPreset(Number($("set-fps").value)).fps,
     disk_quota_gb: Number($("set-quota").value),
     media_dir: $("set-media-dir").value.trim(),
+    replay_storage: {
+      mode: $("set-replay-disk-enabled").checked ? "disk" : "memory",
+      disk_dir: $("set-replay-disk-dir").value.trim(),
+      disk_quota_gb: Number($("set-replay-disk-quota").value),
+      disk_acknowledged: $("set-replay-disk-ack").checked,
+    },
     hotkey: $("set-hotkey").value,
   };
 }
@@ -151,6 +163,15 @@ function defaultAudioSettings() {
     mic_device_id: null,
     mic_volume: 1,
     mic_channels: "mono",
+  };
+}
+
+function defaultReplayStorageSettings() {
+  return {
+    mode: "memory",
+    disk_dir: "",
+    disk_quota_gb: 2,
+    disk_acknowledged: false,
   };
 }
 
@@ -177,6 +198,20 @@ function syncRecordingFields() {
       : `${encoder.name} is used for new recordings.`;
   $("quality-summary").textContent = `${quality.label} quality - ${quality.hint}.`;
   $("fps-summary").textContent = `${smoothness.label} - ${smoothness.hint}.`;
+  syncReplayStorageFields();
+}
+
+function syncReplayStorageFields() {
+  const enabled = $("set-replay-disk-enabled").checked;
+  const fields = $("replay-disk-fields");
+  fields.hidden = !enabled;
+  const quality = recordingQualityPreset(Number($("set-bitrate").value));
+  const gbPerHour = quality.bitrate * 1_000_000 / 8 * 3600 / (1000 ** 3);
+  $("replay-disk-estimate").textContent =
+    `${quality.bitrate} Mbps: about ${gbPerHour.toFixed(quality.bitrate >= 40 ? 0 : 1)} GB/hour written while recording.`;
+  for (const id of ["set-replay-disk-dir", "choose-replay-cache-folder", "set-replay-disk-quota", "set-replay-disk-ack"]) {
+    $(id).disabled = !enabled;
+  }
 }
 
 function volumeLabel(value) {
@@ -668,7 +703,7 @@ async function refreshStorage() {
 async function refreshMemoryUsage() {
   try {
     const s = await invoke("memory_status");
-    $("memory-usage").textContent = `Using ${fmtBytes(s.working_set_bytes)} RAM`;
+    $("memory-usage").textContent = `Using ${fmtBytes(s.private_working_set_bytes)} RAM`;
   } catch (_) {
     $("memory-usage").textContent = "Using -- RAM";
   }
@@ -1091,6 +1126,20 @@ async function chooseMediaFolder() {
   }
 }
 
+async function chooseReplayCacheFolder() {
+  try {
+    const selected = await invoke("choose_replay_cache_folder", {
+      current: $("set-replay-disk-dir").value,
+    });
+    if (selected) {
+      $("set-replay-disk-dir").value = selected;
+      $("settings-status").textContent = "replay cache folder selected - save to apply";
+    }
+  } catch (e) {
+    $("error").textContent = e;
+  }
+}
+
 /* ---- backend events ---- */
 
 listen("status", (e) => {
@@ -1157,6 +1206,10 @@ for (const id of ["set-output-volume", "set-mic-volume"]) {
 }
 $("test-mic").addEventListener("click", testMic);
 $("choose-media-folder").addEventListener("click", chooseMediaFolder);
+$("choose-replay-cache-folder").addEventListener("click", chooseReplayCacheFolder);
+$("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);
+$("set-replay-disk-quota").addEventListener("input", syncReplayStorageFields);
+$("set-replay-disk-quota").addEventListener("change", syncReplayStorageFields);
 for (const id of ["set-buffer", "set-replay", "set-encoder", "set-bitrate", "set-fps"]) {
   $(id).addEventListener("input", syncRecordingFields);
   $(id).addEventListener("change", syncRecordingFields);

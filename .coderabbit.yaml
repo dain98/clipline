@@ -1,0 +1,164 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: en-US
+early_access: false
+focus: high
+tone_instructions: "Be direct and high signal. Prioritize correctness, safety, privacy, performance, tests, and CI; skip praise, poems, and stylistic nitpicks unless they hide a defect."
+
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  review_status: true
+  review_details: false
+  commit_status: true
+  fail_commit_status: false
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: false
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: true
+  auto_apply_labels: false
+  suggested_reviewers: false
+  auto_assign_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  enable_prompt_for_ai_agents: true
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 5
+    drafts: true
+    ignore_title_keywords:
+      - "wip"
+      - "do not review"
+
+  path_filters:
+    - "**"
+    - "!target/**"
+    - "Cargo.lock"
+
+  path_instructions:
+    - path: "crates/clipline-capture/src/windows/**"
+      instructions: |
+        Treat Windows capture, encoding, and audio code as the highest-risk surface.
+        Check COM/D3D11/MFT/WASAPI lifetimes, HRESULT handling, thread ownership, QPC timestamping, GPU texture format transitions, and safe wrappers around unsafe code.
+        Flag any behavior that moves toward DLL injection, game memory inspection, kernel drivers, or anti-cheat-sensitive hooks.
+
+    - path: "crates/clipline-capture/src/**"
+      instructions: |
+        Verify recorder, capture, encode, and audio changes preserve one shared clock, stamp-derived PTS, audio gap filling, hardware encoder assumptions, and replay-save correctness.
+        Look for backpressure, dropped-frame, and shutdown races that could corrupt output or leave capture devices running.
+
+    - path: "crates/clipline-mp4/src/**"
+      instructions: |
+        Review MP4 muxing and trimming changes for correct sample tables, keyframe alignment, finalization, Opus timing, H.264 AVCC/Annex B boundaries, and the no-B-frame assumption.
+        Treat playable-but-desynchronized output as a correctness bug.
+
+    - path: "crates/clipline-events/src/**"
+      instructions: |
+        Check event schema and marker math against ddoc.md section 5.
+        Verify game-clock to recording-time mapping handles drift, pauses, duplicate events, and clip-window rebasing without remapping already written markers.
+
+    - path: "crates/clipline-lol/src/**"
+      instructions: |
+        Review League Live Client Data changes for quiet retry behavior outside matches, self-signed localhost HTTPS handling, monotonic EventID de-duplication, local-player identification, and defensive parsing of undocumented events.
+
+    - path: "crates/clipline-buffer/src/**"
+      instructions: |
+        Check replay-buffer changes for GOP-aligned saves, byte/time eviction correctness, overlapping-save behavior, and multi-track audio preservation.
+
+    - path: "crates/clipline-storage/src/**"
+      instructions: |
+        Check storage changes for path traversal protection, sidecar-aware size accounting, quota GC safety, protection of the just-saved clip, and configurable media-root consistency.
+
+    - path: "apps/clipline-app/src/**"
+      instructions: |
+        Review Tauri commands, service-thread state, settings persistence, hotkey handling, and tray behavior for races, stale status, and path validation.
+        Non-Windows builds must keep compiling through cfg gates and stubs.
+
+    - path: "apps/clipline-app/ui/**"
+      instructions: |
+        Preserve the first-party review player contracts in handoff.md.
+        Check keyboard behavior, stable DOM ids, hidden view stacking, WebView2 media-scope assumptions, no native video controls, and responsive layout without overlapping text or controls.
+
+    - path: "**/tests/**"
+      instructions: |
+        Ensure tests cover behavior, error paths, and cross-platform cfg boundaries.
+        Prefer neutral Rust tests for shared logic; keep real device tests skipped under CI when Windows runners lack capture, encoder, or audio hardware.
+
+    - path: ".github/workflows/**"
+      instructions: |
+        CI must continue to run cargo test --workspace and cargo clippy --workspace --all-targets -- -D warnings on both Ubuntu and Windows.
+        Keep ffprobe availability for MP4 validation and avoid adding hardware-dependent steps to hosted runners.
+
+    - path: "**/Cargo.toml"
+      instructions: |
+        Review new dependencies for license compatibility with MIT OR Apache-2.0 first-party code and ddoc.md LGPL FFmpeg constraints.
+        Flag GPL/nonfree dependencies unless the PR explicitly documents why they are acceptable.
+
+    - path: "Cargo.lock"
+      instructions: |
+        Review dependency updates for unexpected major-version jumps, duplicate dependency trees, security-sensitive crates, and license-risk changes.
+
+  pre_merge_checks:
+    title:
+      mode: warning
+      requirements: "Use a concise conventional-style title when practical, such as feat(scope): summary, fix(scope): summary, test(scope): summary, or docs(scope): summary."
+    description:
+      mode: warning
+    issue_assessment:
+      mode: warning
+    custom_checks:
+      - name: "No injection or telemetry"
+        mode: warning
+        instructions: |
+          Pass only if the PR preserves Clipline's core privacy and anti-cheat stance: no DLL injection, no process memory reading, no kernel driver, no hidden telemetry, and no account requirement.
+          For capture or game-integration changes, fail if the PR adds an anti-cheat-sensitive technique without an explicit rationale tied to ddoc.md.
+      - name: "Project source of truth"
+        mode: warning
+        instructions: |
+          Pass if behavior-changing PRs are consistent with ddoc.md and handoff.md.
+          For completed implementation milestones, check whether handoff.md or a relevant docs/superpowers/plans entry needs an update.
+
+  tools:
+    github-checks:
+      enabled: true
+      timeout_ms: 900000
+    languagetool:
+      enabled: false
+
+chat:
+  auto_reply: true
+  art: false
+
+knowledge_base:
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - files: "AGENTS.md, ddoc.md, handoff.md, CODEX_NOTES.md"
+        applyTo: "**/*"
+  learnings:
+    scope: local
+    approval_delay: 7
+  issues:
+    scope: local
+  pull_requests:
+    scope: local
+
+code_generation:
+  unit_tests:
+    path_instructions:
+      - path: "crates/**/src/**/*.rs"
+        instructions: |
+          Generate focused Rust tests near the changed crate. Prefer deterministic unit tests for neutral logic and avoid adding hardware-dependent CI requirements.
+      - path: "apps/clipline-app/ui/player-core.js"
+        instructions: |
+          Add or update the Rust Boa tests in apps/clipline-app/tests/player_core.rs for pure player-core behavior.

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use clipline_events::{ClipMarker, ClipMarkers};
-use clipline_mp4::trim_keyframe_aligned;
+use clipline_mp4::trim_keyframe_aligned_file;
 use clipline_mp4::walker::movie_duration_s;
 use clipline_storage::storage_status as read_storage_status;
 
@@ -165,11 +165,16 @@ pub fn export_clip(
     settings: tauri::State<StorageSettings>,
 ) -> Result<ExportedClipInfo, String> {
     let source = validate_clip_path(&settings, &path)?;
-    let input = std::fs::read(&source).map_err(|e| e.to_string())?;
-    let (output, info) =
-        trim_keyframe_aligned(&input, start_s, end_s).map_err(|e| e.to_string())?;
+    let tmp = unique_temp_export_path(&source)?;
+    let info = match trim_keyframe_aligned_file(&source, &tmp, start_s, end_s) {
+        Ok(info) => info,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
+    };
     let target = unique_export_path(&source, info.aligned_start_s, info.aligned_end_s)?;
-    std::fs::write(&target, output).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
 
     if let Some(markers) = read_markers(&source) {
         let cropped = crop_markers(&markers, info.aligned_start_s, info.aligned_end_s);
@@ -264,6 +269,24 @@ fn crop_markers(markers: &ClipMarkers, start_s: f64, end_s: f64) -> ClipMarkers 
         duration_s: end_s - start_s,
         markers: cropped,
     }
+}
+
+fn unique_temp_export_path(source: &Path) -> Result<PathBuf, String> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| "source clip has no parent directory".to_string())?;
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy())
+        .ok_or_else(|| "source clip has no file stem".to_string())?;
+    for suffix in 0..1000u32 {
+        let name = format!("{stem}_trim_pending_{suffix:03}.mp4.tmp");
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("could not choose an unused temporary export filename".into())
 }
 
 fn unique_export_path(source: &Path, start_s: f64, end_s: f64) -> Result<PathBuf, String> {

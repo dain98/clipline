@@ -1,9 +1,13 @@
 //! Keyframe-aligned stream-copy trim for finalized Clipline MP4s.
 
-use std::io::Cursor;
+use std::fs::File;
+use std::io::{Cursor, Seek, Write};
+use std::path::Path;
 
 use crate::walker::{children, find, walk, BoxInfo};
-use crate::{AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig};
+use crate::{
+    AudioTrackConfig, FragSample, HybridMp4Writer, SourceSample, TrackConfig, VideoTrackConfig,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrimInfo {
@@ -46,54 +50,25 @@ pub fn trim_keyframe_aligned(
     start_s: f64,
     end_s: f64,
 ) -> Result<(Vec<u8>, TrimInfo), TrimError> {
+    let mut out = Cursor::new(Vec::new());
+    let info = trim_keyframe_aligned_to_writer(input, start_s, end_s, &mut out)?;
+    Ok((out.into_inner(), info))
+}
+
+pub fn trim_keyframe_aligned_to_writer<W: Write + Seek>(
+    input: &[u8],
+    start_s: f64,
+    end_s: f64,
+    output: W,
+) -> Result<TrimInfo, TrimError> {
     validate_range(start_s, end_s)?;
     let movie = parse_movie(input)?;
-    let video_idx = movie
-        .tracks
-        .iter()
-        .position(|t| matches!(t.cfg, TrackConfig::Video(_)))
-        .ok_or_else(|| TrimError::Unsupported("missing video track".into()))?;
-    let video = &movie.tracks[video_idx];
-    let video_end_s = video.track_end_s();
-    if start_s >= video_end_s {
-        return Err(TrimError::InvalidRange("start is past the clip end".into()));
-    }
-
-    let start_idx = video
-        .samples
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.is_sync && s.start_s(video.timescale) <= start_s)
-        .map(|(i, _)| i)
-        .next_back()
-        .or_else(|| video.samples.iter().position(|s| s.is_sync))
-        .ok_or_else(|| TrimError::Unsupported("video track has no sync samples".into()))?;
-
-    let end_idx = video
-        .samples
-        .iter()
-        .enumerate()
-        .skip(start_idx + 1)
-        .find(|(_, s)| s.is_sync && s.start_s(video.timescale) >= end_s)
-        .map(|(i, _)| i)
-        .unwrap_or(video.samples.len());
-
-    let aligned_start_s = video.samples[start_idx].start_s(video.timescale);
-    let aligned_end_s = if end_idx < video.samples.len() {
-        video.samples[end_idx].start_s(video.timescale)
-    } else {
-        video.track_end_s()
-    };
-    if aligned_end_s <= aligned_start_s {
-        return Err(TrimError::InvalidRange(
-            "aligned range does not contain a video sample".into(),
-        ));
-    }
+    let selection = select_trim_range(&movie, start_s, end_s)?;
 
     let mut selected: Vec<Vec<FragSample>> = Vec::with_capacity(movie.tracks.len());
     for (idx, track) in movie.tracks.iter().enumerate() {
-        let samples: Vec<FragSample> = if idx == video_idx {
-            track.samples[start_idx..end_idx]
+        let samples: Vec<FragSample> = if idx == selection.video_idx {
+            track.samples[selection.start_idx..selection.end_idx]
                 .iter()
                 .map(|s| s.to_frag_sample(input))
                 .collect::<Result<_, _>>()?
@@ -103,7 +78,7 @@ pub fn trim_keyframe_aligned(
                 .iter()
                 .filter(|s| {
                     let start = s.start_s(track.timescale);
-                    start >= aligned_start_s && start < aligned_end_s
+                    start >= selection.aligned_start_s && start < selection.aligned_end_s
                 })
                 .map(|s| s.to_frag_sample(input))
                 .collect::<Result<_, _>>()?
@@ -112,25 +87,79 @@ pub fn trim_keyframe_aligned(
     }
 
     let tracks: Vec<TrackConfig> = movie.tracks.iter().map(|t| t.cfg.clone()).collect();
-    let mut writer = HybridMp4Writer::new_multi(Cursor::new(Vec::new()), tracks)?;
+    let mut writer = HybridMp4Writer::new_multi(output, tracks)?;
     let refs: Vec<&[FragSample]> = selected.iter().map(Vec::as_slice).collect();
     writer.write_fragment_multi(&refs)?;
-    let output = writer.finalize()?.into_inner();
+    let _ = writer.finalize()?;
 
-    Ok((
-        output,
-        TrimInfo {
-            requested_start_s: start_s,
-            requested_end_s: end_s,
-            aligned_start_s,
-            aligned_end_s,
-            duration_s: aligned_end_s - aligned_start_s,
-        },
-    ))
+    Ok(selection.info(start_s, end_s))
+}
+
+pub fn trim_keyframe_aligned_file(
+    source: &Path,
+    target: &Path,
+    start_s: f64,
+    end_s: f64,
+) -> Result<TrimInfo, TrimError> {
+    validate_range(start_s, end_s)?;
+    reject_same_file(source, target)?;
+    let input = std::fs::read(source)?;
+    let movie = parse_movie(&input)?;
+    let selection = select_trim_range(&movie, start_s, end_s)?;
+    let mut per_track: Vec<Vec<SourceSample>> = Vec::with_capacity(movie.tracks.len());
+    for (idx, track) in movie.tracks.iter().enumerate() {
+        let samples: Vec<SourceSample> = if idx == selection.video_idx {
+            track.samples[selection.start_idx..selection.end_idx]
+                .iter()
+                .map(SampleRecord::to_source_sample)
+                .collect()
+        } else {
+            track
+                .samples
+                .iter()
+                .filter(|s| {
+                    let start = s.start_s(track.timescale);
+                    start >= selection.aligned_start_s && start < selection.aligned_end_s
+                })
+                .map(SampleRecord::to_source_sample)
+                .collect()
+        };
+        per_track.push(samples);
+    }
+
+    let tracks: Vec<TrackConfig> = movie.tracks.iter().map(|t| t.cfg.clone()).collect();
+    let mut source_file = File::open(source)?;
+    let target_file = File::create(target)?;
+    let mut writer = HybridMp4Writer::new_multi(target_file, tracks)?;
+    let refs: Vec<&[SourceSample]> = per_track.iter().map(Vec::as_slice).collect();
+    writer.write_fragment_multi_from_source(&mut source_file, &refs)?;
+    let _ = writer.finalize()?;
+    Ok(selection.info(start_s, end_s))
+}
+
+fn reject_same_file(source: &Path, target: &Path) -> Result<(), TrimError> {
+    let source = std::fs::canonicalize(source)?;
+    if let Ok(target) = std::fs::canonicalize(target) {
+        if source == target {
+            return Err(TrimError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "trim source and target must be different files",
+            )));
+        }
+    }
+    Ok(())
 }
 
 struct ParsedMovie {
     tracks: Vec<ParsedTrack>,
+}
+
+struct TrimSelection {
+    video_idx: usize,
+    start_idx: usize,
+    end_idx: usize,
+    aligned_start_s: f64,
+    aligned_end_s: f64,
 }
 
 struct ParsedTrack {
@@ -180,6 +209,82 @@ impl SampleRecord {
             is_sync: self.is_sync,
         })
     }
+
+    fn to_source_sample(&self) -> SourceSample {
+        SourceSample {
+            offset: self.offset as u64,
+            size: self.size,
+            duration: self.duration,
+            is_sync: self.is_sync,
+        }
+    }
+}
+
+impl TrimSelection {
+    fn info(&self, requested_start_s: f64, requested_end_s: f64) -> TrimInfo {
+        TrimInfo {
+            requested_start_s,
+            requested_end_s,
+            aligned_start_s: self.aligned_start_s,
+            aligned_end_s: self.aligned_end_s,
+            duration_s: self.aligned_end_s - self.aligned_start_s,
+        }
+    }
+}
+
+fn select_trim_range(
+    movie: &ParsedMovie,
+    start_s: f64,
+    end_s: f64,
+) -> Result<TrimSelection, TrimError> {
+    let video_idx = movie
+        .tracks
+        .iter()
+        .position(|t| matches!(t.cfg, TrackConfig::Video(_)))
+        .ok_or_else(|| TrimError::Unsupported("missing video track".into()))?;
+    let video = &movie.tracks[video_idx];
+    let video_end_s = video.track_end_s();
+    if start_s >= video_end_s {
+        return Err(TrimError::InvalidRange("start is past the clip end".into()));
+    }
+
+    let start_idx = video
+        .samples
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.is_sync && s.start_s(video.timescale) <= start_s)
+        .map(|(i, _)| i)
+        .next_back()
+        .or_else(|| video.samples.iter().position(|s| s.is_sync))
+        .ok_or_else(|| TrimError::Unsupported("video track has no sync samples".into()))?;
+
+    let end_idx = video
+        .samples
+        .iter()
+        .enumerate()
+        .skip(start_idx + 1)
+        .find(|(_, s)| s.is_sync && s.start_s(video.timescale) >= end_s)
+        .map(|(i, _)| i)
+        .unwrap_or(video.samples.len());
+
+    let aligned_start_s = video.samples[start_idx].start_s(video.timescale);
+    let aligned_end_s = if end_idx < video.samples.len() {
+        video.samples[end_idx].start_s(video.timescale)
+    } else {
+        video.track_end_s()
+    };
+    if aligned_end_s <= aligned_start_s {
+        return Err(TrimError::InvalidRange(
+            "aligned range does not contain a video sample".into(),
+        ));
+    }
+    Ok(TrimSelection {
+        video_idx,
+        start_idx,
+        end_idx,
+        aligned_start_s,
+        aligned_end_s,
+    })
 }
 
 fn parse_movie(input: &[u8]) -> Result<ParsedMovie, TrimError> {
@@ -804,5 +909,56 @@ mod tests {
         assert!(out.windows(6).any(|w| w == b"V00000"));
         assert!(out.windows(6).any(|w| w == b"V00019"));
         assert!(!out.windows(6).any(|w| w == b"V00020"));
+    }
+
+    #[test]
+    fn file_trim_matches_in_memory_trim_output() {
+        let input = clipline_fixture();
+        let (expected, expected_info) = trim_keyframe_aligned(&input, 0.4, 1.2).unwrap();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-trim-file-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        let target = dir.join("target.mp4");
+        std::fs::write(&source, &input).unwrap();
+
+        let info = trim_keyframe_aligned_file(&source, &target, 0.4, 1.2).unwrap();
+        let actual = std::fs::read(&target).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(info, expected_info);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn file_trim_rejects_same_source_and_target_without_truncating() {
+        let input = clipline_fixture();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-trim-same-file-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        std::fs::write(&source, &input).unwrap();
+
+        let err = trim_keyframe_aligned_file(&source, &source, 0.4, 1.2).unwrap_err();
+        let after = std::fs::read(&source).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(matches!(
+            err,
+            TrimError::Io(ref e) if e.kind() == std::io::ErrorKind::InvalidInput
+        ));
+        assert_eq!(after, input);
     }
 }
