@@ -3,6 +3,8 @@ pub mod av1;
 pub mod avsync;
 pub mod clock;
 pub mod ffmpeg;
+pub mod ffmpeg_encoder;
+pub mod framing;
 pub mod hevc;
 pub mod mock;
 pub mod opus;
