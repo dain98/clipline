@@ -70,7 +70,12 @@ fn walk_range(buf: &[u8], mut pos: u64, end: u64) -> Vec<BoxInfo> {
         if size < header || pos + size > end {
             break; // truncated/corrupt — stop, return what we have
         }
-        out.push(BoxInfo { fourcc, offset: pos, size, payload_offset: pos + header });
+        out.push(BoxInfo {
+            fourcc,
+            offset: pos,
+            size,
+            payload_offset: pos + header,
+        });
         pos += size;
     }
     out
@@ -142,7 +147,11 @@ mod tests {
         };
         let mut w = HybridMp4Writer::new(std::io::Cursor::new(Vec::new()), cfg).unwrap();
         let samples: Vec<FragSample> = (0..n)
-            .map(|i| FragSample { data: vec![0xAB; 8], duration: dur, is_sync: i == 0 })
+            .map(|i| FragSample {
+                data: vec![0xAB; 8],
+                duration: dur,
+                is_sync: i == 0,
+            })
             .collect();
         w.write_fragment(&samples).unwrap();
         w.finalize().unwrap().into_inner()

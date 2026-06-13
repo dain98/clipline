@@ -35,7 +35,9 @@ async fn polls_dedupe_and_stamp_recording_offsets() {
     let mut tracker = EventTracker::default();
     let t0 = Instant::now();
 
-    let batch = poll_once(&client, &mut tracker, "Me", t0, 0.0).await.unwrap();
+    let batch = poll_once(&client, &mut tracker, "Me", t0, 0.0)
+        .await
+        .unwrap();
     assert_eq!(batch.len(), 2);
     let kill = &batch[1];
     assert!(kill.involves_local_player);
@@ -59,7 +61,9 @@ async fn polls_dedupe_and_stamp_recording_offsets() {
         ]),
     );
 
-    let batch2 = poll_once(&client, &mut tracker, "Me", t0, 0.0).await.unwrap();
+    let batch2 = poll_once(&client, &mut tracker, "Me", t0, 0.0)
+        .await
+        .unwrap();
     assert_eq!(batch2.len(), 1);
     assert_eq!(batch2[0].subtype.as_deref(), Some("2"));
 }

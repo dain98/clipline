@@ -47,7 +47,11 @@ pub fn normalize(raw: &RawEvent, local_player: &str) -> GameEvent {
     };
 
     let importance = (base_importance(kind)
-        + if involves_local_player { LOCAL_PLAYER_BOOST } else { 0 })
+        + if involves_local_player {
+            LOCAL_PLAYER_BOOST
+        } else {
+            0
+        })
     .min(10);
 
     GameEvent {

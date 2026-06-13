@@ -57,11 +57,17 @@ impl MarkerLog {
             .iter()
             .filter_map(|e| {
                 let off = e.recording_offset_s?;
-                (off >= start_s && off < end_s)
-                    .then(|| ClipMarker { t_s: off - start_s, event: e.clone() })
+                (off >= start_s && off < end_s).then(|| ClipMarker {
+                    t_s: off - start_s,
+                    event: e.clone(),
+                })
             })
             .collect();
-        ClipMarkers { recording_start_s: start_s, duration_s: end_s - start_s, markers }
+        ClipMarkers {
+            recording_start_s: start_s,
+            duration_s: end_s - start_s,
+            markers,
+        }
     }
 }
 
@@ -92,8 +98,15 @@ mod tests {
         log.push(ev(EventKind::DragonKill, 70.0));
         log.push(ev(EventKind::BaronKill, 130.0));
         let clip = log.clip_markers(60.0, 120.0);
-        assert_eq!(clip.markers.len(), 1, "only the dragon is inside the window");
-        assert!((clip.markers[0].t_s - 10.0).abs() < 1e-9, "70s − 60s clip start");
+        assert_eq!(
+            clip.markers.len(),
+            1,
+            "only the dragon is inside the window"
+        );
+        assert!(
+            (clip.markers[0].t_s - 10.0).abs() < 1e-9,
+            "70s − 60s clip start"
+        );
         assert_eq!(clip.markers[0].event.kind, EventKind::DragonKill);
         assert!((clip.duration_s - 60.0).abs() < 1e-9);
     }

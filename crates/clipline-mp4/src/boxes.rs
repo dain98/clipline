@@ -82,10 +82,7 @@ mod tests {
         p.u8(1).u16(2).u32(3).u64(4).bytes(b"ab").i32(-1);
         assert_eq!(
             p.into_vec(),
-            vec![
-                1, 0, 2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, b'a', b'b', 0xFF, 0xFF,
-                0xFF, 0xFF
-            ]
+            vec![1, 0, 2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, b'a', b'b', 0xFF, 0xFF, 0xFF, 0xFF]
         );
     }
 }

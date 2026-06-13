@@ -38,7 +38,11 @@ impl OpusFrameEncoder {
     }
 
     pub fn track_config(&self) -> AudioTrackConfig {
-        AudioTrackConfig { channels: 2, sample_rate: 48_000, pre_skip: self.pre_skip }
+        AudioTrackConfig {
+            channels: 2,
+            sample_rate: 48_000,
+            pre_skip: self.pre_skip,
+        }
     }
 }
 
@@ -61,7 +65,11 @@ mod tests {
         let mut enc = OpusFrameEncoder::new().expect("opus encoder");
         let packet = enc.encode_frame(&sine_frame()).expect("encode");
         assert!(!packet.is_empty());
-        assert!(packet.len() < 1500, "20ms of opus is small, got {}", packet.len());
+        assert!(
+            packet.len() < 1500,
+            "20ms of opus is small, got {}",
+            packet.len()
+        );
     }
 
     #[test]

@@ -29,7 +29,10 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<Poller
     std::thread::Builder::new()
         .name("clipline-lol-poller".into())
         .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(_) => return,
             };

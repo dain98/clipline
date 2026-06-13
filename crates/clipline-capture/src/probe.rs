@@ -43,14 +43,20 @@ mod tests {
     #[test]
     fn prefers_nvenc_over_other_backends() {
         let caps = vec![
-            EncoderCapability { backend: EncoderBackend::Amf, codecs: vec![Codec::Av1] },
+            EncoderCapability {
+                backend: EncoderBackend::Amf,
+                codecs: vec![Codec::Av1],
+            },
             EncoderCapability {
                 backend: EncoderBackend::Nvenc,
                 codecs: vec![Codec::H264, Codec::Hevc],
             },
         ];
         // Backend priority wins even when a lower backend has a better codec.
-        assert_eq!(select_encoder(&caps), Some((EncoderBackend::Nvenc, Codec::Hevc)));
+        assert_eq!(
+            select_encoder(&caps),
+            Some((EncoderBackend::Nvenc, Codec::Hevc))
+        );
     }
 
     #[test]
@@ -59,7 +65,10 @@ mod tests {
             backend: EncoderBackend::QuickSync,
             codecs: vec![Codec::H264, Codec::Av1, Codec::Hevc],
         }];
-        assert_eq!(select_encoder(&caps), Some((EncoderBackend::QuickSync, Codec::Av1)));
+        assert_eq!(
+            select_encoder(&caps),
+            Some((EncoderBackend::QuickSync, Codec::Av1))
+        );
     }
 
     #[test]
@@ -68,16 +77,28 @@ mod tests {
             backend: EncoderBackend::X264,
             codecs: vec![Codec::H264],
         }];
-        assert_eq!(select_encoder(&caps), Some((EncoderBackend::X264, Codec::H264)));
+        assert_eq!(
+            select_encoder(&caps),
+            Some((EncoderBackend::X264, Codec::H264))
+        );
     }
 
     #[test]
     fn mf_software_ranks_below_x264() {
         let caps = vec![
-            EncoderCapability { backend: EncoderBackend::MfSoftware, codecs: vec![Codec::H264] },
-            EncoderCapability { backend: EncoderBackend::X264, codecs: vec![Codec::H264] },
+            EncoderCapability {
+                backend: EncoderBackend::MfSoftware,
+                codecs: vec![Codec::H264],
+            },
+            EncoderCapability {
+                backend: EncoderBackend::X264,
+                codecs: vec![Codec::H264],
+            },
         ];
-        assert_eq!(select_encoder(&caps), Some((EncoderBackend::X264, Codec::H264)));
+        assert_eq!(
+            select_encoder(&caps),
+            Some((EncoderBackend::X264, Codec::H264))
+        );
     }
 
     #[test]
