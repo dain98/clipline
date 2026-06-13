@@ -12,6 +12,11 @@ use crate::service::{
 
 const MAX_REPLAY_WINDOW_S: f64 = 120.0;
 
+/// The replay ring holds the save window plus this margin (for keyframe
+/// alignment and eviction timing). Sizing the ring to the window — rather than
+/// a fixed 2 minutes — keeps memory proportional to what is actually saved.
+const BUFFER_HEADROOM_S: f64 = 15.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureMode {
@@ -153,7 +158,7 @@ impl Default for AppSettings {
             window_title: String::new(),
             capture_region: CaptureRegionSettings::default(),
             audio: AudioSettings::default(),
-            buffer_seconds: 120.0,
+            buffer_seconds: 60.0 + BUFFER_HEADROOM_S,
             replay_window_s: 60.0,
             bitrate_mbps: 12.0,
             fps: 60,
@@ -251,7 +256,10 @@ impl AppSettings {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| default_media_dir());
         settings.replay_window_s = settings.replay_window_s.min(MAX_REPLAY_WINDOW_S);
-        settings.buffer_seconds = settings.buffer_seconds.max(settings.replay_window_s);
+        // Size the ring to the replay window (+ headroom), not whatever was
+        // persisted. This migrates old fixed 120 s buffers down and keeps the
+        // recording footprint proportional to what a save actually needs.
+        settings.buffer_seconds = settings.replay_window_s + BUFFER_HEADROOM_S;
         settings.validate()?;
         Ok(settings)
     }
@@ -449,7 +457,7 @@ mod tests {
         assert_eq!(settings.audio.mic_device_id, None);
         assert_eq!(settings.audio.mic_volume, 1.0);
         assert_eq!(settings.audio.mic_channels, AudioChannelMode::Mono);
-        assert_eq!(settings.buffer_seconds, 120.0);
+        assert_eq!(settings.buffer_seconds, 75.0);
         assert_eq!(settings.replay_window_s, 60.0);
         assert_eq!(settings.bitrate_mbps, 12.0);
         assert_eq!(settings.fps, 60);
@@ -587,7 +595,9 @@ mod tests {
         let settings = AppSettings::load_from(&path).unwrap();
 
         assert_eq!(settings.replay_window_s, 120.0);
-        assert_eq!(settings.buffer_seconds, 300.0);
+        // Buffer is recomputed from the (clamped) window + headroom, not kept
+        // at the legacy 300 s.
+        assert_eq!(settings.buffer_seconds, 120.0 + 15.0);
     }
 
     #[test]
@@ -707,7 +717,10 @@ mod tests {
         assert_eq!(opts.media_dir, PathBuf::from(default_media_dir()));
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
         assert_eq!(opts.audio, AudioOptions::default());
-        assert!(opts.buffer_bytes >= 220 * 1024 * 1024);
+        // Ring tracks the 60 s window + 15 s headroom at 12 Mbps (~146 MB),
+        // not the old fixed 120 s (~234 MB).
+        assert!(opts.buffer_bytes >= 120 * 1024 * 1024);
+        assert!(opts.buffer_bytes < 180 * 1024 * 1024);
     }
 
     #[test]
