@@ -13,6 +13,7 @@
   --rec: #e5484d;
   --warn: #f0883e;
   --ok: #7ab8ff;
+  --titlebar-h: 32px;
 }
 
 * {
@@ -65,6 +66,9 @@ body {
 }
 
 h1 { margin: 0; font-size: 18px; letter-spacing: 0.3px; }
+h1.brand { display: flex; align-items: center; gap: 9px; }
+.logo-mark { width: 26px; height: 26px; flex: none; display: block; color: var(--accent); }
+.logo-mark path { fill: currentColor; }
 h2 {
   margin: 0 0 8px;
   font-size: 12px;
@@ -221,11 +225,37 @@ label span { white-space: nowrap; }
    Lesson learned: a grid only bounds its children if the track is sized.
    Every grid here pins its rows with minmax(0, 1fr); every scroll/shrink
    child carries min-height: 0. */
+/* ---- custom titlebar (frameless window) ---- */
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  height: var(--titlebar-h);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+}
+.titlebar-controls { display: flex; height: 100%; }
+.titlebar-btn {
+  width: 46px;
+  height: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.titlebar-btn:hover { background: var(--panel-2); color: var(--text); }
+.titlebar-btn:active { transform: none; }
+.titlebar-btn.titlebar-close:hover { background: #c4302b; color: #fff; }
+.titlebar-btn svg { width: 12px; height: 12px; fill: currentColor; }
+
 .app {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  height: 100vh;
+  height: calc(100vh - var(--titlebar-h));
   overflow: hidden;
 }
 
@@ -367,7 +397,7 @@ label span { white-space: nowrap; }
 
 .clip {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
@@ -379,6 +409,21 @@ label span { white-space: nowrap; }
 }
 .clip:hover { border-color: var(--line-strong); }
 .clip.active { border-color: var(--accent); background: #1b2334; }
+
+/* Leading kind marker: one color per clip kind so the library reads at a
+   glance. A future full-session kind gets its own color here. */
+.clip-kind {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  color: var(--muted);
+}
+.clip-kind svg { display: block; width: 16px; height: 16px; fill: currentColor; }
+.clip-kind.replay { color: var(--ok); }
+.clip-kind.trim { color: var(--marker); }
 
 .clip .name {
   font-size: 13px;

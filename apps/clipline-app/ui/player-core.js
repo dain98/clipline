@@ -251,6 +251,11 @@ const PlayerCore = (() => {
     return `${MONTHS[month0]} ${day} · ${h12}:${String(minutes).padStart(2, "0")} ${ampm}`;
   };
 
+  // Classify a library clip by its on-disk name so each kind can carry its own
+  // icon. Trimmed exports always include a `_trim_` segment; everything else is
+  // a buffered replay today. Full-session recordings will add a kind here.
+  const clipKind = (name) => (/_trim_/.test(name || "") ? "trim" : "replay");
+
   const keyIntent = (code, shiftKey) => {
     switch (code) {
       case "Space":
@@ -432,6 +437,7 @@ const PlayerCore = (() => {
     rulerMarks,
     sessionGroups,
     formatClipTitle,
+    clipKind,
     keyIntent,
     hotkeyFromKeyEvent,
     displayBounds,
