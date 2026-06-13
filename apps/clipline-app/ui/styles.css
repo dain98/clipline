@@ -622,6 +622,55 @@ label span { white-space: nowrap; }
 
 .danger-check span { line-height: 1.35; }
 
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #10141b;
+}
+
+.segmented-control label {
+  position: relative;
+  display: block;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.segmented-control input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.segmented-control span {
+  display: grid;
+  place-items: center;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+
+.segmented-control label:hover span {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.segmented-control input:checked + span {
+  background: #1b2b49;
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px #315a9d;
+}
+
+.segmented-control input:focus-visible + span {
+  outline: 2px solid rgba(61, 123, 253, 0.45);
+  outline-offset: 1px;
+}
+
 .supported-games,
 .custom-games,
 .game-window-picker {

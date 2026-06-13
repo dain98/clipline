@@ -125,6 +125,7 @@ function fillSettings(s) {
   $("set-window").value = s.window_title ?? "";
   regionState = s.capture_region ?? regionState;
   $("set-games-auto-detect").checked = !!games.auto_detect;
+  setGameRecordingMode(games.recording_mode);
   $("set-output-enabled").checked = !!audio.output_enabled;
   $("set-output-volume").value = String(Number.isFinite(audio.output_volume) ? audio.output_volume : 1);
   $("set-mic-enabled").checked = !!audio.mic_enabled;
@@ -163,6 +164,7 @@ function readSettings() {
     capture_region: regionState,
     games: {
       auto_detect: $("set-games-auto-detect").checked,
+      recording_mode: selectedGameRecordingMode(),
       custom_games: customGames.map((game) => ({ ...game })),
     },
     audio: {
@@ -217,8 +219,25 @@ function defaultReplayStorageSettings() {
 function defaultGameSettings() {
   return {
     auto_detect: true,
+    recording_mode: "replays_only",
     custom_games: [],
   };
+}
+
+function normalizeGameRecordingMode(mode) {
+  return mode === "full_session" ? "full_session" : "replays_only";
+}
+
+function setGameRecordingMode(mode) {
+  const value = normalizeGameRecordingMode(mode);
+  document.querySelectorAll("input[name='game-recording-mode']").forEach((input) => {
+    input.checked = input.value === value;
+  });
+}
+
+function selectedGameRecordingMode() {
+  const checked = document.querySelector("input[name='game-recording-mode']:checked");
+  return normalizeGameRecordingMode(checked && checked.value);
 }
 
 function normalizeCustomGame(game) {

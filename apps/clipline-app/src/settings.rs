@@ -135,10 +135,20 @@ impl CustomGameSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GameRecordingMode {
+    FullSession,
+    #[default]
+    ReplaysOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GameSettings {
     #[serde(default = "default_enabled")]
     pub auto_detect: bool,
+    #[serde(default)]
+    pub recording_mode: GameRecordingMode,
     #[serde(default)]
     pub custom_games: Vec<CustomGameSettings>,
 }
@@ -147,6 +157,7 @@ impl Default for GameSettings {
     fn default() -> Self {
         Self {
             auto_detect: true,
+            recording_mode: GameRecordingMode::ReplaysOnly,
             custom_games: Vec::new(),
         }
     }
@@ -663,6 +674,10 @@ mod tests {
 
         assert_eq!(settings.capture_mode, CaptureMode::PrimaryMonitor);
         assert!(settings.games.auto_detect);
+        assert_eq!(
+            settings.games.recording_mode,
+            GameRecordingMode::ReplaysOnly
+        );
         assert!(settings.games.custom_games.is_empty());
         assert!(settings.audio.output_enabled);
         assert_eq!(settings.audio.output_device_id, None);
@@ -1015,6 +1030,7 @@ mod tests {
             hotkey: "Ctrl+Alt+F9".into(),
             games: GameSettings {
                 auto_detect: true,
+                recording_mode: GameRecordingMode::FullSession,
                 custom_games: vec![CustomGameSettings {
                     id: "custom-notepad".into(),
                     name: "Notepad".into(),
@@ -1038,6 +1054,7 @@ mod tests {
         let settings = AppSettings {
             games: GameSettings {
                 auto_detect: true,
+                recording_mode: GameRecordingMode::ReplaysOnly,
                 custom_games: vec![CustomGameSettings {
                     id: "custom-empty".into(),
                     name: "Mystery".into(),

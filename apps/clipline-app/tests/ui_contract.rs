@@ -120,6 +120,7 @@ fn review_player_owns_all_controls() {
         "data-tab=\"games\"",
         "data-section=\"games\"",
         "id=\"set-games-auto-detect\"",
+        "name=\"game-recording-mode\"",
         "id=\"supported-games\"",
         "id=\"custom-games\"",
         "id=\"add-custom-game\"",
@@ -211,6 +212,12 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains(">Games<") && html.contains("Add Custom Game"),
         "settings must expose the Games tab and custom game action"
+    );
+    assert!(
+        html.contains("value=\"replays_only\"")
+            && html.contains("value=\"full_session\"")
+            && main_js().contains("selectedGameRecordingMode"),
+        "games settings must expose and persist the recording mode choice"
     );
 
     // Settings is a page in the main pane now, not a sidebar fold.
