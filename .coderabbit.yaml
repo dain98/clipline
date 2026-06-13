@@ -39,6 +39,7 @@ reviews:
       - "do not review"
 
   path_filters:
+    - "**"
     - "!target/**"
     - "Cargo.lock"
 
