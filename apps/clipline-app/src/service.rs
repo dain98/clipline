@@ -277,6 +277,16 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             ),
         );
     }
+    if is_within_temp(&clips_dir, &std::env::temp_dir()) {
+        // Windows reclaims %TEMP% (Storage Sense, Disk Cleanup), so saving here
+        // risks silently losing replays. Surface it loudly instead of failing.
+        warn_user(
+            events,
+            format!(
+                "saving recordings to a temporary folder {clips_dir:?} that the system may delete; choose a Media folder in Settings"
+            ),
+        );
+    }
     // Saves land in a session folder: one per recorder run, with a dedicated
     // folder per detected match. Folders are created lazily at save time.
     let mut session = SessionTracker::new(local_session_label(false));
@@ -594,6 +604,13 @@ pub(crate) fn clips_dir_resolved(
     Ok((dir, true))
 }
 
+/// Whether `dir` lives under the system temp root. Both paths are canonicalized
+/// when they exist so a symlinked or short-name temp root still matches.
+fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
+    let normalize = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    normalize(dir).starts_with(normalize(temp_dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,5 +672,26 @@ mod tests {
         assert!(fell_back);
         assert_eq!(resolved, fallback);
         assert!(fallback.is_dir());
+    }
+
+    #[test]
+    fn temp_guard_flags_clips_inside_temp_root() {
+        let dir = TestDir::new("temp-guard");
+        let temp_root = dir.path().join("temp");
+        let inside = temp_root.join("Videos").join("Clipline");
+        std::fs::create_dir_all(&inside).unwrap();
+
+        assert!(is_within_temp(&inside, &temp_root));
+    }
+
+    #[test]
+    fn temp_guard_allows_clips_outside_temp_root() {
+        let dir = TestDir::new("temp-guard-outside");
+        let temp_root = dir.path().join("temp");
+        let outside = dir.path().join("media").join("Clipline");
+        std::fs::create_dir_all(&temp_root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        assert!(!is_within_temp(&outside, &temp_root));
     }
 }
