@@ -15,17 +15,24 @@ decode for the editor is a separate follow-up milestone, ddoc §11).
 - **LGPL only.** No `--enable-gpl`: x264/x265 are out. Software tier = SVT-AV1 (BSD, in LGPL
   FFmpeg builds) for AV1 plus the existing Microsoft software H.264 MFT as last resort. No
   software HEVC. The `EncoderBackend::X264` placeholder becomes `SvtAv1`.
-- **Runtime loading, not link-time.** `libloading` opens `avcodec`/`avutil` at probe time;
-  `avcodec_version()` must match one pinned major (set when the dev-box LGPL shared build is
-  installed) or the FFmpeg tier reports unavailable. All `AVCodecContext` configuration goes
-  through the `av_opt_set` string API so we never depend on that struct's layout; only the
-  pinned-major `AVFrame`/`AVPacket` layouts are vendored, with a loader self-test
-  (`av_frame_get_buffer` round-trip) as a layout canary. No build-time FFmpeg, no bindgen, no
-  CI toolchain changes; Windows/Ubuntu CI compile everything and self-skip real-encode tests
-  when no matching DLLs exist.
-- **CPU NV12 input for FFmpeg v1.** GPU texture → staging readback → NV12 `AVFrame`. The MFT
-  path keeps the zero-copy GPU route; D3D11 hwframes for FFmpeg is a later optimization. For
-  same-vendor H.264 the MFT encoder therefore outranks the FFmpeg one.
+- **Subprocess, not link-time (revised 2026-06-12 with Dain).** The committed plan first
+  assumed in-process `libloading` of libavcodec; we switched to driving `ffmpeg.exe` as a
+  long-lived child per recording. Rationale: zero unsafe FFI (the repo keeps `unsafe` in
+  `windows/` only), robust across FFmpeg versions (no vendored `AVFrame`/`AVPacket` layouts),
+  cleanest LGPL separation (FFmpeg stays a separate program), and it reuses the new
+  annexb/hevc/av1 bitstream modules for access-unit framing. Raw NV12 is piped to the child's
+  stdin (`-f rawvideo -pix_fmt nv12 -s WxH -r FPS -i pipe:0`); the encoded elementary stream is
+  read from stdout (`-f h264|hevc|ivf … pipe:1`) on a reader thread that frames it into access
+  units. No build-time FFmpeg, no bindgen, no CI toolchain changes; CI self-skips real-encode
+  tests when no `ffmpeg.exe` is found.
+- **Per-frame metadata without AVPacket.** Because we frame the raw elementary stream
+  ourselves: `pts_s` per access unit comes from the matching input `Frame.pts_s` (B-frames are
+  disabled, so output order == input order; the pipeline already re-derives durations from pts
+  deltas at GOP seal). `is_keyframe` comes from the bitstream where cheap (H.264 IDR, HEVC
+  IRAP) and from forced fixed-GOP position for AV1 (scene-cut keyframes disabled per encoder).
+- **CPU NV12 input.** GPU texture → staging readback → NV12 bytes piped to the child. The MFT
+  path keeps the zero-copy GPU route, so for same-vendor H.264 the MFT encoder outranks the
+  FFmpeg one.
 - **Codec-aware muxing.** `VideoTrackConfig` grows a codec enum (H264{sps,pps},
   Hevc{vps,sps,pps}, Av1{seq_header_obu}); the muxer writes `avc1`/avcC, `hvc1`/hvcC (profile
   tier level parsed from the HEVC SPS), or `av01`/av1C. HEVC Annex B handling parallels the
@@ -56,19 +63,24 @@ decode for the editor is a separate follow-up milestone, ddoc §11).
   with the rules: backend merit order, codec preference within backend, Auto restricted to
   decodable codecs, MFT preferred over FFmpeg for same backend+H.264, `MfSoftware` last.
   Unit tests for every rule.
-- [ ] **FFmpeg loader (neutral, self-skipping).** `ffi` module: `libloading` of avcodec/avutil
-  (Windows DLL names + Unix sonames), pinned-major version gate, vendored AVFrame/AVPacket
-  layouts, function table, layout-canary self-test, `probe_ffmpeg()` returning capabilities by
-  `avcodec_find_encoder_by_name` + test-open (hardware encoders confirm against the real GPU).
-  Search order: exe dir → `%APPDATA%\Clipline\ffmpeg` → PATH/system default.
-- [ ] **`FfmpegVideoEncoder` implementing `Encoder`.** Open by encoder name; configure via
-  `av_opt_set` (`video_size`, `pixel_format`, `time_base`, `b`, `g` = 2 s GOP, `bf=0`,
-  `flags=+global_header`, per-backend rate-control/preset/low-latency opts); NV12 frames in;
-  packets out with Annex B → length-prefix conversion for H.264/HEVC and OBU handling for AV1;
-  `track_config()` built from `extradata`; `finish()` drains. CPU-frame tests run real encodes
-  when a matching FFmpeg is present (self-skip otherwise; live on the dev box, skipped on CI).
+- [ ] **FFmpeg locator + probe (neutral, self-skipping).** `ffmpeg.rs`: locate `ffmpeg.exe`
+  (exe dir → `%APPDATA%\Clipline\ffmpeg` → PATH), confirm it runs (`-version`), and
+  `probe_ffmpeg()` → capabilities by parsing `ffmpeg -hide_banner -encoders` for our encoder
+  names (`{h264,hevc,av1}_{nvenc,amf,qsv}`, `libsvtav1`) and mapping to (backend, codec) — with
+  a quick test-encode (`-f lavfi testsrc -frames 1`) per hardware encoder so a listed-but-
+  unusable GPU encoder is dropped. The elementary-stream parsing of the name list is pure and
+  unit-tested; the locate/run path self-skips when no ffmpeg is found.
+- [ ] **`FfmpegVideoEncoder` implementing `Encoder`.** Spawn `ffmpeg` with a per-codec arg set
+  (`-f rawvideo -pix_fmt nv12 -s WxH -r FPS -i pipe:0` in; `-c:v <name>` + 2 s GOP, `bf 0`,
+  CBR rate control + per-backend preset/low-latency; `-f h264|hevc|ivf pipe:1` out). A reader
+  thread frames stdout into access units via the annexb/hevc/av1 modules; `encode()` writes the
+  NV12 frame and returns ready packets (pts from input order, keyframe from bitstream/position),
+  `finish()` closes stdin and drains. Output framing + pts/keyframe assignment is pure and
+  unit-tested on captured fixtures; the spawn path runs real encodes when ffmpeg is present
+  (self-skip otherwise; live on the dev box, skipped on CI).
 - [ ] **GPU → CPU NV12 readback (windows).** Staging-texture copy + map in the existing
-  nv12/d3d11 modules so `FrameData::Gpu` feeds FFmpeg; device test (CI-skipped).
+  nv12/d3d11 modules so `FrameData::Gpu` becomes contiguous NV12 bytes to pipe to FFmpeg;
+  device test (CI-skipped).
 - [ ] **Service wiring.** `VideoEncoder` setting grows backend×codec choices (Auto default,
   serialized names stay snake_case; legacy values keep deserializing); recorder start walks the
   ranked candidate list until one opens, reports the active encoder/codec in status events, and
@@ -78,10 +90,10 @@ decode for the editor is a separate follow-up milestone, ddoc §11).
   (`canPlayType`) feeds both the warning badges ("may not play in the in-app player") and the
   Rust-side Auto policy; pure formatting/selection logic in `player-core.js` with Boa tests;
   `ui_contract` covers the new controls.
-- [ ] **Dev-box FFmpeg install + docs.** Install the pinned-major BtbN win64 **lgpl-shared**
-  build under `%APPDATA%\Clipline\ffmpeg`; record the pinned major in code + handoff; ddoc
-  caveat notes (LGPL build contents, SVT-AV1 presence, no software HEVC); LGPL §6 attribution
-  text in the app/docs.
+- [ ] **Dev-box FFmpeg install + docs.** Install a BtbN win64 **lgpl-shared** build (ships
+  `ffmpeg.exe` + the LGPL DLLs, SVT-AV1, vendor hw encoders; no GPL x264/x265) under
+  `%APPDATA%\Clipline\ffmpeg`; handoff + ddoc caveat notes (LGPL build contents, SVT-AV1
+  presence, no software HEVC, subprocess boundary); LGPL §6 attribution text in the app/docs.
 - [ ] **Verify.** Workspace tests + clippy (after `cargo clean -p` on touched crates); live
   matrix on the dev box: AMF H.264, AMF HEVC, SVT-AV1, MS software MFT (RX 6700 XT is RDNA2 —
   no AV1 hardware encode; NVENC/QSV paths verified by probe unit tests only), each saving a
