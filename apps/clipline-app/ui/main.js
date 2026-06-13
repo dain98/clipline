@@ -852,6 +852,7 @@ function closeReview() {
   video.load();
   currentClip = null;
   updateViews();
+  $("deck-status").textContent = "";
   $("stage-note").textContent = "";
   $("timeline").querySelectorAll(".tick").forEach((t) => t.remove());
   renderClips();
@@ -1139,6 +1140,22 @@ async function openFolder() {
   }
 }
 
+async function copyClipToClipboard() {
+  if (!currentClip) return;
+  $("copy-clip").disabled = true;
+  $("error").textContent = "";
+  $("deck-status").textContent = "";
+  try {
+    await invoke("copy_clip_to_clipboard", { path: currentClip.path });
+    $("deck-status").textContent = "clip copied to clipboard";
+  } catch (e) {
+    $("deck-status").textContent = "";
+    $("error").textContent = e;
+  } finally {
+    $("copy-clip").disabled = false;
+  }
+}
+
 async function chooseMediaFolder() {
   try {
     const selected = await invoke("choose_media_folder", {
@@ -1329,6 +1346,7 @@ $("volume-slider").addEventListener("input", () => {
 $("export-clip").addEventListener("click", exportTrim);
 $("delete-clip").addEventListener("click", () => deleteClip());
 $("open-folder").addEventListener("click", openFolder);
+$("copy-clip").addEventListener("click", copyClipToClipboard);
 
 $("sidebar-toggle").addEventListener("click", toggleRail);
 $("rail-save").addEventListener("click", () => invoke("save_replay"));

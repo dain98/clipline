@@ -53,6 +53,7 @@ fn review_player_owns_all_controls() {
         "id=\"delete-clip\"",
         "id=\"ruler\"",
         "id=\"open-folder\"",
+        "id=\"copy-clip\"",
         "id=\"stage-overlay\"",
         "id=\"sidebar-toggle\"",
         "id=\"memory-usage\"",
@@ -216,8 +217,8 @@ fn review_player_owns_all_controls() {
         "Close must come after Save in the footer markup"
     );
 
-    // Removed on purpose (2026-06-12): the path lives in #pmeta, and clicking
-    // the active library row again closes the clip.
+    // Removed on purpose (2026-06-12): clicking the active library row again
+    // closes the clip; the new copy affordance must not revive the old path-only id.
     for gone in [
         "id=\"copy-path\"",
         "id=\"close-review\"",
@@ -228,6 +229,13 @@ fn review_player_owns_all_controls() {
             "{gone} was removed from the header — do not reintroduce it"
         );
     }
+    let open_folder = html.find("id=\"open-folder\"").expect("open folder button");
+    let copy_clip = html.find("id=\"copy-clip\"").expect("copy clip button");
+    let delete_clip = html.find("id=\"delete-clip\"").expect("delete clip button");
+    assert!(
+        open_folder < copy_clip && copy_clip < delete_clip,
+        "copy clip must sit beside Open Folder before the destructive action"
+    );
 
     // Conventional ordering: transport glued to the stage, timeline below it.
     let transport = html.find("id=\"play-toggle\"").expect("play toggle");
@@ -247,6 +255,7 @@ fn review_player_owns_all_controls() {
         "id=\"mute-toggle\"",
         "id=\"sidebar-toggle\"",
         "id=\"open-folder\"",
+        "id=\"copy-clip\"",
         "id=\"rail-save\"",
         "id=\"rail-settings\"",
         "id=\"delete-clip\"",

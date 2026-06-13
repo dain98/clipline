@@ -938,7 +938,7 @@ label span { white-space: nowrap; }
   text-overflow: ellipsis;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
-  /* The visible path doubles as the copy story — let it be selected. */
+  /* The visible path still supports manual selection. */
   user-select: text;
 }
 
