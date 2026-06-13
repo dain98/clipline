@@ -663,6 +663,15 @@ async function refreshStorage() {
   $("storage-clips").textContent = s.clip_count;
 }
 
+async function refreshMemoryUsage() {
+  try {
+    const s = await invoke("memory_status");
+    $("memory-usage").textContent = `Using ${fmtBytes(s.working_set_bytes)} RAM`;
+  } catch (_) {
+    $("memory-usage").textContent = "Using -- RAM";
+  }
+}
+
 async function refreshClips() {
   clipsCache = await invoke("list_clips");
   renderClips();
@@ -1321,3 +1330,5 @@ loadDisplays();
 loadAudioDevices();
 loadVideoEncoders();
 refresh();
+refreshMemoryUsage();
+setInterval(refreshMemoryUsage, 2000);

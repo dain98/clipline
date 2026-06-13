@@ -17,6 +17,8 @@ mod library;
 #[cfg(windows)]
 mod markers;
 #[cfg(windows)]
+mod memory;
+#[cfg(windows)]
 mod service;
 #[cfg(windows)]
 mod settings;
