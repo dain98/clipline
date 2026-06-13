@@ -102,6 +102,7 @@ pub fn trim_keyframe_aligned_file(
     end_s: f64,
 ) -> Result<TrimInfo, TrimError> {
     validate_range(start_s, end_s)?;
+    reject_same_file(source, target)?;
     let input = std::fs::read(source)?;
     let movie = parse_movie(&input)?;
     let selection = select_trim_range(&movie, start_s, end_s)?;
@@ -134,6 +135,19 @@ pub fn trim_keyframe_aligned_file(
     writer.write_fragment_multi_from_source(&mut source_file, &refs)?;
     let _ = writer.finalize()?;
     Ok(selection.info(start_s, end_s))
+}
+
+fn reject_same_file(source: &Path, target: &Path) -> Result<(), TrimError> {
+    let source = std::fs::canonicalize(source)?;
+    if let Ok(target) = std::fs::canonicalize(target) {
+        if source == target {
+            return Err(TrimError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "trim source and target must be different files",
+            )));
+        }
+    }
+    Ok(())
 }
 
 struct ParsedMovie {
@@ -920,5 +934,31 @@ mod tests {
 
         assert_eq!(info, expected_info);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn file_trim_rejects_same_source_and_target_without_truncating() {
+        let input = clipline_fixture();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-trim-same-file-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        std::fs::write(&source, &input).unwrap();
+
+        let err = trim_keyframe_aligned_file(&source, &source, 0.4, 1.2).unwrap_err();
+        let after = std::fs::read(&source).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(matches!(
+            err,
+            TrimError::Io(ref e) if e.kind() == std::io::ErrorKind::InvalidInput
+        ));
+        assert_eq!(after, input);
     }
 }
