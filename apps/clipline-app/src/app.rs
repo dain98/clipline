@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 use crate::service::{self, Cmd, Event, ServiceOptions};
@@ -36,12 +36,6 @@ struct AudioDeviceInfo {
 struct AudioDeviceLists {
     outputs: Vec<AudioDeviceInfo>,
     inputs: Vec<AudioDeviceInfo>,
-}
-
-#[derive(serde::Serialize)]
-struct VideoEncoderInfo {
-    id: &'static str,
-    name: &'static str,
 }
 
 #[tauri::command]
@@ -90,6 +84,9 @@ struct RuntimeInner {
     tx: Option<Sender<Cmd>>,
     settings: AppSettings,
     lol_url: Option<String>,
+    /// Codecs WebView2 can decode, reported by the frontend. Drives the
+    /// recorder's Automatic selection; H.264 is the always-safe default.
+    decodable_codecs: Vec<service::Codec>,
 }
 
 impl RuntimeState {
@@ -98,7 +95,36 @@ impl RuntimeState {
             tx: Some(tx),
             settings,
             lol_url,
+            decodable_codecs: vec![service::Codec::H264],
         }))
+    }
+
+    /// Replace the decodable-codec set from the frontend's canPlayType probe.
+    /// Unknown keys are ignored; H.264 is always retained as the safe floor.
+    fn set_decodable_codecs(&self, keys: &[String]) {
+        let mut codecs = vec![service::Codec::H264];
+        for key in keys {
+            match key.as_str() {
+                "hevc" if !codecs.contains(&service::Codec::Hevc) => {
+                    codecs.push(service::Codec::Hevc)
+                }
+                "av1" if !codecs.contains(&service::Codec::Av1) => {
+                    codecs.push(service::Codec::Av1)
+                }
+                _ => {}
+            }
+        }
+        if let Ok(mut inner) = self.0.lock() {
+            inner.decodable_codecs = codecs;
+        }
+    }
+
+    /// Build service options for the current settings with the reported
+    /// decodable codecs injected. Caller holds the lock.
+    fn options(inner: &RuntimeInner) -> Result<service::ServiceOptions, String> {
+        let mut opts = inner.settings.to_service_options(inner.lol_url.clone())?;
+        opts.decodable_codecs = inner.decodable_codecs.clone();
+        Ok(opts)
     }
 
     fn send(&self, cmd: Cmd) -> bool {
@@ -131,7 +157,9 @@ impl RuntimeState {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             let old_tx = inner.tx.clone();
             if inner.tx.is_some() {
-                let (tx, rx) = service::spawn(settings.to_service_options(inner.lol_url.clone())?);
+                let mut opts = settings.to_service_options(inner.lol_url.clone())?;
+                opts.decodable_codecs = inner.decodable_codecs.clone();
+                let (tx, rx) = service::spawn(opts);
                 inner.tx = Some(tx);
                 pump_events(app, rx);
             }
@@ -162,8 +190,7 @@ impl RuntimeState {
             if inner.tx.is_some() {
                 return Ok(true);
             }
-            let (tx, rx) =
-                service::spawn(inner.settings.to_service_options(inner.lol_url.clone())?);
+            let (tx, rx) = service::spawn(Self::options(&inner)?);
             inner.tx = Some(tx);
             rx
         };
@@ -228,6 +255,29 @@ async fn choose_media_folder(
 }
 
 #[tauri::command]
+async fn choose_replay_cache_folder(
+    state: tauri::State<'_, RuntimeState>,
+    current: Option<String>,
+) -> Result<Option<String>, String> {
+    let current_dir = current
+        .as_deref()
+        .and_then(|path| crate::settings::normalize_replay_cache_dir(path).ok())
+        .filter(|path| path.exists())
+        .or_else(|| state.settings().media_dir_path().ok())
+        .unwrap_or_else(service::default_clips_dir);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Replay Cache Folder");
+        if current_dir.exists() {
+            dialog = dialog.set_directory(current_dir);
+        }
+        dialog.pick_folder().map(|path| path.display().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn list_displays() -> Result<Vec<DisplayInfo>, String> {
     clipline_capture::windows::display::enumerate_displays()
         .map_err(|e| e.to_string())
@@ -273,50 +323,20 @@ fn list_audio_devices() -> Result<AudioDeviceLists, String> {
         })
 }
 
+/// Every encoder this machine can use, for the Settings dropdown. Each
+/// option carries its codec key so the frontend can flag codecs the in-app
+/// player cannot decode.
 #[tauri::command]
-fn list_video_encoders() -> Result<Vec<VideoEncoderInfo>, String> {
-    let capabilities =
-        clipline_capture::windows::mft_probe::enumerate().map_err(|e| e.to_string())?;
-    let mut encoders = Vec::new();
-    for capability in capabilities {
-        if !capability
-            .codecs
-            .contains(&clipline_capture::probe::Codec::H264)
-        {
-            continue;
-        }
-        let Some(info) = video_encoder_info(capability.backend) else {
-            continue;
-        };
-        if !encoders
-            .iter()
-            .any(|encoder: &VideoEncoderInfo| encoder.id == info.id)
-        {
-            encoders.push(info);
-        }
-    }
-    Ok(encoders)
+fn probe_encoders() -> Vec<service::EncoderOption> {
+    service::available_encoder_options()
 }
 
-fn video_encoder_info(
-    backend: clipline_capture::probe::EncoderBackend,
-) -> Option<VideoEncoderInfo> {
-    match backend {
-        clipline_capture::probe::EncoderBackend::Nvenc => Some(VideoEncoderInfo {
-            id: "nvenc_h264",
-            name: "NVIDIA NVENC H.264 (uses GPU)",
-        }),
-        clipline_capture::probe::EncoderBackend::Amf => Some(VideoEncoderInfo {
-            id: "amf_h264",
-            name: "AMD AMF H.264 (uses GPU)",
-        }),
-        clipline_capture::probe::EncoderBackend::QuickSync => Some(VideoEncoderInfo {
-            id: "quick_sync_h264",
-            name: "Intel Quick Sync H.264 (uses GPU)",
-        }),
-        clipline_capture::probe::EncoderBackend::X264
-        | clipline_capture::probe::EncoderBackend::MfSoftware => None,
-    }
+/// The frontend reports which codecs WebView2 can decode (canPlayType) so
+/// Automatic selection never records a clip the review player can't show.
+/// Takes effect on the next recorder (re)start.
+#[tauri::command]
+fn report_decode_support(state: tauri::State<RuntimeState>, codecs: Vec<String>) {
+    state.set_decodable_codecs(&codecs);
 }
 
 #[tauri::command]
@@ -506,9 +526,11 @@ pub fn run() {
             set_recording,
             get_settings,
             choose_media_folder,
+            choose_replay_cache_folder,
             list_displays,
             list_audio_devices,
-            list_video_encoders,
+            probe_encoders,
+            report_decode_support,
             memory_status,
             start_microphone_test,
             stop_microphone_test,
@@ -536,8 +558,9 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
+            let open_item = MenuItem::with_id(app, "open", "Open Clipline", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&save_item, &quit_item])?;
+            let menu = Menu::with_items(app, &[&open_item, &save_item, &quit_item])?;
             app.manage(TrayItems {
                 save_item: save_item.clone(),
             });
@@ -546,6 +569,11 @@ pub fn run() {
                 .tooltip("Clipline — replay buffer")
                 .menu(&menu)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
+                    "open" => {
+                        if let Err(e) = open_main_window(app) {
+                            eprintln!("open window: {e}");
+                        }
+                    }
                     "save" => {
                         app.state::<RuntimeState>().send(Cmd::Save);
                     }
@@ -557,6 +585,17 @@ pub fn run() {
                     }
                     _ => {}
                 })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } = event
+                    {
+                        if let Err(e) = open_main_window(tray.app_handle()) {
+                            eprintln!("open window: {e}");
+                        }
+                    }
+                })
                 .build(app)?;
 
             pump_events(app.handle().clone(), event_rx);
@@ -564,13 +603,52 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("build tauri app")
-        .run(move |app, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(move |app, event| match event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == "main" => {
+                api.prevent_close();
+                app.state::<MicTestState>().stop();
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.destroy();
+                }
+            }
+            tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } => {
+                api.prevent_exit();
+            }
+            tauri::RunEvent::Exit => {
                 app.state::<MicTestState>().stop();
                 app.state::<RuntimeState>()
                     .send(Cmd::Stop { announce: false });
             }
+            _ => {}
         });
+}
+
+fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let config = app
+        .config()
+        .app
+        .windows
+        .first()
+        .ok_or_else(|| "missing main window config".to_string())?
+        .clone();
+    let window = WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
 }
 
 fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>) {
@@ -643,24 +721,5 @@ mod tests {
     fn quota_parser_rejects_negative_or_non_numeric_values() {
         assert!(parse_quota_gb("-1").is_err());
         assert!(parse_quota_gb("nope").is_err());
-    }
-
-    #[test]
-    fn encoder_info_ids_match_settings_serialization() {
-        use crate::service::VideoEncoder;
-        use clipline_capture::probe::EncoderBackend;
-
-        // The Settings dropdown sends VideoEncoderInfo.id; settings.rs maps it
-        // back through VideoEncoder's snake_case serde. If the two drift, a
-        // saved encoder silently shows "Unavailable encoder", so pin them.
-        for (backend, encoder) in [
-            (EncoderBackend::Nvenc, VideoEncoder::NvencH264),
-            (EncoderBackend::Amf, VideoEncoder::AmfH264),
-            (EncoderBackend::QuickSync, VideoEncoder::QuickSyncH264),
-        ] {
-            let info = video_encoder_info(backend).expect("hardware backend exposes encoder info");
-            let serialized = serde_json::to_string(&encoder).expect("encoder serializes");
-            assert_eq!(serialized, format!("\"{}\"", info.id));
-        }
     }
 }

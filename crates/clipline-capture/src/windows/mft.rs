@@ -413,13 +413,13 @@ impl Encoder for MftH264Encoder {
 
     fn track_config(&self) -> VideoTrackConfig {
         let (sps, pps) = self.sps_pps.clone().unwrap_or_default();
-        VideoTrackConfig {
-            width: self.cfg.width as u16,
-            height: self.cfg.height as u16,
-            timescale: 90_000,
+        VideoTrackConfig::h264(
+            self.cfg.width as u16,
+            self.cfg.height as u16,
+            90_000,
             sps,
             pps,
-        }
+        )
     }
 
     fn finish(&mut self) -> Result<Vec<EncodedPacket>, EncodeError> {
@@ -539,10 +539,12 @@ mod tests {
         assert!(first.len() > 4);
         assert_ne!(&first[..4], &[0, 0, 0, 1], "no Annex B start codes");
         let track = enc.track_config();
-        assert!(
-            !track.sps.is_empty() && !track.pps.is_empty(),
-            "SPS/PPS extracted"
-        );
+        match &track.codec {
+            clipline_mp4::VideoCodecParams::H264 { sps, pps } => {
+                assert!(!sps.is_empty() && !pps.is_empty(), "SPS/PPS extracted");
+            }
+            other => panic!("MFT encoder must report H.264, got {other:?}"),
+        }
         assert_eq!((track.width, track.height), (640, 360));
         let mono = packets.windows(2).all(|w| w[1].pts_s >= w[0].pts_s);
         assert!(mono, "pts monotonic (B-frames disabled)");

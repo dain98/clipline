@@ -54,6 +54,10 @@ let recordingActive = true;
 let displays = [];
 let audioDevices = { outputs: [], inputs: [] };
 let videoEncoders = [];
+// Codecs WebView2 can decode in the review player (H.264 always; HEVC/AV1
+// probed at startup). Drives the playback caveat and the recorder's
+// Automatic-codec policy via report_decode_support.
+let decodableCodecs = ["h264"];
 let regionState = { display_id: null, x: 0, y: 0, width: 1920, height: 1080 };
 let regionLayout = null;
 let regionDrag = null;
@@ -87,7 +91,8 @@ function clipMarkers() {
 
 function fillSettings(s) {
   const audio = { ...defaultAudioSettings(), ...(s.audio || {}) };
-  currentSettings = { ...s, audio };
+  const replayStorage = { ...defaultReplayStorageSettings(), ...(s.replay_storage || {}) };
+  currentSettings = { ...s, audio, replay_storage: replayStorage };
   $("set-capture").value = s.capture_mode;
   $("set-window").value = s.window_title ?? "";
   regionState = s.capture_region ?? regionState;
@@ -96,13 +101,17 @@ function fillSettings(s) {
   $("set-mic-enabled").checked = !!audio.mic_enabled;
   $("set-mic-volume").value = String(Number.isFinite(audio.mic_volume) ? audio.mic_volume : 1);
   $("set-mic-mono").checked = (audio.mic_channels || "mono") === "mono";
-  $("set-buffer").value = Number(s.buffer_seconds) || 75;
+  $("set-buffer").value = Number(s.buffer_seconds) || ((Number(s.replay_window_s) || 60) + 15);
   $("set-replay").value = Math.min(120, Number(s.replay_window_s) || 60);
   $("set-encoder").value = s.video_encoder || "auto";
   $("set-bitrate").value = qualityIndexForBitrate(s.bitrate_mbps);
   $("set-fps").value = smoothnessIndexForFps(s.fps);
   $("set-quota").value = s.disk_quota_gb;
   $("set-media-dir").value = s.media_dir ?? "";
+  $("set-replay-disk-enabled").checked = replayStorage.mode === "disk";
+  $("set-replay-disk-dir").value = replayStorage.disk_dir || "";
+  $("set-replay-disk-quota").value = replayStorage.disk_quota_gb ?? 2;
+  $("set-replay-disk-ack").checked = !!replayStorage.disk_acknowledged;
   $("set-hotkey").value = s.hotkey;
   $("save-hotkey").textContent = s.hotkey;
   endHotkeyCapture("Click the field to record a new shortcut.");
@@ -111,6 +120,7 @@ function fillSettings(s) {
   renderVideoEncoderSelect();
   syncAudioFields();
   syncRecordingFields();
+  syncReplayStorageFields();
   updateCaptureStatus();
 }
 
@@ -130,7 +140,7 @@ function readSettings() {
       mic_channels: $("set-mic-mono").checked ? "mono" : "stereo",
     },
     // Ring holds the save window plus 15 s headroom (mirrors BUFFER_HEADROOM_S
-    // in settings.rs) — not a fixed 2 minutes.
+    // in settings.rs) - not a fixed 2 minutes.
     buffer_seconds: replay + 15,
     replay_window_s: replay,
     video_encoder: $("set-encoder").value,
@@ -138,6 +148,12 @@ function readSettings() {
     fps: smoothnessPreset(Number($("set-fps").value)).fps,
     disk_quota_gb: Number($("set-quota").value),
     media_dir: $("set-media-dir").value.trim(),
+    replay_storage: {
+      mode: $("set-replay-disk-enabled").checked ? "disk" : "memory",
+      disk_dir: $("set-replay-disk-dir").value.trim(),
+      disk_quota_gb: Number($("set-replay-disk-quota").value),
+      disk_acknowledged: $("set-replay-disk-ack").checked,
+    },
     hotkey: $("set-hotkey").value,
   };
 }
@@ -151,6 +167,15 @@ function defaultAudioSettings() {
     mic_device_id: null,
     mic_volume: 1,
     mic_channels: "mono",
+  };
+}
+
+function defaultReplayStorageSettings() {
+  return {
+    mode: "memory",
+    disk_dir: "",
+    disk_quota_gb: 2,
+    disk_acknowledged: false,
   };
 }
 
@@ -171,12 +196,32 @@ function syncRecordingFields() {
   syncRangeProgress($("set-fps"));
   $("replay-summary").textContent = `Save Replay writes the last ${settingDurationLabel(replay)}.`;
   $("replay-summary").className = "setting-summary";
-  $("encoder-summary").textContent =
-    encoder.id === "auto"
-      ? "Clipline chooses the best available H.264 GPU encoder."
-      : `${encoder.name} is used for new recordings.`;
+  const encoderSummary = $("encoder-summary");
+  if (encoder.id === "auto") {
+    encoderSummary.textContent =
+      "Clipline picks the best available encoder the review player can decode.";
+    encoderSummary.classList.remove("warn");
+  } else {
+    const caveat = PlayerCore.encoderCodecCaveat(encoder.codec, decodableCodecs);
+    encoderSummary.textContent = caveat || `${encoder.name} is used for new recordings.`;
+    encoderSummary.classList.toggle("warn", Boolean(caveat));
+  }
   $("quality-summary").textContent = `${quality.label} quality - ${quality.hint}.`;
   $("fps-summary").textContent = `${smoothness.label} - ${smoothness.hint}.`;
+  syncReplayStorageFields();
+}
+
+function syncReplayStorageFields() {
+  const enabled = $("set-replay-disk-enabled").checked;
+  const fields = $("replay-disk-fields");
+  fields.hidden = !enabled;
+  const quality = recordingQualityPreset(Number($("set-bitrate").value));
+  const gbPerHour = quality.bitrate * 1_000_000 / 8 * 3600 / (1000 ** 3);
+  $("replay-disk-estimate").textContent =
+    `${quality.bitrate} Mbps: about ${gbPerHour.toFixed(quality.bitrate >= 40 ? 0 : 1)} GB/hour written while recording.`;
+  for (const id of ["set-replay-disk-dir", "choose-replay-cache-folder", "set-replay-disk-quota", "set-replay-disk-ack"]) {
+    $(id).disabled = !enabled;
+  }
 }
 
 function volumeLabel(value) {
@@ -241,7 +286,8 @@ function renderVideoEncoderSelect() {
   for (const encoder of videoEncoders) {
     const opt = document.createElement("option");
     opt.value = encoder.id;
-    opt.textContent = encoder.name;
+    const caveat = PlayerCore.encoderCodecCaveat(encoder.codec, decodableCodecs);
+    opt.textContent = caveat ? `${encoder.name} (limited playback)` : encoder.name;
     select.appendChild(opt);
   }
   if (selected !== "auto" && !videoEncoders.some((encoder) => encoder.id === selected)) {
@@ -494,17 +540,33 @@ async function loadAudioDevices() {
   }
 }
 
+// Probe which codecs this WebView2 can actually decode and report them so
+// Automatic recording never produces a clip the review player can't show.
+function probeDecodableCodecs() {
+  const probe = document.createElement("video");
+  const supported = ["h264"];
+  for (const { codec, mime } of PlayerCore.videoDecodeProbes()) {
+    const verdict = probe.canPlayType(mime);
+    if (verdict === "probably" || verdict === "maybe") supported.push(codec);
+  }
+  decodableCodecs = supported;
+}
+
 async function loadVideoEncoders() {
+  probeDecodableCodecs();
   try {
-    videoEncoders = await invoke("list_video_encoders");
-    renderVideoEncoderSelect();
-    if (currentSettings) syncRecordingFields();
+    await invoke("report_decode_support", { codecs: decodableCodecs });
+  } catch (e) {
+    // Reporting is best-effort; the recorder defaults to H.264-safe Automatic.
+  }
+  try {
+    videoEncoders = await invoke("probe_encoders");
   } catch (e) {
     videoEncoders = [];
-    renderVideoEncoderSelect();
-    if (currentSettings) syncRecordingFields();
     $("error").textContent = e;
   }
+  renderVideoEncoderSelect();
+  if (currentSettings) syncRecordingFields();
 }
 
 function updateRegionFields() {
@@ -668,7 +730,7 @@ async function refreshStorage() {
 async function refreshMemoryUsage() {
   try {
     const s = await invoke("memory_status");
-    $("memory-usage").textContent = `Using ${fmtBytes(s.working_set_bytes)} RAM`;
+    $("memory-usage").textContent = `Using ${fmtBytes(s.private_working_set_bytes)} RAM`;
   } catch (_) {
     $("memory-usage").textContent = "Using -- RAM";
   }
@@ -1091,6 +1153,20 @@ async function chooseMediaFolder() {
   }
 }
 
+async function chooseReplayCacheFolder() {
+  try {
+    const selected = await invoke("choose_replay_cache_folder", {
+      current: $("set-replay-disk-dir").value,
+    });
+    if (selected) {
+      $("set-replay-disk-dir").value = selected;
+      $("settings-status").textContent = "replay cache folder selected - save to apply";
+    }
+  } catch (e) {
+    $("error").textContent = e;
+  }
+}
+
 /* ---- backend events ---- */
 
 listen("status", (e) => {
@@ -1157,6 +1233,10 @@ for (const id of ["set-output-volume", "set-mic-volume"]) {
 }
 $("test-mic").addEventListener("click", testMic);
 $("choose-media-folder").addEventListener("click", chooseMediaFolder);
+$("choose-replay-cache-folder").addEventListener("click", chooseReplayCacheFolder);
+$("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);
+$("set-replay-disk-quota").addEventListener("input", syncReplayStorageFields);
+$("set-replay-disk-quota").addEventListener("change", syncReplayStorageFields);
 for (const id of ["set-buffer", "set-replay", "set-encoder", "set-bitrate", "set-fps"]) {
   $(id).addEventListener("input", syncRecordingFields);
   $(id).addEventListener("change", syncRecordingFields);

@@ -5,13 +5,14 @@
 use windows::core::{Interface, Result as WinResult};
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
-    ID3D11VideoProcessorEnumerator, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
-    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
-    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
-    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
+    ID3D11Device, ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
+    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+    D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
+    D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_RATIONAL;
 
@@ -180,9 +181,71 @@ impl VideoConverter {
     }
 }
 
+/// Copy a GPU NV12 texture to a staging texture and pack it into contiguous
+/// NV12 bytes (Y plane `width*height`, then interleaved UV `width*height/2`)
+/// for piping to FFmpeg. Maps with the texture's row pitch and reads the UV
+/// plane immediately after the Y plane — the conventional D3D11 NV12 layout.
+/// Dimensions come from `src` itself so the packed size can't drift from the
+/// texture the caller actually produced.
+pub fn read_nv12(device: &ID3D11Device, src: &ID3D11Texture2D) -> WinResult<Vec<u8>> {
+    let (width, height) = d3d11::texture_size(src);
+    let staging = d3d11::create_nv12_staging(device, width, height)?;
+    let dst: ID3D11Resource = staging.cast()?;
+    let source: ID3D11Resource = src.cast()?;
+    // SAFETY: trivial getter; the device owns a single immediate context.
+    let ctx = unsafe { device.GetImmediateContext()? };
+    let (w, h) = (width as usize, height as usize);
+    let mut out = vec![0u8; w * h * 3 / 2];
+    // SAFETY: dst/source are valid resources of identical NV12 descs; the
+    // staging texture is CPU-readable and mapped for read below. The mapped
+    // pointer is valid until Unmap, which we always call before returning.
+    unsafe {
+        ctx.CopyResource(&dst, &source);
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        ctx.Map(&dst, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+        let pitch = mapped.RowPitch as usize;
+        let base = mapped.pData as *const u8;
+        for row in 0..h {
+            let src_row = std::slice::from_raw_parts(base.add(row * pitch), w);
+            out[row * w..(row + 1) * w].copy_from_slice(src_row);
+        }
+        let uv_base = base.add(pitch * h);
+        let uv_out = w * h;
+        for row in 0..h / 2 {
+            let src_row = std::slice::from_raw_parts(uv_base.add(row * pitch), w);
+            out[uv_out + row * w..uv_out + (row + 1) * w].copy_from_slice(src_row);
+        }
+        ctx.Unmap(&dst, 0);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_back_converted_nv12_as_contiguous_bytes() {
+        // WARP has no ID3D11VideoDevice — needs real hardware; skips on CI.
+        let device = match crate::windows::d3d11::create_device() {
+            Ok((device, _ctx)) => device,
+            Err(e) => {
+                eprintln!("SKIP: no hardware D3D11 device: {e}");
+                return;
+            }
+        };
+        let mut conv = match VideoConverter::new(&device, 64, 64, 64, 64) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("SKIP: video processor unavailable: {e}");
+                return;
+            }
+        };
+        let src = crate::windows::d3d11::create_bgra_texture(&device, 64, 64).expect("src");
+        let nv12 = conv.convert(&src).expect("convert");
+        let bytes = read_nv12(&device, &nv12).expect("readback");
+        assert_eq!(bytes.len(), 64 * 64 * 3 / 2, "tightly packed NV12");
+    }
 
     #[test]
     fn converts_bgra_texture_to_nv12_with_scaling() {

@@ -1,6 +1,11 @@
 pub mod annexb;
+pub mod av1;
 pub mod avsync;
 pub mod clock;
+pub mod ffmpeg;
+pub mod ffmpeg_encoder;
+pub mod framing;
+pub mod hevc;
 pub mod mock;
 pub mod opus;
 pub mod pcm;
@@ -16,8 +21,11 @@ pub use clock::{qpc_to_ticks_100ns, RelativeClock};
 pub use mock::{LimitedCapture, MockAudioSource, MockCapture, MockEncoder};
 pub use opus::OpusFrameEncoder;
 pub use pcm::{extract_stereo, LoopbackAssembler};
-pub use pipeline::{PipelineError, Recorder};
-pub use probe::{select_encoder, Codec, EncoderBackend, EncoderCapability};
+pub use pipeline::{PipelineError, Recorder, ReplayStorageConfig};
+pub use probe::{
+    rank_encoders, Codec, EncoderApi, EncoderBackend, EncoderCandidate, EncoderCapability,
+    EncoderPreference,
+};
 pub use traits::{
     AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket, Encoder,
     Frame, FrameData,

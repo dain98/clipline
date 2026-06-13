@@ -27,13 +27,13 @@ fn ffprobe_parses_finalized_file_as_standard_mp4() {
         return;
     };
 
-    let cfg = VideoTrackConfig {
-        width: 128,
-        height: 128,
-        timescale: 90_000,
-        sps: vec![0x67, 0x64, 0x00, 0x0A, 0xAC, 0x72, 0x84, 0x44, 0x26, 0x84],
-        pps: vec![0x68, 0xEE, 0x38, 0x80],
-    };
+    let cfg = VideoTrackConfig::h264(
+        128,
+        128,
+        90_000,
+        vec![0x67, 0x64, 0x00, 0x0A, 0xAC, 0x72, 0x84, 0x44, 0x26, 0x84],
+        vec![0x68, 0xEE, 0x38, 0x80],
+    );
     let mut w = HybridMp4Writer::new(Cursor::new(Vec::new()), cfg).unwrap();
     // 60 frames at 30 fps in GOPs of 10 → 2.0 s duration.
     for _ in 0..6 {

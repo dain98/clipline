@@ -109,6 +109,13 @@ fn review_player_owns_all_controls() {
         "id=\"set-media-dir\"",
         "id=\"choose-media-folder\"",
         "id=\"set-quota\"",
+        "id=\"set-replay-disk-enabled\"",
+        "id=\"replay-disk-fields\"",
+        "id=\"set-replay-disk-dir\"",
+        "id=\"choose-replay-cache-folder\"",
+        "id=\"set-replay-disk-quota\"",
+        "id=\"replay-disk-estimate\"",
+        "id=\"set-replay-disk-ack\"",
         "id=\"set-hotkey\"",
         "id=\"settings-save\"",
         "id=\"settings-close\"",
@@ -180,6 +187,15 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains("Choose Folder"),
         "storage settings must expose a native-folder-picker action"
+    );
+    assert!(
+        html.contains("Disk replay buffer (advanced)")
+            && html.contains("Only turn this on if you know what you're doing")
+            && html.contains("can add significant SSD wear")
+            && html.contains(
+                "I understand this continuously writes to disk and can shorten SSD life."
+            ),
+        "disk replay buffer settings must carry explicit advanced SSD-wear warnings"
     );
 
     // Settings is a page in the main pane now, not a sidebar fold.

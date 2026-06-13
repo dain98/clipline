@@ -61,6 +61,20 @@ pub trait Encoder {
     }
 }
 
+/// Lets the recorder hold a runtime-selected encoder (MFT or FFmpeg) behind
+/// one type after walking the ranked candidate list.
+impl Encoder for Box<dyn Encoder> {
+    fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
+        (**self).encode(frame)
+    }
+    fn track_config(&self) -> VideoTrackConfig {
+        (**self).track_config()
+    }
+    fn finish(&mut self) -> Result<Vec<EncodedPacket>, EncodeError> {
+        (**self).finish()
+    }
+}
+
 /// One encoded audio packet (e.g. a 20 ms Opus frame).
 #[derive(Debug, Clone)]
 pub struct AudioPacket {

@@ -530,6 +530,11 @@ label span { white-space: nowrap; }
   border-bottom: 1px solid var(--line);
 }
 .setting-row:last-child { border-bottom: 0; }
+.setting-row.compact {
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+  gap: 18px;
+  padding: 12px 0;
+}
 
 .setting-info { display: grid; gap: 3px; min-width: 0; }
 .setting-info strong { font-size: 13.5px; font-weight: 600; }
@@ -593,6 +598,29 @@ label span { white-space: nowrap; }
   padding: 0;
   accent-color: var(--accent);
 }
+
+.advanced-box {
+  display: grid;
+  gap: 12px;
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+}
+
+.advanced-fields {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding-left: 23px;
+}
+
+.advanced-fields[hidden] { display: none; }
+
+.danger-check {
+  align-items: flex-start;
+  color: var(--warn);
+}
+
+.danger-check span { line-height: 1.35; }
 
 .volume-line {
   display: grid;
@@ -668,6 +696,11 @@ label span { white-space: nowrap; }
   min-height: 17px;
   color: var(--muted);
   font-size: 12px;
+}
+
+/* Amber caveat for an encoder/codec the review player may not decode. */
+.setting-summary.warn {
+  color: var(--amber, #e0a23a);
 }
 
 .slider-scale {

@@ -291,8 +291,8 @@
             <input id="set-buffer" type="hidden" value="75" />
             <div class="setting-row">
               <div class="setting-info">
-                <strong>Hardware encoder</strong>
-                <span>GPU encoder used for new recordings.</span>
+                <strong>Encoder</strong>
+                <span>Encoder and codec used for new recordings.</span>
               </div>
               <div class="recording-control">
                 <select id="set-encoder"></select>
@@ -370,6 +370,40 @@
                 <span>Budget for saved clips — oldest clips are cleaned up after each save.</span>
               </div>
               <input id="set-quota" type="number" min="0" step="0.5" />
+            </div>
+            <div class="advanced-box">
+              <div class="setting-info">
+                <strong>Disk replay buffer (advanced)</strong>
+                <span>Only turn this on if you know what you're doing. Clipline will continuously write encoded replay data while recording. This can add significant SSD wear.</span>
+              </div>
+              <label class="check-line">
+                <input id="set-replay-disk-enabled" type="checkbox" />
+                <span>Store the replay buffer on disk instead of RAM</span>
+              </label>
+              <div id="replay-disk-fields" class="advanced-fields">
+                <div class="setting-row compact">
+                  <div class="setting-info">
+                    <strong>Replay cache folder</strong>
+                    <span>Temporary rolling cache files. Use a separate folder from saved clips.</span>
+                  </div>
+                  <div class="folder-control">
+                    <input id="set-replay-disk-dir" aria-label="Replay cache folder" spellcheck="false" readonly />
+                    <button id="choose-replay-cache-folder" type="button" aria-label="Choose replay cache folder">Choose Folder</button>
+                  </div>
+                </div>
+                <div class="setting-row compact">
+                  <div class="setting-info">
+                    <strong>Replay cache quota (GiB)</strong>
+                    <span>Hard cap for temporary replay cache files.</span>
+                  </div>
+                  <input id="set-replay-disk-quota" aria-label="Replay cache quota in GiB" type="number" min="0.25" step="0.25" />
+                </div>
+                <span id="replay-disk-estimate" class="setting-summary"></span>
+                <label class="check-line danger-check">
+                  <input id="set-replay-disk-ack" type="checkbox" />
+                  <span>I understand this continuously writes to disk and can shorten SSD life.</span>
+                </label>
+              </div>
             </div>
           </div>
 
