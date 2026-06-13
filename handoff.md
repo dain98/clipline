@@ -151,8 +151,10 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     size changes, scaling resized windows into the fixed MP4 track instead of artifacting or
     clipping to the first size. The review player also renders clips inside an aspect-locked
     `#stage-frame`, so WebView's `<video>` element cannot add top/bottom letterboxing when the
-    available stage area is slightly off from the clip's aspect ratio. Each saved custom game now
-    persists its own recording-mode preference (`replays_only` default, `full_session`
+    available stage area is slightly off from the clip's aspect ratio. Custom game detection now
+    owns per-window capture selection in the UI, so the old manual "Window title" capture target
+    was removed from Settings > Capture while backend/CLI compatibility remains. Each saved custom
+    game now persists its own recording-mode preference (`replays_only` default, `full_session`
     selectable); the current recorder still uses the replay-buffer path, and the full-session file
     sink remains the ddoc Goal 2 follow-up.
 

@@ -70,7 +70,6 @@ fn review_player_owns_all_controls() {
         "id=\"settings-tabs\"",
         "id=\"open-settings\"",
         "id=\"set-capture\"",
-        "id=\"set-window\"",
         "id=\"set-output-enabled\"",
         "id=\"set-output-device\"",
         "id=\"set-output-volume\"",
@@ -140,6 +139,10 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains("value=\"display_region\""),
         "capture target must expose the display_region mode"
+    );
+    assert!(
+        !html.contains("value=\"window_title\"") && !html.contains("id=\"set-window\""),
+        "manual window-title capture was replaced by custom game detection"
     );
     assert!(
         html.contains("data-replay-preset=\"30\"")

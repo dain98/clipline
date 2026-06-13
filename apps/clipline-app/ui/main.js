@@ -121,8 +121,7 @@ function fillSettings(s) {
     replay_storage: replayStorage,
     games: { ...games, custom_games: customGames.map((game) => ({ ...game })) },
   };
-  $("set-capture").value = s.capture_mode;
-  $("set-window").value = s.window_title ?? "";
+  $("set-capture").value = captureSettingsMode(s.capture_mode);
   regionState = s.capture_region ?? regionState;
   $("set-games-auto-detect").checked = !!games.auto_detect;
   $("set-output-enabled").checked = !!audio.output_enabled;
@@ -159,7 +158,7 @@ function readSettings() {
   const replay = Number($("set-replay").value);
   return {
     capture_mode: $("set-capture").value,
-    window_title: $("set-window").value,
+    window_title: "",
     capture_region: regionState,
     games: {
       auto_detect: $("set-games-auto-detect").checked,
@@ -237,9 +236,12 @@ function normalizeCustomGame(game) {
   };
 }
 
+function captureSettingsMode(mode) {
+  return mode === "display_region" ? "display_region" : "primary_monitor";
+}
+
 function syncCaptureFields() {
   const mode = $("set-capture").value;
-  $("set-window").disabled = mode !== "window_title";
   $("capture-region-editor").hidden = mode !== "display_region";
   if (mode === "display_region") renderRegionEditor();
 }
