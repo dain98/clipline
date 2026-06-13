@@ -309,7 +309,7 @@ fn video_encoder_info(
             id: "quick_sync_h264",
             name: "Intel Quick Sync H.264 (uses GPU)",
         }),
-        clipline_capture::probe::EncoderBackend::X264
+        clipline_capture::probe::EncoderBackend::SvtAv1
         | clipline_capture::probe::EncoderBackend::MfSoftware => None,
     }
 }
