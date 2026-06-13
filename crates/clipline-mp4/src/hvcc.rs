@@ -127,8 +127,9 @@ pub(crate) fn hvcc(vps: &[u8], sps: &[u8], pps: &[u8]) -> Vec<u8> {
         .u8(0xF8 | info.bit_depth_chroma_minus8)
         .u16(0) // avgFrameRate 0 (unspecified)
         // constantFrameRate 0 | numTemporalLayers | temporalIdNested |
-        // lengthSizeMinusOne 3 (4-byte length prefixes).
-.u8((info.num_temporal_layers.saturating_sub(1) << 3) | (info.temporal_id_nested << 2) | 3)
+        // lengthSizeMinusOne 3 (4-byte length prefixes). numTemporalLayers is
+        // the actual layer count (1-7) per ISO/IEC 14496-15, not a minus-1.
+        .u8((info.num_temporal_layers << 3) | (info.temporal_id_nested << 2) | 3)
         .u8(3); // numOfArrays: VPS, SPS, PPS
     for (nal_type, nal) in [(32u8, vps), (33, sps), (34, pps)] {
         // hvcC nalUnitLength is u16 by spec; real parameter sets are far smaller.
