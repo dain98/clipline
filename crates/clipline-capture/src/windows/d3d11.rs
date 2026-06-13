@@ -126,7 +126,10 @@ pub fn create_nv12_staging(
         MipLevels: 1,
         ArraySize: 1,
         Format: DXGI_FORMAT_NV12,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         Usage: D3D11_USAGE_STAGING,
         BindFlags: 0,
         CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,

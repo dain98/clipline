@@ -53,6 +53,7 @@ fn review_player_owns_all_controls() {
         "id=\"delete-clip\"",
         "id=\"ruler\"",
         "id=\"open-folder\"",
+        "id=\"stage-frame\"",
         "id=\"copy-clip\"",
         "id=\"stage-overlay\"",
         "id=\"sidebar-toggle\"",
@@ -70,7 +71,6 @@ fn review_player_owns_all_controls() {
         "id=\"settings-tabs\"",
         "id=\"open-settings\"",
         "id=\"set-capture\"",
-        "id=\"set-window\"",
         "id=\"set-output-enabled\"",
         "id=\"set-output-device\"",
         "id=\"set-output-volume\"",
@@ -117,6 +117,16 @@ fn review_player_owns_all_controls() {
         "id=\"set-replay-disk-quota\"",
         "id=\"replay-disk-estimate\"",
         "id=\"set-replay-disk-ack\"",
+        "data-tab=\"games\"",
+        "data-section=\"games\"",
+        "id=\"set-games-auto-detect\"",
+        "id=\"supported-games\"",
+        "id=\"custom-games\"",
+        "id=\"add-custom-game\"",
+        "id=\"game-window-picker\"",
+        "id=\"refresh-game-windows\"",
+        "id=\"game-window-list\"",
+        "id=\"game-detection-status\"",
         "id=\"set-hotkey\"",
         "id=\"settings-save\"",
         "id=\"settings-close\"",
@@ -130,6 +140,20 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains("value=\"display_region\""),
         "capture target must expose the display_region mode"
+    );
+    assert!(
+        !html.contains(">primary monitor<")
+            && main_js().contains("renderCaptureTargetSelect")
+            && main_js().contains("displayCaptureValue")
+            && main_js().contains("display:")
+            && html.contains(">SET REGION<")
+            && main_js().find("displayCaptureValue").unwrap()
+                < main_js().find("region.value = \"display_region\"").unwrap(),
+        "capture target must list available displays before the display-region option"
+    );
+    assert!(
+        !html.contains("value=\"window_title\"") && !html.contains("id=\"set-window\""),
+        "manual window-title capture was replaced by custom game detection"
     );
     assert!(
         html.contains("data-replay-preset=\"30\"")
@@ -198,6 +222,19 @@ fn review_player_owns_all_controls() {
             ),
         "disk replay buffer settings must carry explicit advanced SSD-wear warnings"
     );
+    assert!(
+        html.contains(">Games<") && html.contains("Add Custom Game"),
+        "settings must expose the Games tab and custom game action"
+    );
+    assert!(
+        main_js().contains("gameRecordingModeControl")
+            && main_js().contains("custom-game-recording-mode")
+            && main_js().contains("recording_mode")
+            && main_js().contains("replays_only")
+            && main_js().contains("full_session")
+            && styles_css().contains(".custom-game-mode"),
+        "custom games must expose and persist per-game recording mode choices"
+    );
 
     // Settings is a page in the main pane now, not a sidebar fold.
     assert!(
@@ -243,6 +280,12 @@ fn review_player_owns_all_controls() {
     assert!(
         transport < timeline,
         "transport row must precede the timeline in the deck"
+    );
+    assert!(
+        styles_css().contains(".stage-frame")
+            && styles_css().contains("object-fit: contain")
+            && main_js().contains("updateStageFrame"),
+        "the review stage must size an aspect-locked frame around the video"
     );
 
     // Icon buttons carry SVG icons; text labels are a regression.
@@ -329,6 +372,26 @@ fn shell_shows_live_memory_usage() {
         css.contains(".memory-usage") && css.contains("font-variant-numeric: tabular-nums"),
         "memory usage should have stable numeric styling in the top-left chrome"
     );
+}
+
+#[test]
+fn games_ui_wires_detection_commands() {
+    let js = main_js();
+
+    for required in [
+        "await invoke(\"list_game_windows\")",
+        "listen(\"game-detection\"",
+        "renderCustomGames",
+        "refreshGameWindows",
+        "$(\"add-custom-game\").addEventListener(\"click\", showGameWindowPicker)",
+        "$(\"refresh-game-windows\").addEventListener(\"click\", refreshGameWindows)",
+        "$(\"cancel-game-picker\").addEventListener(\"click\", hideGameWindowPicker)",
+    ] {
+        assert!(
+            js.contains(required),
+            "main.js must wire the custom game workflow through {required}"
+        );
+    }
 }
 
 #[test]

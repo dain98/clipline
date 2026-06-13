@@ -11,9 +11,18 @@ const MATRIX: [u32; 9] = [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_000
 /// is a full OBU (header + size field + payload).
 #[derive(Debug, Clone)]
 pub enum VideoCodecParams {
-    H264 { sps: Vec<u8>, pps: Vec<u8> },
-    Hevc { vps: Vec<u8>, sps: Vec<u8>, pps: Vec<u8> },
-    Av1 { sequence_header_obu: Vec<u8> },
+    H264 {
+        sps: Vec<u8>,
+        pps: Vec<u8>,
+    },
+    Hevc {
+        vps: Vec<u8>,
+        sps: Vec<u8>,
+        pps: Vec<u8>,
+    },
+    Av1 {
+        sequence_header_obu: Vec<u8>,
+    },
 }
 
 /// Video track parameters.
@@ -28,7 +37,12 @@ pub struct VideoTrackConfig {
 
 impl VideoTrackConfig {
     pub fn h264(width: u16, height: u16, timescale: u32, sps: Vec<u8>, pps: Vec<u8>) -> Self {
-        Self { width, height, timescale, codec: VideoCodecParams::H264 { sps, pps } }
+        Self {
+            width,
+            height,
+            timescale,
+            codec: VideoCodecParams::H264 { sps, pps },
+        }
     }
 
     pub fn hevc(
@@ -39,11 +53,23 @@ impl VideoTrackConfig {
         sps: Vec<u8>,
         pps: Vec<u8>,
     ) -> Self {
-        Self { width, height, timescale, codec: VideoCodecParams::Hevc { vps, sps, pps } }
+        Self {
+            width,
+            height,
+            timescale,
+            codec: VideoCodecParams::Hevc { vps, sps, pps },
+        }
     }
 
     pub fn av1(width: u16, height: u16, timescale: u32, sequence_header_obu: Vec<u8>) -> Self {
-        Self { width, height, timescale, codec: VideoCodecParams::Av1 { sequence_header_obu } }
+        Self {
+            width,
+            height,
+            timescale,
+            codec: VideoCodecParams::Av1 {
+                sequence_header_obu,
+            },
+        }
     }
 }
 
@@ -318,11 +344,13 @@ fn stsd(cfg: &VideoTrackConfig) -> Vec<u8> {
     let (fourcc, codec_box) = match &cfg.codec {
         VideoCodecParams::H264 { sps, pps } => (*b"avc1", avcc(sps, pps)),
         VideoCodecParams::Hevc { vps, sps, pps } => (*b"hvc1", crate::hvcc::hvcc(vps, sps, pps)),
-        VideoCodecParams::Av1 { sequence_header_obu } => {
-            (*b"av01", crate::av1c::av1c(sequence_header_obu))
-        }
+        VideoCodecParams::Av1 {
+            sequence_header_obu,
+        } => (*b"av01", crate::av1c::av1c(sequence_header_obu)),
     };
-    payload.extend(visual_sample_entry(fourcc, cfg.width, cfg.height, codec_box));
+    payload.extend(visual_sample_entry(
+        fourcc, cfg.width, cfg.height, codec_box,
+    ));
     full_box(*b"stsd", 0, 0, payload)
 }
 
@@ -354,8 +382,14 @@ fn visual_sample_entry(fourcc: [u8; 4], width: u16, height: u16, codec_box: Vec<
 fn avcc(sps: &[u8], pps: &[u8]) -> Vec<u8> {
     // avcC NAL-length fields are u16 by spec; real parameter sets are well
     // under 64 KiB, so a longer one signals an upstream bug, not valid input.
-    debug_assert!(sps.len() <= u16::MAX as usize, "SPS exceeds avcC u16 length");
-    debug_assert!(pps.len() <= u16::MAX as usize, "PPS exceeds avcC u16 length");
+    debug_assert!(
+        sps.len() <= u16::MAX as usize,
+        "SPS exceeds avcC u16 length"
+    );
+    debug_assert!(
+        pps.len() <= u16::MAX as usize,
+        "PPS exceeds avcC u16 length"
+    );
     let mut p = Payload::new();
     p.u8(1) // configurationVersion
         .u8(sps.get(1).copied().unwrap_or(0)) // AVCProfileIndication

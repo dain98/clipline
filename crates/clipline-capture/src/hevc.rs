@@ -67,7 +67,11 @@ mod tests {
     fn annexb(units: &[&[u8]]) -> Vec<u8> {
         let mut out = Vec::new();
         for (i, u) in units.iter().enumerate() {
-            out.extend_from_slice(if i % 2 == 0 { &[0, 0, 0, 1][..] } else { &[0, 0, 1][..] });
+            out.extend_from_slice(if i % 2 == 0 {
+                &[0, 0, 0, 1][..]
+            } else {
+                &[0, 0, 1][..]
+            });
             out.extend_from_slice(u);
         }
         out
@@ -94,7 +98,10 @@ mod tests {
     fn extracts_parameter_sets() {
         let hdr = annexb(&[VPS, SPS, PPS]);
         let (vps, sps, pps) = extract_vps_sps_pps(&hdr).expect("all three present");
-        assert_eq!((vps.as_slice(), sps.as_slice(), pps.as_slice()), (VPS, SPS, PPS));
+        assert_eq!(
+            (vps.as_slice(), sps.as_slice(), pps.as_slice()),
+            (VPS, SPS, PPS)
+        );
         // Also from a full access unit with in-band parameter sets.
         let au = annexb(&[AUD, VPS, SPS, PPS, SEI, IDR]);
         assert!(extract_vps_sps_pps(&au).is_some());

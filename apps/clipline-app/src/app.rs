@@ -11,6 +11,7 @@ use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
+use crate::games::{DetectedGame, GameWindowInfo};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode};
 
@@ -36,6 +37,36 @@ struct AudioDeviceInfo {
 struct AudioDeviceLists {
     outputs: Vec<AudioDeviceInfo>,
     inputs: Vec<AudioDeviceInfo>,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct GameDetectionEvent {
+    active: bool,
+    name: Option<String>,
+    window_title: Option<String>,
+    process_id: Option<u32>,
+    exe_name: Option<String>,
+}
+
+impl GameDetectionEvent {
+    fn from_detected(detected: Option<&DetectedGame>) -> Self {
+        match detected {
+            Some(game) => Self {
+                active: true,
+                name: Some(game.name.clone()),
+                window_title: Some(game.window_title.clone()),
+                process_id: Some(game.process_id),
+                exe_name: Some(game.exe_name.clone()),
+            },
+            None => Self {
+                active: false,
+                name: None,
+                window_title: None,
+                process_id: None,
+                exe_name: None,
+            },
+        }
+    }
 }
 
 #[tauri::command]
@@ -84,6 +115,7 @@ struct RuntimeInner {
     tx: Option<Sender<Cmd>>,
     settings: AppSettings,
     lol_url: Option<String>,
+    active_game: Option<DetectedGame>,
     /// Codecs WebView2 can decode, reported by the frontend. Drives the
     /// recorder's Automatic selection; H.264 is the always-safe default.
     decodable_codecs: Vec<service::Codec>,
@@ -95,6 +127,7 @@ impl RuntimeState {
             tx: Some(tx),
             settings,
             lol_url,
+            active_game: None,
             decodable_codecs: vec![service::Codec::H264],
         }))
     }
@@ -108,9 +141,7 @@ impl RuntimeState {
                 "hevc" if !codecs.contains(&service::Codec::Hevc) => {
                     codecs.push(service::Codec::Hevc)
                 }
-                "av1" if !codecs.contains(&service::Codec::Av1) => {
-                    codecs.push(service::Codec::Av1)
-                }
+                "av1" if !codecs.contains(&service::Codec::Av1) => codecs.push(service::Codec::Av1),
                 _ => {}
             }
         }
@@ -124,6 +155,12 @@ impl RuntimeState {
     fn options(inner: &RuntimeInner) -> Result<service::ServiceOptions, String> {
         let mut opts = inner.settings.to_service_options(inner.lol_url.clone())?;
         opts.decodable_codecs = inner.decodable_codecs.clone();
+        if let Some(game) = &inner.active_game {
+            opts.capture_source = service::CaptureSource::WindowHandle {
+                hwnd: game.hwnd,
+                title: game.window_title.clone(),
+            };
+        }
         Ok(opts)
     }
 
@@ -153,21 +190,35 @@ impl RuntimeState {
     }
 
     fn restart<R: Runtime>(&self, app: AppHandle<R>, settings: AppSettings) -> Result<(), String> {
-        let old_tx = {
+        let (old_tx, next_options, cleared_active_game) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            let old_tx = inner.tx.clone();
-            if inner.tx.is_some() {
-                let mut opts = settings.to_service_options(inner.lol_url.clone())?;
-                opts.decodable_codecs = inner.decodable_codecs.clone();
-                let (tx, rx) = service::spawn(opts);
-                inner.tx = Some(tx);
-                pump_events(app, rx);
+            let old_tx = inner.tx.take();
+            let cleared_active_game = inner.active_game.is_some()
+                && !active_game_still_configured(&settings, inner.active_game.as_ref());
+            if cleared_active_game {
+                inner.active_game = None;
             }
             inner.settings = settings;
-            old_tx
+            let next_options = if old_tx.is_some() {
+                Some(Self::options(&inner)?)
+            } else {
+                None
+            };
+            (old_tx, next_options, cleared_active_game)
         };
         if let Some(tx) = old_tx {
             let _ = tx.send(Cmd::Stop { announce: false });
+        }
+        if let Some(options) = next_options {
+            let (tx, rx) = service::spawn(options);
+            {
+                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+                inner.tx = Some(tx);
+            }
+            pump_events(app.clone(), rx);
+        }
+        if cleared_active_game {
+            let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
         }
         Ok(())
     }
@@ -208,6 +259,67 @@ impl RuntimeState {
         }
         Ok(false)
     }
+
+    fn set_detected_game<R: Runtime>(
+        &self,
+        app: AppHandle<R>,
+        detected: Option<DetectedGame>,
+    ) -> Result<(), String> {
+        let event = GameDetectionEvent::from_detected(detected.as_ref());
+        let (old_tx, next_options, emit_event) = {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
+                if inner.active_game != detected {
+                    inner.active_game = detected;
+                    (None, None, true)
+                } else {
+                    (None, None, false)
+                }
+            } else {
+                inner.active_game = detected;
+                let old_tx = inner.tx.take();
+                let next_options = if old_tx.is_some() {
+                    Some(Self::options(&inner)?)
+                } else {
+                    None
+                };
+                (old_tx, next_options, true)
+            }
+        };
+        if let Some(tx) = old_tx {
+            let _ = tx.send(Cmd::Stop { announce: false });
+        }
+        if let Some(options) = next_options {
+            let (tx, rx) = service::spawn(options);
+            {
+                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+                inner.tx = Some(tx);
+            }
+            pump_events(app.clone(), rx);
+        }
+        if emit_event {
+            let _ = app.emit("game-detection", event);
+        }
+        Ok(())
+    }
+}
+
+fn same_game_window(current: Option<&DetectedGame>, next: Option<&DetectedGame>) -> bool {
+    match (current, next) {
+        (Some(current), Some(next)) => current.id == next.id && current.hwnd == next.hwnd,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn active_game_still_configured(settings: &AppSettings, active: Option<&DetectedGame>) -> bool {
+    let Some(active) = active else { return true };
+    settings.games.auto_detect
+        && settings
+            .games
+            .custom_games
+            .iter()
+            .any(|game| game.enabled && game.id == active.id)
 }
 
 #[tauri::command]
@@ -329,6 +441,11 @@ fn list_audio_devices() -> Result<AudioDeviceLists, String> {
 #[tauri::command]
 fn probe_encoders() -> Vec<service::EncoderOption> {
     service::available_encoder_options()
+}
+
+#[tauri::command]
+fn list_game_windows() -> Vec<GameWindowInfo> {
+    crate::games::list_game_windows()
 }
 
 /// The frontend reports which codecs WebView2 can decode (canPlayType) so
@@ -531,6 +648,7 @@ pub fn run() {
             list_audio_devices,
             probe_encoders,
             report_decode_support,
+            list_game_windows,
             memory_status,
             start_microphone_test,
             stop_microphone_test,
@@ -600,6 +718,7 @@ pub fn run() {
                 .build(app)?;
 
             pump_events(app.handle().clone(), event_rx);
+            spawn_game_detector(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -628,6 +747,31 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
+    std::thread::Builder::new()
+        .name("clipline-game-detector".into())
+        .spawn(move || {
+            let mut last_error = None::<String>;
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                let settings = app.state::<RuntimeState>().settings();
+                let detected = crate::games::detect_active_game(&settings.games);
+                match app
+                    .state::<RuntimeState>()
+                    .set_detected_game(app.clone(), detected)
+                {
+                    Ok(()) => last_error = None,
+                    Err(e) if last_error.as_deref() != Some(e.as_str()) => {
+                        last_error = Some(e.clone());
+                        let _ = app.emit("error", format!("game detection: {e}"));
+                    }
+                    Err(_) => {}
+                }
+            }
+        })
+        .expect("spawn game detector thread");
 }
 
 fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -722,5 +866,28 @@ mod tests {
     fn quota_parser_rejects_negative_or_non_numeric_values() {
         assert!(parse_quota_gb("-1").is_err());
         assert!(parse_quota_gb("nope").is_err());
+    }
+
+    #[test]
+    fn detected_game_identity_ignores_volatile_window_title() {
+        let current = DetectedGame {
+            id: "custom-game".into(),
+            name: "Game".into(),
+            hwnd: 42,
+            window_title: "Loading".into(),
+            process_id: 7,
+            exe_name: "game.exe".into(),
+        };
+        let updated_title = DetectedGame {
+            window_title: "Paused".into(),
+            ..current.clone()
+        };
+        let different_window = DetectedGame {
+            hwnd: 43,
+            ..current.clone()
+        };
+
+        assert!(same_game_window(Some(&current), Some(&updated_title)));
+        assert!(!same_game_window(Some(&current), Some(&different_window)));
     }
 }

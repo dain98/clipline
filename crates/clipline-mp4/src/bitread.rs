@@ -92,7 +92,11 @@ mod tests {
     #[test]
     fn exp_golomb_rejects_truncation_and_runaway() {
         // 7 leading zeros promise 7 suffix bits, but the byte ends first.
-        assert_eq!(BitReader::new(&[0b0000_0001]).ue(), None, "truncated suffix");
+        assert_eq!(
+            BitReader::new(&[0b0000_0001]).ue(),
+            None,
+            "truncated suffix"
+        );
         assert_eq!(BitReader::new(&[0; 8]).ue(), None, "all-zero runaway");
     }
 

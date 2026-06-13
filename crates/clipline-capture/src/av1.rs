@@ -46,7 +46,10 @@ fn walk_obus(data: &[u8]) -> Option<Vec<Obu<'_>>> {
             return None;
         }
         pos = end;
-        out.push(Obu { obu_type, bytes: &data[start..end] });
+        out.push(Obu {
+            obu_type,
+            bytes: &data[start..end],
+        });
     }
     Some(out)
 }

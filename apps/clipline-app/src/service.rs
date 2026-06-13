@@ -17,8 +17,8 @@ use clipline_capture::traits::{AudioSource, CaptureError, Encoder, FrameData};
 use clipline_capture::windows::nv12::CropRect;
 use clipline_capture::windows::wasapi::{WasapiChannelMode, WasapiMixedLoopback};
 use clipline_capture::windows::{
-    d3d11, find_window_by_title, mft_probe, ID3D11Device, MftConfig, MftH264Encoder,
-    WasapiLoopback, WgcCapture,
+    d3d11, find_window_by_title, mft_probe, window_from_raw_handle, ID3D11Device, MftConfig,
+    MftH264Encoder, WasapiLoopback, WgcCapture,
 };
 use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
@@ -54,6 +54,7 @@ pub struct CaptureRegion {
 pub enum CaptureSource {
     PrimaryMonitor,
     WindowTitle(String),
+    WindowHandle { hwnd: isize, title: String },
     DisplayRegion(CaptureRegion),
 }
 
@@ -178,7 +179,11 @@ pub fn available_encoder_options() -> Vec<EncoderOption> {
             if !seen.insert(encoder.id()) {
                 continue;
             }
-            let candidate = EncoderCandidate { api: cap.api, backend: cap.backend, codec };
+            let candidate = EncoderCandidate {
+                api: cap.api,
+                backend: cap.backend,
+                codec,
+            };
             options.push(EncoderOption {
                 id: encoder.id().to_string(),
                 name: encoder_label(candidate),
@@ -339,30 +344,28 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let recording_t0 = Instant::now();
     let marker_rx = markers::spawn(opts.lol_url.clone(), recording_t0);
     let mut marker_log = MarkerLog::new();
-    let (mut cap, crop) = match &opts.capture_source {
+    let mut cap = match &opts.capture_source {
         CaptureSource::WindowTitle(needle) => {
             let hwnd = find_window_by_title(needle)
                 .ok_or_else(|| format!("no visible window matching {needle:?}"))?;
-            (
-                WgcCapture::for_window_on(device.clone(), hwnd, clock).map_err(|e| init(&e))?,
-                None,
-            )
+            WgcCapture::for_window_client_on(device.clone(), hwnd, clock).map_err(|e| init(&e))?
         }
-        CaptureSource::PrimaryMonitor => (
-            WgcCapture::primary_monitor_on(device.clone(), clock).map_err(|e| init(&e))?,
-            None,
-        ),
+        CaptureSource::WindowHandle { hwnd, title } => {
+            let hwnd = window_from_raw_handle(*hwnd)
+                .ok_or_else(|| format!("game window {title:?} is no longer available"))?;
+            WgcCapture::for_window_client_on(device.clone(), hwnd, clock).map_err(|e| init(&e))?
+        }
+        CaptureSource::PrimaryMonitor => {
+            WgcCapture::primary_monitor_on(device.clone(), clock).map_err(|e| init(&e))?
+        }
         CaptureSource::DisplayRegion(region) => {
             let display = clipline_capture::windows::display::display_handle_by_id(
                 region.display_id.as_deref(),
             )
             .map_err(|e| init(&e))?;
             let crop = crop_for_region(region, &display.info)?;
-            (
-                WgcCapture::for_monitor_region_on(device.clone(), display.handle, clock, crop)
-                    .map_err(|e| init(&e))?,
-                None,
-            )
+            WgcCapture::for_monitor_region_on(device.clone(), display.handle, clock, crop)
+                .map_err(|e| init(&e))?
         }
     };
 
@@ -375,23 +378,17 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         return Err("expected a GPU frame".into());
     };
     let (in_w, in_h) = d3d11::texture_size(tex);
-    validate_crop_in_frame(crop, in_w, in_h)?;
-    let (source_w, source_h) = crop
-        .map(|crop| (crop.width, crop.height))
-        .unwrap_or((in_w, in_h));
-    let scale = if source_w > 2560 {
-        2560.0 / source_w as f64
+    let scale = if in_w > 2560 {
+        2560.0 / in_w as f64
     } else {
         1.0
     };
     let (enc_w, enc_h) = even_dimensions(
-        (source_w as f64 * scale).round() as u32,
-        (source_h as f64 * scale).round() as u32,
+        (in_w as f64 * scale).round() as u32,
+        (in_h as f64 * scale).round() as u32,
     );
 
-    let (encoder, active) = build_encoder(
-        &device, &opts, in_w, in_h, crop, enc_w, enc_h, events,
-    )?;
+    let (encoder, active) = build_encoder(&device, &opts, in_w, in_h, enc_w, enc_h, events)?;
     let encoder_status = encoder_label(active);
 
     let replay_cache_dir = prepare_replay_storage(&opts)?;
@@ -662,7 +659,6 @@ fn build_encoder(
     opts: &ServiceOptions,
     in_w: u32,
     in_h: u32,
-    crop: Option<CropRect>,
     enc_w: u32,
     enc_h: u32,
     events: &Sender<Event>,
@@ -680,8 +676,16 @@ fn build_encoder(
     let ffmpeg_path = ffmpeg::locate();
     let mut last_err = String::new();
     for candidate in &candidates {
-        match open_candidate(*candidate, device, opts, in_w, in_h, crop, enc_w, enc_h, &ffmpeg_path)
-        {
+        match open_candidate(
+            *candidate,
+            device,
+            opts,
+            in_w,
+            in_h,
+            enc_w,
+            enc_h,
+            &ffmpeg_path,
+        ) {
             Ok(encoder) => {
                 // If the user forced a specific encoder/codec and we ended up
                 // on a different one — whether the choice failed to open or
@@ -709,7 +713,9 @@ fn build_encoder(
             Err(e) => last_err = e,
         }
     }
-    Err(format!("init: no video encoder could be opened: {last_err}"))
+    Err(format!(
+        "init: no video encoder could be opened: {last_err}"
+    ))
 }
 
 /// Construct one candidate encoder. MFT uses the zero-copy GPU H.264 path;
@@ -722,7 +728,6 @@ fn open_candidate(
     opts: &ServiceOptions,
     in_w: u32,
     in_h: u32,
-    crop: Option<CropRect>,
     enc_w: u32,
     enc_h: u32,
     ffmpeg_path: &Option<PathBuf>,
@@ -739,7 +744,7 @@ fn open_candidate(
                 bitrate_bps: opts.bitrate_bps,
                 encoder_backend: Some(candidate.backend),
             };
-            MftH264Encoder::new_with_crop(device, in_w, in_h, cfg, crop)
+            MftH264Encoder::new(device, in_w, in_h, cfg)
                 .map(|e| Box::new(e) as Box<dyn Encoder>)
                 .map_err(|e| e.to_string())
         }
@@ -754,7 +759,7 @@ fn open_candidate(
                 candidate.codec,
                 in_w,
                 in_h,
-                crop,
+                None,
                 enc_w,
                 enc_h,
                 opts.fps,
@@ -894,17 +899,6 @@ fn crop_for_region(
         width: region.width,
         height: region.height,
     })
-}
-
-fn validate_crop_in_frame(crop: Option<CropRect>, in_w: u32, in_h: u32) -> Result<(), String> {
-    let Some(crop) = crop else { return Ok(()) };
-    if crop.x + crop.width > in_w || crop.y + crop.height > in_h {
-        return Err(format!(
-            "capture region {}x{} at {}, {} exceeds captured frame {}x{}",
-            crop.width, crop.height, crop.x, crop.y, in_w, in_h
-        ));
-    }
-    Ok(())
 }
 
 /// Session label from the local wall clock (folder names should match what

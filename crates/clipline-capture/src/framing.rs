@@ -33,11 +33,17 @@ pub struct AnnexBFramer {
 
 impl AnnexBFramer {
     pub fn h264() -> Self {
-        Self { buf: Vec::new(), is_vcl: h264_is_vcl }
+        Self {
+            buf: Vec::new(),
+            is_vcl: h264_is_vcl,
+        }
     }
 
     pub fn hevc() -> Self {
-        Self { buf: Vec::new(), is_vcl: hevc_is_vcl }
+        Self {
+            buf: Vec::new(),
+            is_vcl: hevc_is_vcl,
+        }
     }
 }
 
@@ -115,7 +121,10 @@ pub struct IvfFramer {
 
 impl IvfFramer {
     pub fn new() -> Self {
-        Self { buf: Vec::new(), header_consumed: false }
+        Self {
+            buf: Vec::new(),
+            header_consumed: false,
+        }
     }
 }
 
@@ -184,7 +193,10 @@ mod tests {
         let units = f.push(&stream);
         assert_eq!(units.len(), 2, "third slice waits for the next start code");
         // AU #1 carries SPS+PPS+IDR; AU #2 is the lone P slice.
-        assert_eq!(units[0], [sc4(&[0x67, 1]), sc4(&[0x68, 2]), sc4(&[0x65, 3])].concat());
+        assert_eq!(
+            units[0],
+            [sc4(&[0x67, 1]), sc4(&[0x68, 2]), sc4(&[0x65, 3])].concat()
+        );
         assert_eq!(units[1], sc4(&[0x41, 4]));
         // flush releases the still-buffered final slice.
         assert_eq!(f.flush(), Some(sc4(&[0x41, 5])));
@@ -196,7 +208,7 @@ mod tests {
         let mut stream = Vec::new();
         stream.extend(sc4(&[0x65, 0xAA, 0xBB])); // IDR
         stream.extend(sc4(&[0x41, 0xCC])); // P terminates the IDR's AU
-        // Split mid-NAL to exercise the streaming buffer.
+                                           // Split mid-NAL to exercise the streaming buffer.
         let mut out = f.push(&stream[..6]);
         out.extend(f.push(&stream[6..]));
         assert_eq!(out.len(), 1);

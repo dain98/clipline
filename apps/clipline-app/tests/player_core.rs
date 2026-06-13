@@ -50,13 +50,19 @@ fn fmt_dur_carries_seconds_into_minutes() {
 fn encoder_caveat_only_warns_for_undecodable_non_h264_codecs() {
     let mut ctx = player_core_context();
     // H.264 always plays — never a caveat, regardless of the decodable set.
-    assert_eq!(eval(&mut ctx, "PlayerCore.encoderCodecCaveat('h264', [])"), "null");
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.encoderCodecCaveat('h264', [])"),
+        "null"
+    );
     // HEVC/AV1 warn when not in the decodable set...
     assert!(eval(&mut ctx, "PlayerCore.encoderCodecCaveat('hevc', ['h264'])").contains("HEVC"));
     assert!(eval(&mut ctx, "PlayerCore.encoderCodecCaveat('av1', ['h264'])").contains("AV1"));
     // ...and stay quiet once the player reports it can decode them.
     assert_eq!(
-        eval(&mut ctx, "PlayerCore.encoderCodecCaveat('av1', ['h264','av1'])"),
+        eval(
+            &mut ctx,
+            "PlayerCore.encoderCodecCaveat('av1', ['h264','av1'])"
+        ),
         "null"
     );
 }

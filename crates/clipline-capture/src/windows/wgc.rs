@@ -15,7 +15,8 @@ use windows::Graphics::Capture::{
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
-use windows::Win32::Foundation::{HWND, POINT, RPC_E_CHANGED_MODE};
+use windows::Graphics::SizeInt32;
+use windows::Win32::Foundation::{E_FAIL, HWND, POINT, RPC_E_CHANGED_MODE};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY};
@@ -29,12 +30,41 @@ use crate::clock::RelativeClock;
 use crate::traits::{CaptureEngine, CaptureError, Frame, FrameData};
 use crate::windows::d3d11;
 use crate::windows::nv12::CropRect;
+use crate::windows::window::{window_client_crop_state, WindowClientCrop};
 
 /// Default `next_frame` wait. WGC only delivers on screen updates, so an
 /// idle desktop can legitimately go quiet; recorders that need cadence
 /// repeat the previous frame (encoder-side concern, milestone 4).
 const DEFAULT_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_QUEUE_CAPACITY: usize = 2;
+
+#[derive(Clone)]
+enum FrameCopyMode {
+    Full,
+    StaticRegion(CropRect),
+    WindowClient {
+        hwnd: isize,
+        cache: Arc<Mutex<Option<ClientCropCache>>>,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FrameGeometry {
+    content_width: i32,
+    content_height: i32,
+    source_width: u32,
+    source_height: u32,
+}
+
+#[derive(Clone, Copy)]
+struct ClientCropCache {
+    geometry: FrameGeometry,
+    crop: CropRect,
+}
+
+struct FramePoolState {
+    size: SizeInt32,
+}
 
 struct QueuedFrame {
     texture: ID3D11Texture2D,
@@ -92,7 +122,7 @@ impl WgcCapture {
             return Err(CaptureError::Init("invalid monitor handle".into()));
         }
         let item = create_item(|interop| unsafe { interop.CreateForMonitor(monitor) })?;
-        Self::new(item, device, clock, None)
+        Self::new(item, device, clock, FrameCopyMode::Full)
     }
 
     pub fn for_monitor_region_on(
@@ -105,7 +135,7 @@ impl WgcCapture {
             return Err(CaptureError::Init("invalid monitor handle".into()));
         }
         let item = create_item(|interop| unsafe { interop.CreateForMonitor(monitor) })?;
-        Self::new(item, device, clock, Some(crop))
+        Self::new(item, device, clock, FrameCopyMode::StaticRegion(crop))
     }
 
     /// Capture one window (must be visible; ddoc §3: per-window preferred,
@@ -125,14 +155,36 @@ impl WgcCapture {
             return Err(CaptureError::Init("invalid window handle".into()));
         }
         let item = create_item(|interop| unsafe { interop.CreateForWindow(hwnd) })?;
-        Self::new(item, device, clock, None)
+        Self::new(item, device, clock, FrameCopyMode::Full)
+    }
+
+    /// Window capture that returns only the current client area. This keeps
+    /// windowed games from encoding the title bar and tracks resize geometry.
+    pub fn for_window_client_on(
+        device: ID3D11Device,
+        hwnd: HWND,
+        clock: RelativeClock,
+    ) -> Result<Self, CaptureError> {
+        if hwnd.is_invalid() {
+            return Err(CaptureError::Init("invalid window handle".into()));
+        }
+        let item = create_item(|interop| unsafe { interop.CreateForWindow(hwnd) })?;
+        Self::new(
+            item,
+            device,
+            clock,
+            FrameCopyMode::WindowClient {
+                hwnd: hwnd.0 as isize,
+                cache: Arc::new(Mutex::new(None)),
+            },
+        )
     }
 
     fn new(
         item: GraphicsCaptureItem,
         device: ID3D11Device,
         clock: RelativeClock,
-        copy_region: Option<CropRect>,
+        copy_mode: FrameCopyMode,
     ) -> Result<Self, CaptureError> {
         init_winrt()?;
         let init = |e: windows::core::Error| CaptureError::Init(e.to_string());
@@ -155,12 +207,10 @@ impl WgcCapture {
         let _ = session.SetIsBorderRequired(false);
 
         let (tx, rx) = bounded_frame_channel(FRAME_QUEUE_CAPACITY);
+        let state = Arc::new(Mutex::new(FramePoolState { size }));
         frame_pool
             .FrameArrived(&TypedEventHandler::new(on_frame_arrived(
-                device,
-                context,
-                tx,
-                copy_region,
+                device, context, state, tx, copy_mode,
             )))
             .map_err(init)?;
         session.StartCapture().map_err(init)?;
@@ -211,8 +261,9 @@ impl Drop for WgcCapture {
 fn on_frame_arrived(
     device: ID3D11Device,
     context: ID3D11DeviceContext,
+    state: Arc<Mutex<FramePoolState>>,
     tx: FrameSender,
-    copy_region: Option<CropRect>,
+    copy_mode: FrameCopyMode,
 ) -> impl Fn(
     windows::core::Ref<'_, Direct3D11CaptureFramePool>,
     windows::core::Ref<'_, windows::core::IInspectable>,
@@ -225,36 +276,127 @@ fn on_frame_arrived(
             return Ok(());
         };
         let ticks_100ns = frame.SystemRelativeTime()?.Duration;
+        let content_size = frame.ContentSize()?;
+        if !size_has_area(content_size) {
+            recreate_frame_pool_if_needed(pool, &device, &state, content_size)?;
+            return Ok(());
+        }
         let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
         // SAFETY: the surface is a live IDirect3D surface backed by an
         // ID3D11Texture2D; GetInterface AddRefs it.
         let source: ID3D11Texture2D = unsafe { access.GetInterface()? };
-        let copy = if let Some(crop) = copy_region {
-            let copy = d3d11::create_bgra_texture(&device, crop.width, crop.height)?;
-            d3d11::copy_texture_region(
-                &context,
-                &copy,
-                &source,
-                crop.x,
-                crop.y,
-                crop.width,
-                crop.height,
-            );
-            copy
-        } else {
-            let (w, h) = d3d11::texture_size(&source);
-            let copy = d3d11::create_bgra_texture(&device, w, h)?;
-            // SAFETY: both resources belong to `device`; CopyResource is valid
-            // for same-format, same-size textures.
-            unsafe { context.CopyResource(&copy, &source) };
-            copy
+        let (source_w, source_h) = d3d11::texture_size(&source);
+        if content_size_exceeds_source(content_size, source_w, source_h) {
+            recreate_frame_pool_if_needed(pool, &device, &state, content_size)?;
+            return Ok(());
+        }
+        let Some(crop) = copy_rect_for_frame(&copy_mode, content_size, source_w, source_h) else {
+            recreate_frame_pool_if_needed(pool, &device, &state, content_size)?;
+            return Ok(());
         };
+        let copy = d3d11::create_bgra_texture(&device, crop.width, crop.height)?;
+        d3d11::copy_texture_region(
+            &context,
+            &copy,
+            &source,
+            crop.x,
+            crop.y,
+            crop.width,
+            crop.height,
+        );
+        recreate_frame_pool_if_needed(pool, &device, &state, content_size)?;
         tx.send_drop_oldest(QueuedFrame {
             texture: copy,
             ticks_100ns,
         });
         Ok(())
     }
+}
+
+fn recreate_frame_pool_if_needed(
+    pool: &Direct3D11CaptureFramePool,
+    device: &ID3D11Device,
+    state: &Arc<Mutex<FramePoolState>>,
+    size: SizeInt32,
+) -> WinResult<()> {
+    let mut state = state
+        .lock()
+        .map_err(|_| windows::core::Error::new(E_FAIL, "frame pool state lock poisoned"))?;
+    if state.size == size || !size_has_area(size) {
+        return Ok(());
+    }
+    let winrt_device = winrt_device(device)?;
+    pool.Recreate(
+        &winrt_device,
+        DirectXPixelFormat::B8G8R8A8UIntNormalized,
+        2,
+        size,
+    )?;
+    state.size = size;
+    Ok(())
+}
+
+fn copy_rect_for_frame(
+    mode: &FrameCopyMode,
+    content_size: SizeInt32,
+    source_w: u32,
+    source_h: u32,
+) -> Option<CropRect> {
+    match mode {
+        FrameCopyMode::Full => content_crop(content_size, source_w, source_h),
+        FrameCopyMode::StaticRegion(crop) => crop.in_frame(source_w, source_h),
+        FrameCopyMode::WindowClient { hwnd, cache } => {
+            let geometry = FrameGeometry {
+                content_width: content_size.Width,
+                content_height: content_size.Height,
+                source_width: source_w,
+                source_height: source_h,
+            };
+            if let Ok(guard) = cache.lock() {
+                if let Some(cached) = *guard {
+                    if cached.geometry == geometry {
+                        return Some(cached.crop);
+                    }
+                }
+            }
+
+            let hwnd = HWND(*hwnd as *mut core::ffi::c_void);
+            let crop = match window_client_crop_state(hwnd)? {
+                WindowClientCrop::Client(crop) => crop.in_frame(source_w, source_h)?,
+                WindowClientCrop::FullFrame => content_crop(content_size, source_w, source_h)?,
+            };
+            if let Ok(mut guard) = cache.lock() {
+                *guard = Some(ClientCropCache { geometry, crop });
+            }
+            Some(crop)
+        }
+    }
+}
+
+fn content_crop(size: SizeInt32, source_w: u32, source_h: u32) -> Option<CropRect> {
+    let width = u32::try_from(size.Width).ok()?;
+    let height = u32::try_from(size.Height).ok()?;
+    CropRect {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    }
+    .in_frame(source_w, source_h)
+}
+
+fn content_size_exceeds_source(size: SizeInt32, source_w: u32, source_h: u32) -> bool {
+    let Ok(width) = u32::try_from(size.Width) else {
+        return false;
+    };
+    let Ok(height) = u32::try_from(size.Height) else {
+        return false;
+    };
+    width > source_w || height > source_h
+}
+
+fn size_has_area(size: SizeInt32) -> bool {
+    size.Width >= 2 && size.Height >= 2
 }
 
 #[derive(Clone)]

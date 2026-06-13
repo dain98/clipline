@@ -11,9 +11,9 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-12): a working tray recorder with a first-party review player
+## Current state (2026-06-13): a working tray recorder with a first-party review player
 
-Twenty-three milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-eight plan docs, all
+Twenty-four milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-eight plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -157,6 +157,28 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     **The subprocess approach was chosen over linking libavcodec** (deliberate revision of the
     plan): zero unsafe FFI, version-robust, cleanest LGPL boundary. Decisions, sharp edges, and
     the not-yet-done parts are below.
+24. **Custom game detection foundation** — Settings now has a Games tab with built-in profile
+    placeholders and a custom game workflow: Add Custom Game scans visible top-level windows,
+    records process path/exe/title metadata, and saves enabled custom rules under
+    `%APPDATA%\Clipline\settings.json`. A background detector enumerates visible windows every
+    2 seconds and, when a saved custom game is running, restarts the recorder onto that concrete
+    WGC window handle; when it disappears, Clipline falls back to the normal Capture target. This
+    remains no-injection/no-memory-read: only Win32 window/process metadata plus WGC window capture.
+    The sidebar/status surface reports `Capturing Game: <name>` while a custom game override is
+    active. Windowed game capture uses the HWND client rect, so title bars/borders are excluded
+    from saved replays. The WGC frame pool now respects per-frame `ContentSize` and recreates on
+    capture-item resize; the NV12 converter rebuilds its video processor when the client texture
+    size changes, scaling resized windows into the fixed MP4 track instead of artifacting or
+    clipping to the first size. The review player also renders clips inside an aspect-locked
+    `#stage-frame`, so WebView's `<video>` element cannot add top/bottom letterboxing when the
+    available stage area is slightly off from the clip's aspect ratio. Custom game detection now
+    owns per-window capture selection in the UI, so the old manual "Window title" capture target
+    was removed from Settings > Capture while backend/CLI compatibility remains. The fallback
+    Capture target dropdown lists available displays first and keeps the editable `SET REGION`
+    option at the bottom; display selections persist as full-monitor display-region captures. Each
+    saved custom game now persists its own recording-mode preference (`replays_only` default,
+    `full_session` selectable); the current recorder still uses the replay-buffer path, and the
+    full-session file sink remains the ddoc Goal 2 follow-up.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -179,8 +201,8 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 | `clipline-buffer` | Replay ring of GOP segments (video + N audio tracks), byte eviction, `save_window` smart mode | unit tests |
 | `clipline-storage` | Saved-clip inventory, sidecar-aware size accounting, oldest-first quota GC with protected fresh saves | unit tests |
 | `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), **codec-aware** (H.264/HEVC/AV1: avc1/hvc1/av01 + avcC/hvcC/av1C), multi-track + Opus, box walker, `movie_duration_s`, codec-agnostic keyframe-aligned stream-copy trim | ffprobe + unit tests |
-| `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`) + the **FFmpeg subprocess encoder** (`ffmpeg`, `ffmpeg_encoder`, `framing`) + neutral `annexb`/`hevc`/`av1`/`opus`/`pcm`/`clock`/`avsync`/`probe`; WASAPI covers selectable output loopback, mic capture, mic level testing, PCM decode, and resampling to 48 kHz | mocks on CI; CI-skipped device + ffmpeg tests run real on the dev machine |
-| `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/settings plus the first-party review player | live e2e (screenshots in the session logs) + `player_core` (Boa) + `ui_contract` |
+| `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`, `window`) + the **FFmpeg subprocess encoder** (`ffmpeg`, `ffmpeg_encoder`, `framing`) + neutral `annexb`/`hevc`/`av1`/`opus`/`pcm`/`clock`/`avsync`/`probe`; WASAPI covers selectable output loopback, mic capture, mic level testing, PCM decode, and resampling to 48 kHz; window helpers enumerate visible HWND/process metadata for custom game detection | mocks on CI; CI-skipped device + ffmpeg tests run real on the dev machine |
+| `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/settings plus the first-party review player; Settings > Games persists custom game rules and auto-switches capture to detected game windows | live e2e (screenshots in the session logs) + `player_core` (Boa) + `ui_contract` |
 
 ## Machine setup (already done on this machine; for a fresh clone elsewhere)
 

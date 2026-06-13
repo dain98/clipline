@@ -47,6 +47,8 @@ const {
 } = PlayerCore;
 
 const video = $("video");
+const stage = document.querySelector(".stage");
+const stageFrame = $("stage-frame");
 let currentClip = null;
 let clipsCache = [];
 let currentSettings = null;
@@ -54,6 +56,10 @@ let recordingActive = true;
 let displays = [];
 let audioDevices = { outputs: [], inputs: [] };
 let videoEncoders = [];
+let customGames = [];
+let gameWindows = [];
+let activeDetectedGame = null;
+let captureTargetDirty = false;
 // Codecs WebView2 can decode in the review player (H.264 always; HEVC/AV1
 // probed at startup). Drives the playback caveat and the recorder's
 // Automatic-codec policy via report_decode_support.
@@ -87,15 +93,43 @@ function clipMarkers() {
   return currentClip && currentClip.markers ? currentClip.markers.markers : [];
 }
 
+function videoAspect() {
+  return video.videoWidth > 0 && video.videoHeight > 0
+    ? video.videoWidth / video.videoHeight
+    : 16 / 9;
+}
+
+function updateStageFrame() {
+  const bounds = stage.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) return;
+  const aspect = videoAspect();
+  let width = bounds.width;
+  let height = width / aspect;
+  if (height > bounds.height) {
+    height = bounds.height;
+    width = height * aspect;
+  }
+  stageFrame.style.width = `${Math.max(1, Math.floor(width))}px`;
+  stageFrame.style.height = `${Math.max(1, Math.floor(height))}px`;
+}
+
 /* ---- sidebar: status, settings, library ---- */
 
 function fillSettings(s) {
   const audio = { ...defaultAudioSettings(), ...(s.audio || {}) };
   const replayStorage = { ...defaultReplayStorageSettings(), ...(s.replay_storage || {}) };
-  currentSettings = { ...s, audio, replay_storage: replayStorage };
-  $("set-capture").value = s.capture_mode;
-  $("set-window").value = s.window_title ?? "";
+  const games = { ...defaultGameSettings(), ...(s.games || {}) };
+  customGames = (games.custom_games || []).map(normalizeCustomGame);
+  currentSettings = {
+    ...s,
+    audio,
+    replay_storage: replayStorage,
+    games: { ...games, custom_games: customGames.map((game) => ({ ...game })) },
+  };
   regionState = s.capture_region ?? regionState;
+  captureTargetDirty = false;
+  renderCaptureTargetSelect();
+  $("set-games-auto-detect").checked = !!games.auto_detect;
   $("set-output-enabled").checked = !!audio.output_enabled;
   $("set-output-volume").value = String(Number.isFinite(audio.output_volume) ? audio.output_volume : 1);
   $("set-mic-enabled").checked = !!audio.mic_enabled;
@@ -121,15 +155,29 @@ function fillSettings(s) {
   syncAudioFields();
   syncRecordingFields();
   syncReplayStorageFields();
+  renderCustomGames();
+  updateGameDetectionStatus();
   updateCaptureStatus();
 }
 
 function readSettings() {
   const replay = Number($("set-replay").value);
+  const capture = selectedCaptureSettings();
+  const preserveLegacyWindow =
+    !captureTargetDirty
+    && currentSettings
+    && currentSettings.capture_mode === "window_title"
+    && String(currentSettings.window_title || "").trim().length > 0;
   return {
-    capture_mode: $("set-capture").value,
-    window_title: $("set-window").value,
-    capture_region: regionState,
+    capture_mode: preserveLegacyWindow ? "window_title" : capture.capture_mode,
+    window_title: preserveLegacyWindow ? currentSettings.window_title : "",
+    capture_region: preserveLegacyWindow
+      ? (currentSettings.capture_region || capture.capture_region)
+      : capture.capture_region,
+    games: {
+      auto_detect: $("set-games-auto-detect").checked,
+      custom_games: customGames.map((game) => ({ ...game })),
+    },
     audio: {
       output_enabled: $("set-output-enabled").checked,
       output_device_id: selectedDeviceId("set-output-device"),
@@ -179,11 +227,112 @@ function defaultReplayStorageSettings() {
   };
 }
 
+function defaultGameSettings() {
+  return {
+    auto_detect: true,
+    custom_games: [],
+  };
+}
+
+function normalizeGameRecordingMode(mode) {
+  return mode === "full_session" ? "full_session" : "replays_only";
+}
+
+function normalizeCustomGame(game) {
+  return {
+    id: String(game.id || `custom-${Date.now()}`),
+    name: String(game.name || game.exe_name || game.window_title || "Custom game").trim(),
+    enabled: game.enabled !== false,
+    exe_name: String(game.exe_name || "").trim(),
+    process_path: game.process_path ? String(game.process_path).trim() : null,
+    window_title: String(game.window_title || "").trim(),
+    recording_mode: normalizeGameRecordingMode(game.recording_mode),
+  };
+}
+
+function displayCaptureValue(display) {
+  return `display:${display.id}`;
+}
+
+function displayForCaptureValue(value) {
+  if (!String(value || "").startsWith("display:")) return null;
+  const id = String(value).slice("display:".length);
+  return displays.find((display) => display.id === id) || null;
+}
+
+function isFullDisplayRegion(region, display) {
+  return !!region && !!display
+    && region.display_id === display.id
+    && Number(region.x) === display.x
+    && Number(region.y) === display.y
+    && Number(region.width) === display.width
+    && Number(region.height) === display.height;
+}
+
+function captureSettingsValue(settings = currentSettings) {
+  if (settings && settings.capture_mode === "display_region") {
+    const display = displays.find((item) => isFullDisplayRegion(settings.capture_region, item));
+    return display ? displayCaptureValue(display) : "display_region";
+  }
+  const display = primaryDisplay();
+  return display ? displayCaptureValue(display) : "primary_monitor";
+}
+
+function displayLabel(display) {
+  const primary = display.is_primary ? " (primary)" : "";
+  return `${display.name}${primary} - ${display.width}x${display.height}`;
+}
+
+function renderCaptureTargetSelect() {
+  const select = $("set-capture");
+  const desired = captureSettingsValue();
+  select.replaceChildren();
+  if (displays.length) {
+    for (const display of displays) {
+      const option = document.createElement("option");
+      option.value = displayCaptureValue(display);
+      option.textContent = displayLabel(display);
+      select.appendChild(option);
+    }
+  } else {
+    const option = document.createElement("option");
+    option.value = "primary_monitor";
+    option.textContent = "Primary display";
+    select.appendChild(option);
+  }
+  const region = document.createElement("option");
+  region.value = "display_region";
+  region.textContent = "SET REGION";
+  select.appendChild(region);
+  select.value = Array.from(select.options).some((option) => option.value === desired)
+    ? desired
+    : captureSettingsValue({ capture_mode: "primary_monitor" });
+  syncCaptureFields();
+}
+
+function selectedCaptureSettings() {
+  const display = displayForCaptureValue($("set-capture").value);
+  if (display) {
+    return {
+      capture_mode: "display_region",
+      capture_region: regionForDisplay(display),
+    };
+  }
+  return {
+    capture_mode: $("set-capture").value === "display_region" ? "display_region" : "primary_monitor",
+    capture_region: regionState,
+  };
+}
+
 function syncCaptureFields() {
-  const mode = $("set-capture").value;
-  $("set-window").disabled = mode !== "window_title";
-  $("capture-region-editor").hidden = mode !== "display_region";
-  if (mode === "display_region") renderRegionEditor();
+  const display = displayForCaptureValue($("set-capture").value);
+  if (display) {
+    regionState = regionForDisplay(display);
+  }
+  const isEditableRegion = $("set-capture").value === "display_region";
+  $("capture-region-editor").hidden = !isEditableRegion;
+  if (isEditableRegion) renderRegionEditor();
+  updateCaptureStatus();
 }
 
 function syncRecordingFields() {
@@ -425,7 +574,10 @@ async function testMic() {
 }
 
 function updateCaptureStatus() {
-  const source = captureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
+  const source =
+    activeDetectedGame && activeDetectedGame.active
+      ? `Game: ${activeDetectedGame.name}`
+      : fallbackCaptureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
   $("capture-status-label").textContent = recordingActive ? `Capturing ${source}` : "Recording stopped";
   $("capture-status").classList.toggle("stopped", !recordingActive);
   $("capture-status").setAttribute("aria-pressed", String(recordingActive));
@@ -433,6 +585,14 @@ function updateCaptureStatus() {
   $("rail-status").title = $("capture-status").title;
   $("save").disabled = !recordingActive;
   $("rail-save").disabled = !recordingActive;
+}
+
+function fallbackCaptureSourceLabel(settings) {
+  if (settings && settings.capture_mode === "display_region") {
+    const display = displays.find((item) => isFullDisplayRegion(settings.capture_region, item));
+    if (display) return `Display: ${display.name}`;
+  }
+  return captureSourceLabel(settings);
 }
 
 async function toggleRecording() {
@@ -524,6 +684,7 @@ async function loadDisplays() {
     if (!regionState.display_id && displays.length) {
       regionState = regionForDisplay(primaryDisplay());
     }
+    renderCaptureTargetSelect();
     renderRegionEditor();
   } catch (e) {
     $("region-display-label").textContent = "display list unavailable";
@@ -567,6 +728,176 @@ async function loadVideoEncoders() {
   }
   renderVideoEncoderSelect();
   if (currentSettings) syncRecordingFields();
+}
+
+function gameNameFromWindow(win) {
+  const exe = String(win.exe_name || "").replace(/\.exe$/i, "");
+  return exe || String(win.title || "Custom game").trim() || "Custom game";
+}
+
+function customGameId(name) {
+  const slug = String(name || "game")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 28) || "game";
+  return `custom-${slug}-${Date.now()}`;
+}
+
+function gameRecordingModeControl(game, index) {
+  const control = document.createElement("div");
+  control.className = "segmented-control custom-game-mode";
+  control.setAttribute("role", "radiogroup");
+  control.setAttribute("aria-label", `${game.name} recording mode`);
+  const selectedMode = normalizeGameRecordingMode(game.recording_mode);
+  [
+    ["replays_only", "Replays only"],
+    ["full_session", "Full session"],
+  ].forEach(([value, label]) => {
+    const option = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = `custom-game-recording-mode-${index}`;
+    input.value = value;
+    input.checked = selectedMode === value;
+    input.addEventListener("change", () => {
+      if (input.checked) {
+        customGames[index] = { ...customGames[index], recording_mode: value };
+      }
+    });
+    const text = document.createElement("span");
+    text.textContent = label;
+    option.append(input, text);
+    control.appendChild(option);
+  });
+  return control;
+}
+
+function renderCustomGames() {
+  const root = $("custom-games");
+  root.replaceChildren();
+  if (!customGames.length) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "no custom games saved";
+    root.appendChild(empty);
+    return;
+  }
+  customGames.forEach((game, index) => {
+    const row = document.createElement("div");
+    row.className = "custom-game";
+
+    const enabled = document.createElement("label");
+    enabled.className = "check-line";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = game.enabled;
+    checkbox.addEventListener("change", () => {
+      customGames[index] = { ...customGames[index], enabled: checkbox.checked };
+    });
+    enabled.appendChild(checkbox);
+
+    const meta = document.createElement("div");
+    meta.className = "custom-game-meta";
+    const name = document.createElement("strong");
+    name.textContent = game.name;
+    const info = document.createElement("span");
+    info.textContent =
+      `${game.exe_name || "window title"} · ${game.window_title || game.process_path || "custom rule"}`;
+    meta.append(name, info);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "custom-game-remove";
+    remove.title = "Remove custom game";
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      customGames.splice(index, 1);
+      renderCustomGames();
+    });
+
+    row.append(enabled, meta, remove, gameRecordingModeControl(game, index));
+    root.appendChild(row);
+  });
+}
+
+function renderGameWindows() {
+  const root = $("game-window-list");
+  root.replaceChildren();
+  if (!gameWindows.length) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "no running windows found";
+    root.appendChild(empty);
+    return;
+  }
+  for (const win of gameWindows) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "game-window";
+    const title = document.createElement("strong");
+    title.textContent = win.title;
+    const meta = document.createElement("span");
+    meta.textContent =
+      `${win.exe_name || "unknown process"} · PID ${win.process_id}` +
+      (win.exe_path ? ` · ${win.exe_path}` : "");
+    row.append(title, meta);
+    row.addEventListener("click", () => addCustomGameFromWindow(win));
+    root.appendChild(row);
+  }
+}
+
+async function refreshGameWindows() {
+  $("error").textContent = "";
+  $("game-window-list").replaceChildren();
+  const loading = document.createElement("div");
+  loading.className = "hint";
+  loading.textContent = "scanning running windows…";
+  $("game-window-list").appendChild(loading);
+  try {
+    gameWindows = await invoke("list_game_windows");
+    renderGameWindows();
+  } catch (e) {
+    $("error").textContent = e;
+    gameWindows = [];
+    renderGameWindows();
+  }
+}
+
+async function showGameWindowPicker() {
+  $("game-window-picker").hidden = false;
+  await refreshGameWindows();
+}
+
+function hideGameWindowPicker() {
+  $("game-window-picker").hidden = true;
+}
+
+function addCustomGameFromWindow(win) {
+  const name = gameNameFromWindow(win);
+  customGames.push(normalizeCustomGame({
+    id: customGameId(name),
+    name,
+    enabled: true,
+    exe_name: win.exe_name || "",
+    process_path: win.exe_path || null,
+    window_title: win.title || "",
+    recording_mode: "replays_only",
+  }));
+  hideGameWindowPicker();
+  renderCustomGames();
+  $("settings-status").textContent = "custom game added - save to apply";
+}
+
+function updateGameDetectionStatus() {
+  if (activeDetectedGame && activeDetectedGame.active) {
+    $("game-detection-status").textContent =
+      `Active: ${activeDetectedGame.name} · ${activeDetectedGame.window_title}`;
+  } else {
+    $("game-detection-status").textContent = customGames.length
+      ? "No saved custom game is active."
+      : "Add a running game window, then save.";
+  }
 }
 
 function updateRegionFields() {
@@ -834,6 +1165,7 @@ function openClip(clip) {
   $("pmeta").textContent = `${clip.size_mb.toFixed(1)} MB · ${clip.path}`;
   settingsOpen = false;
   updateViews();
+  updateStageFrame();
   video.src = convertFileSrc(clip.path);
   video.playbackRate = Number($("rate-select").value);
   setTrim(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
@@ -842,6 +1174,7 @@ function openClip(clip) {
   renderClips();
   paintTimeline();
   noteActivity();
+  requestAnimationFrame(updateStageFrame);
   video.play().catch(() => syncPlayState());
 }
 
@@ -872,6 +1205,10 @@ function renderVisibleSettingsSection() {
   const active = document.querySelector("#settings-tabs .tab.active");
   if (settingsOpen && active && active.dataset.tab === "capture") {
     requestAnimationFrame(renderRegionEditor);
+  }
+  if (settingsOpen && active && active.dataset.tab === "games") {
+    renderCustomGames();
+    updateGameDetectionStatus();
   }
 }
 
@@ -954,6 +1291,7 @@ function renderRuler() {
 
 function toggleRail() {
   document.querySelector(".app").classList.toggle("rail");
+  requestAnimationFrame(updateStageFrame);
 }
 
 // Rapid seeks (scrubbing) must not pile up: WebView2 stops painting frames
@@ -1229,12 +1567,21 @@ listen("mic-test-stopped", () => {
   if (micTestRunning) stopMicTestUi("stopped");
 });
 
+listen("game-detection", (e) => {
+  activeDetectedGame = e.payload || null;
+  updateCaptureStatus();
+  updateGameDetectionStatus();
+});
+
 /* ---- wiring ---- */
 
 $("save").addEventListener("click", () => invoke("save_replay"));
 $("capture-status").addEventListener("click", toggleRecording);
 $("rail-status").addEventListener("click", toggleRecording);
-$("set-capture").addEventListener("change", syncCaptureFields);
+$("set-capture").addEventListener("change", () => {
+  captureTargetDirty = true;
+  syncCaptureFields();
+});
 for (const id of ["set-output-enabled", "set-mic-enabled"]) {
   $(id).addEventListener("change", syncAudioFields);
 }
@@ -1249,6 +1596,9 @@ for (const id of ["set-output-volume", "set-mic-volume"]) {
   });
 }
 $("test-mic").addEventListener("click", testMic);
+$("add-custom-game").addEventListener("click", showGameWindowPicker);
+$("refresh-game-windows").addEventListener("click", refreshGameWindows);
+$("cancel-game-picker").addEventListener("click", hideGameWindowPicker);
 $("choose-media-folder").addEventListener("click", chooseMediaFolder);
 $("choose-replay-cache-folder").addEventListener("click", chooseReplayCacheFolder);
 $("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);
@@ -1287,7 +1637,10 @@ document.querySelectorAll("#region-align-menu button").forEach((button) => {
 document.addEventListener("click", (ev) => {
   if (!$("capture-region-menu").contains(ev.target)) hideRegionMenu();
 });
-window.addEventListener("resize", renderRegionEditor);
+window.addEventListener("resize", () => {
+  renderRegionEditor();
+  updateStageFrame();
+});
 $("settings-save").addEventListener("click", async () => {
   $("settings-status").textContent = "";
   $("error").textContent = "";
@@ -1316,6 +1669,7 @@ video.addEventListener("timeupdate", paintTimeline);
 video.addEventListener("volumechange", syncVolume);
 video.addEventListener("loadedmetadata", () => {
   $("stage-note").textContent = `${video.videoWidth}x${video.videoHeight} · ${fmtDur(video.duration)}`;
+  updateStageFrame();
   if (currentClip) {
     $("pmeta").textContent = `${fmtDur(video.duration)} · ${currentClip.size_mb.toFixed(1)} MB · ${currentClip.path}`;
     setTrim(0, video.duration);
@@ -1380,7 +1734,6 @@ $("timeline").addEventListener("pointerdown", (ev) => {
 });
 $("timeline").addEventListener("pointermove", moveDrag);
 
-const stage = document.querySelector(".stage");
 stage.addEventListener("pointermove", noteActivity);
 stage.addEventListener("pointerdown", noteActivity);
 stage.addEventListener("pointerleave", () => {
@@ -1388,6 +1741,7 @@ stage.addEventListener("pointerleave", () => {
   lastActivityMs = -Infinity;
   updateOverlay();
 });
+new ResizeObserver(updateStageFrame).observe(stage);
 $("timeline").addEventListener("pointerup", endDrag);
 $("timeline").addEventListener("pointercancel", endDrag);
 $("timeline").addEventListener("lostpointercapture", endDrag);

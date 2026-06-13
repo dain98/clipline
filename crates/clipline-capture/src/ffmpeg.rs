@@ -94,7 +94,11 @@ fn group_capabilities(mut pairs: Vec<(EncoderBackend, Codec)>) -> Vec<EncoderCap
 /// `CLIPLINE_FFMPEG` override, next to our own exe, the per-user
 /// `%APPDATA%\Clipline\ffmpeg` bundle, then a bare name for a PATH lookup.
 pub fn search_paths() -> Vec<PathBuf> {
-    let exe_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    let exe_name = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
     let mut paths = Vec::new();
     if let Some(explicit) = std::env::var_os("CLIPLINE_FFMPEG") {
         paths.push(PathBuf::from(explicit));
@@ -131,7 +135,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 /// `PROBE_TIMEOUT`. stdout is captured (these commands emit little); stderr is
 /// discarded. `None` on spawn failure or timeout — treated as "unavailable".
 fn run_bounded(mut cmd: Command) -> Option<Output> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     let mut child = cmd.spawn().ok()?;
     let deadline = Instant::now() + PROBE_TIMEOUT;
     loop {
@@ -154,7 +160,9 @@ fn run_bounded(mut cmd: Command) -> Option<Output> {
 fn runs(path: &Path) -> bool {
     let mut cmd = Command::new(path);
     cmd.args(["-hide_banner", "-version"]);
-    run_bounded(cmd).map(|o| o.status.success()).unwrap_or(false)
+    run_bounded(cmd)
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Confirm a hardware encoder actually works on this machine with a
@@ -180,7 +188,9 @@ fn test_encode(ffmpeg: &Path, encoder: &str) -> bool {
         "null",
         "-",
     ]);
-    run_bounded(cmd).map(|o| o.status.success()).unwrap_or(false)
+    run_bounded(cmd)
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Probe one located `ffmpeg` binary: list compiled encoders, then confirm
@@ -268,15 +278,28 @@ mod tests {
             (EncoderBackend::Amf, Codec::H264), // duplicate
         ]);
         assert_eq!(caps.len(), 2);
-        let amf = caps.iter().find(|c| c.backend == EncoderBackend::Amf).unwrap();
+        let amf = caps
+            .iter()
+            .find(|c| c.backend == EncoderBackend::Amf)
+            .unwrap();
         assert_eq!(amf.api, EncoderApi::Ffmpeg);
-        assert_eq!(amf.codecs, vec![Codec::Av1, Codec::H264], "preference order, deduped");
+        assert_eq!(
+            amf.codecs,
+            vec![Codec::Av1, Codec::H264],
+            "preference order, deduped"
+        );
     }
 
     #[test]
     fn encoder_name_round_trips_known_pairs() {
-        assert_eq!(encoder_name(EncoderBackend::Amf, Codec::Hevc), Some("hevc_amf"));
-        assert_eq!(encoder_name(EncoderBackend::SvtAv1, Codec::Av1), Some("libsvtav1"));
+        assert_eq!(
+            encoder_name(EncoderBackend::Amf, Codec::Hevc),
+            Some("hevc_amf")
+        );
+        assert_eq!(
+            encoder_name(EncoderBackend::SvtAv1, Codec::Av1),
+            Some("libsvtav1")
+        );
         // No software H.264/HEVC through FFmpeg (LGPL: no x264/x265).
         assert_eq!(encoder_name(EncoderBackend::SvtAv1, Codec::H264), None);
         assert_eq!(encoder_name(EncoderBackend::MfSoftware, Codec::H264), None);

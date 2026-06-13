@@ -108,7 +108,13 @@ fn spawn_process(
         .spawn(move || run_reader(stdout, codec, gop_frames, reader_params, tx))
         .map_err(|e| EncodeError::Backend(format!("spawn reader: {e}")))?;
 
-    Ok(Spawned { child, stdin, rx, reader, codec_params })
+    Ok(Spawned {
+        child,
+        stdin,
+        rx,
+        reader,
+        codec_params,
+    })
 }
 
 impl FfmpegVideoEncoder {
@@ -248,7 +254,12 @@ impl Encoder for FfmpegVideoEncoder {
             .ok()
             .and_then(|g| g.clone())
             .unwrap_or_else(|| empty_params(self.codec));
-        VideoTrackConfig { width: self.width, height: self.height, timescale: 90_000, codec }
+        VideoTrackConfig {
+            width: self.width,
+            height: self.height,
+            timescale: 90_000,
+            codec,
+        }
     }
 
     fn finish(&mut self) -> Result<Vec<EncodedPacket>, EncodeError> {
@@ -278,9 +289,18 @@ impl Encoder for FfmpegVideoEncoder {
 /// entry box (avc1/hvc1/av01).
 fn empty_params(codec: Codec) -> VideoCodecParams {
     match codec {
-        Codec::H264 => VideoCodecParams::H264 { sps: Vec::new(), pps: Vec::new() },
-        Codec::Hevc => VideoCodecParams::Hevc { vps: Vec::new(), sps: Vec::new(), pps: Vec::new() },
-        Codec::Av1 => VideoCodecParams::Av1 { sequence_header_obu: Vec::new() },
+        Codec::H264 => VideoCodecParams::H264 {
+            sps: Vec::new(),
+            pps: Vec::new(),
+        },
+        Codec::Hevc => VideoCodecParams::Hevc {
+            vps: Vec::new(),
+            sps: Vec::new(),
+            pps: Vec::new(),
+        },
+        Codec::Av1 => VideoCodecParams::Av1 {
+            sequence_header_obu: Vec::new(),
+        },
     }
 }
 
@@ -316,7 +336,11 @@ fn run_reader(
         set_params_if_empty(codec, &au, &params);
         *frame_index += 1;
         // A dropped receiver (encoder gone) just ends the thread.
-        tx.send(RawUnit { data: sample, is_keyframe }).is_ok()
+        tx.send(RawUnit {
+            data: sample,
+            is_keyframe,
+        })
+        .is_ok()
     };
     loop {
         match stdout.read(&mut buf) {
@@ -346,7 +370,10 @@ fn finish_unit(codec: Codec, au: &[u8], gop_frames: u32, frame_index: u64) -> (V
                 .any(|n| crate::annexb::nal_type(n) == 5);
             (crate::annexb::annexb_to_avcc(au), is_key)
         }
-        Codec::Hevc => (crate::hevc::annexb_to_hvcc_samples(au), crate::hevc::is_keyframe(au)),
+        Codec::Hevc => (
+            crate::hevc::annexb_to_hvcc_samples(au),
+            crate::hevc::is_keyframe(au),
+        ),
         // AV1: IVF gives temporal-unit framing but no keyframe flag; with a
         // forced fixed GOP and scene-cut disabled, position is authoritative.
         Codec::Av1 => (
@@ -363,12 +390,16 @@ fn set_params_if_empty(codec: Codec, au: &[u8], params: &Arc<Mutex<Option<VideoC
         return;
     }
     *guard = match codec {
-        Codec::H264 => crate::annexb::extract_sps_pps(au)
-            .map(|(sps, pps)| VideoCodecParams::H264 { sps, pps }),
+        Codec::H264 => {
+            crate::annexb::extract_sps_pps(au).map(|(sps, pps)| VideoCodecParams::H264 { sps, pps })
+        }
         Codec::Hevc => crate::hevc::extract_vps_sps_pps(au)
             .map(|(vps, sps, pps)| VideoCodecParams::Hevc { vps, sps, pps }),
-        Codec::Av1 => crate::av1::extract_sequence_header(au)
-            .map(|sequence_header_obu| VideoCodecParams::Av1 { sequence_header_obu }),
+        Codec::Av1 => crate::av1::extract_sequence_header(au).map(|sequence_header_obu| {
+            VideoCodecParams::Av1 {
+                sequence_header_obu,
+            }
+        }),
     };
 }
 
@@ -466,7 +497,15 @@ mod tests {
 
     #[test]
     fn args_set_nv12_input_gop_and_output_format() {
-        let args = build_args("libsvtav1", EncoderBackend::SvtAv1, Codec::Av1, 1920, 1080, 60, 8_000_000);
+        let args = build_args(
+            "libsvtav1",
+            EncoderBackend::SvtAv1,
+            Codec::Av1,
+            1920,
+            1080,
+            60,
+            8_000_000,
+        );
         let joined = args.join(" ");
         assert!(joined.contains("rawvideo"));
         assert!(joined.contains("nv12"));
@@ -480,9 +519,25 @@ mod tests {
 
     #[test]
     fn h264_and_hevc_select_their_elementary_stream_muxers() {
-        let h264 = build_args("h264_amf", EncoderBackend::Amf, Codec::H264, 640, 360, 30, 4_000_000);
+        let h264 = build_args(
+            "h264_amf",
+            EncoderBackend::Amf,
+            Codec::H264,
+            640,
+            360,
+            30,
+            4_000_000,
+        );
         assert!(h264.join(" ").ends_with("-f h264 pipe:1"));
-        let hevc = build_args("hevc_amf", EncoderBackend::Amf, Codec::Hevc, 640, 360, 30, 4_000_000);
+        let hevc = build_args(
+            "hevc_amf",
+            EncoderBackend::Amf,
+            Codec::Hevc,
+            640,
+            360,
+            30,
+            4_000_000,
+        );
         assert!(hevc.join(" ").ends_with("-f hevc pipe:1"));
     }
 
@@ -505,8 +560,14 @@ mod tests {
     #[test]
     fn finish_unit_uses_position_for_av1_keyframes() {
         let au = [0x12, 0x00]; // arbitrary OBU bytes; framing tested elsewhere
-        assert!(finish_unit(Codec::Av1, &au, 120, 0).1, "frame 0 is a keyframe");
-        assert!(!finish_unit(Codec::Av1, &au, 120, 60).1, "mid-GOP frame is not");
+        assert!(
+            finish_unit(Codec::Av1, &au, 120, 0).1,
+            "frame 0 is a keyframe"
+        );
+        assert!(
+            !finish_unit(Codec::Av1, &au, 120, 60).1,
+            "mid-GOP frame is not"
+        );
         assert!(finish_unit(Codec::Av1, &au, 120, 120).1, "GOP boundary is");
     }
 }

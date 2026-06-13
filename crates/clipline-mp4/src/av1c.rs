@@ -71,7 +71,11 @@ pub(crate) fn parse_sequence_header(obu: &[u8]) -> Option<Av1SeqInfo> {
     r.bits(5)?; // operating_points_cnt_minus_1 — only op 0 is summarized
     r.bits(12)?; // operating_point_idc[0]
     let seq_level_idx_0 = r.bits(5)? as u8;
-    let seq_tier_0 = if seq_level_idx_0 > 7 { r.bit()? as u8 } else { 0 };
+    let seq_tier_0 = if seq_level_idx_0 > 7 {
+        r.bit()? as u8
+    } else {
+        0
+    };
     // Consume op-0 conditionals only to keep the reads honest; later
     // operating points are irrelevant to av1C.
     if decoder_model_info_present && r.bit()? == 1 {
@@ -147,8 +151,16 @@ mod tests {
 
     #[test]
     fn rejects_non_sequence_header_obus() {
-        assert_eq!(parse_sequence_header(&[0x32, 0x01, 0x00]), None, "frame OBU");
-        assert_eq!(parse_sequence_header(&[0x8A, 0x01, 0x00]), None, "forbidden bit");
+        assert_eq!(
+            parse_sequence_header(&[0x32, 0x01, 0x00]),
+            None,
+            "frame OBU"
+        );
+        assert_eq!(
+            parse_sequence_header(&[0x8A, 0x01, 0x00]),
+            None,
+            "forbidden bit"
+        );
         assert_eq!(parse_sequence_header(&[]), None);
         assert_eq!(parse_sequence_header(&[0x0A, 0x02]), None, "truncated");
     }

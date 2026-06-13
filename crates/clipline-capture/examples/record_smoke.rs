@@ -77,7 +77,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // ffmpeg:<backend>:<codec>, e.g. ffmpeg:amf:hevc, ffmpeg:svtav1:av1.
             let parts: Vec<&str> = spec.split(':').collect();
             if parts.first() != Some(&"ffmpeg") || parts.len() != 3 {
-                return Err(format!("bad --encoder {spec:?}; want ffmpeg:<backend>:<codec>").into());
+                return Err(
+                    format!("bad --encoder {spec:?}; want ffmpeg:<backend>:<codec>").into(),
+                );
             }
             let backend = match parts[1] {
                 "nvenc" => EncoderBackend::Nvenc,
@@ -93,7 +95,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 other => return Err(format!("unknown codec {other:?}").into()),
             };
             let ffmpeg = ffmpeg::locate().ok_or("no ffmpeg located")?;
-            println!("ffmpeg encoder {backend:?}/{codec:?} via {}", ffmpeg.display());
+            println!(
+                "ffmpeg encoder {backend:?}/{codec:?} via {}",
+                ffmpeg.display()
+            );
             Box::new(FfmpegVideoEncoder::new_on(
                 &device, &ffmpeg, backend, codec, in_w, in_h, None, enc_w, enc_h, FPS, 12_000_000,
             )?)

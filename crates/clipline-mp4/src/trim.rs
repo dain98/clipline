@@ -426,7 +426,9 @@ fn parse_video_stsd(
             let av1c = find_box_between(input, p + 78, entry_end, b"av1C")?
                 .ok_or_else(|| TrimError::Unsupported("missing av1C".into()))?;
             let sequence_header_obu = parse_av1c(input, &av1c)?;
-            VideoCodecParams::Av1 { sequence_header_obu }
+            VideoCodecParams::Av1 {
+                sequence_header_obu,
+            }
         }
         other => {
             return Err(TrimError::Unsupported(format!(
@@ -543,9 +545,7 @@ fn parse_hvcc(input: &[u8], hvcc: &BoxInfo) -> Result<HevcParamSets, TrimError> 
     }
     match (vps, sps, pps) {
         (Some(vps), Some(sps), Some(pps)) => Ok((vps, sps, pps)),
-        _ => Err(TrimError::Unsupported(
-            "hvcC missing VPS/SPS/PPS".into(),
-        )),
+        _ => Err(TrimError::Unsupported("hvcC missing VPS/SPS/PPS".into())),
     }
 }
 
@@ -996,13 +996,14 @@ mod tests {
     // genuine hvcC / av1C records, not just placeholder bytes.
     const HEVC_VPS: &[u8] = &[0x40, 0x01, 0x0C, 0x01, 0xFF, 0xFF, 0x01];
     const HEVC_SPS: &[u8] = &[
-        0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00,
-        0x00, 0x03, 0x00, 0x1E, 0xA0, 0x10, 0x20, 0x49, 0x65, 0x95, 0x9A, 0x49, 0x32, 0xBC,
-        0x05, 0xA0, 0x20, 0x00, 0x00, 0x03, 0x00, 0x20, 0x00, 0x00, 0x03, 0x03, 0xC1,
+        0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x03, 0x00, 0x1E, 0xA0, 0x10, 0x20, 0x49, 0x65, 0x95, 0x9A, 0x49, 0x32, 0xBC, 0x05, 0xA0,
+        0x20, 0x00, 0x00, 0x03, 0x00, 0x20, 0x00, 0x00, 0x03, 0x03, 0xC1,
     ];
     const HEVC_PPS: &[u8] = &[0x44, 0x01, 0xC1, 0x72, 0xB4, 0x22, 0x40];
-    const AV1_SEQ_OBU: &[u8] =
-        &[0x0A, 0x0A, 0x00, 0x00, 0x00, 0x03, 0x37, 0xF8, 0xE3, 0x57, 0xCC, 0x02];
+    const AV1_SEQ_OBU: &[u8] = &[
+        0x0A, 0x0A, 0x00, 0x00, 0x00, 0x03, 0x37, 0xF8, 0xE3, 0x57, 0xCC, 0x02,
+    ];
 
     fn single_video_fixture(codec: VideoCodecParams) -> Vec<u8> {
         let cfg = vec![TrackConfig::Video(VideoTrackConfig {
@@ -1046,15 +1047,19 @@ mod tests {
 
     #[test]
     fn trims_av1_clip_recovering_sequence_header() {
-        let fixture =
-            single_video_fixture(VideoCodecParams::Av1 { sequence_header_obu: AV1_SEQ_OBU.to_vec() });
+        let fixture = single_video_fixture(VideoCodecParams::Av1 {
+            sequence_header_obu: AV1_SEQ_OBU.to_vec(),
+        });
         let (out, info) = trim_keyframe_aligned(&fixture, 0.4, 1.2).unwrap();
         let movie = parse_movie(&out).unwrap();
         assert_eq!(info.aligned_end_s, 2.0);
         assert_eq!(movie.tracks[0].samples.len(), 20);
         match &movie.tracks[0].cfg {
             TrackConfig::Video(VideoTrackConfig {
-                codec: VideoCodecParams::Av1 { sequence_header_obu },
+                codec:
+                    VideoCodecParams::Av1 {
+                        sequence_header_obu,
+                    },
                 ..
             }) => assert_eq!(sequence_header_obu.as_slice(), AV1_SEQ_OBU),
             other => panic!("expected AV1 track, got {other:?}"),

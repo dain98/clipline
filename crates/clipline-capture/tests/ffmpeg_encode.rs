@@ -32,7 +32,11 @@ fn nv12_frame(index: u32) -> Vec<u8> {
 }
 
 fn which(bin: &str) -> Option<PathBuf> {
-    let exe = if cfg!(windows) { format!("{bin}.exe") } else { bin.to_string() };
+    let exe = if cfg!(windows) {
+        format!("{bin}.exe")
+    } else {
+        bin.to_string()
+    };
     let sep = if cfg!(windows) { ';' } else { ':' };
     std::env::var_os("PATH")?
         .to_str()?
@@ -45,18 +49,27 @@ fn which(bin: &str) -> Option<PathBuf> {
 /// return its bytes. Asserts the encoder produced one packet per frame with a
 /// leading keyframe and real parameter sets.
 fn encode_and_mux(ffmpeg: &std::path::Path, backend: EncoderBackend, codec: Codec) -> Vec<u8> {
-    let mut enc =
-        FfmpegVideoEncoder::new(ffmpeg, backend, codec, W, H, FPS, 2_000_000).expect("spawn encoder");
+    let mut enc = FfmpegVideoEncoder::new(ffmpeg, backend, codec, W, H, FPS, 2_000_000)
+        .expect("spawn encoder");
 
     let mut packets = Vec::new();
     for i in 0..FRAMES {
-        let frame = Frame { pts_s: i as f64 / FPS as f64, data: FrameData::Cpu(nv12_frame(i)) };
+        let frame = Frame {
+            pts_s: i as f64 / FPS as f64,
+            data: FrameData::Cpu(nv12_frame(i)),
+        };
         packets.extend(enc.encode(&frame).expect("encode frame"));
     }
     packets.extend(enc.finish().expect("finish"));
 
-    assert!(!packets.is_empty(), "{backend:?}/{codec:?}: no packets produced");
-    assert!(packets[0].is_keyframe, "{backend:?}/{codec:?}: stream must open on a keyframe");
+    assert!(
+        !packets.is_empty(),
+        "{backend:?}/{codec:?}: no packets produced"
+    );
+    assert!(
+        packets[0].is_keyframe,
+        "{backend:?}/{codec:?}: stream must open on a keyframe"
+    );
 
     let cfg = enc.track_config();
     match (&cfg.codec, codec) {
@@ -64,10 +77,21 @@ fn encode_and_mux(ffmpeg: &std::path::Path, backend: EncoderBackend, codec: Code
             assert!(!sps.is_empty() && !pps.is_empty(), "H.264 params extracted")
         }
         (VideoCodecParams::Hevc { vps, sps, pps }, Codec::Hevc) => {
-            assert!(!vps.is_empty() && !sps.is_empty() && !pps.is_empty(), "HEVC params extracted")
+            assert!(
+                !vps.is_empty() && !sps.is_empty() && !pps.is_empty(),
+                "HEVC params extracted"
+            )
         }
-        (VideoCodecParams::Av1 { sequence_header_obu }, Codec::Av1) => {
-            assert!(!sequence_header_obu.is_empty(), "AV1 sequence header extracted")
+        (
+            VideoCodecParams::Av1 {
+                sequence_header_obu,
+            },
+            Codec::Av1,
+        ) => {
+            assert!(
+                !sequence_header_obu.is_empty(),
+                "AV1 sequence header extracted"
+            )
         }
         (other, _) => panic!("{backend:?}/{codec:?}: wrong codec params {other:?}"),
     }
@@ -90,14 +114,24 @@ fn ffprobe_codec(ffprobe: &std::path::Path, mp4: &[u8]) -> String {
     std::fs::write(&path, mp4).unwrap();
     let out = Command::new(ffprobe)
         .args([
-            "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
             "default=nw=1:nk=1",
         ])
         .arg(&path)
         .output()
         .expect("run ffprobe");
     std::fs::remove_file(&path).ok();
-    assert!(out.status.success(), "ffprobe failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "ffprobe failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -125,7 +159,11 @@ fn ffmpeg_encoder_round_trips_through_the_muxer() {
     // SVT-AV1 software is in every LGPL build — always exercise it.
     if caps.iter().any(|c| c.backend == EncoderBackend::SvtAv1) {
         let mp4 = encode_and_mux(&ffmpeg, EncoderBackend::SvtAv1, Codec::Av1);
-        assert_eq!(ffprobe_codec(&ffprobe, &mp4), "av1", "SVT-AV1 muxes to av01");
+        assert_eq!(
+            ffprobe_codec(&ffprobe, &mp4),
+            "av1",
+            "SVT-AV1 muxes to av01"
+        );
         exercised += 1;
     }
 

@@ -63,7 +63,10 @@ pub enum EncoderPreference {
     /// A specific engine + codec; the recorder still falls back through the
     /// Auto order if it fails to open, but this is tried first even when the
     /// codec is not in-app-decodable (the user opted in).
-    Explicit { backend: EncoderBackend, codec: Codec },
+    Explicit {
+        backend: EncoderBackend,
+        codec: Codec,
+    },
 }
 
 /// Merit key: backend priority, then codec preference, then API (MFT before
@@ -87,9 +90,11 @@ pub fn rank_encoders(
         .iter()
         .flat_map(|cap| {
             let (api, backend) = (cap.api, cap.backend);
-            cap.codecs
-                .iter()
-                .map(move |&codec| EncoderCandidate { api, backend, codec })
+            cap.codecs.iter().map(move |&codec| EncoderCandidate {
+                api,
+                backend,
+                codec,
+            })
         })
         .collect();
     all.sort_by_key(merit);
@@ -125,24 +130,45 @@ mod tests {
     const ALL_CODECS: &[Codec] = &[Codec::Av1, Codec::Hevc, Codec::H264];
 
     fn cap(api: EncoderApi, backend: EncoderBackend, codecs: &[Codec]) -> EncoderCapability {
-        EncoderCapability { api, backend, codecs: codecs.to_vec() }
+        EncoderCapability {
+            api,
+            backend,
+            codecs: codecs.to_vec(),
+        }
     }
 
     fn cand(api: EncoderApi, backend: EncoderBackend, codec: Codec) -> EncoderCandidate {
-        EncoderCandidate { api, backend, codec }
+        EncoderCandidate {
+            api,
+            backend,
+            codec,
+        }
     }
 
     #[test]
     fn auto_prefers_backend_then_codec() {
         let caps = vec![
             cap(EncoderApi::Ffmpeg, EncoderBackend::Amf, &[Codec::Av1]),
-            cap(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, &[Codec::H264, Codec::Hevc]),
+            cap(
+                EncoderApi::Ffmpeg,
+                EncoderBackend::Nvenc,
+                &[Codec::H264, Codec::Hevc],
+            ),
         ];
         let ranked = rank_encoders(&caps, ALL_CODECS, EncoderPreference::Auto);
         // Nvenc wins on backend priority; HEVC beats H.264 within it.
-        assert_eq!(ranked[0], cand(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, Codec::Hevc));
-        assert_eq!(ranked[1], cand(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, Codec::H264));
-        assert_eq!(ranked[2], cand(EncoderApi::Ffmpeg, EncoderBackend::Amf, Codec::Av1));
+        assert_eq!(
+            ranked[0],
+            cand(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, Codec::Hevc)
+        );
+        assert_eq!(
+            ranked[1],
+            cand(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, Codec::H264)
+        );
+        assert_eq!(
+            ranked[2],
+            cand(EncoderApi::Ffmpeg, EncoderBackend::Amf, Codec::Av1)
+        );
     }
 
     #[test]
@@ -166,36 +192,69 @@ mod tests {
             &[Codec::Av1, Codec::Hevc, Codec::H264],
         )];
         let ranked = rank_encoders(&caps, &[Codec::H264], EncoderPreference::Auto);
-        assert_eq!(ranked, vec![cand(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, Codec::H264)]);
+        assert_eq!(
+            ranked,
+            vec![cand(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, Codec::H264)]
+        );
     }
 
     #[test]
     fn explicit_choice_is_tried_first_even_when_not_decodable() {
         let caps = vec![
             cap(EncoderApi::Mft, EncoderBackend::Amf, &[Codec::H264]),
-            cap(EncoderApi::Ffmpeg, EncoderBackend::Amf, &[Codec::Av1, Codec::H264]),
+            cap(
+                EncoderApi::Ffmpeg,
+                EncoderBackend::Amf,
+                &[Codec::Av1, Codec::H264],
+            ),
         ];
         // User forces AMF AV1; player can't decode AV1.
         let ranked = rank_encoders(
             &caps,
             &[Codec::H264],
-            EncoderPreference::Explicit { backend: EncoderBackend::Amf, codec: Codec::Av1 },
+            EncoderPreference::Explicit {
+                backend: EncoderBackend::Amf,
+                codec: Codec::Av1,
+            },
         );
-        assert_eq!(ranked[0], cand(EncoderApi::Ffmpeg, EncoderBackend::Amf, Codec::Av1));
+        assert_eq!(
+            ranked[0],
+            cand(EncoderApi::Ffmpeg, EncoderBackend::Amf, Codec::Av1)
+        );
         // Then the decodable Auto order provides fallback (MFT H.264 first).
-        assert_eq!(ranked[1], cand(EncoderApi::Mft, EncoderBackend::Amf, Codec::H264));
-        assert!(!ranked[1..].contains(&ranked[0]), "explicit head not duplicated");
+        assert_eq!(
+            ranked[1],
+            cand(EncoderApi::Mft, EncoderBackend::Amf, Codec::H264)
+        );
+        assert!(
+            !ranked[1..].contains(&ranked[0]),
+            "explicit head not duplicated"
+        );
     }
 
     #[test]
     fn explicit_choice_absent_falls_back_to_auto() {
-        let caps = vec![cap(EncoderApi::Mft, EncoderBackend::MfSoftware, &[Codec::H264])];
+        let caps = vec![cap(
+            EncoderApi::Mft,
+            EncoderBackend::MfSoftware,
+            &[Codec::H264],
+        )];
         let ranked = rank_encoders(
             &caps,
             ALL_CODECS,
-            EncoderPreference::Explicit { backend: EncoderBackend::Nvenc, codec: Codec::Av1 },
+            EncoderPreference::Explicit {
+                backend: EncoderBackend::Nvenc,
+                codec: Codec::Av1,
+            },
         );
-        assert_eq!(ranked, vec![cand(EncoderApi::Mft, EncoderBackend::MfSoftware, Codec::H264)]);
+        assert_eq!(
+            ranked,
+            vec![cand(
+                EncoderApi::Mft,
+                EncoderBackend::MfSoftware,
+                Codec::H264
+            )]
+        );
     }
 
     #[test]
