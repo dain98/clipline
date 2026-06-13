@@ -352,6 +352,10 @@ fn visual_sample_entry(fourcc: [u8; 4], width: u16, height: u16, codec_box: Vec<
 }
 
 fn avcc(sps: &[u8], pps: &[u8]) -> Vec<u8> {
+    // avcC NAL-length fields are u16 by spec; real parameter sets are well
+    // under 64 KiB, so a longer one signals an upstream bug, not valid input.
+    debug_assert!(sps.len() <= u16::MAX as usize, "SPS exceeds avcC u16 length");
+    debug_assert!(pps.len() <= u16::MAX as usize, "PPS exceeds avcC u16 length");
     let mut p = Payload::new();
     p.u8(1) // configurationVersion
         .u8(sps.get(1).copied().unwrap_or(0)) // AVCProfileIndication

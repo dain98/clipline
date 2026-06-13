@@ -102,7 +102,7 @@
 
 **Components:**
 - **Capture Engine:** WGC primary (HDR, cross-GPU, no injection); DXGI Desktop Duplication fallback; per-window or per-monitor. Frames stay as GPU textures to avoid CPU round-trips. **Exclusive-fullscreen games cannot be captured per-window without injection** — we recommend borderless fullscreen (OBS's own guidance for anti-cheat titles) and fall back to display capture otherwise, with a clear in-UI warning that display capture records everything on the monitor (notifications, overlays, alt-tabbed apps).
-- **Encode Pipeline:** encoder abstraction probing hardware at startup by deterministic priority (NVENC → AMF → QuickSync → x264 software fallback). Codec preference AV1 → HEVC → H.264. CQP/VBR for quality-efficient local recording; CBR for replay-buffer predictability.
+- **Encode Pipeline:** encoder abstraction probing hardware at startup by deterministic priority (NVENC → AMF → QuickSync → software). The LGPL-clean software tier is SVT-AV1 (with Microsoft's software H.264 MFT as the last resort); no GPL x264. Codec preference AV1 → HEVC → H.264. CQP/VBR for quality-efficient local recording; CBR for replay-buffer predictability.
 - **Replay Buffer Manager:** segment-based circular buffer of *encoded* video+audio in RAM, with disk-spill option. Keyframe-aligned segments so saved clips start cleanly.
 - **Event Ingestion Service:** per-game adapters normalizing into a common event schema; synchronizes game-clock event times to recording timestamps.
 - **Storage Manager:** Hybrid MP4 (fragmented internally for crash safety; finalized as standard MP4 on stop) with disk quota and auto-GC.

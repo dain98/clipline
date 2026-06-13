@@ -131,6 +131,8 @@ pub(crate) fn hvcc(vps: &[u8], sps: &[u8], pps: &[u8]) -> Vec<u8> {
         .u8((info.num_temporal_layers << 3) | (info.temporal_id_nested << 2) | 3)
         .u8(3); // numOfArrays: VPS, SPS, PPS
     for (nal_type, nal) in [(32u8, vps), (33, sps), (34, pps)] {
+        // hvcC nalUnitLength is u16 by spec; real parameter sets are far smaller.
+        debug_assert!(nal.len() <= u16::MAX as usize, "HEVC NAL exceeds hvcC u16 length");
         p.u8(0x80 | nal_type) // array_completeness=1
             .u16(1) // numNalus
             .u16(nal.len() as u16)

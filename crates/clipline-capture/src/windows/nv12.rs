@@ -185,12 +185,10 @@ impl VideoConverter {
 /// NV12 bytes (Y plane `width*height`, then interleaved UV `width*height/2`)
 /// for piping to FFmpeg. Maps with the texture's row pitch and reads the UV
 /// plane immediately after the Y plane — the conventional D3D11 NV12 layout.
-pub fn read_nv12(
-    device: &ID3D11Device,
-    src: &ID3D11Texture2D,
-    width: u32,
-    height: u32,
-) -> WinResult<Vec<u8>> {
+/// Dimensions come from `src` itself so the packed size can't drift from the
+/// texture the caller actually produced.
+pub fn read_nv12(device: &ID3D11Device, src: &ID3D11Texture2D) -> WinResult<Vec<u8>> {
+    let (width, height) = d3d11::texture_size(src);
     let staging = d3d11::create_nv12_staging(device, width, height)?;
     let dst: ID3D11Resource = staging.cast()?;
     let source: ID3D11Resource = src.cast()?;
@@ -245,7 +243,7 @@ mod tests {
         };
         let src = crate::windows::d3d11::create_bgra_texture(&device, 64, 64).expect("src");
         let nv12 = conv.convert(&src).expect("convert");
-        let bytes = read_nv12(&device, &nv12, 64, 64).expect("readback");
+        let bytes = read_nv12(&device, &nv12).expect("readback");
         assert_eq!(bytes.len(), 64 * 64 * 3 / 2, "tightly packed NV12");
     }
 

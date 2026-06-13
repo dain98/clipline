@@ -9,7 +9,8 @@
 //! confirmed with a one-frame test encode before being reported.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::probe::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
 
@@ -122,12 +123,38 @@ pub fn locate() -> Option<PathBuf> {
     search_paths().into_iter().find(|path| runs(path))
 }
 
+/// All probe subprocesses must finish well within this; a wedged ffmpeg is
+/// killed rather than allowed to block startup probing indefinitely.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Run a probe command to completion, killing it if it exceeds
+/// `PROBE_TIMEOUT`. stdout is captured (these commands emit little); stderr is
+/// discarded. `None` on spawn failure or timeout — treated as "unavailable".
+fn run_bounded(mut cmd: Command) -> Option<Output> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => return None,
+        }
+    }
+    child.wait_with_output().ok()
+}
+
 fn runs(path: &Path) -> bool {
-    Command::new(path)
-        .args(["-hide_banner", "-version"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut cmd = Command::new(path);
+    cmd.args(["-hide_banner", "-version"]);
+    run_bounded(cmd).map(|o| o.status.success()).unwrap_or(false)
 }
 
 /// Confirm a hardware encoder actually works on this machine with a
@@ -136,35 +163,32 @@ fn runs(path: &Path) -> bool {
 /// (`Init() failed with error 5` at 128x72), which would wrongly drop a
 /// working H.264/HEVC encoder.
 fn test_encode(ffmpeg: &Path, encoder: &str) -> bool {
-    Command::new(ffmpeg)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=640x360:rate=30",
-            "-frames:v",
-            "1",
-            "-c:v",
-            encoder,
-            "-f",
-            "null",
-            "-",
-        ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=640x360:rate=30",
+        "-frames:v",
+        "1",
+        "-c:v",
+        encoder,
+        "-f",
+        "null",
+        "-",
+    ]);
+    run_bounded(cmd).map(|o| o.status.success()).unwrap_or(false)
 }
 
 /// Probe one located `ffmpeg` binary: list compiled encoders, then confirm
 /// each hardware encoder with a test encode (software is trusted).
 pub fn probe_ffmpeg(ffmpeg: &Path) -> Vec<EncoderCapability> {
-    let Ok(output) = Command::new(ffmpeg)
-        .args(["-hide_banner", "-encoders"])
-        .output()
-    else {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-hide_banner", "-encoders"]);
+    let Some(output) = run_bounded(cmd) else {
         return Vec::new();
     };
     if !output.status.success() {

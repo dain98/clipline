@@ -52,6 +52,9 @@ pub struct FfmpegVideoEncoder {
     reader: Option<JoinHandle<()>>,
     codec_params: Arc<Mutex<Option<VideoCodecParams>>>,
     pending_pts: VecDeque<f64>,
+    /// The codec this child was configured to produce — used for the
+    /// `track_config` fallback before the reader extracts parameter sets.
+    codec: Codec,
     width: u16,
     height: u16,
     fps: u32,
@@ -109,7 +112,7 @@ fn spawn_process(
 }
 
 impl FfmpegVideoEncoder {
-    fn assemble(spawned: Spawned, width: u32, height: u32, fps: u32) -> Self {
+    fn assemble(spawned: Spawned, codec: Codec, width: u32, height: u32, fps: u32) -> Self {
         Self {
             child: spawned.child,
             stdin: Some(spawned.stdin),
@@ -117,6 +120,7 @@ impl FfmpegVideoEncoder {
             reader: Some(spawned.reader),
             codec_params: spawned.codec_params,
             pending_pts: VecDeque::new(),
+            codec,
             width: width as u16,
             height: height as u16,
             fps,
@@ -141,7 +145,7 @@ impl FfmpegVideoEncoder {
         bitrate_bps: u32,
     ) -> Result<Self, EncodeError> {
         let spawned = spawn_process(ffmpeg, backend, codec, width, height, fps, bitrate_bps)?;
-        Ok(Self::assemble(spawned, width, height, fps))
+        Ok(Self::assemble(spawned, codec, width, height, fps))
     }
 
     /// Windows constructor for GPU capture: converts each BGRA `FrameData::Gpu`
@@ -165,7 +169,7 @@ impl FfmpegVideoEncoder {
         let converter = VideoConverter::new_with_crop(device, in_w, in_h, out_w, out_h, crop)
             .map_err(|e| EncodeError::Backend(format!("nv12 converter: {e}")))?;
         let spawned = spawn_process(ffmpeg, backend, codec, out_w, out_h, fps, bitrate_bps)?;
-        let mut enc = Self::assemble(spawned, out_w, out_h, fps);
+        let mut enc = Self::assemble(spawned, codec, out_w, out_h, fps);
         enc.converter = Some(converter);
         enc.device = Some(device.clone());
         Ok(enc)
@@ -185,7 +189,7 @@ impl FfmpegVideoEncoder {
                     .convert(texture)
                     .map_err(|e| EncodeError::Backend(format!("nv12 convert: {e}")))?;
                 let device = self.device.as_ref().expect("device set with converter");
-                crate::windows::nv12::read_nv12(device, &nv12, self.width as u32, self.height as u32)
+                crate::windows::nv12::read_nv12(device, &nv12)
                     .map_err(|e| EncodeError::Backend(format!("nv12 readback: {e}")))
             }
         }
@@ -234,12 +238,16 @@ impl Encoder for FfmpegVideoEncoder {
     }
 
     fn track_config(&self) -> VideoTrackConfig {
+        // The reader fills this from the stream's first parameter sets. If
+        // it is queried before any keyframe (e.g. an empty recording), fall
+        // back to the *configured* codec with empty params — never claim a
+        // codec the stream isn't (which would pick the wrong sample entry).
         let codec = self
             .codec_params
             .lock()
             .ok()
             .and_then(|g| g.clone())
-            .unwrap_or(VideoCodecParams::H264 { sps: Vec::new(), pps: Vec::new() });
+            .unwrap_or_else(|| empty_params(self.codec));
         VideoTrackConfig { width: self.width, height: self.height, timescale: 90_000, codec }
     }
 
@@ -248,10 +256,31 @@ impl Encoder for FfmpegVideoEncoder {
         // the tail, then exits when stdout closes.
         drop(self.stdin.take());
         if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
+            reader
+                .join()
+                .map_err(|_| EncodeError::Backend("ffmpeg reader thread panicked".into()))?;
         }
-        let _ = self.child.wait();
+        // A non-zero ffmpeg exit means the elementary stream is incomplete;
+        // surface it rather than letting the muxer finalize truncated output.
+        let status = self
+            .child
+            .wait()
+            .map_err(|e| EncodeError::Backend(format!("await ffmpeg: {e}")))?;
+        if !status.success() {
+            return Err(EncodeError::Backend(format!("ffmpeg exited with {status}")));
+        }
         Ok(self.drain_ready())
+    }
+}
+
+/// Empty-parameter-set config for the configured codec — used only as the
+/// pre-keyframe fallback so the muxer at least selects the right sample
+/// entry box (avc1/hvc1/av01).
+fn empty_params(codec: Codec) -> VideoCodecParams {
+    match codec {
+        Codec::H264 => VideoCodecParams::H264 { sps: Vec::new(), pps: Vec::new() },
+        Codec::Hevc => VideoCodecParams::Hevc { vps: Vec::new(), sps: Vec::new(), pps: Vec::new() },
+        Codec::Av1 => VideoCodecParams::Av1 { sequence_header_obu: Vec::new() },
     }
 }
 

@@ -643,24 +643,36 @@ fn build_encoder(
         return Err("init: no usable video encoder found on this system".into());
     }
 
-    let explicit = matches!(preference, EncoderPreference::Explicit { .. });
+    let explicit_target = match preference {
+        EncoderPreference::Explicit { backend, codec } => Some((backend, codec)),
+        EncoderPreference::Auto => None,
+    };
     let ffmpeg_path = ffmpeg::locate();
     let mut last_err = String::new();
-    for (idx, candidate) in candidates.iter().enumerate() {
+    for candidate in &candidates {
         match open_candidate(*candidate, device, opts, in_w, in_h, crop, enc_w, enc_h, &ffmpeg_path)
         {
             Ok(encoder) => {
-                // An explicit first choice that failed but a later candidate
-                // succeeded means we silently downgraded — say so.
-                if explicit && idx > 0 {
-                    warn_user(
-                        events,
-                        format!(
-                            "{:?} encoder unavailable ({last_err}); using {} instead",
-                            opts.video_encoder,
-                            encoder_label(*candidate)
-                        ),
-                    );
+                // If the user forced a specific encoder/codec and we ended up
+                // on a different one — whether the choice failed to open or
+                // was never offered (so it isn't even in `candidates`) — tell
+                // them we downgraded.
+                if let Some((backend, codec)) = explicit_target {
+                    if candidate.backend != backend || candidate.codec != codec {
+                        let reason = if last_err.is_empty() {
+                            "not available on this system".to_string()
+                        } else {
+                            last_err.clone()
+                        };
+                        warn_user(
+                            events,
+                            format!(
+                                "{:?} encoder unavailable ({reason}); using {} instead",
+                                opts.video_encoder,
+                                encoder_label(*candidate)
+                            ),
+                        );
+                    }
                 }
                 return Ok((encoder, *candidate));
             }

@@ -16,6 +16,13 @@ pub trait AccessUnitFramer: Send {
     fn flush(&mut self) -> Option<Vec<u8>>;
 }
 
+/// Hard ceiling on a framer's pending buffer. A single access unit / temporal
+/// unit at Clipline's resolutions and bitrates is well under this; exceeding it
+/// means the subprocess output is malformed (no NAL boundary, or a bogus IVF
+/// frame length), so the buffer is dropped to avoid unbounded growth on the
+/// long-lived reader thread (an availability guard, not a normal path).
+const MAX_FRAMER_BUFFER: usize = 32 * 1024 * 1024;
+
 /// H.264/HEVC Annex B framer. An access unit is the run of NALs ending at a
 /// VCL NAL; parameter sets / SEI that follow belong to the next unit.
 pub struct AnnexBFramer {
@@ -83,6 +90,9 @@ impl AccessUnitFramer for AnnexBFramer {
         if au_start > 0 {
             self.buf.drain(..au_start);
         }
+        if self.buf.len() > MAX_FRAMER_BUFFER {
+            self.buf.clear(); // malformed: no AU boundary in a huge window
+        }
         units
     }
 
@@ -131,6 +141,10 @@ impl AccessUnitFramer for IvfFramer {
                 break;
             }
             let size = u32::from_le_bytes(self.buf[0..4].try_into().unwrap()) as usize;
+            if size > MAX_FRAMER_BUFFER {
+                self.buf.clear(); // bogus frame length: malformed, can't resync
+                break;
+            }
             let total = IVF_FRAME_HEADER_LEN + size;
             if self.buf.len() < total {
                 break;

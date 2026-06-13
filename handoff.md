@@ -243,8 +243,8 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   are fully unit-tested on both CI OSes.
 - Ship an **lgpl-shared** build (BtbN) under `%APPDATA%\Clipline\ffmpeg` — it has SVT-AV1 + GPU
   encoders but **no libx264/libx265**, so no software H.264/HEVC. The dev box has it installed
-  there; the search order (exe dir → that folder → PATH) means it wins over any GPL PATH ffmpeg.
-  Set `CLIPLINE_FFMPEG` to point at a specific binary. Attribution: `THIRD-PARTY-NOTICES.md`.
+  there; the search order (`CLIPLINE_FFMPEG` override → exe dir → that folder → PATH) means it
+  wins over any GPL PATH ffmpeg. Attribution: `THIRD-PARTY-NOTICES.md`.
 - AMF **rejects tiny resolutions** (`Init() failed with error 5` at 128×72) — the probe
   test-encodes at 640×360. SVT-AV1 **errors on `-maxrate`/`-bufsize`** (exit -22): CBR capping is
   hardware-only; SVT-AV1 gets `-b:v` + `-preset 8` (VBR-ish; the ring evicts by bytes anyway).

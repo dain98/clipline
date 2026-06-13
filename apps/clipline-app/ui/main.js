@@ -520,7 +520,7 @@ function probeDecodableCodecs() {
 async function loadVideoEncoders() {
   probeDecodableCodecs();
   try {
-    invoke("report_decode_support", { codecs: decodableCodecs });
+    await invoke("report_decode_support", { codecs: decodableCodecs });
   } catch (e) {
     // Reporting is best-effort; the recorder defaults to H.264-safe Automatic.
   }
