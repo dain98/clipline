@@ -9,6 +9,11 @@ fn index_html() -> String {
     fs::read_to_string(path).expect("read ui/index.html")
 }
 
+fn main_js() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/main.js");
+    fs::read_to_string(path).expect("read ui/main.js")
+}
+
 fn styles_css() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/styles.css");
     fs::read_to_string(path).expect("read ui/styles.css")
@@ -100,6 +105,8 @@ fn review_player_owns_all_controls() {
         "id=\"set-fps\"",
         "id=\"fps-summary\"",
         "id=\"fps-scale\"",
+        "id=\"set-media-dir\"",
+        "id=\"choose-media-folder\"",
         "id=\"set-quota\"",
         "id=\"set-hotkey\"",
         "id=\"settings-save\"",
@@ -157,6 +164,21 @@ fn review_player_owns_all_controls() {
     assert!(
         html[hotkey_start..=hotkey_tag_end].contains("readonly"),
         "hotkey input must record shortcuts instead of accepting free text"
+    );
+    let media_dir_start = html
+        .find("id=\"set-media-dir\"")
+        .expect("media folder input exists");
+    let media_dir_tag_end = html[media_dir_start..]
+        .find('>')
+        .map(|offset| media_dir_start + offset)
+        .expect("media folder input tag closes");
+    assert!(
+        html[media_dir_start..=media_dir_tag_end].contains("readonly"),
+        "media folder should be chosen with the native folder picker"
+    );
+    assert!(
+        html.contains("Choose Folder"),
+        "storage settings must expose a native-folder-picker action"
     );
 
     // Settings is a page in the main pane now, not a sidebar fold.
@@ -226,8 +248,7 @@ fn review_player_owns_all_controls() {
 
 #[test]
 fn no_native_browser_dialogs() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/main.js");
-    let js = fs::read_to_string(path).expect("read ui/main.js");
+    let js = main_js();
     // window.confirm/alert render browser chrome ("tauri.localhost says") —
     // use the in-app #confirm-dialog instead.
     for banned in ["confirm(", "alert("] {

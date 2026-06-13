@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use tauri_plugin_global_shortcut::Shortcut;
 
 use crate::service::{
-    AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource, ServiceOptions, VideoEncoder,
+    default_clips_dir, AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource, ServiceOptions,
+    VideoEncoder,
 };
 
 const MAX_REPLAY_WINDOW_S: f64 = 120.0;
@@ -140,6 +141,8 @@ pub struct AppSettings {
     #[serde(default, deserialize_with = "deserialize_video_encoder")]
     pub video_encoder: VideoEncoder,
     pub disk_quota_gb: f64,
+    #[serde(default = "default_media_dir")]
+    pub media_dir: String,
     pub hotkey: String,
 }
 
@@ -156,6 +159,7 @@ impl Default for AppSettings {
             fps: 60,
             video_encoder: VideoEncoder::Auto,
             disk_quota_gb: 10.0,
+            media_dir: default_media_dir(),
             hotkey: "Alt+F10".into(),
         }
     }
@@ -193,8 +197,13 @@ impl AppSettings {
             return Err("fps must be 30, 60, 90, or 120".into());
         }
         quota_bytes_from_gb(self.disk_quota_gb)?;
+        self.media_dir_path()?;
         normalize_hotkey(&self.hotkey)?;
         Ok(())
+    }
+
+    pub fn media_dir_path(&self) -> Result<PathBuf, String> {
+        normalize_media_dir(&self.media_dir)
     }
 
     pub fn to_service_options(&self, lol_url: Option<String>) -> Result<ServiceOptions, String> {
@@ -209,6 +218,7 @@ impl AppSettings {
                     CaptureSource::DisplayRegion(self.capture_region.to_service_region())
                 }
             },
+            media_dir: self.media_dir_path()?,
             lol_url,
             replay_window_s: self.replay_window_s,
             buffer_bytes: estimated_buffer_bytes(self.buffer_seconds, self.bitrate_mbps),
@@ -233,6 +243,13 @@ impl AppSettings {
             .audio
             .mic_device_id
             .filter(|id| !id.trim().is_empty());
+        // A malformed media_dir (empty/relative hand-edit, partial write) must
+        // not nuke the whole settings file — degrade it to the default folder,
+        // mirroring the hotkey repair above.
+        settings.media_dir = settings
+            .media_dir_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| default_media_dir());
         settings.replay_window_s = settings.replay_window_s.min(MAX_REPLAY_WINDOW_S);
         settings.buffer_seconds = settings.buffer_seconds.max(settings.replay_window_s);
         settings.validate()?;
@@ -242,6 +259,7 @@ impl AppSettings {
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
         let mut settings = self.clone();
         settings.hotkey = normalize_hotkey(&settings.hotkey)?;
+        settings.media_dir = settings.media_dir_path()?.display().to_string();
         settings.validate()?;
         let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
         if let Some(parent) = path.parent() {
@@ -347,6 +365,22 @@ pub fn settings_path() -> PathBuf {
     base.join("Clipline").join("settings.json")
 }
 
+pub fn default_media_dir() -> String {
+    default_clips_dir().display().to_string()
+}
+
+pub fn normalize_media_dir(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("media folder is required".into());
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err("media folder must be an absolute path".into());
+    }
+    Ok(path)
+}
+
 fn validate_range(name: &str, value: f64, min: f64, max: f64) -> Result<(), String> {
     if !value.is_finite() || value < min || value > max {
         return Err(format!("{name} must be between {min} and {max}"));
@@ -421,6 +455,7 @@ mod tests {
         assert_eq!(settings.fps, 60);
         assert_eq!(settings.video_encoder, VideoEncoder::Auto);
         assert_eq!(settings.disk_quota_gb, 10.0);
+        assert_eq!(settings.media_dir, default_media_dir());
         assert_eq!(settings.hotkey, "Alt+F10");
     }
 
@@ -463,8 +498,48 @@ mod tests {
         assert_eq!(settings.capture_region.width, 1920);
         assert_eq!(settings.capture_region.height, 1080);
         assert_eq!(settings.audio, AudioSettings::default());
+        assert_eq!(settings.media_dir, default_media_dir());
         assert_eq!(settings.video_encoder, VideoEncoder::Auto);
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_relative_media_folder() {
+        let settings = AppSettings {
+            media_dir: "clips".into(),
+            ..AppSettings::default()
+        };
+
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn load_heals_invalid_media_folder_without_resetting_settings() {
+        let dir = TestDir::new("heal-media-folder");
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "buffer_seconds": 120.0,
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 24.0,
+                "fps": 90,
+                "media_dir": "relative/not/allowed",
+                "disk_quota_gb": 6.0,
+                "hotkey": "Alt+F9"
+            }"#,
+        )
+        .unwrap();
+
+        let settings = AppSettings::load_from(&path).unwrap();
+
+        assert_eq!(settings.media_dir, default_media_dir());
+        assert_eq!(settings.bitrate_mbps, 24.0);
+        assert_eq!(settings.fps, 90);
+        assert_eq!(settings.disk_quota_gb, 6.0);
+        assert_eq!(settings.hotkey, "Alt+F9");
     }
 
     #[test]
@@ -629,6 +704,7 @@ mod tests {
         assert_eq!(opts.bitrate_bps, 12_000_000);
         assert_eq!(opts.video_encoder, VideoEncoder::Auto);
         assert_eq!(opts.disk_quota_bytes, Some(DEFAULT_DISK_QUOTA_BYTES));
+        assert_eq!(opts.media_dir, PathBuf::from(default_media_dir()));
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
         assert_eq!(opts.audio, AudioOptions::default());
         assert!(opts.buffer_bytes >= 220 * 1024 * 1024);

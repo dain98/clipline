@@ -505,6 +505,17 @@ label span { white-space: nowrap; }
   min-width: 0;
 }
 
+.folder-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  min-width: 0;
+}
+
+.folder-control button {
+  min-width: 116px;
+}
+
 .check-line {
   display: flex;
   align-items: center;

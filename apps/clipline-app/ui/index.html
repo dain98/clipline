@@ -337,6 +337,16 @@
           <div class="settings-section" data-section="storage" hidden>
             <div class="setting-row">
               <div class="setting-info">
+                <strong>Media folder</strong>
+                <span>Where Clipline saves recordings, exports, markers, and clip metadata. Existing clips stay in the old folder and won't appear in the library after you change this.</span>
+              </div>
+              <div class="folder-control">
+                <input id="set-media-dir" spellcheck="false" readonly />
+                <button id="choose-media-folder" type="button">Choose Folder</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
                 <strong>Disk quota (GiB)</strong>
                 <span>Budget for saved clips — oldest clips are cleaned up after each save.</span>
               </div>
