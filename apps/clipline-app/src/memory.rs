@@ -5,7 +5,13 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+use windows_sys::Win32::System::Memory::{
+    VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE,
+};
+use windows_sys::Win32::System::ProcessStatus::{
+    K32QueryWorkingSetEx, PSAPI_WORKING_SET_EX_INFORMATION,
+};
+use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     PROCESS_VM_READ,
@@ -13,24 +19,22 @@ use windows_sys::Win32::System::Threading::{
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct MemoryStatus {
-    pub working_set_bytes: u64,
+    pub private_working_set_bytes: u64,
 }
 
 pub fn current_process_tree_memory() -> Result<MemoryStatus, String> {
     let current_pid = unsafe { GetCurrentProcessId() };
-    let mut total = process_working_set_bytes(unsafe { GetCurrentProcess() })?;
+    let page_size = page_size()?;
+    let mut total = process_private_working_set_bytes(unsafe { GetCurrentProcess() }, page_size)?;
 
-    // This is a process-tree working set total, not private/unique memory.
-    // Shared pages can be counted once per process, especially across WebView2
-    // children; the UI uses it as a rough live footprint indicator.
     for pid in child_process_ids(current_pid)? {
-        if let Some(bytes) = process_working_set_for_pid(pid) {
+        if let Some(bytes) = process_private_working_set_for_pid(pid, page_size) {
             total = total.saturating_add(bytes);
         }
     }
 
     Ok(MemoryStatus {
-        working_set_bytes: total,
+        private_working_set_bytes: total,
     })
 }
 
@@ -104,35 +108,110 @@ fn process_name_from_wide(name: &[u16]) -> String {
     String::from_utf16_lossy(&name[..len]).to_ascii_lowercase()
 }
 
-fn process_working_set_for_pid(pid: u32) -> Option<u64> {
+fn process_private_working_set_for_pid(pid: u32, page_size: usize) -> Option<u64> {
     let handle =
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid) };
     if handle.is_null() {
         return None;
     }
-    let result = process_working_set_bytes(handle).ok();
+    let result = process_private_working_set_bytes(handle, page_size).ok();
     unsafe {
         CloseHandle(handle);
     }
     result
 }
 
-fn process_working_set_bytes(handle: HANDLE) -> Result<u64, String> {
-    let mut counters = PROCESS_MEMORY_COUNTERS {
-        cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-        ..unsafe { zeroed() }
-    };
-    let ok = unsafe {
-        K32GetProcessMemoryInfo(
-            handle,
-            &mut counters,
-            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-        )
-    };
-    if ok == 0 {
-        return Err("could not read process memory counters".into());
+fn process_private_working_set_bytes(handle: HANDLE, page_size: usize) -> Result<u64, String> {
+    let mut addr = 0usize;
+    let mut total_pages = 0u64;
+
+    loop {
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { zeroed() };
+        let read = unsafe {
+            VirtualQueryEx(
+                handle,
+                addr as *const _,
+                &mut info,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if read == 0 {
+            break;
+        }
+
+        let base = info.BaseAddress as usize;
+        let size = info.RegionSize;
+        if info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && size > 0 {
+            total_pages =
+                total_pages.saturating_add(resident_private_pages(handle, base, size, page_size)?);
+        }
+
+        let next = base.saturating_add(size);
+        if next <= addr {
+            break;
+        }
+        addr = next;
     }
-    Ok(counters.WorkingSetSize as u64)
+
+    Ok(total_pages.saturating_mul(page_size as u64))
+}
+
+fn resident_private_pages(
+    handle: HANDLE,
+    base: usize,
+    size: usize,
+    page_size: usize,
+) -> Result<u64, String> {
+    const WS_VALID: usize = 1;
+    const WS_SHARED: usize = 1 << 15;
+    const CHUNK_PAGES: usize = 4096;
+
+    let pages = size.div_ceil(page_size);
+    if pages == 0 {
+        return Ok(0);
+    }
+
+    let mut resident = 0u64;
+    let mut page = 0usize;
+    while page < pages {
+        let count = (pages - page).min(CHUNK_PAGES);
+        let mut query: Vec<PSAPI_WORKING_SET_EX_INFORMATION> = (0..count)
+            .map(|i| PSAPI_WORKING_SET_EX_INFORMATION {
+                VirtualAddress: (base + (page + i) * page_size) as *mut _,
+                VirtualAttributes: Default::default(),
+            })
+            .collect();
+        let bytes = query
+            .len()
+            .checked_mul(size_of::<PSAPI_WORKING_SET_EX_INFORMATION>())
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| "working set query chunk is too large".to_string())?;
+
+        let ok = unsafe { K32QueryWorkingSetEx(handle, query.as_mut_ptr().cast(), bytes) };
+        if ok != 0 {
+            resident += query
+                .iter()
+                .filter(|entry| {
+                    let flags = unsafe { entry.VirtualAttributes.Flags };
+                    flags & WS_VALID != 0 && flags & WS_SHARED == 0
+                })
+                .count() as u64;
+        }
+        page += count;
+    }
+
+    Ok(resident)
+}
+
+fn page_size() -> Result<usize, String> {
+    let mut info: SYSTEM_INFO = unsafe { zeroed() };
+    unsafe {
+        GetSystemInfo(&mut info);
+    };
+    if info.dwPageSize == 0 {
+        return Err("could not read system page size".into());
+    }
+    Ok(info.dwPageSize as usize)
 }
 
 struct Snapshot {

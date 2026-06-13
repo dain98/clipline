@@ -1,7 +1,10 @@
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use crate::boxes::{full_box, mp4_box, Payload};
-use crate::fragment::{fragment_multi, FragSample, TrackRun};
+use crate::fragment::{
+    fragment_moof_multi, fragment_multi, mdat_header, FragSample, FragSampleInfo, TrackRun,
+    TrackRunInfo,
+};
 use crate::init::{
     audio_trak_with_tables, free_placeholder, ftyp, moov_init_multi, mvhd, video_trak_with_tables,
     TrackConfig, VideoTrackConfig, MOVIE_TIMESCALE,
@@ -27,6 +30,14 @@ pub struct HybridMp4Writer<W: Write + Seek> {
     tracks: Vec<TrackState>,
     free_offset: u64,
     next_sequence: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SourceSample {
+    pub offset: u64,
+    pub size: u32,
+    pub duration: u32,
+    pub is_sync: bool,
 }
 
 impl<W: Write + Seek> HybridMp4Writer<W> {
@@ -121,6 +132,86 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         Ok(())
     }
 
+    pub fn write_fragment_multi_from_source<R: Read + Seek>(
+        &mut self,
+        source: &mut R,
+        per_track: &[&[SourceSample]],
+    ) -> io::Result<()> {
+        if per_track.len() != self.tracks.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "expected {} track slices, got {}",
+                    self.tracks.len(),
+                    per_track.len()
+                ),
+            ));
+        }
+        if per_track.iter().all(|s| s.is_empty()) {
+            return Ok(());
+        }
+
+        let info_storage: Vec<Vec<FragSampleInfo>> = per_track
+            .iter()
+            .map(|samples| {
+                samples
+                    .iter()
+                    .map(|s| FragSampleInfo {
+                        size: s.size,
+                        duration: s.duration,
+                        is_sync: s.is_sync,
+                    })
+                    .collect()
+            })
+            .collect();
+        let runs: Vec<TrackRunInfo<'_>> = info_storage
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(i, s)| TrackRunInfo {
+                track_id: i as u32 + 1,
+                base_decode_time: self.tracks[i].next_decode_time,
+                samples: s,
+            })
+            .collect();
+
+        let frag_start = self.w.stream_position()?;
+        let total_payload: u64 = per_track
+            .iter()
+            .flat_map(|samples| samples.iter())
+            .map(|s| s.size as u64)
+            .sum();
+        let moof = fragment_moof_multi(self.next_sequence, &runs);
+        self.w.write_all(&moof)?;
+        self.w.write_all(&mdat_header(total_payload))?;
+
+        let mut copy_buf = vec![0u8; 64 * 1024];
+        for run in &runs {
+            let idx = (run.track_id - 1) as usize;
+            for sample in per_track[idx] {
+                source.seek(SeekFrom::Start(sample.offset))?;
+                copy_exact(source, &mut self.w, sample.size as u64, &mut copy_buf)?;
+            }
+        }
+
+        let mut sample_offset =
+            frag_start + moof.len() as u64 + mdat_header(total_payload).len() as u64;
+        for run in &runs {
+            let idx = (run.track_id - 1) as usize;
+            let state = &mut self.tracks[idx];
+            state.chunks.push((sample_offset, run.samples.len() as u32));
+            for s in per_track[idx] {
+                state.sizes.push(s.size);
+                state.durations.push(s.duration);
+                state.sync.push(s.is_sync);
+                state.next_decode_time += s.duration as u64;
+                sample_offset += s.size as u64;
+            }
+        }
+        self.next_sequence += 1;
+        Ok(())
+    }
+
     /// Append the full moov, then overwrite the leading free box with a
     /// largesize mdat header spanning init-moov + all fragments — hiding
     /// them so the file parses as ftyp / mdat / moov (ddoc §10).
@@ -158,6 +249,21 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         }
         mp4_box(*b"moov", moov)
     }
+}
+
+fn copy_exact<R: Read, W: Write>(
+    source: &mut R,
+    dest: &mut W,
+    mut remaining: u64,
+    buf: &mut [u8],
+) -> io::Result<()> {
+    while remaining > 0 {
+        let n = remaining.min(buf.len() as u64) as usize;
+        source.read_exact(&mut buf[..n])?;
+        dest.write_all(&buf[..n])?;
+        remaining -= n as u64;
+    }
+    Ok(())
 }
 
 impl TrackState {

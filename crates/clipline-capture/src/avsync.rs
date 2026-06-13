@@ -140,7 +140,7 @@ mod tests {
         )
         .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
         rec.run_to_end().unwrap();
-        rec.ring().segments().cloned().collect()
+        rec.ring().unwrap().segments().cloned().collect()
     }
 
     #[test]

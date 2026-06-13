@@ -9,7 +9,7 @@ use windows::Win32::Graphics::Direct3D::{
 use windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ,
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     D3D11_USAGE_STAGING,
 };
@@ -151,4 +151,26 @@ pub fn texture_size(texture: &ID3D11Texture2D) -> (u32, u32) {
     // SAFETY: GetDesc writes to a valid out-pointer.
     unsafe { texture.GetDesc(&mut desc) };
     (desc.Width, desc.Height)
+}
+
+pub fn copy_texture_region(
+    context: &ID3D11DeviceContext,
+    dst: &ID3D11Texture2D,
+    src: &ID3D11Texture2D,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) {
+    let src_box = D3D11_BOX {
+        left: x,
+        top: y,
+        front: 0,
+        right: x + width,
+        bottom: y + height,
+        back: 1,
+    };
+    unsafe {
+        context.CopySubresourceRegion(dst, 0, 0, 0, 0, src, 0, Some(&src_box));
+    }
 }

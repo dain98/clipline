@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 use crate::service::{self, Cmd, Event, ServiceOptions};
@@ -245,6 +245,29 @@ async fn choose_media_folder(
     // IPC keep flowing while the picker is open.
     tauri::async_runtime::spawn_blocking(move || {
         let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Media Folder");
+        if current_dir.exists() {
+            dialog = dialog.set_directory(current_dir);
+        }
+        dialog.pick_folder().map(|path| path.display().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn choose_replay_cache_folder(
+    state: tauri::State<'_, RuntimeState>,
+    current: Option<String>,
+) -> Result<Option<String>, String> {
+    let current_dir = current
+        .as_deref()
+        .and_then(|path| crate::settings::normalize_replay_cache_dir(path).ok())
+        .filter(|path| path.exists())
+        .or_else(|| state.settings().media_dir_path().ok())
+        .unwrap_or_else(service::default_clips_dir);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Replay Cache Folder");
         if current_dir.exists() {
             dialog = dialog.set_directory(current_dir);
         }
@@ -503,6 +526,7 @@ pub fn run() {
             set_recording,
             get_settings,
             choose_media_folder,
+            choose_replay_cache_folder,
             list_displays,
             list_audio_devices,
             probe_encoders,
@@ -534,8 +558,9 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
+            let open_item = MenuItem::with_id(app, "open", "Open Clipline", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&save_item, &quit_item])?;
+            let menu = Menu::with_items(app, &[&open_item, &save_item, &quit_item])?;
             app.manage(TrayItems {
                 save_item: save_item.clone(),
             });
@@ -544,6 +569,11 @@ pub fn run() {
                 .tooltip("Clipline — replay buffer")
                 .menu(&menu)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
+                    "open" => {
+                        if let Err(e) = open_main_window(app) {
+                            eprintln!("open window: {e}");
+                        }
+                    }
                     "save" => {
                         app.state::<RuntimeState>().send(Cmd::Save);
                     }
@@ -555,6 +585,17 @@ pub fn run() {
                     }
                     _ => {}
                 })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } = event
+                    {
+                        if let Err(e) = open_main_window(tray.app_handle()) {
+                            eprintln!("open window: {e}");
+                        }
+                    }
+                })
                 .build(app)?;
 
             pump_events(app.handle().clone(), event_rx);
@@ -562,13 +603,52 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("build tauri app")
-        .run(move |app, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(move |app, event| match event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == "main" => {
+                api.prevent_close();
+                app.state::<MicTestState>().stop();
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.destroy();
+                }
+            }
+            tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } => {
+                api.prevent_exit();
+            }
+            tauri::RunEvent::Exit => {
                 app.state::<MicTestState>().stop();
                 app.state::<RuntimeState>()
                     .send(Cmd::Stop { announce: false });
             }
+            _ => {}
         });
+}
+
+fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let config = app
+        .config()
+        .app
+        .windows
+        .first()
+        .ok_or_else(|| "missing main window config".to_string())?
+        .clone();
+    let window = WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
 }
 
 fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>) {

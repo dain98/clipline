@@ -123,10 +123,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     rec.run_to_end()?;
     let elapsed = started.elapsed();
 
-    let segments = rec.ring().len();
+    let ring = rec
+        .ring()
+        .expect("record_smoke uses the default in-memory replay ring");
+    let segments = ring.len();
     {
         use clipline_capture::{validate_timeline, SyncTolerances};
-        let segs: Vec<_> = rec.ring().segments().collect();
+        let segs: Vec<_> = ring.segments().collect();
         match validate_timeline(&segs, &SyncTolerances::default()) {
             Ok(r) => println!(
                 "sync: video {:.3}s, audio {:?}s, max gap {:.1}ms, drift {:?}ms",
