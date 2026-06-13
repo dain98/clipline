@@ -1,6 +1,8 @@
 pub mod annexb;
+pub mod av1;
 pub mod avsync;
 pub mod clock;
+pub mod hevc;
 pub mod mock;
 pub mod opus;
 pub mod pcm;

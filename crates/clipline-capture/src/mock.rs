@@ -58,13 +58,13 @@ impl Encoder for MockEncoder {
     }
 
     fn track_config(&self) -> VideoTrackConfig {
-        VideoTrackConfig {
-            width: 128,
-            height: 128,
-            timescale: 90_000,
-            sps: vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
-            pps: vec![0x68, 0xEE, 0x38, 0x80],
-        }
+        VideoTrackConfig::h264(
+            128,
+            128,
+            90_000,
+            vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+            vec![0x68, 0xEE, 0x38, 0x80],
+        )
     }
 }
 
@@ -174,8 +174,12 @@ mod tests {
         let enc = MockEncoder::new(30, 30);
         let cfg = enc.track_config();
         assert!(cfg.timescale > 0);
-        assert!(!cfg.sps.is_empty());
-        assert!(!cfg.pps.is_empty());
+        match &cfg.codec {
+            clipline_mp4::VideoCodecParams::H264 { sps, pps } => {
+                assert!(!sps.is_empty() && !pps.is_empty());
+            }
+            other => panic!("mock encoder is H.264, got {other:?}"),
+        }
     }
 
     #[test]
