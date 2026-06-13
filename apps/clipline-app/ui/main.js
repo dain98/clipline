@@ -96,7 +96,7 @@ function fillSettings(s) {
   $("set-mic-enabled").checked = !!audio.mic_enabled;
   $("set-mic-volume").value = String(Number.isFinite(audio.mic_volume) ? audio.mic_volume : 1);
   $("set-mic-mono").checked = (audio.mic_channels || "mono") === "mono";
-  $("set-buffer").value = Math.max(120, Number(s.buffer_seconds) || 120);
+  $("set-buffer").value = Number(s.buffer_seconds) || 75;
   $("set-replay").value = Math.min(120, Number(s.replay_window_s) || 60);
   $("set-encoder").value = s.video_encoder || "auto";
   $("set-bitrate").value = qualityIndexForBitrate(s.bitrate_mbps);
@@ -129,7 +129,9 @@ function readSettings() {
       mic_volume: Number($("set-mic-volume").value),
       mic_channels: $("set-mic-mono").checked ? "mono" : "stereo",
     },
-    buffer_seconds: Math.max(120, replay),
+    // Ring holds the save window plus 15 s headroom (mirrors BUFFER_HEADROOM_S
+    // in settings.rs) — not a fixed 2 minutes.
+    buffer_seconds: replay + 15,
     replay_window_s: replay,
     video_encoder: $("set-encoder").value,
     bitrate_mbps: recordingQualityPreset(Number($("set-bitrate").value)).bitrate,
