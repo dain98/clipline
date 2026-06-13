@@ -234,7 +234,12 @@ label span { white-space: nowrap; }
 .app.rail .sidebar-full { display: none; }
 .app.rail .sidebar-rail { display: flex; }
 .app.rail .sidebar-top h1 { display: none; }
-.app.rail .sidebar-top { justify-content: center; padding: 10px 0; }
+.app.rail .memory-usage { display: none; }
+.app.rail .sidebar-top {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0;
+}
 
 /* ---- sidebar ---- */
 .sidebar {
@@ -246,10 +251,22 @@ label span { white-space: nowrap; }
 }
 
 .sidebar-top {
-  display: flex;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
+  column-gap: 10px;
+  row-gap: 1px;
   padding: 10px 12px 0;
+}
+
+.memory-usage {
+  grid-column: 2;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 #sidebar-toggle,
