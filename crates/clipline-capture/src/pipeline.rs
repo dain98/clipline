@@ -1,6 +1,7 @@
 use std::io::{self, Seek, Write};
+use std::path::PathBuf;
 
-use clipline_buffer::{ReplayRing, SampleInfo, Segment, TrackSamples};
+use clipline_buffer::{DiskReplayRing, ReplayRing, SampleInfo, Segment, TrackSamples};
 use clipline_mp4::{FragSample, HybridMp4Writer, TrackConfig};
 
 use crate::traits::{
@@ -13,6 +14,19 @@ pub enum PipelineError {
     Capture(#[from] CaptureError),
     #[error(transparent)]
     Encode(#[from] EncodeError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
+#[derive(Debug)]
+pub enum ReplayStorageConfig {
+    Memory { max_bytes: usize },
+    Disk { max_bytes: usize, dir: PathBuf },
+}
+
+enum ReplayStorage {
+    Memory(ReplayRing),
+    Disk(DiskReplayRing),
 }
 
 /// The recording pipeline (ddoc §3): capture → encode → GOP-aligned
@@ -21,7 +35,7 @@ pub enum PipelineError {
 pub struct Recorder<C: CaptureEngine, E: Encoder> {
     capture: C,
     encoder: E,
-    ring: ReplayRing,
+    ring: ReplayStorage,
     pending: Vec<EncodedPacket>,
     audio_sources: Vec<Box<dyn AudioSource>>,
     pending_audio: Vec<Vec<AudioPacket>>,
@@ -36,12 +50,36 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         Self {
             capture,
             encoder,
-            ring: ReplayRing::new(max_buffer_bytes),
+            ring: ReplayStorage::Memory(ReplayRing::new(max_buffer_bytes)),
             pending: Vec::new(),
             audio_sources: Vec::new(),
             pending_audio: Vec::new(),
             video_start_pts_s: None,
         }
+    }
+
+    pub fn new_with_replay_storage(
+        capture: C,
+        encoder: E,
+        storage: ReplayStorageConfig,
+    ) -> io::Result<Self> {
+        let ring = match storage {
+            ReplayStorageConfig::Memory { max_bytes } => {
+                ReplayStorage::Memory(ReplayRing::new(max_bytes))
+            }
+            ReplayStorageConfig::Disk { max_bytes, dir } => {
+                ReplayStorage::Disk(DiskReplayRing::new(max_bytes, dir)?)
+            }
+        };
+        Ok(Self {
+            capture,
+            encoder,
+            ring,
+            pending: Vec::new(),
+            audio_sources: Vec::new(),
+            pending_audio: Vec::new(),
+            video_start_pts_s: None,
+        })
     }
 
     /// Attach an audio source as the next audio track (ddoc §10:
@@ -68,7 +106,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
                 self.video_start_pts_s = Some(pkt.pts_s);
             }
             if pkt.is_keyframe && !self.pending.is_empty() {
-                self.seal_pending(pkt.pts_s);
+                self.seal_pending(pkt.pts_s)?;
             }
             self.pending.push(pkt);
         }
@@ -80,7 +118,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
     pub fn finish_stream(&mut self) -> Result<(), PipelineError> {
         for pkt in self.encoder.finish()? {
             if pkt.is_keyframe && !self.pending.is_empty() {
-                self.seal_pending(pkt.pts_s);
+                self.seal_pending(pkt.pts_s)?;
             }
             self.pending.push(pkt);
         }
@@ -93,7 +131,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             for (src, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
                 pending.extend(src.poll_packets(end)?);
             }
-            self.seal_pending(f64::INFINITY);
+            self.seal_pending(f64::INFINITY)?;
         }
         Ok(())
     }
@@ -108,7 +146,61 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
     }
 
     pub fn ring(&self) -> &ReplayRing {
-        &self.ring
+        match &self.ring {
+            ReplayStorage::Memory(ring) => ring,
+            ReplayStorage::Disk(_) => panic!("disk replay storage does not expose ReplayRing"),
+        }
+    }
+
+    pub fn ring_len(&self) -> usize {
+        match &self.ring {
+            ReplayStorage::Memory(ring) => ring.len(),
+            ReplayStorage::Disk(ring) => ring.len(),
+        }
+    }
+
+    pub fn ring_bytes(&self) -> usize {
+        match &self.ring {
+            ReplayStorage::Memory(ring) => ring.bytes(),
+            ReplayStorage::Disk(ring) => ring.bytes(),
+        }
+    }
+
+    pub fn buffered_span_s(&self) -> f64 {
+        let mut span = 0.0f64;
+        let mut first_pts = None::<f64>;
+        match &self.ring {
+            ReplayStorage::Memory(ring) => {
+                for seg in ring.segments() {
+                    first_pts.get_or_insert(seg.pts_start_s);
+                    span = seg.pts_end_s() - first_pts.unwrap();
+                }
+            }
+            ReplayStorage::Disk(ring) => {
+                for seg in ring.segments() {
+                    first_pts.get_or_insert(seg.pts_start_s);
+                    span = seg.pts_end_s() - first_pts.unwrap();
+                }
+            }
+        }
+        span
+    }
+
+    pub fn save_window_bounds(
+        &self,
+        window_s: f64,
+        exclude_before_s: Option<f64>,
+    ) -> Option<(f64, f64)> {
+        match &self.ring {
+            ReplayStorage::Memory(ring) => {
+                let segs = ring.save_window(window_s, exclude_before_s);
+                Some((segs.first()?.pts_start_s, segs.last()?.pts_end_s()))
+            }
+            ReplayStorage::Disk(ring) => {
+                let segs = ring.save_window(window_s, exclude_before_s);
+                Some((segs.first()?.pts_start_s, segs.last()?.pts_end_s()))
+            }
+        }
     }
 
     pub fn encoder(&self) -> &E {
@@ -128,7 +220,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         window_s: f64,
         exclude_before_s: Option<f64>,
     ) -> io::Result<(W, f64)> {
-        let segments = self.ring.save_window(window_s, exclude_before_s);
+        let segments = self.save_window_segments(window_s, exclude_before_s)?;
         if segments.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -182,7 +274,26 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         Ok((writer.finalize()?, end_pts))
     }
 
-    fn seal_pending(&mut self, boundary_pts_s: f64) {
+    fn save_window_segments(
+        &self,
+        window_s: f64,
+        exclude_before_s: Option<f64>,
+    ) -> io::Result<Vec<Segment>> {
+        match &self.ring {
+            ReplayStorage::Memory(ring) => Ok(ring
+                .save_window(window_s, exclude_before_s)
+                .into_iter()
+                .cloned()
+                .collect()),
+            ReplayStorage::Disk(ring) => ring
+                .save_window(window_s, exclude_before_s)
+                .into_iter()
+                .map(|seg| seg.load())
+                .collect(),
+        }
+    }
+
+    fn seal_pending(&mut self, boundary_pts_s: f64) -> Result<(), PipelineError> {
         let packets = std::mem::take(&mut self.pending);
         let pts_start_s = packets[0].pts_s;
         let starts_with_keyframe = packets[0].is_keyframe;
@@ -240,14 +351,19 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             audio.push(track);
         }
 
-        self.ring.push(Segment {
+        let seg = Segment {
             starts_with_keyframe,
             pts_start_s,
             duration_s,
             data,
             samples,
             audio,
-        });
+        };
+        match &mut self.ring {
+            ReplayStorage::Memory(ring) => ring.push(seg),
+            ReplayStorage::Disk(ring) => ring.push(seg)?,
+        }
+        Ok(())
     }
 }
 
@@ -255,6 +371,29 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
 mod tests {
     use super::*;
     use crate::mock::{MockCapture, MockEncoder};
+    use std::path::PathBuf;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "clipline-pipeline-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            Self(dir)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn groups_packets_into_gop_aligned_segments() {
@@ -335,6 +474,40 @@ mod tests {
         let kids = children(&buf, moov);
         let traks = kids.iter().filter(|b| &b.fourcc == b"trak").count();
         assert_eq!(traks, 3, "video plus two audio tracks");
+    }
+
+    #[test]
+    fn disk_replay_storage_saves_same_bytes_as_memory_storage() {
+        let mut ram = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        );
+        ram.run_to_end().unwrap();
+        let (ram_buf, _) = ram
+            .save_replay(std::io::Cursor::new(Vec::new()), 10.0, None)
+            .map(|(w, end)| (w.into_inner(), end))
+            .unwrap();
+
+        let dir = TestDir::new("disk-equivalence");
+        let mut disk = Recorder::new_with_replay_storage(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            ReplayStorageConfig::Disk {
+                max_bytes: usize::MAX,
+                dir: dir.0.clone(),
+            },
+        )
+        .unwrap();
+        disk.run_to_end().unwrap();
+        let (disk_buf, _) = disk
+            .save_replay(std::io::Cursor::new(Vec::new()), 10.0, None)
+            .map(|(w, end)| (w.into_inner(), end))
+            .unwrap();
+
+        assert_eq!(disk.ring_len(), ram.ring_len());
+        assert_eq!(disk.ring_bytes(), ram.ring_bytes());
+        assert_eq!(disk_buf, ram_buf);
     }
 
     /// Wraps MockEncoder but holds back the latest packet until finish() —

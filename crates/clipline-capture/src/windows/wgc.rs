@@ -3,7 +3,9 @@
 //! each frame's texture (pool surfaces are recycled) and queues it; the
 //! pull-model `next_frame` drains the queue.
 
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::collections::VecDeque;
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use windows::core::{Interface, Result as WinResult};
@@ -26,11 +28,13 @@ use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 use crate::clock::RelativeClock;
 use crate::traits::{CaptureEngine, CaptureError, Frame, FrameData};
 use crate::windows::d3d11;
+use crate::windows::nv12::CropRect;
 
 /// Default `next_frame` wait. WGC only delivers on screen updates, so an
 /// idle desktop can legitimately go quiet; recorders that need cadence
 /// repeat the previous frame (encoder-side concern, milestone 4).
 const DEFAULT_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+const FRAME_QUEUE_CAPACITY: usize = 2;
 
 struct QueuedFrame {
     texture: ID3D11Texture2D,
@@ -40,7 +44,7 @@ struct QueuedFrame {
 pub struct WgcCapture {
     session: GraphicsCaptureSession,
     frame_pool: Direct3D11CaptureFramePool,
-    rx: Receiver<QueuedFrame>,
+    rx: FrameReceiver,
     clock: RelativeClock,
 }
 
@@ -88,7 +92,20 @@ impl WgcCapture {
             return Err(CaptureError::Init("invalid monitor handle".into()));
         }
         let item = create_item(|interop| unsafe { interop.CreateForMonitor(monitor) })?;
-        Self::new(item, device, clock)
+        Self::new(item, device, clock, None)
+    }
+
+    pub fn for_monitor_region_on(
+        device: ID3D11Device,
+        monitor: HMONITOR,
+        clock: RelativeClock,
+        crop: CropRect,
+    ) -> Result<Self, CaptureError> {
+        if monitor.is_invalid() {
+            return Err(CaptureError::Init("invalid monitor handle".into()));
+        }
+        let item = create_item(|interop| unsafe { interop.CreateForMonitor(monitor) })?;
+        Self::new(item, device, clock, Some(crop))
     }
 
     /// Capture one window (must be visible; ddoc §3: per-window preferred,
@@ -108,13 +125,14 @@ impl WgcCapture {
             return Err(CaptureError::Init("invalid window handle".into()));
         }
         let item = create_item(|interop| unsafe { interop.CreateForWindow(hwnd) })?;
-        Self::new(item, device, clock)
+        Self::new(item, device, clock, None)
     }
 
     fn new(
         item: GraphicsCaptureItem,
         device: ID3D11Device,
         clock: RelativeClock,
+        copy_region: Option<CropRect>,
     ) -> Result<Self, CaptureError> {
         init_winrt()?;
         let init = |e: windows::core::Error| CaptureError::Init(e.to_string());
@@ -136,10 +154,13 @@ impl WgcCapture {
         // builds show the yellow border.
         let _ = session.SetIsBorderRequired(false);
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = bounded_frame_channel(FRAME_QUEUE_CAPACITY);
         frame_pool
             .FrameArrived(&TypedEventHandler::new(on_frame_arrived(
-                device, context, tx,
+                device,
+                context,
+                tx,
+                copy_region,
             )))
             .map_err(init)?;
         session.StartCapture().map_err(init)?;
@@ -190,7 +211,8 @@ impl Drop for WgcCapture {
 fn on_frame_arrived(
     device: ID3D11Device,
     context: ID3D11DeviceContext,
-    tx: Sender<QueuedFrame>,
+    tx: FrameSender,
+    copy_region: Option<CropRect>,
 ) -> impl Fn(
     windows::core::Ref<'_, Direct3D11CaptureFramePool>,
     windows::core::Ref<'_, windows::core::IInspectable>,
@@ -207,17 +229,92 @@ fn on_frame_arrived(
         // SAFETY: the surface is a live IDirect3D surface backed by an
         // ID3D11Texture2D; GetInterface AddRefs it.
         let source: ID3D11Texture2D = unsafe { access.GetInterface()? };
-        let (w, h) = d3d11::texture_size(&source);
-        let copy = d3d11::create_bgra_texture(&device, w, h)?;
-        // SAFETY: both resources belong to `device`; CopyResource is valid
-        // for same-format, same-size textures.
-        unsafe { context.CopyResource(&copy, &source) };
-        // Receiver gone (engine dropped) → stop forwarding, not an error.
-        let _ = tx.send(QueuedFrame {
+        let copy = if let Some(crop) = copy_region {
+            let copy = d3d11::create_bgra_texture(&device, crop.width, crop.height)?;
+            d3d11::copy_texture_region(
+                &context,
+                &copy,
+                &source,
+                crop.x,
+                crop.y,
+                crop.width,
+                crop.height,
+            );
+            copy
+        } else {
+            let (w, h) = d3d11::texture_size(&source);
+            let copy = d3d11::create_bgra_texture(&device, w, h)?;
+            // SAFETY: both resources belong to `device`; CopyResource is valid
+            // for same-format, same-size textures.
+            unsafe { context.CopyResource(&copy, &source) };
+            copy
+        };
+        tx.send_drop_oldest(QueuedFrame {
             texture: copy,
             ticks_100ns,
         });
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct FrameSender {
+    inner: Arc<FrameQueueInner>,
+}
+
+struct FrameReceiver {
+    inner: Arc<FrameQueueInner>,
+}
+
+struct FrameQueueInner {
+    queue: Mutex<VecDeque<QueuedFrame>>,
+    ready: Condvar,
+    capacity: usize,
+}
+
+fn bounded_frame_channel(capacity: usize) -> (FrameSender, FrameReceiver) {
+    let inner = Arc::new(FrameQueueInner {
+        queue: Mutex::new(VecDeque::new()),
+        ready: Condvar::new(),
+        capacity: capacity.max(1),
+    });
+    (
+        FrameSender {
+            inner: inner.clone(),
+        },
+        FrameReceiver { inner },
+    )
+}
+
+impl FrameSender {
+    fn send_drop_oldest(&self, frame: QueuedFrame) {
+        let Ok(mut queue) = self.inner.queue.lock() else {
+            return;
+        };
+        if queue.len() >= self.inner.capacity {
+            queue.pop_front();
+        }
+        queue.push_back(frame);
+        self.inner.ready.notify_one();
+    }
+}
+
+impl FrameReceiver {
+    fn recv_timeout(&self, timeout: Duration) -> Result<QueuedFrame, RecvTimeoutError> {
+        let queue = self
+            .inner
+            .queue
+            .lock()
+            .map_err(|_| RecvTimeoutError::Disconnected)?;
+        let (mut queue, result) = self
+            .inner
+            .ready
+            .wait_timeout_while(queue, timeout, |queue| queue.is_empty())
+            .map_err(|_| RecvTimeoutError::Disconnected)?;
+        if result.timed_out() && queue.is_empty() {
+            return Err(RecvTimeoutError::Timeout);
+        }
+        queue.pop_front().ok_or(RecvTimeoutError::Disconnected)
     }
 }
 
@@ -334,6 +431,36 @@ mod tests {
         // SAFETY: trivial getter on a valid texture.
         let owner = unsafe { tex.GetDevice() }.expect("owner device");
         assert_eq!(owner.as_raw(), device.as_raw());
+    }
+
+    #[test]
+    fn bounded_frame_queue_drops_oldest_frame() {
+        let (device, _) = crate::windows::d3d11::create_device_for_tests().expect("device");
+        let tex = crate::windows::d3d11::create_bgra_texture(&device, 2, 2).expect("texture");
+        let (tx, rx) = bounded_frame_channel(2);
+        for ticks_100ns in [1, 2, 3] {
+            tx.send_drop_oldest(QueuedFrame {
+                texture: tex.clone(),
+                ticks_100ns,
+            });
+        }
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(1))
+                .expect("second frame")
+                .ticks_100ns,
+            2
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(1))
+                .expect("third frame")
+                .ticks_100ns,
+            3
+        );
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(1)),
+            Err(RecvTimeoutError::Timeout)
+        ));
     }
 
     /// The milestone 4 exit test: video + audio on ONE clock, recorded by

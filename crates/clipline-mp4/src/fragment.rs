@@ -15,6 +15,13 @@ pub struct FragSample {
     pub is_sync: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct FragSampleInfo {
+    pub size: u32,
+    pub duration: u32,
+    pub is_sync: bool,
+}
+
 /// One track's slice of a fragment.
 #[derive(Debug)]
 pub struct TrackRun<'a> {
@@ -24,19 +31,39 @@ pub struct TrackRun<'a> {
     pub samples: &'a [FragSample],
 }
 
+#[derive(Debug)]
+pub struct TrackRunInfo<'a> {
+    pub track_id: u32,
+    pub base_decode_time: u64,
+    pub samples: &'a [FragSampleInfo],
+}
+
 /// One `moof` with a `traf` per run, plus one shared `mdat` holding all
 /// runs' samples in run order.
 pub fn fragment_multi(sequence: u32, runs: &[TrackRun<'_>]) -> Vec<u8> {
-    // Two-pass: data offsets depend on the moof's size, which is stable.
-    let zeros = vec![0i32; runs.len()];
-    let moof = build_moof_multi(sequence, runs, &zeros);
-    let mut offsets = Vec::with_capacity(runs.len());
-    let mut acc = (moof.len() + 8) as i32; // + mdat header
-    for r in runs {
-        offsets.push(acc);
-        acc += r.samples.iter().map(|s| s.data.len()).sum::<usize>() as i32;
-    }
-    let moof = build_moof_multi(sequence, runs, &offsets);
+    let infos: Vec<Vec<FragSampleInfo>> = runs
+        .iter()
+        .map(|run| {
+            run.samples
+                .iter()
+                .map(|s| FragSampleInfo {
+                    size: s.data.len() as u32,
+                    duration: s.duration,
+                    is_sync: s.is_sync,
+                })
+                .collect()
+        })
+        .collect();
+    let info_runs: Vec<TrackRunInfo<'_>> = runs
+        .iter()
+        .zip(&infos)
+        .map(|(run, samples)| TrackRunInfo {
+            track_id: run.track_id,
+            base_decode_time: run.base_decode_time,
+            samples,
+        })
+        .collect();
+    let moof = fragment_moof_multi(sequence, &info_runs);
 
     let mut mdat_payload = Vec::new();
     for r in runs {
@@ -47,6 +74,19 @@ pub fn fragment_multi(sequence: u32, runs: &[TrackRun<'_>]) -> Vec<u8> {
     let mut out = moof;
     out.extend(mp4_box(*b"mdat", mdat_payload));
     out
+}
+
+pub fn fragment_moof_multi(sequence: u32, runs: &[TrackRunInfo<'_>]) -> Vec<u8> {
+    // Two-pass: data offsets depend on the moof's size, which is stable.
+    let zeros = vec![0i32; runs.len()];
+    let moof = build_moof_multi(sequence, runs, &zeros);
+    let mut offsets = Vec::with_capacity(runs.len());
+    let mut acc = (moof.len() + 8) as i32; // + mdat header
+    for r in runs {
+        offsets.push(acc);
+        acc += r.samples.iter().map(|s| s.size as usize).sum::<usize>() as i32;
+    }
+    build_moof_multi(sequence, runs, &offsets)
 }
 
 /// Single-track fragment (track 1) — the original API.
@@ -61,7 +101,22 @@ pub fn fragment(sequence: u32, base_decode_time: u64, samples: &[FragSample]) ->
     )
 }
 
-fn build_moof_multi(sequence: u32, runs: &[TrackRun<'_>], data_offsets: &[i32]) -> Vec<u8> {
+pub fn mdat_header(payload_len: u64) -> Vec<u8> {
+    if payload_len <= (u32::MAX as u64 - 8) {
+        let mut out = Vec::with_capacity(8);
+        out.extend(((payload_len + 8) as u32).to_be_bytes());
+        out.extend(b"mdat");
+        out
+    } else {
+        let mut out = Vec::with_capacity(16);
+        out.extend(1u32.to_be_bytes());
+        out.extend(b"mdat");
+        out.extend((payload_len + 16).to_be_bytes());
+        out
+    }
+}
+
+fn build_moof_multi(sequence: u32, runs: &[TrackRunInfo<'_>], data_offsets: &[i32]) -> Vec<u8> {
     let mut mfhd_p = Payload::new();
     mfhd_p.u32(sequence);
     let mut moof = full_box(*b"mfhd", 0, 0, mfhd_p.into_vec());
@@ -71,7 +126,7 @@ fn build_moof_multi(sequence: u32, runs: &[TrackRun<'_>], data_offsets: &[i32]) 
     mp4_box(*b"moof", moof)
 }
 
-fn traf(run: &TrackRun<'_>, data_offset: i32) -> Vec<u8> {
+fn traf(run: &TrackRunInfo<'_>, data_offset: i32) -> Vec<u8> {
     let mut tfhd_p = Payload::new();
     tfhd_p.u32(run.track_id);
     let tfhd = full_box(*b"tfhd", 0, 0x020000, tfhd_p.into_vec()); // default-base-is-moof
@@ -87,7 +142,7 @@ fn traf(run: &TrackRun<'_>, data_offset: i32) -> Vec<u8> {
     for s in run.samples {
         trun_p
             .u32(s.duration)
-            .u32(s.data.len() as u32)
+            .u32(s.size)
             .u32(if s.is_sync { FLAG_SYNC } else { FLAG_NON_SYNC });
     }
     let trun = full_box(*b"trun", 0, 0x000701, trun_p.into_vec());

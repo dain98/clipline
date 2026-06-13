@@ -7,10 +7,12 @@ use tauri_plugin_global_shortcut::Shortcut;
 
 use crate::service::{
     default_clips_dir, AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource,
-    ServiceOptions, VideoEncoder,
+    ReplayStorageOptions, ServiceOptions, VideoEncoder,
 };
 
 const MAX_REPLAY_WINDOW_S: f64 = 120.0;
+pub const BUFFER_HEADROOM_S: f64 = 15.0;
+const DEFAULT_REPLAY_CACHE_QUOTA_GB: f64 = 2.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -126,6 +128,49 @@ impl AudioSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayStorageMode {
+    #[default]
+    Memory,
+    Disk,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReplayStorageSettings {
+    #[serde(default)]
+    pub mode: ReplayStorageMode,
+    #[serde(default)]
+    pub disk_dir: String,
+    #[serde(default = "default_replay_cache_quota_gb")]
+    pub disk_quota_gb: f64,
+    #[serde(default)]
+    pub disk_acknowledged: bool,
+}
+
+impl Default for ReplayStorageSettings {
+    fn default() -> Self {
+        Self {
+            mode: ReplayStorageMode::Memory,
+            disk_dir: String::new(),
+            disk_quota_gb: default_replay_cache_quota_gb(),
+            disk_acknowledged: false,
+        }
+    }
+}
+
+impl ReplayStorageSettings {
+    fn to_service_options(&self) -> Result<ReplayStorageOptions, String> {
+        match self.mode {
+            ReplayStorageMode::Memory => Ok(ReplayStorageOptions::Memory),
+            ReplayStorageMode::Disk => Ok(ReplayStorageOptions::Disk {
+                dir: normalize_replay_cache_dir(&self.disk_dir)?,
+                quota_bytes: replay_cache_quota_bytes_from_gb(self.disk_quota_gb)?,
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppSettings {
     pub capture_mode: CaptureMode,
@@ -143,6 +188,8 @@ pub struct AppSettings {
     pub disk_quota_gb: f64,
     #[serde(default = "default_media_dir")]
     pub media_dir: String,
+    #[serde(default)]
+    pub replay_storage: ReplayStorageSettings,
     pub hotkey: String,
 }
 
@@ -153,13 +200,14 @@ impl Default for AppSettings {
             window_title: String::new(),
             capture_region: CaptureRegionSettings::default(),
             audio: AudioSettings::default(),
-            buffer_seconds: 120.0,
             replay_window_s: 60.0,
+            buffer_seconds: 60.0 + BUFFER_HEADROOM_S,
             bitrate_mbps: 12.0,
             fps: 60,
             video_encoder: VideoEncoder::Auto,
             disk_quota_gb: 10.0,
             media_dir: default_media_dir(),
+            replay_storage: ReplayStorageSettings::default(),
             hotkey: "Alt+F10".into(),
         }
     }
@@ -198,6 +246,7 @@ impl AppSettings {
         }
         quota_bytes_from_gb(self.disk_quota_gb)?;
         self.media_dir_path()?;
+        self.validate_replay_storage()?;
         normalize_hotkey(&self.hotkey)?;
         Ok(())
     }
@@ -221,7 +270,8 @@ impl AppSettings {
             media_dir: self.media_dir_path()?,
             lol_url,
             replay_window_s: self.replay_window_s,
-            buffer_bytes: estimated_buffer_bytes(self.buffer_seconds, self.bitrate_mbps),
+            buffer_bytes: estimated_buffer_bytes(replay_buffer_seconds(self), self.bitrate_mbps),
+            replay_storage: self.replay_storage.to_service_options()?,
             disk_quota_bytes: quota_bytes_from_gb(self.disk_quota_gb)?,
             fps: self.fps,
             bitrate_bps: (self.bitrate_mbps * 1_000_000.0).round() as u32,
@@ -251,7 +301,7 @@ impl AppSettings {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| default_media_dir());
         settings.replay_window_s = settings.replay_window_s.min(MAX_REPLAY_WINDOW_S);
-        settings.buffer_seconds = settings.buffer_seconds.max(settings.replay_window_s);
+        settings.buffer_seconds = replay_buffer_seconds(&settings);
         settings.validate()?;
         Ok(settings)
     }
@@ -260,6 +310,13 @@ impl AppSettings {
         let mut settings = self.clone();
         settings.hotkey = normalize_hotkey(&settings.hotkey)?;
         settings.media_dir = settings.media_dir_path()?.display().to_string();
+        if matches!(settings.replay_storage.mode, ReplayStorageMode::Disk) {
+            settings.replay_storage.disk_dir =
+                normalize_replay_cache_dir(&settings.replay_storage.disk_dir)?
+                    .display()
+                    .to_string();
+        }
+        settings.buffer_seconds = replay_buffer_seconds(&settings);
         settings.validate()?;
         let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
         if let Some(parent) = path.parent() {
@@ -274,6 +331,24 @@ impl AppSettings {
 
     pub fn save(&self) -> Result<(), String> {
         self.save_to(&settings_path())
+    }
+
+    fn validate_replay_storage(&self) -> Result<(), String> {
+        if matches!(self.replay_storage.mode, ReplayStorageMode::Memory) {
+            return Ok(());
+        }
+        if !self.replay_storage.disk_acknowledged {
+            return Err("disk replay buffer requires acknowledging SSD wear".into());
+        }
+        replay_cache_quota_bytes_from_gb(self.replay_storage.disk_quota_gb)?;
+        let cache_dir = normalize_replay_cache_dir(&self.replay_storage.disk_dir)?;
+        let media_dir = self.media_dir_path()?;
+        if same_or_nested_path(&cache_dir, &media_dir)
+            || same_or_nested_path(&media_dir, &cache_dir)
+        {
+            return Err("replay cache folder must be separate from the media folder".into());
+        }
+        Ok(())
     }
 }
 
@@ -381,6 +456,35 @@ pub fn normalize_media_dir(raw: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+pub fn normalize_replay_cache_dir(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("replay cache folder is required".into());
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err("replay cache folder must be an absolute path".into());
+    }
+    Ok(path)
+}
+
+pub fn replay_cache_quota_bytes_from_gb(gb: f64) -> Result<u64, String> {
+    const GIB_BYTES: f64 = 1024.0 * 1024.0 * 1024.0;
+
+    if !gb.is_finite() || gb < 0.25 {
+        return Err("replay cache quota must be at least 0.25 GiB".into());
+    }
+    let bytes = gb * GIB_BYTES;
+    if bytes > u64::MAX as f64 {
+        return Err("replay cache quota is too large".into());
+    }
+    Ok(bytes.round() as u64)
+}
+
+fn default_replay_cache_quota_gb() -> f64 {
+    DEFAULT_REPLAY_CACHE_QUOTA_GB
+}
+
 fn validate_range(name: &str, value: f64, min: f64, max: f64) -> Result<(), String> {
     if !value.is_finite() || value < min || value > max {
         return Err(format!("{name} must be between {min} and {max}"));
@@ -396,12 +500,30 @@ fn set_once(slot: &mut bool, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn replay_buffer_seconds(settings: &AppSettings) -> f64 {
+    settings.replay_window_s + BUFFER_HEADROOM_S
+}
+
 fn estimated_buffer_bytes(buffer_seconds: f64, bitrate_mbps: f64) -> usize {
-    const MIN_BUFFER_BYTES: f64 = 64.0 * 1024.0 * 1024.0;
+    const MIN_BUFFER_BYTES: f64 = 32.0 * 1024.0 * 1024.0;
     const AUDIO_AND_MOTION_HEADROOM: f64 = 1.30;
 
     let video_bytes = bitrate_mbps * 1_000_000.0 / 8.0 * buffer_seconds;
     (video_bytes * AUDIO_AND_MOTION_HEADROOM).max(MIN_BUFFER_BYTES) as usize
+}
+
+fn same_or_nested_path(child: &Path, parent: &Path) -> bool {
+    let child = normalize_components(child);
+    let parent = normalize_components(parent);
+    child == parent || child.starts_with(&parent)
+}
+
+fn normalize_components(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        out.push(component.as_os_str());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -449,13 +571,14 @@ mod tests {
         assert_eq!(settings.audio.mic_device_id, None);
         assert_eq!(settings.audio.mic_volume, 1.0);
         assert_eq!(settings.audio.mic_channels, AudioChannelMode::Mono);
-        assert_eq!(settings.buffer_seconds, 120.0);
         assert_eq!(settings.replay_window_s, 60.0);
+        assert_eq!(settings.buffer_seconds, 75.0);
         assert_eq!(settings.bitrate_mbps, 12.0);
         assert_eq!(settings.fps, 60);
         assert_eq!(settings.video_encoder, VideoEncoder::Auto);
         assert_eq!(settings.disk_quota_gb, 10.0);
         assert_eq!(settings.media_dir, default_media_dir());
+        assert_eq!(settings.replay_storage, ReplayStorageSettings::default());
         assert_eq!(settings.hotkey, "Alt+F10");
     }
 
@@ -587,7 +710,7 @@ mod tests {
         let settings = AppSettings::load_from(&path).unwrap();
 
         assert_eq!(settings.replay_window_s, 120.0);
-        assert_eq!(settings.buffer_seconds, 300.0);
+        assert_eq!(settings.buffer_seconds, 135.0);
     }
 
     #[test]
@@ -707,7 +830,9 @@ mod tests {
         assert_eq!(opts.media_dir, PathBuf::from(default_media_dir()));
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
         assert_eq!(opts.audio, AudioOptions::default());
-        assert!(opts.buffer_bytes >= 220 * 1024 * 1024);
+        assert_eq!(opts.replay_storage, ReplayStorageOptions::Memory);
+        assert!(opts.buffer_bytes < 160 * 1024 * 1024);
+        assert!(opts.buffer_bytes > 100 * 1024 * 1024);
     }
 
     #[test]
@@ -827,7 +952,74 @@ mod tests {
         let small = estimated_buffer_bytes(60.0, 8.0);
         let large = estimated_buffer_bytes(120.0, 16.0);
 
-        assert!(small >= 64 * 1024 * 1024);
+        assert!(small >= 32 * 1024 * 1024);
         assert!(large > small * 3);
+    }
+
+    #[test]
+    fn load_normalizes_buffer_seconds_to_replay_plus_headroom() {
+        let dir = TestDir::new("buffer-headroom");
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "buffer_seconds": 120.0,
+                "replay_window_s": 30.0,
+                "bitrate_mbps": 12.0,
+                "fps": 60,
+                "video_encoder": "auto",
+                "disk_quota_gb": 10.0,
+                "media_dir": default_media_dir(),
+                "hotkey": "Alt+F10"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let settings = AppSettings::load_from(&path).unwrap();
+
+        assert_eq!(settings.buffer_seconds, 45.0);
+        assert_eq!(settings.replay_storage, ReplayStorageSettings::default());
+    }
+
+    #[test]
+    fn disk_replay_requires_acknowledgement_and_folder() {
+        let mut settings = AppSettings {
+            replay_storage: ReplayStorageSettings {
+                mode: ReplayStorageMode::Disk,
+                disk_dir: String::new(),
+                disk_quota_gb: 2.0,
+                disk_acknowledged: false,
+            },
+            ..AppSettings::default()
+        };
+
+        assert!(settings.validate().is_err());
+        settings.replay_storage.disk_acknowledged = true;
+        assert!(settings.validate().is_err());
+        settings.replay_storage.disk_dir = std::env::temp_dir()
+            .join("clipline-cache")
+            .display()
+            .to_string();
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn disk_replay_rejects_media_folder_overlap() {
+        let media = std::env::temp_dir().join("clipline-media");
+        let settings = AppSettings {
+            media_dir: media.display().to_string(),
+            replay_storage: ReplayStorageSettings {
+                mode: ReplayStorageMode::Disk,
+                disk_dir: media.join("cache").display().to_string(),
+                disk_quota_gb: 2.0,
+                disk_acknowledged: true,
+            },
+            ..AppSettings::default()
+        };
+
+        assert!(settings.validate().is_err());
     }
 }
