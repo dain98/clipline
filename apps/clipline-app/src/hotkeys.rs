@@ -2,6 +2,7 @@
 //! reliably deliver registered global shortcuts while focused.
 
 use std::collections::BTreeSet;
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
@@ -32,7 +33,7 @@ struct HookHotkey {
 struct HookState {
     hotkey: Mutex<HookHotkey>,
     down_keys: Mutex<BTreeSet<u32>>,
-    on_trigger: Box<dyn Fn() + Send + Sync>,
+    trigger_tx: Sender<()>,
 }
 
 impl HookState {
@@ -47,7 +48,7 @@ impl HookState {
     }
 
     fn on_key_down(&self, vk_code: u32, ctrl: bool, alt: bool, shift: bool) -> bool {
-        let mut down_keys = match self.down_keys.lock() {
+        let mut down_keys = match self.down_keys.try_lock() {
             Ok(keys) => keys,
             Err(_) => return false,
         };
@@ -56,19 +57,19 @@ impl HookState {
         }
         drop(down_keys);
 
-        let hotkey = match self.hotkey.lock() {
-            Ok(hotkey) => hotkey.clone(),
+        let hotkey = match self.hotkey.try_lock() {
+            Ok(hotkey) => hotkey,
             Err(_) => return false,
         };
         if hotkey.matches(vk_code, ctrl, alt, shift) {
-            (self.on_trigger)();
+            let _ = self.trigger_tx.send(());
             return true;
         }
         false
     }
 
     fn on_key_up(&self, vk_code: u32) {
-        if let Ok(mut down_keys) = self.down_keys.lock() {
+        if let Ok(mut down_keys) = self.down_keys.try_lock() {
             down_keys.remove(&vk_code);
         }
     }
@@ -88,10 +89,21 @@ where
         return state.set_hotkey(hotkey);
     }
 
+    let parsed_hotkey = parse_hook_hotkey(hotkey)?;
+    let (trigger_tx, trigger_rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("clipline-save-hotkey-dispatch".into())
+        .spawn(move || {
+            while trigger_rx.recv().is_ok() {
+                on_trigger();
+            }
+        })
+        .map_err(|e| format!("spawn save hotkey dispatcher: {e}"))?;
+
     let state = Arc::new(HookState {
-        hotkey: Mutex::new(parse_hook_hotkey(hotkey)?),
+        hotkey: Mutex::new(parsed_hotkey),
         down_keys: Mutex::new(BTreeSet::new()),
-        on_trigger: Box::new(on_trigger),
+        trigger_tx,
     });
     SAVE_HOOK
         .set(state)

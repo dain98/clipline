@@ -79,6 +79,15 @@ pub fn contains(id: &str) -> bool {
     all().iter().any(|plugin| plugin.id == id)
 }
 
+pub fn has_event_source(plugin_id: Option<&str>) -> bool {
+    let Some(id) = plugin_id else {
+        return false;
+    };
+    all()
+        .iter()
+        .any(|plugin| plugin.id == id && plugin.event_source.is_some())
+}
+
 pub fn spawn_event_source(
     plugin_id: Option<&str>,
     context: GameEventSourceContext,

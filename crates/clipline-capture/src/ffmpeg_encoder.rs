@@ -430,14 +430,9 @@ fn build_args(
         "rawvideo".into(),
         "-pix_fmt".into(),
         "nv12".into(),
-        "-color_range".into(),
-        "tv".into(),
-        "-colorspace".into(),
-        "bt709".into(),
-        "-color_primaries".into(),
-        "bt709".into(),
-        "-color_trc".into(),
-        "bt709".into(),
+    ];
+    a.extend(rec709_limited_flags());
+    a.extend([
         "-s".into(),
         format!("{width}x{height}"),
         "-r".into(),
@@ -451,7 +446,7 @@ fn build_args(
         gop.to_string(),
         "-bf".into(),
         "0".into(),
-    ];
+    ]);
     a.extend(backend_rate_control(backend, bitrate_bps, bufsize));
     a.extend(rec709_limited_flags());
     a.extend(["-f".into(), out_format.into(), "pipe:1".into()]);

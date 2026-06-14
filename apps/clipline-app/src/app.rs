@@ -177,7 +177,7 @@ impl RuntimeState {
     }
 
     fn request_save(&self) -> bool {
-        const DEBOUNCE: Duration = Duration::from_millis(500);
+        const DOUBLE_TRIGGER_DEBOUNCE: Duration = Duration::from_millis(150);
 
         if let Ok(mut inner) = self.0.lock() {
             let Some(tx) = inner.tx.as_ref().cloned() else {
@@ -186,13 +186,14 @@ impl RuntimeState {
             let now = Instant::now();
             if inner
                 .last_save_request
-                .is_some_and(|last| now.duration_since(last) < DEBOUNCE)
+                .is_some_and(|last| now.duration_since(last) < DOUBLE_TRIGGER_DEBOUNCE)
             {
                 return false;
             }
-            inner.last_save_request = Some(now);
-            let _ = tx.send(Cmd::Save);
-            return true;
+            if tx.send(Cmd::Save).is_ok() {
+                inner.last_save_request = Some(now);
+                return true;
+            }
         }
         false
     }
@@ -226,6 +227,7 @@ impl RuntimeState {
         let (old_tx, next_options, cleared_active_game) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             let old_tx = inner.tx.take();
+            inner.last_save_request = None;
             let cleared_active_game = inner.active_game.is_some()
                 && !active_game_still_configured(&settings, inner.active_game.as_ref());
             if cleared_active_game {
@@ -247,6 +249,7 @@ impl RuntimeState {
             {
                 let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
                 inner.tx = Some(tx);
+                inner.last_save_request = None;
             }
             pump_events(app.clone(), rx);
         }
@@ -276,6 +279,7 @@ impl RuntimeState {
             }
             let (tx, rx) = service::spawn(Self::options(&inner)?);
             inner.tx = Some(tx);
+            inner.last_save_request = None;
             rx
         };
         pump_events(app, rx);
@@ -285,7 +289,9 @@ impl RuntimeState {
     fn stop_recording(&self) -> Result<bool, String> {
         let tx = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            inner.tx.take()
+            let tx = inner.tx.take();
+            inner.last_save_request = None;
+            tx
         };
         if let Some(tx) = tx {
             let _ = tx.send(Cmd::Stop { announce: true });
@@ -305,6 +311,7 @@ impl RuntimeState {
                 if game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref()) {
                     inner.active_game = detected;
                     let old_tx = inner.tx.take();
+                    inner.last_save_request = None;
                     let next_options = if old_tx.is_some() {
                         Some(Self::options(&inner)?)
                     } else {
@@ -320,6 +327,7 @@ impl RuntimeState {
             } else {
                 inner.active_game = detected;
                 let old_tx = inner.tx.take();
+                inner.last_save_request = None;
                 let next_options = if old_tx.is_some() {
                     Some(Self::options(&inner)?)
                 } else {
@@ -336,6 +344,7 @@ impl RuntimeState {
             {
                 let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
                 inner.tx = Some(tx);
+                inner.last_save_request = None;
             }
             pump_events(app.clone(), rx);
         }
@@ -935,6 +944,26 @@ mod tests {
     fn quota_parser_rejects_negative_or_non_numeric_values() {
         assert!(parse_quota_gb("-1").is_err());
         assert!(parse_quota_gb("nope").is_err());
+    }
+
+    #[test]
+    fn request_save_debounces_only_immediate_duplicate_triggers() {
+        let (tx, rx) = mpsc::channel();
+        let state = RuntimeState::new(tx, AppSettings::default(), None);
+
+        assert!(state.request_save());
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Save)));
+
+        assert!(!state.request_save());
+        assert!(rx.try_recv().is_err());
+
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.last_save_request = Some(Instant::now() - Duration::from_millis(151));
+        }
+
+        assert!(state.request_save());
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Save)));
     }
 
     #[test]

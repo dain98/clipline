@@ -268,6 +268,14 @@ function normalizeGameRecordingMode(mode) {
   return mode === "full_session" ? "full_session" : "replays_only";
 }
 
+function normalizeGamePluginId(raw) {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
 function normalizeGamePluginSettings(settings, plugin = null) {
   const defaults = defaultGamePluginSettings(plugin);
   return {
@@ -283,7 +291,7 @@ function normalizeGamePluginSettings(settings, plugin = null) {
 function normalizeGamePluginSettingsMap(settings) {
   const out = {};
   for (const [id, value] of Object.entries(settings || {})) {
-    const cleanId = String(id || "").trim();
+    const cleanId = normalizeGamePluginId(id);
     if (cleanId) out[cleanId] = normalizeGamePluginSettings(value);
   }
   return out;
@@ -301,9 +309,9 @@ function normalizeCustomGame(game) {
   };
 }
 
-function selectedRecordingMode(name) {
+function selectedRecordingMode(name, fallback = "replays_only") {
   const input = document.querySelector(`input[name="${name}"]:checked`);
-  return normalizeGameRecordingMode(input && input.value);
+  return input ? normalizeGameRecordingMode(input.value) : normalizeGameRecordingMode(fallback);
 }
 
 function setRecordingMode(name, mode) {
@@ -324,9 +332,14 @@ function readGamePluginSettings() {
     ),
   };
   for (const plugin of gamePlugins) {
+    const existing = gamePluginSetting(plugin);
+    const checkbox = document.querySelector(`[data-game-plugin-enabled="${plugin.id}"]`);
     next[plugin.id] = normalizeGamePluginSettings({
-      enabled: document.querySelector(`[data-game-plugin-enabled="${plugin.id}"]`)?.checked,
-      recording_mode: selectedRecordingMode(`game-plugin-mode-${plugin.id}`),
+      enabled: checkbox ? checkbox.checked : existing.enabled,
+      recording_mode: selectedRecordingMode(
+        `game-plugin-mode-${plugin.id}`,
+        existing.recording_mode
+      ),
     }, plugin);
   }
   gamePluginSettings = next;
@@ -338,9 +351,9 @@ function gamePluginSummary(plugin, settings = gamePluginSetting(plugin)) {
     return `Disabled. ${plugin.name} will not change capture or start session recordings.`;
   }
   if (settings.recording_mode === "full_session") {
-    return "Full-session recording starts when the match window appears.";
+    return "Full-session recording starts when the match window appears. Takes priority over matching custom games.";
   }
-  return "Replay capture switches to the match window without saving a full session.";
+  return "Replay capture switches to the match window without saving a full session. Takes priority over matching custom games.";
 }
 
 function updateGamePluginSummary(plugin) {
@@ -1801,10 +1814,6 @@ listen("mic-test-stopped", () => {
 
 listen("game-detection", (e) => {
   activeDetectedGame = e.payload || null;
-  fullSessionRecordingActive =
-    activeDetectedGame &&
-    activeDetectedGame.active &&
-    normalizeGameRecordingMode(activeDetectedGame.recording_mode) === "full_session";
   updateCaptureStatus();
   updateGameDetectionStatus();
 });

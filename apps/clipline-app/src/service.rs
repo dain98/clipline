@@ -382,6 +382,36 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
     (cmd_tx, event_rx)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkerSourceKind {
+    Plugin,
+    LegacyLeaguePoller,
+}
+
+fn marker_source_kind(opts: &ServiceOptions) -> MarkerSourceKind {
+    if crate::game_plugins::has_event_source(opts.active_game_plugin_id.as_deref()) {
+        MarkerSourceKind::Plugin
+    } else {
+        MarkerSourceKind::LegacyLeaguePoller
+    }
+}
+
+fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver<PollerMsg> {
+    let context = crate::game_plugins::GameEventSourceContext {
+        lol_url: opts.lol_url.clone(),
+        recording_t0,
+    };
+    match marker_source_kind(opts) {
+        MarkerSourceKind::Plugin => {
+            crate::game_plugins::spawn_event_source(opts.active_game_plugin_id.as_deref(), context)
+                .expect("marker source kind checked plugin event source")
+        }
+        MarkerSourceKind::LegacyLeaguePoller => {
+            crate::markers::spawn(context.lol_url, context.recording_t0)
+        }
+    }
+}
+
 fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> Result<(), String> {
     let init = |e: &dyn std::fmt::Display| format!("init: {e}");
     let (device, _ctx) = d3d11::create_device().map_err(|e| init(&e))?;
@@ -389,13 +419,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     // The wall-clock twin of the capture clock origin (both are QPC under
     // the hood; sampled together they describe one timeline — ddoc §5).
     let recording_t0 = Instant::now();
-    let marker_rx = crate::game_plugins::spawn_event_source(
-        opts.active_game_plugin_id.as_deref(),
-        crate::game_plugins::GameEventSourceContext {
-            lol_url: opts.lol_url.clone(),
-            recording_t0,
-        },
-    );
+    let marker_rx = spawn_marker_source(&opts, recording_t0);
     let mut marker_log = MarkerLog::new();
     let mut cap = match &opts.capture_source {
         CaptureSource::WindowTitle(needle) => {
@@ -508,20 +532,18 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             }
         }
 
-        if let Some(marker_rx) = &marker_rx {
-            while let Ok(msg) = marker_rx.try_recv() {
-                match msg {
-                    PollerMsg::Event(event) => {
-                        // GameEnd means the match is over even while the Live
-                        // Client API lingers; stop attributing saves to it.
-                        if event.kind == EventKind::GameEnd {
-                            session.match_ended();
-                        }
-                        marker_log.push(event);
+        while let Ok(msg) = marker_rx.try_recv() {
+            match msg {
+                PollerMsg::Event(event) => {
+                    // GameEnd means the match is over even while the Live
+                    // Client API lingers; stop attributing saves to it.
+                    if event.kind == EventKind::GameEnd {
+                        session.match_ended();
                     }
-                    PollerMsg::MatchStarted => session.match_started(local_session_label(true)),
-                    PollerMsg::MatchEnded => session.match_ended(),
+                    marker_log.push(event);
                 }
+                PollerMsg::MatchStarted => session.match_started(local_session_label(true)),
+                PollerMsg::MatchEnded => session.match_ended(),
             }
         }
 
@@ -1403,6 +1425,39 @@ mod tests {
         assert_eq!(
             output_dimensions(5120, 1440, OutputResolution::Source),
             (2560, 720)
+        );
+    }
+
+    #[test]
+    fn marker_source_falls_back_to_league_poller_without_active_plugin() {
+        let opts = ServiceOptions::default();
+
+        assert_eq!(
+            marker_source_kind(&opts),
+            MarkerSourceKind::LegacyLeaguePoller
+        );
+    }
+
+    #[test]
+    fn marker_source_uses_active_plugin_event_source_when_available() {
+        let opts = ServiceOptions {
+            active_game_plugin_id: Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into()),
+            ..ServiceOptions::default()
+        };
+
+        assert_eq!(marker_source_kind(&opts), MarkerSourceKind::Plugin);
+    }
+
+    #[test]
+    fn marker_source_falls_back_for_unknown_plugin_id() {
+        let opts = ServiceOptions {
+            active_game_plugin_id: Some("community_game_without_source".into()),
+            ..ServiceOptions::default()
+        };
+
+        assert_eq!(
+            marker_source_kind(&opts),
+            MarkerSourceKind::LegacyLeaguePoller
         );
     }
 

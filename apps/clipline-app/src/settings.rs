@@ -568,8 +568,9 @@ impl AppSettings {
         let legacy_bitrate_mbps = f64_field(object, "bitrate_mbps")
             .map(|value| value.clamp(MIN_BITRATE_MBPS, MAX_BITRATE_MBPS))
             .unwrap_or(defaults.bitrate_mbps);
-        let video_quality = deserialize_field(object, "video_quality")
-            .unwrap_or_else(|| repair_video_quality_from_legacy_bitrate(legacy_bitrate_mbps));
+        let video_quality = deserialize_field(object, "video_quality").unwrap_or_else(|| {
+            repair_video_quality_from_legacy_bitrate(legacy_bitrate_mbps, output_resolution)
+        });
         let mut settings = Self {
             capture_mode: deserialize_field(object, "capture_mode")
                 .unwrap_or_else(|| defaults.capture_mode.clone()),
@@ -882,21 +883,25 @@ fn repair_fps(value: i64) -> u32 {
         .unwrap_or(AppSettings::default().fps)
 }
 
-fn repair_video_quality_from_legacy_bitrate(mbps: f64) -> VideoQuality {
+fn repair_video_quality_from_legacy_bitrate(
+    mbps: f64,
+    resolution: OutputResolution,
+) -> VideoQuality {
     [
-        (VideoQuality::Compact, 6.0),
-        (VideoQuality::Balanced, 12.0),
-        (VideoQuality::Sharp, 24.0),
-        (VideoQuality::Maximum, 40.0),
+        VideoQuality::Compact,
+        VideoQuality::Balanced,
+        VideoQuality::Sharp,
+        VideoQuality::Maximum,
     ]
     .into_iter()
-    .min_by(|(_, left), (_, right)| {
-        (mbps - *left)
+    .min_by(|left, right| {
+        let left = left.bitrate_mbps(resolution);
+        let right = right.bitrate_mbps(resolution);
+        (mbps - left)
             .abs()
-            .partial_cmp(&(mbps - *right).abs())
+            .partial_cmp(&(mbps - right).abs())
             .unwrap_or(std::cmp::Ordering::Equal)
     })
-    .map(|(quality, _)| quality)
     .unwrap_or_default()
 }
 
@@ -1188,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_bitrate_migrates_to_quality_before_resolution_scaling() {
+    fn legacy_bitrate_migration_uses_output_resolution() {
         let dir = TestDir::new("legacy-quality-resolution");
         let path = dir.path().join("settings.json");
         std::fs::write(
@@ -1199,7 +1204,7 @@ mod tests {
                 "buffer_seconds": 120.0,
                 "replay_window_s": 60.0,
                 "output_resolution": "720p",
-                "bitrate_mbps": 12.0,
+                "bitrate_mbps": 5.0,
                 "fps": 60,
                 "disk_quota_gb": 10.0,
                 "hotkey": "Alt+F10"

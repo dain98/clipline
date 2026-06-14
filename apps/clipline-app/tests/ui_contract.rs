@@ -248,8 +248,14 @@ fn review_player_owns_all_controls() {
             && main_js().contains("games.plugins")
             && main_js().contains("dataset.gamePluginEnabled")
             && main_js().contains("game-plugin-mode-")
+            && main_js().contains("normalizeGamePluginId")
+            && main_js().contains("Takes priority over matching custom games.")
             && styles_css().contains(".game-profile-mode"),
         "supported games must render from backend game plugins, not hardcoded rows"
+    );
+    assert!(
+        !index_html().contains("game-profile planned"),
+        "planned game cards should not sit in static HTML where renderGamePlugins wipes them"
     );
 
     // Settings is a page in the main pane now, not a sidebar fold.
