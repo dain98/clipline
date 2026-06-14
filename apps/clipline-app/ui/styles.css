@@ -423,6 +423,7 @@ label span { white-space: nowrap; }
 }
 .clip-kind svg { display: block; width: 16px; height: 16px; fill: currentColor; }
 .clip-kind.replay { color: var(--ok); }
+.clip-kind.session { color: var(--accent); }
 .clip-kind.trim { color: var(--marker); }
 
 .clip .name {

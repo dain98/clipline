@@ -25,7 +25,7 @@ use clipline_capture::{
 };
 use clipline_events::{EventKind, MarkerLog};
 use clipline_storage::sessions::{session_label, SessionTracker};
-use clipline_storage::{enforce_quota, storage_status};
+use clipline_storage::{enforce_quota, storage_status, StorageStatus};
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 use crate::markers::{self, PollerMsg};
@@ -247,6 +247,13 @@ pub enum ReplayStorageOptions {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RecordingMode {
+    FullSession,
+    #[default]
+    ReplaysOnly,
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
@@ -263,6 +270,8 @@ pub enum Event {
         path: String,
         seconds: f64,
         markers: usize,
+        #[serde(default)]
+        full_session: bool,
         gc_deleted: usize,
         gc_freed_bytes: u64,
         storage_total_bytes: u64,
@@ -288,6 +297,7 @@ pub struct ServiceOptions {
     pub replay_storage: ReplayStorageOptions,
     /// Saved clip disk quota. None disables save-time GC.
     pub disk_quota_bytes: Option<u64>,
+    pub recording_mode: RecordingMode,
     pub fps: u32,
     pub bitrate_bps: u32,
     pub video_encoder: VideoEncoder,
@@ -311,6 +321,7 @@ impl Default for ServiceOptions {
             buffer_bytes: 220 * 1024 * 1024,
             replay_storage: ReplayStorageOptions::Memory,
             disk_quota_bytes: Some(DEFAULT_DISK_QUOTA_BYTES),
+            recording_mode: RecordingMode::ReplaysOnly,
             fps: 60,
             bitrate_bps: 12_000_000,
             video_encoder: VideoEncoder::Auto,
@@ -433,6 +444,8 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let mut session = SessionTracker::new(local_session_label(false));
     let mut last_save_end: Option<f64> = None;
     let mut last_status = Instant::now();
+    let mut full_session =
+        begin_full_session_recording(&mut rec, &clips_dir, session.current(), opts.recording_mode)?;
 
     loop {
         match rec.step() {
@@ -440,7 +453,20 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             Ok(false) => break,
             // Idle screen: WGC delivers nothing — keep serving commands.
             Err(PipelineError::Capture(CaptureError::Timeout(_))) => {}
-            Err(e) => return Err(format!("recording: {e}")),
+            Err(e) => {
+                if let Err(finish_err) = rec.finish_stream() {
+                    warn_user(events, format!("finish: {finish_err}"));
+                }
+                finish_full_session_recording(
+                    &mut rec,
+                    &mut full_session,
+                    &marker_log,
+                    &clips_dir,
+                    &opts,
+                    events,
+                );
+                return Err(format!("recording: {e}"));
+            }
         }
 
         while let Ok(msg) = marker_rx.try_recv() {
@@ -475,10 +501,6 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         loop {
             match cmd_rx.try_recv() {
                 Ok(Cmd::Save) => {
-                    let stamp = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
                     let session_dir = clips_dir.join(session.current());
                     if let Err(e) = std::fs::create_dir_all(&session_dir) {
                         let _ = events.send(Event::Error {
@@ -486,52 +508,22 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         });
                         continue;
                     }
-                    let path = session_dir.join(format!("clip_{stamp}.mp4"));
+                    let path = unique_media_path(&session_dir, "clip");
                     match save(&rec, &path, opts.replay_window_s, last_save_end) {
                         Ok((end, seconds)) => {
                             last_save_end = Some(end);
                             // Markers inside the saved window ride along as
                             // a sidecar (ddoc §5) — only when there are any.
-                            let clip = marker_log.clip_markers(end - seconds, end);
-                            let markers = clip.markers.len();
-                            if markers > 0 {
-                                let sidecar = path.with_extension("markers.json");
-                                if let Ok(json) = serde_json::to_string_pretty(&clip) {
-                                    let _ = std::fs::write(sidecar, json);
-                                }
-                            }
-                            let gc =
-                                match enforce_quota(&clips_dir, opts.disk_quota_bytes, Some(&path))
-                                {
-                                    Ok(report) => report,
-                                    Err(e) => {
-                                        let _ = events.send(Event::Error {
-                                            message: format!("storage cleanup: {e}"),
-                                        });
-                                        let status =
-                                            storage_status(&clips_dir, opts.disk_quota_bytes)
-                                                .unwrap_or(clipline_storage::StorageStatus {
-                                                    clip_count: 0,
-                                                    total_bytes: 0,
-                                                    quota_bytes: opts.disk_quota_bytes,
-                                                });
-                                        clipline_storage::GcReport {
-                                            deleted_clips: 0,
-                                            freed_bytes: 0,
-                                            status,
-                                        }
-                                    }
-                                };
-                            let _ = events.send(Event::Saved {
-                                path: path.display().to_string(),
-                                seconds,
-                                markers,
-                                gc_deleted: gc.deleted_clips,
-                                gc_freed_bytes: gc.freed_bytes,
-                                storage_total_bytes: gc.status.total_bytes,
-                                storage_quota_bytes: gc.status.quota_bytes,
-                                storage_over_quota: gc.status.is_over_quota(),
-                            });
+                            let markers = write_marker_sidecar(
+                                events,
+                                &marker_log,
+                                &path,
+                                end - seconds,
+                                end,
+                            );
+                            emit_saved_clip(
+                                events, &clips_dir, &path, seconds, markers, false, &opts,
+                            );
                         }
                         Err(e) => {
                             let _ = events.send(Event::Error { message: e });
@@ -540,14 +532,34 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     }
                 }
                 Ok(Cmd::Stop { announce }) => {
-                    let _ = rec.finish_stream();
+                    if let Err(e) = rec.finish_stream() {
+                        warn_user(events, format!("finish: {e}"));
+                    }
+                    finish_full_session_recording(
+                        &mut rec,
+                        &mut full_session,
+                        &marker_log,
+                        &clips_dir,
+                        &opts,
+                        events,
+                    );
                     if announce {
                         send_stopped(events);
                     }
                     return Ok(());
                 }
                 Err(TryRecvError::Disconnected) => {
-                    let _ = rec.finish_stream();
+                    if let Err(e) = rec.finish_stream() {
+                        warn_user(events, format!("finish: {e}"));
+                    }
+                    finish_full_session_recording(
+                        &mut rec,
+                        &mut full_session,
+                        &marker_log,
+                        &clips_dir,
+                        &opts,
+                        events,
+                    );
                     send_stopped(events);
                     return Ok(());
                 }
@@ -555,7 +567,25 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             }
         }
     }
-    rec.finish_stream().map_err(|e| format!("finish: {e}"))?;
+    if let Err(e) = rec.finish_stream() {
+        finish_full_session_recording(
+            &mut rec,
+            &mut full_session,
+            &marker_log,
+            &clips_dir,
+            &opts,
+            events,
+        );
+        return Err(format!("finish: {e}"));
+    }
+    finish_full_session_recording(
+        &mut rec,
+        &mut full_session,
+        &marker_log,
+        &clips_dir,
+        &opts,
+        events,
+    );
     send_stopped(events);
     Ok(())
 }
@@ -858,9 +888,183 @@ fn send_stopped(events: &Sender<Event>) {
     });
 }
 
+fn begin_full_session_recording(
+    rec: &mut Recorder<WgcCapture, Box<dyn Encoder>>,
+    clips_dir: &Path,
+    session_label: &str,
+    mode: RecordingMode,
+) -> Result<Option<FullSessionRecording>, String> {
+    if mode != RecordingMode::FullSession {
+        return Ok(None);
+    }
+
+    let session_dir = clips_dir.join(session_label);
+    std::fs::create_dir_all(&session_dir)
+        .map_err(|e| format!("create session folder {session_dir:?}: {e}"))?;
+    let final_path = unique_media_path(&session_dir, "session");
+    let temp_path = final_path.with_extension("mp4.recording");
+    let file =
+        std::fs::File::create(&temp_path).map_err(|e| format!("create {temp_path:?}: {e}"))?;
+    if let Err(e) = rec.start_full_session(file) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("start full session: {e}"));
+    }
+    Ok(Some(FullSessionRecording {
+        final_path,
+        temp_path,
+    }))
+}
+
+fn finish_full_session_recording(
+    rec: &mut Recorder<WgcCapture, Box<dyn Encoder>>,
+    recording: &mut Option<FullSessionRecording>,
+    marker_log: &MarkerLog,
+    clips_dir: &Path,
+    opts: &ServiceOptions,
+    events: &Sender<Event>,
+) {
+    let Some(recording) = recording.take() else {
+        return;
+    };
+    match rec.finish_full_session() {
+        Ok(Some(summary)) if summary.duration_s > 0.0 => {
+            if let Err(e) = std::fs::rename(&recording.temp_path, &recording.final_path) {
+                warn_user(
+                    events,
+                    format!(
+                        "finalize full session {:?} -> {:?}: {e}",
+                        recording.temp_path, recording.final_path
+                    ),
+                );
+                let _ = std::fs::remove_file(&recording.temp_path);
+                return;
+            }
+            let markers = write_marker_sidecar(
+                events,
+                marker_log,
+                &recording.final_path,
+                summary.start_s,
+                summary.end_s,
+            );
+            emit_saved_clip(
+                events,
+                clips_dir,
+                &recording.final_path,
+                summary.duration_s,
+                markers,
+                true,
+                opts,
+            );
+        }
+        Ok(_) => {
+            let _ = std::fs::remove_file(&recording.temp_path);
+        }
+        Err(e) => {
+            warn_user(events, format!("finish full session: {e}"));
+            let _ = std::fs::remove_file(&recording.temp_path);
+        }
+    }
+}
+
+struct FullSessionRecording {
+    final_path: PathBuf,
+    temp_path: PathBuf,
+}
+
+fn unique_media_path(session_dir: &Path, prefix: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    for attempt in 0u32..1024 {
+        let name = if attempt == 0 {
+            format!("{prefix}_{stamp}.mp4")
+        } else {
+            format!("{prefix}_{stamp}_{attempt}.mp4")
+        };
+        let candidate = session_dir.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    let fallback = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    session_dir.join(format!("{prefix}_{fallback}.mp4"))
+}
+
+fn write_marker_sidecar(
+    events: &Sender<Event>,
+    marker_log: &MarkerLog,
+    path: &Path,
+    start_s: f64,
+    end_s: f64,
+) -> usize {
+    let clip = marker_log.clip_markers(start_s, end_s);
+    let markers = clip.markers.len();
+    if markers == 0 {
+        return 0;
+    }
+    match serde_json::to_string_pretty(&clip) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(path.with_extension("markers.json"), json) {
+                warn_user(events, format!("write marker sidecar for {path:?}: {e}"));
+            }
+        }
+        Err(e) => warn_user(
+            events,
+            format!("serialize marker sidecar for {path:?}: {e}"),
+        ),
+    }
+    markers
+}
+
+fn emit_saved_clip(
+    events: &Sender<Event>,
+    clips_dir: &Path,
+    path: &Path,
+    seconds: f64,
+    markers: usize,
+    full_session: bool,
+    opts: &ServiceOptions,
+) {
+    let report = match enforce_quota(clips_dir, opts.disk_quota_bytes, Some(path)) {
+        Ok(report) => report,
+        Err(e) => {
+            warn_user(events, format!("storage cleanup: {e}"));
+            let status = storage_status(clips_dir, opts.disk_quota_bytes).unwrap_or_else(|e| {
+                warn_user(events, format!("storage status: {e}"));
+                StorageStatus {
+                    clip_count: 0,
+                    total_bytes: 0,
+                    quota_bytes: opts.disk_quota_bytes,
+                }
+            });
+            clipline_storage::GcReport {
+                deleted_clips: 0,
+                freed_bytes: 0,
+                status,
+            }
+        }
+    };
+
+    let _ = events.send(Event::Saved {
+        path: path.display().to_string(),
+        seconds,
+        markers,
+        full_session,
+        gc_deleted: report.deleted_clips,
+        gc_freed_bytes: report.freed_bytes,
+        storage_total_bytes: report.status.total_bytes,
+        storage_quota_bytes: report.status.quota_bytes,
+        storage_over_quota: report.status.is_over_quota(),
+    });
+}
+
 fn save(
     rec: &Recorder<WgcCapture, Box<dyn Encoder>>,
-    path: &PathBuf,
+    path: &Path,
     window_s: f64,
     exclude_before_s: Option<f64>,
 ) -> Result<(f64, f64), String> {

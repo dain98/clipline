@@ -40,7 +40,7 @@
 
 **Goals (MVP):**
 1. Instant replay buffer (retroactively save the last N seconds/minutes by hotkey), 30 s–20 min configurable.
-2. Manual full recording + simultaneous replay buffer.
+2. Full-session recording + simultaneous replay buffer, selectable per saved custom game.
 3. Hardware-accelerated capture/encode with <5% gameplay FPS impact and <300 MB RAM while active (excluding large in-RAM replay buffers).
 4. Anti-cheat-safe capture (no injection) — must work with VALORANT/Vanguard.
 5. Built-in lightweight, lossless-where-possible clip trimmer/editor.
@@ -189,7 +189,7 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
 - On **Save Replay** hotkey, flush from the oldest in-buffer keyframe to now into a Hybrid MP4. Provide a "don't re-clip overlapping footage" smart mode — OBS lacks this natively (users currently hack it with Advanced Scene Switcher macros that stop/restart the buffer and lose ~1 s between saves).
 - ShadowPlay/Instant Replay parity: rolling N-minute window (NVIDIA's default save hotkey is Alt+F10), no perf hit due to the dedicated encoder.
 - **Clocking & A/V sync:** every video frame (WGC `SystemRelativeTime`) and audio buffer (WASAPI position) is stamped against the same QPC timebase; the muxer derives PTS from these stamps rather than assuming a fixed frame cadence, keeping sync correct under VRR/G-Sync displays delivering irregular frame times and under transient frame drops. This timing layer is the single biggest hidden cost of skipping libobs and is treated as M0 core work, not polish.
-- **Simultaneous full recording + replay buffer** (Goal 2) shares one encoder session per track: encoded GOP-aligned segments fan out to two sinks (ring buffer and the open recording file) rather than running duplicate encoder sessions — staying within session limits on older GPUs.
+- **Simultaneous full-session recording + replay buffer** (Goal 2) shares one encoder session per track: encoded GOP-aligned segments fan out to two sinks (ring buffer and the open recording file) rather than running duplicate encoder sessions — staying within session limits on older GPUs. Today this is enabled per saved custom game in Settings > Games; games set to `full_session` write `session_<unix>.mp4` while Save Replay continues to use the same encoded GOP ring.
 
 ### 7. Performance Budgets
 - **GPU encode:** ≤3–5% GPU at 1080p60; near-zero with dedicated NVENC/QSV. (Caution: an RTX 3080 user reported OBS's replay buffer at ~27–28% GPU with look-ahead and psycho-visual tuning enabled, and still ~25% after disabling them — so we ship conservative low-latency presets with look-ahead **off** by default and treat encoder-feature creep as a real perf risk.)

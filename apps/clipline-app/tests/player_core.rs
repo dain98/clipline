@@ -539,6 +539,10 @@ fn clip_kind_distinguishes_trims_from_replays() {
         ),
         "trim"
     );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.clipKind('session_1781377615.mp4')"),
+        "session"
+    );
     assert_eq!(eval(&mut ctx, "PlayerCore.clipKind('')"), "replay");
 }
 

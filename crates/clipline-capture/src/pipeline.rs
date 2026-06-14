@@ -29,6 +29,24 @@ enum ReplayStorage {
     Disk(DiskReplayRing),
 }
 
+pub trait WriteSeek: Write + Seek {}
+
+impl<T: Write + Seek> WriteSeek for T {}
+
+pub struct FullSessionSummary {
+    pub start_s: f64,
+    pub end_s: f64,
+    pub duration_s: f64,
+}
+
+struct FullSessionSink {
+    target: Option<Box<dyn WriteSeek>>,
+    writer: Option<HybridMp4Writer<Box<dyn WriteSeek>>>,
+    audio_cfgs: Vec<clipline_mp4::AudioTrackConfig>,
+    start_s: Option<f64>,
+    end_s: Option<f64>,
+}
+
 /// The recording pipeline (ddoc §3): capture → encode → GOP-aligned
 /// segments → replay ring. Synchronous pull loop; production runs it on a
 /// dedicated thread.
@@ -43,6 +61,7 @@ pub struct Recorder<C: CaptureEngine, E: Encoder> {
     /// Audio captured before it (engine-init lead-in) is dropped so both
     /// tracks begin together in the file.
     video_start_pts_s: Option<f64>,
+    full_session: Option<FullSessionSink>,
 }
 
 impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
@@ -55,6 +74,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             audio_sources: Vec::new(),
             pending_audio: Vec::new(),
             video_start_pts_s: None,
+            full_session: None,
         }
     }
 
@@ -79,6 +99,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             audio_sources: Vec::new(),
             pending_audio: Vec::new(),
             video_start_pts_s: None,
+            full_session: None,
         })
     }
 
@@ -207,6 +228,49 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         &self.encoder
     }
 
+    pub fn start_full_session<W: Write + Seek + 'static>(&mut self, w: W) -> io::Result<()> {
+        if self.full_session.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "full session already recording",
+            ));
+        }
+        let audio_cfgs: Vec<_> = self
+            .audio_sources
+            .iter()
+            .map(|source| source.track_config())
+            .collect();
+        self.full_session = Some(FullSessionSink {
+            target: Some(Box::new(w) as Box<dyn WriteSeek>),
+            writer: None,
+            audio_cfgs,
+            start_s: None,
+            end_s: None,
+        });
+        Ok(())
+    }
+
+    pub fn full_session_active(&self) -> bool {
+        self.full_session.is_some()
+    }
+
+    pub fn finish_full_session(&mut self) -> io::Result<Option<FullSessionSummary>> {
+        let Some(sink) = self.full_session.take() else {
+            return Ok(None);
+        };
+        let Some(writer) = sink.writer else {
+            return Ok(None);
+        };
+        let start_s = sink.start_s.unwrap_or(0.0);
+        let end_s = sink.end_s.unwrap_or(start_s);
+        let _ = writer.finalize()?;
+        Ok(Some(FullSessionSummary {
+            start_s,
+            end_s,
+            duration_s: end_s - start_s,
+        }))
+    }
+
     /// Save the trailing `window_s` seconds as a finalized Hybrid MP4
     /// written to `w` (ddoc §6). `exclude_before_s` is the smart
     /// no-overlap mode. Returns the writer and the end pts of the saved
@@ -228,45 +292,18 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             ));
         }
         let video_cfg = self.encoder.track_config();
-        let video_ts = video_cfg.timescale as f64;
         let audio_cfgs: Vec<_> = self
             .audio_sources
             .iter()
             .map(|s| s.track_config())
             .collect();
-        let mut track_cfgs = vec![TrackConfig::Video(video_cfg)];
+        let mut track_cfgs = vec![TrackConfig::Video(video_cfg.clone())];
         for cfg in &audio_cfgs {
             track_cfgs.push(TrackConfig::Audio(cfg.clone()));
         }
         let mut writer = HybridMp4Writer::new_multi(w, track_cfgs)?;
         for seg in &segments {
-            let video: Vec<FragSample> = seg
-                .sample_slices()
-                .zip(&seg.samples)
-                .map(|(slice, info)| FragSample {
-                    data: slice.to_vec(),
-                    duration: (info.duration_s * video_ts).round() as u32,
-                    is_sync: info.is_sync,
-                })
-                .collect();
-            let mut per_track: Vec<Vec<FragSample>> = vec![video];
-            for (track, cfg) in seg.audio.iter().zip(&audio_cfgs) {
-                let ts = cfg.sample_rate as f64;
-                per_track.push(
-                    track
-                        .sample_slices()
-                        .zip(&track.samples)
-                        .map(|(slice, info)| FragSample {
-                            data: slice.to_vec(),
-                            duration: (info.duration_s * ts).round() as u32,
-                            is_sync: info.is_sync,
-                        })
-                        .collect(),
-                );
-            }
-            // Segments recorded before an audio source was attached have
-            // fewer audio tracks; pad with empty runs to keep alignment.
-            per_track.resize_with(1 + audio_cfgs.len(), Vec::new);
+            let per_track = segment_fragments(seg, &video_cfg, &audio_cfgs);
             let slices: Vec<&[FragSample]> = per_track.iter().map(|v| v.as_slice()).collect();
             writer.write_fragment_multi(&slices)?;
         }
@@ -359,12 +396,79 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             samples,
             audio,
         };
+        self.write_full_session_segment(&seg)?;
         match &mut self.ring {
             ReplayStorage::Memory(ring) => ring.push(seg),
             ReplayStorage::Disk(ring) => ring.push(seg)?,
         }
         Ok(())
     }
+
+    fn write_full_session_segment(&mut self, seg: &Segment) -> Result<(), PipelineError> {
+        let Some(sink) = &mut self.full_session else {
+            return Ok(());
+        };
+        if sink.writer.is_none() {
+            let video_cfg = self.encoder.track_config();
+            let mut track_cfgs = vec![TrackConfig::Video(video_cfg)];
+            for cfg in &sink.audio_cfgs {
+                track_cfgs.push(TrackConfig::Audio(cfg.clone()));
+            }
+            let target = sink.target.take().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "full session writer target missing",
+                )
+            })?;
+            sink.writer = Some(HybridMp4Writer::new_multi(target, track_cfgs)?);
+        }
+        sink.start_s.get_or_insert(seg.pts_start_s);
+        sink.end_s = Some(seg.pts_end_s());
+        let video_cfg = self.encoder.track_config();
+        let per_track = segment_fragments(seg, &video_cfg, &sink.audio_cfgs);
+        let slices: Vec<&[FragSample]> = per_track.iter().map(|v| v.as_slice()).collect();
+        sink.writer
+            .as_mut()
+            .expect("writer initialized")
+            .write_fragment_multi(&slices)?;
+        Ok(())
+    }
+}
+
+fn segment_fragments(
+    seg: &Segment,
+    video_cfg: &clipline_mp4::VideoTrackConfig,
+    audio_cfgs: &[clipline_mp4::AudioTrackConfig],
+) -> Vec<Vec<FragSample>> {
+    let video_ts = video_cfg.timescale as f64;
+    let video: Vec<FragSample> = seg
+        .sample_slices()
+        .zip(&seg.samples)
+        .map(|(slice, info)| FragSample {
+            data: slice.to_vec(),
+            duration: (info.duration_s * video_ts).round() as u32,
+            is_sync: info.is_sync,
+        })
+        .collect();
+    let mut per_track: Vec<Vec<FragSample>> = vec![video];
+    for (track, cfg) in seg.audio.iter().zip(audio_cfgs) {
+        let ts = cfg.sample_rate as f64;
+        per_track.push(
+            track
+                .sample_slices()
+                .zip(&track.samples)
+                .map(|(slice, info)| FragSample {
+                    data: slice.to_vec(),
+                    duration: (info.duration_s * ts).round() as u32,
+                    is_sync: info.is_sync,
+                })
+                .collect(),
+        );
+    }
+    // Segments recorded before an audio source was attached have fewer audio
+    // tracks; pad with empty runs to keep alignment.
+    per_track.resize_with(1 + audio_cfgs.len(), Vec::new);
+    per_track
 }
 
 #[cfg(test)]
@@ -508,6 +612,84 @@ mod tests {
         assert_eq!(disk.ring_len(), ram.ring_len());
         assert_eq!(disk.ring_bytes(), ram.ring_bytes());
         assert_eq!(disk_buf, ram_buf);
+    }
+
+    #[test]
+    fn full_session_sink_keeps_segments_evicted_from_replay_ring() {
+        let dir = TestDir::new("full-session");
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let path = dir.0.join("session.mp4");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut rec = Recorder::new(MockCapture::new(90, 30), MockEncoder::new(30, 30), 4 * 1024);
+
+        rec.start_full_session(file).unwrap();
+        rec.run_to_end().unwrap();
+        let summary = rec.finish_full_session().unwrap().expect("session summary");
+
+        assert_eq!(
+            rec.ring().unwrap().len(),
+            2,
+            "oldest GOP evicted from replay ring"
+        );
+        assert!((summary.start_s - 0.0).abs() < 1e-6);
+        assert!((summary.duration_s - 3.0).abs() < 1e-6);
+        let data = std::fs::read(&path).unwrap();
+        let duration = clipline_mp4::walker::movie_duration_s(&data).unwrap();
+        assert!(
+            (duration - 3.0).abs() < 1e-3,
+            "full-session file keeps all GOPs, got {duration}"
+        );
+    }
+
+    #[test]
+    fn full_session_initializes_muxer_after_encoder_config_is_ready() {
+        let dir = TestDir::new("full-session-lazy-config");
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let path = dir.0.join("session.mp4");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut rec = Recorder::new(
+            MockCapture::new(60, 30),
+            DelayedTrackConfig {
+                inner: MockEncoder::new(30, 30),
+                encoded_any: false,
+            },
+            usize::MAX,
+        );
+
+        rec.start_full_session(file).unwrap();
+        rec.run_to_end().unwrap();
+        rec.finish_full_session().unwrap().expect("session summary");
+
+        let data = std::fs::read(&path).unwrap();
+        assert!(
+            data.windows(DELAYED_SPS.len()).any(|w| w == DELAYED_SPS),
+            "full-session moov must use the encoder config populated by the first packets"
+        );
+    }
+
+    const DELAYED_SPS: &[u8] = &[0x67, 0x64, 0x00, 0x0A, 0xAC];
+
+    struct DelayedTrackConfig {
+        inner: MockEncoder,
+        encoded_any: bool,
+    }
+
+    impl Encoder for DelayedTrackConfig {
+        fn encode(
+            &mut self,
+            frame: &crate::traits::Frame,
+        ) -> Result<Vec<crate::traits::EncodedPacket>, crate::traits::EncodeError> {
+            let packets = self.inner.encode(frame)?;
+            self.encoded_any = true;
+            Ok(packets)
+        }
+
+        fn track_config(&self) -> clipline_mp4::VideoTrackConfig {
+            if self.encoded_any {
+                return self.inner.track_config();
+            }
+            clipline_mp4::VideoTrackConfig::h264(128, 128, 90_000, Vec::new(), Vec::new())
+        }
     }
 
     /// Wraps MockEncoder but holds back the latest packet until finish() —

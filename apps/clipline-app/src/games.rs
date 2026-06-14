@@ -3,7 +3,7 @@
 
 use clipline_capture::windows::{enumerate_capturable_windows, CapturableWindow};
 
-use crate::settings::{CustomGameSettings, GameSettings};
+use crate::settings::{CustomGameSettings, GameRecordingMode, GameSettings};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GameWindowInfo {
@@ -21,6 +21,7 @@ pub struct DetectedGame {
     pub window_title: String,
     pub process_id: u32,
     pub exe_name: String,
+    pub recording_mode: GameRecordingMode,
 }
 
 pub fn list_game_windows() -> Vec<GameWindowInfo> {
@@ -71,6 +72,7 @@ pub fn detect_active_game_from_windows(
                 window_title: window.title.clone(),
                 process_id: window.process_id,
                 exe_name: window.exe_name.clone(),
+                recording_mode: game.recording_mode,
             });
         }
     }
@@ -157,7 +159,10 @@ mod tests {
     fn detects_first_enabled_custom_game_by_process_path() {
         let settings = GameSettings {
             auto_detect: true,
-            custom_games: vec![game()],
+            custom_games: vec![CustomGameSettings {
+                recording_mode: GameRecordingMode::FullSession,
+                ..game()
+            }],
         };
         let detected = detect_active_game_from_windows(
             &settings,
@@ -172,6 +177,7 @@ mod tests {
 
         assert_eq!(detected.hwnd, 42);
         assert_eq!(detected.name, "Test Game");
+        assert_eq!(detected.recording_mode, GameRecordingMode::FullSession);
     }
 
     #[test]

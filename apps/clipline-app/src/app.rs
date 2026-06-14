@@ -13,7 +13,9 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 use crate::games::{DetectedGame, GameWindowInfo};
 use crate::service::{self, Cmd, Event, ServiceOptions};
-use crate::settings::{parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode};
+use crate::settings::{
+    parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode, GameRecordingMode,
+};
 
 #[derive(serde::Serialize)]
 struct DisplayInfo {
@@ -159,6 +161,10 @@ impl RuntimeState {
             opts.capture_source = service::CaptureSource::WindowHandle {
                 hwnd: game.hwnd,
                 title: game.window_title.clone(),
+            };
+            opts.recording_mode = match game.recording_mode {
+                GameRecordingMode::FullSession => service::RecordingMode::FullSession,
+                GameRecordingMode::ReplaysOnly => service::RecordingMode::ReplaysOnly,
             };
         }
         Ok(opts)
@@ -877,6 +883,7 @@ mod tests {
             window_title: "Loading".into(),
             process_id: 7,
             exe_name: "game.exe".into(),
+            recording_mode: GameRecordingMode::ReplaysOnly,
         };
         let updated_title = DetectedGame {
             window_title: "Paused".into(),
@@ -889,5 +896,35 @@ mod tests {
 
         assert!(same_game_window(Some(&current), Some(&updated_title)));
         assert!(!same_game_window(Some(&current), Some(&different_window)));
+    }
+
+    #[test]
+    fn active_full_session_game_sets_service_recording_mode() {
+        let inner = RuntimeInner {
+            tx: None,
+            settings: AppSettings::default(),
+            lol_url: None,
+            active_game: Some(DetectedGame {
+                id: "custom-game".into(),
+                name: "Game".into(),
+                hwnd: 42,
+                window_title: "Game Window".into(),
+                process_id: 7,
+                exe_name: "game.exe".into(),
+                recording_mode: GameRecordingMode::FullSession,
+            }),
+            decodable_codecs: vec![service::Codec::H264],
+        };
+
+        let opts = RuntimeState::options(&inner).unwrap();
+
+        assert_eq!(opts.recording_mode, service::RecordingMode::FullSession);
+        assert_eq!(
+            opts.capture_source,
+            service::CaptureSource::WindowHandle {
+                hwnd: 42,
+                title: "Game Window".into(),
+            }
+        );
     }
 }

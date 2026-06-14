@@ -13,7 +13,7 @@ Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
 ## Current state (2026-06-13): a working tray recorder with a first-party review player
 
-Twenty-four milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-eight plan docs, all
+Twenty-five milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-nine plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -175,10 +175,19 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     owns per-window capture selection in the UI, so the old manual "Window title" capture target
     was removed from Settings > Capture while backend/CLI compatibility remains. The fallback
     Capture target dropdown lists available displays first and keeps the editable `SET REGION`
-    option at the bottom; display selections persist as full-monitor display-region captures. Each
-    saved custom game now persists its own recording-mode preference (`replays_only` default,
-    `full_session` selectable); the current recorder still uses the replay-buffer path, and the
-    full-session file sink remains the ddoc Goal 2 follow-up.
+    option at the bottom; display selections persist as full-monitor display-region captures.
+25. **Full-session game recording** — Each saved custom game persists its own recording-mode
+    preference (`replays_only` default, `full_session` selectable). Games set to full session start
+    a shared-encoder Hybrid MP4 sink when the detected window becomes the active capture target,
+    while continuing to feed the replay ring so Save Replay still works. The session sink writes
+    sealed GOP segments as they are produced, so it keeps footage after the replay ring evicts old
+    GOPs, then finalizes `session_<unix>.mp4` in the run's session folder on game disappearance,
+    target switch, service stop, capture end, or capture error. The MP4 writer is initialized
+    lazily on the first sealed GOP so codec parameter sets discovered from the first HEVC/AV1/H.264
+    packets land in the final `hvcC`/`av1C`/`avcC`; the on-disk file uses a temporary
+    `.mp4.recording` suffix until finalized so the Library cannot open an in-progress fragmented
+    recording. Full sessions use the same marker sidecar, quota cleanup, library refresh, and
+    saved-event path as manual replays, and the library labels them as "Full session".
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
