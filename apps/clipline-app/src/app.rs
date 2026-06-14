@@ -172,6 +172,12 @@ impl RuntimeState {
             if crate::game_plugins::contains(&game.id) {
                 opts.active_game_plugin_id = Some(game.id.clone());
             }
+            // Tag clips with the active game (plugin or custom) so the library
+            // can show its icon; this is independent of the plugin-only id above.
+            opts.active_game = Some(service::ActiveGame {
+                id: game.id.clone(),
+                name: game.name.clone(),
+            });
         }
         Ok(opts)
     }
@@ -510,6 +516,13 @@ fn list_game_windows() -> Vec<GameWindowInfo> {
     crate::games::list_game_windows()
 }
 
+/// Extract an executable's icon as a PNG `data:` URL for the custom-games UI.
+/// Returns `None` when the path has no usable icon.
+#[tauri::command]
+fn extract_window_icon(exe_path: String) -> Option<String> {
+    crate::game_icon::extract_exe_icon_data_url(&exe_path)
+}
+
 #[tauri::command]
 fn list_game_plugins() -> Vec<GamePluginInfo> {
     crate::games::game_plugin_catalog()
@@ -718,6 +731,7 @@ pub fn run() {
             report_decode_support,
             list_game_plugins,
             list_game_windows,
+            extract_window_icon,
             memory_status,
             start_microphone_test,
             stop_microphone_test,

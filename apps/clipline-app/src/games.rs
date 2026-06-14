@@ -108,6 +108,11 @@ fn detect_built_in_game_from_windows(
             continue;
         }
         if let Some(window) = (plugin.match_window)(windows) {
+            // Opportunistically cache the icon for plugins that ship none —
+            // a no-op for League (bundled) and once a cache exists.
+            if let Some(path) = window.exe_path.as_deref() {
+                game_plugins::ensure_plugin_icon_cached(plugin.id, path);
+            }
             return Some(DetectedGame {
                 id: plugin.id.into(),
                 name: plugin.name.into(),
@@ -184,6 +189,7 @@ mod tests {
             process_path: Some(r"C:\Games\Test\game.exe".into()),
             window_title: "Test Game".into(),
             recording_mode: Default::default(),
+            icon: None,
         }
     }
 

@@ -20,8 +20,11 @@ tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-global-shortcut = "2"
 chrono = "0.4.45"
 rfd = "0.15"
+png = "0.17"
+base64 = "0.22"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
     "Win32_System_DataExchange",
     "Win32_System_Diagnostics_ToolHelp",

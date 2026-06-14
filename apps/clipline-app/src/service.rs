@@ -314,10 +314,21 @@ pub enum Event {
     },
 }
 
+/// The game a recording run is attributed to (plugin or custom), recorded
+/// alongside saved clips so the library can show its icon.
+#[derive(Clone, Debug)]
+pub struct ActiveGame {
+    pub id: String,
+    pub name: String,
+}
+
 pub struct ServiceOptions {
     pub capture_source: CaptureSource,
     /// Built-in game plugin id for the active capture target, if any.
     pub active_game_plugin_id: Option<String>,
+    /// Active game (plugin or custom) for clip attribution. Unlike
+    /// `active_game_plugin_id`, this is set for custom games too.
+    pub active_game: Option<ActiveGame>,
     /// Root folder for saved media.
     pub media_dir: PathBuf,
     /// Override the League Live Client endpoint (mock servers).
@@ -349,6 +360,7 @@ impl Default for ServiceOptions {
         Self {
             capture_source: CaptureSource::PrimaryMonitor,
             active_game_plugin_id: None,
+            active_game: None,
             media_dir: default_clips_dir(),
             lol_url: None,
             replay_window_s: 60.0,
@@ -509,6 +521,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         &clips_dir,
         session.current(),
         opts.recording_mode,
+        opts.active_game.as_ref(),
         events,
     );
     send_recording_status(events, &rec, &full_session, &encoder_status);
@@ -565,6 +578,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         });
                         continue;
                     }
+                    write_session_game_meta(&session_dir, opts.active_game.as_ref());
                     let path = unique_media_path(&session_dir, "clip");
                     match save(&rec, &path, opts.replay_window_s, last_save_end) {
                         Ok((end, seconds)) => {
@@ -1015,11 +1029,29 @@ fn shutdown_recorder(
     }
 }
 
+/// Sidecar that records which game a session folder belongs to, so the
+/// library can show its icon. Written once per folder; custom-game clips have
+/// no markers, so this is their only game link.
+const SESSION_META_FILE: &str = "clipline-session.json";
+
+fn write_session_game_meta(session_dir: &Path, active_game: Option<&ActiveGame>) {
+    let Some(game) = active_game else { return };
+    let meta_path = session_dir.join(SESSION_META_FILE);
+    if meta_path.exists() {
+        return;
+    }
+    let doc = serde_json::json!({ "id": game.id, "name": game.name });
+    if let Ok(json) = serde_json::to_string(&doc) {
+        let _ = std::fs::write(&meta_path, json);
+    }
+}
+
 fn begin_full_session_recording(
     rec: &mut Recorder<WgcCapture, Box<dyn Encoder>>,
     clips_dir: &Path,
     session_label: &str,
     mode: RecordingMode,
+    active_game: Option<&ActiveGame>,
     events: &Sender<Event>,
 ) -> Option<FullSessionRecording> {
     if mode != RecordingMode::FullSession {
@@ -1034,6 +1066,7 @@ fn begin_full_session_recording(
         );
         return None;
     }
+    write_session_game_meta(&session_dir, active_game);
     let final_path = unique_media_path(&session_dir, "session");
     let temp_path = final_path.with_extension("mp4.recording");
     let file = match std::fs::File::create(&temp_path) {
