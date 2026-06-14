@@ -10,6 +10,7 @@
   --accent: #3d7bfd;
   --accent-hover: #5a8efd;
   --marker: #e8b341;
+  --session: #b06bf2;
   --rec: #e5484d;
   --warn: #f0883e;
   --ok: #7ab8ff;
@@ -66,8 +67,14 @@ body {
 }
 
 h1 { margin: 0; font-size: 18px; letter-spacing: 0.3px; }
-h1.brand { display: flex; align-items: center; gap: 9px; }
-.logo-mark { width: 26px; height: 26px; flex: none; display: block; color: var(--accent); }
+h1.brand { display: flex; align-items: center; gap: var(--brand-gap, 9px); }
+.logo-mark {
+  width: var(--brand-logo-size, 26px);
+  height: var(--brand-logo-size, 26px);
+  flex: none;
+  display: block;
+  color: var(--accent);
+}
 .logo-mark path { fill: currentColor; }
 h2 {
   margin: 0 0 8px;
@@ -260,7 +267,7 @@ label span { white-space: nowrap; }
 }
 
 /* Rail mode: the sidebar narrows to an icon column; review keeps the rest. */
-.app.rail { grid-template-columns: 52px minmax(0, 1fr); }
+.app.rail { grid-template-columns: 64px minmax(0, 1fr); }
 .app.rail .sidebar-full { display: none; }
 .app.rail .sidebar-rail { display: flex; }
 .app.rail .sidebar-top h1 { display: none; }
@@ -268,7 +275,7 @@ label span { white-space: nowrap; }
 .app.rail .sidebar-top {
   display: flex;
   justify-content: center;
-  padding: 10px 0;
+  padding: 10px 0 6px;
 }
 
 /* ---- sidebar ---- */
@@ -281,17 +288,27 @@ label span { white-space: nowrap; }
 }
 
 .sidebar-top {
+  --brand-logo-size: 26px;
+  --brand-gap: 9px;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 34px;
   align-items: center;
   column-gap: 10px;
   row-gap: 1px;
   padding: 10px 12px 0;
 }
 
-.memory-usage {
-  grid-column: 2;
+.sidebar-top .brand span {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-usage {
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding-left: calc(var(--brand-logo-size) + var(--brand-gap));
   color: var(--muted);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
@@ -299,8 +316,7 @@ label span { white-space: nowrap; }
   white-space: nowrap;
 }
 
-#sidebar-toggle,
-.sidebar-rail button {
+#sidebar-toggle {
   width: 34px;
   height: 34px;
   min-width: 0;
@@ -309,10 +325,14 @@ label span { white-space: nowrap; }
   background: transparent;
   color: var(--muted);
 }
+
+#sidebar-toggle {
+  justify-self: end;
+}
+
 #sidebar-toggle:hover,
 .sidebar-rail button:hover { background: var(--panel-2); color: var(--text); }
-#sidebar-toggle svg,
-.sidebar-rail svg {
+#sidebar-toggle svg {
   display: block;
   width: 100%;
   height: 100%;
@@ -329,10 +349,88 @@ label span { white-space: nowrap; }
   display: none;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
-  padding: 14px 0;
+  gap: 10px;
+  padding: 12px 0;
   min-height: 0;
 }
+
+.sidebar-rail button {
+  display: grid;
+  grid-auto-rows: min-content;
+  place-items: center;
+  gap: 4px;
+  width: 52px;
+  height: auto;
+  min-height: 52px;
+  padding: 6px 4px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.sidebar-rail svg {
+  display: block;
+  width: 19px;
+  height: 19px;
+  fill: currentColor;
+}
+
+#rail-status {
+  color: var(--text);
+}
+
+#rail-status.stopped {
+  color: var(--muted);
+}
+
+.rail-label {
+  max-width: 100%;
+  overflow: hidden;
+  color: inherit;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-status-dot {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sidebar-rail .dot {
+  width: 13px;
+  height: 13px;
+}
+
+.rail-mini {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  min-height: 42px;
+  padding: 5px 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.35px;
+}
+
+.rail-mini strong {
+  color: var(--text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
 .rail-spacer { flex: 1 1 0; }
 
 .sidebar-head {
@@ -373,7 +471,16 @@ label span { white-space: nowrap; }
 .status-row b { color: var(--text); font-weight: 600; }
 
 .dot { width: 10px; height: 10px; border-radius: 50%; background: #4a5160; flex: none; }
-.dot.on { background: var(--rec); box-shadow: 0 0 10px rgba(229, 72, 77, 0.8); }
+.dot.on {
+  background: var(--rec);
+  box-shadow: 0 0 10px rgba(229, 72, 77, 0.8);
+  animation: recording-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes recording-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(229, 72, 77, 0.55), 0 0 10px rgba(229, 72, 77, 0.8); }
+  50% { box-shadow: 0 0 0 6px rgba(229, 72, 77, 0), 0 0 14px rgba(229, 72, 77, 0.95); }
+}
 
 .save-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
 
@@ -411,7 +518,7 @@ label span { white-space: nowrap; }
 .clip.active { border-color: var(--accent); background: #1b2334; }
 
 /* Leading kind marker: one color per clip kind so the library reads at a
-   glance. A future full-session kind gets its own color here. */
+   glance — replay blue, full session purple, trim amber. */
 .clip-kind {
   display: flex;
   align-items: center;
@@ -423,7 +530,7 @@ label span { white-space: nowrap; }
 }
 .clip-kind svg { display: block; width: 16px; height: 16px; fill: currentColor; }
 .clip-kind.replay { color: var(--ok); }
-.clip-kind.session { color: var(--accent); }
+.clip-kind.session { color: var(--session); }
 .clip-kind.trim { color: var(--marker); }
 
 .clip .name {

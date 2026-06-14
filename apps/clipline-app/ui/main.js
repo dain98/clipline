@@ -582,7 +582,10 @@ function updateCaptureStatus() {
   $("capture-status").classList.toggle("stopped", !recordingActive);
   $("capture-status").setAttribute("aria-pressed", String(recordingActive));
   $("capture-status").title = recordingActive ? "Stop recording" : `Start ${source} recording`;
+  $("rail-status").classList.toggle("stopped", !recordingActive);
+  $("rail-status").setAttribute("aria-pressed", String(recordingActive));
   $("rail-status").title = $("capture-status").title;
+  $("rail-status-text").textContent = recordingActive ? "Rec" : "Off";
   $("save").disabled = !recordingActive;
   $("rail-save").disabled = !recordingActive;
 }
@@ -1056,6 +1059,16 @@ async function refreshStorage() {
   $("storage-used").className = s.over_quota ? "warn" : "";
   $("storage-quota").textContent = s.quota_bytes == null ? "no limit" : fmtBytes(s.quota_bytes);
   $("storage-clips").textContent = s.clip_count;
+  $("rail-clips-count").textContent = compactCount(s.clip_count);
+  $("rail-library-status").title = `${plural(s.clip_count, "clip")} in library`;
+}
+
+function compactCount(count) {
+  return count > 99 ? "99+" : String(count);
+}
+
+function plural(count, singular) {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`;
 }
 
 async function refreshMemoryUsage() {
@@ -1082,7 +1095,7 @@ const CLIP_KIND_ICONS = {
   replay:
     '<svg viewBox="0 0 24 24"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>',
   session:
-    '<svg viewBox="0 0 24 24"><path d="M4 5h16v14H4V5zm2 2v10h12V7H6zm3 2h6v2H9V9zm0 4h4v2H9v-2z"/></svg>',
+    '<svg viewBox="0 0 24 24"><path d="M3 5h18v14H3V5zM5 6v2h2v-2zM9 6v2h2v-2zM13 6v2h2v-2zM17 6v2h2v-2zM5 16v2h2v-2zM9 16v2h2v-2zM13 16v2h2v-2zM17 16v2h2v-2z"/></svg>',
   trim:
     '<svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm0 12c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3z"/></svg>',
 };
