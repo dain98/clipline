@@ -582,6 +582,8 @@ function updateCaptureStatus() {
   $("capture-status").classList.toggle("stopped", !recordingActive);
   $("capture-status").setAttribute("aria-pressed", String(recordingActive));
   $("capture-status").title = recordingActive ? "Stop recording" : `Start ${source} recording`;
+  $("rail-status").classList.toggle("stopped", !recordingActive);
+  $("rail-status").setAttribute("aria-pressed", String(recordingActive));
   $("rail-status").title = $("capture-status").title;
   $("rail-status-text").textContent = recordingActive ? "Rec" : "Off";
   $("save").disabled = !recordingActive;
@@ -1057,8 +1059,16 @@ async function refreshStorage() {
   $("storage-used").className = s.over_quota ? "warn" : "";
   $("storage-quota").textContent = s.quota_bytes == null ? "no limit" : fmtBytes(s.quota_bytes);
   $("storage-clips").textContent = s.clip_count;
-  $("rail-clips-count").textContent = s.clip_count > 99 ? "99+" : String(s.clip_count);
-  $("rail-library-status").title = `${s.clip_count} clip${s.clip_count === 1 ? "" : "s"} in library`;
+  $("rail-clips-count").textContent = compactCount(s.clip_count);
+  $("rail-library-status").title = `${plural(s.clip_count, "clip")} in library`;
+}
+
+function compactCount(count) {
+  return count > 99 ? "99+" : String(count);
+}
+
+function plural(count, singular) {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`;
 }
 
 async function refreshMemoryUsage() {

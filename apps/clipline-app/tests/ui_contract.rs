@@ -63,6 +63,7 @@ fn review_player_owns_all_controls() {
         "id=\"rail-dot\"",
         "id=\"rail-status-text\"",
         "id=\"rail-status\"",
+        "id=\"rail-status\" title=\"Stop recording\" aria-pressed=\"true\"",
         "id=\"rail-save\"",
         "id=\"rail-library-status\"",
         "id=\"rail-clips-count\"",

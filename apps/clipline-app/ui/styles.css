@@ -67,8 +67,14 @@ body {
 }
 
 h1 { margin: 0; font-size: 18px; letter-spacing: 0.3px; }
-h1.brand { display: flex; align-items: center; gap: 9px; }
-.logo-mark { width: 26px; height: 26px; flex: none; display: block; color: var(--accent); }
+h1.brand { display: flex; align-items: center; gap: var(--brand-gap, 9px); }
+.logo-mark {
+  width: var(--brand-logo-size, 26px);
+  height: var(--brand-logo-size, 26px);
+  flex: none;
+  display: block;
+  color: var(--accent);
+}
 .logo-mark path { fill: currentColor; }
 h2 {
   margin: 0 0 8px;
@@ -271,7 +277,6 @@ label span { white-space: nowrap; }
   justify-content: center;
   padding: 10px 0 6px;
 }
-.app.rail #sidebar-toggle { justify-self: center; }
 
 /* ---- sidebar ---- */
 .sidebar {
@@ -283,6 +288,8 @@ label span { white-space: nowrap; }
 }
 
 .sidebar-top {
+  --brand-logo-size: 26px;
+  --brand-gap: 9px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 34px;
   align-items: center;
@@ -291,22 +298,17 @@ label span { white-space: nowrap; }
   padding: 10px 12px 0;
 }
 
-.sidebar-top .brand {
-  grid-column: 1;
-  grid-row: 1;
-  min-width: 0;
-}
-
 .sidebar-top .brand span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .memory-usage {
   grid-column: 1 / -1;
   min-width: 0;
-  padding-left: 35px;
+  padding-left: calc(var(--brand-logo-size) + var(--brand-gap));
   color: var(--muted);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
@@ -314,8 +316,7 @@ label span { white-space: nowrap; }
   white-space: nowrap;
 }
 
-#sidebar-toggle,
-.sidebar-rail button {
+#sidebar-toggle {
   width: 34px;
   height: 34px;
   min-width: 0;
@@ -326,15 +327,12 @@ label span { white-space: nowrap; }
 }
 
 #sidebar-toggle {
-  grid-column: 2;
-  grid-row: 1;
   justify-self: end;
 }
 
 #sidebar-toggle:hover,
 .sidebar-rail button:hover { background: var(--panel-2); color: var(--text); }
-#sidebar-toggle svg,
-.sidebar-rail svg {
+#sidebar-toggle svg {
   display: block;
   width: 100%;
   height: 100%;
@@ -365,12 +363,25 @@ label span { white-space: nowrap; }
   height: auto;
   min-height: 52px;
   padding: 6px 4px;
+  border: 0;
   border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
 }
 
 .sidebar-rail svg {
+  display: block;
   width: 19px;
   height: 19px;
+  fill: currentColor;
+}
+
+#rail-status {
+  color: var(--text);
+}
+
+#rail-status.stopped {
+  color: var(--muted);
 }
 
 .rail-label {
@@ -381,8 +392,7 @@ label span { white-space: nowrap; }
   font-weight: 600;
   line-height: 1;
   text-overflow: ellipsis;
-  text-transform: uppercase;
-  letter-spacing: 0.35px;
+  white-space: nowrap;
 }
 
 .rail-status-dot {
