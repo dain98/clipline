@@ -1359,7 +1359,7 @@ label span { white-space: nowrap; }
 
 #timeline {
   position: relative;
-  height: 40px;
+  height: 28px;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: #1d2430;
@@ -1407,55 +1407,89 @@ label span { white-space: nowrap; }
 #handle-in { border-radius: 6px 0 0 6px; }
 #handle-out { border-radius: 0 6px 6px 0; }
 
-.tick {
-  position: absolute;
-  top: 8px;
-  bottom: 8px;
-  width: 15px;
-  margin-left: -8px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 4px;
-  padding: 0;
-  min-width: 0;
-  font-size: 9px;
-  line-height: 1;
-  z-index: 3;
-  cursor: pointer;
+/* Event markers: a small flat glyph rides just above the track, tied to the
+   exact moment by a fading hairline. Restrained, Outplayed-style — the track
+   stays clean and fully clickable (only the glyph itself is a marker target). */
+.timeline-stack {
+  position: relative;
+  padding-top: 20px; /* the band the glyphs ride in, above the track */
 }
-.tick:hover { filter: brightness(1.25); box-shadow: 0 0 6px rgba(255, 255, 255, 0.35); }
-.tick-kill { background: #c93a3f; color: #fff; }
-.tick-spree { background: #ff8c42; color: #2b1503; }
-.tick-objective { background: #a07ee8; color: #1c1030; }
-.tick-structure { background: var(--marker); color: #2b220c; }
-.tick-info { background: #566073; color: #dfe3ea; }
+#marker-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none; /* clicks fall through to the track; glyphs re-enable */
+}
+.marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 16px;
+  margin-left: -8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border: 0;
+  padding: 0;
+  background: none;
+  pointer-events: none;
+  transition: filter 0.12s ease;
+}
+.marker .glyph {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  color: var(--mc, #aeb6c4);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+.marker .glyph svg { width: 15px; height: 15px; display: block; }
+.marker .hair {
+  flex: 1 1 auto;
+  width: 1px;
+  margin-top: 2px;
+  background: linear-gradient(
+    to bottom,
+    var(--hair-top, rgba(174, 182, 196, 0.55)),
+    var(--hair-bot, rgba(174, 182, 196, 0.16))
+  );
+}
+.marker:hover { z-index: 6; filter: brightness(1.32); }
+.marker:hover .glyph { transform: translateY(-1px); }
+
+/* whisper of category color — light glyph + matching hairline, never loud */
+.marker-kill { --mc: #ff9b9e; --hair-top: rgba(255, 97, 102, 0.6); --hair-bot: rgba(255, 97, 102, 0.12); }
+.marker-spree { --mc: #ffc77d; --hair-top: rgba(255, 174, 77, 0.6); --hair-bot: rgba(255, 174, 77, 0.12); }
+.marker-objective { --mc: #cdb2ff; --hair-top: rgba(189, 147, 255, 0.6); --hair-bot: rgba(189, 147, 255, 0.12); }
+.marker-structure { --mc: #f0cd7a; --hair-top: rgba(232, 179, 65, 0.6); --hair-bot: rgba(232, 179, 65, 0.12); }
+.marker-info { --mc: #aab2c0; --hair-top: rgba(139, 147, 163, 0.55); --hair-bot: rgba(139, 147, 163, 0.12); }
 
 .ruler {
   position: relative;
-  height: 14px;
-  margin-top: -4px;
+  height: 22px;
+  margin-top: -3px;
   color: var(--muted);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
 }
-.ruler span {
+.ruler .tick {
   position: absolute;
   top: 0;
+  width: 1px;
+  height: 4px;
+  background: #313a48;
+}
+.ruler .tick.major {
+  height: 7px;
+  background: var(--line-strong);
+}
+.ruler .lab {
+  position: absolute;
+  top: 9px;
   transform: translateX(-50%);
   white-space: nowrap;
 }
-.ruler span::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: -5px;
-  width: 1px;
-  height: 4px;
-  background: var(--line-strong);
-}
-.ruler span:first-child { transform: none; }
-.ruler span:first-child::before { left: 0; }
+.ruler .lab.first { transform: none; }
 
 /* ---- stage overlay transport ---- */
 .stage-overlay {

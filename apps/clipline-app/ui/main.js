@@ -1430,7 +1430,7 @@ function closeReview() {
   updateViews();
   $("deck-status").textContent = "";
   $("stage-note").textContent = "";
-  $("timeline").querySelectorAll(".tick").forEach((t) => t.remove());
+  $("marker-layer").replaceChildren();
   renderClips();
 }
 
@@ -1497,24 +1497,59 @@ function animatePlayhead() {
   if (!video.paused && !video.ended) rafId = requestAnimationFrame(animatePlayhead);
 }
 
+// Per-event glyphs for the marker pins, keyed by EventKind. Kept here (DOM
+// layer) rather than in player-core.js so its tested {glyph,cls} contract stays
+// untouched. Each draws in currentColor so the category tint (--mc) colors it.
+const MARKER_ICONS = {
+  ChampionKill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 4.5 19.5 19.5M19.5 4.5 4.5 19.5"/><path d="M13 16 16 13M8 13 11 16"/><circle cx="19.5" cy="19.5" r="1.15" fill="currentColor" stroke="none"/><circle cx="4.5" cy="19.5" r="1.15" fill="currentColor" stroke="none"/></svg>`,
+  FirstBlood: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 3.5C12 3.5 18.5 11 18.5 15.5A6.5 6.5 0 1 1 5.5 15.5C5.5 11 12 3.5 12 3.5Z"/></svg>`,
+  Multikill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M6 11.5A6 6 0 0 1 18 11.5L18 14.5A1.4 1.4 0 0 1 16.6 15.9L16 15.9 16 18.5 8 18.5 8 15.9 7.4 15.9A1.4 1.4 0 0 1 6 14.5Z"/><circle cx="9.6" cy="12.2" r="1.5" fill="currentColor" stroke="none"/><circle cx="14.4" cy="12.2" r="1.5" fill="currentColor" stroke="none"/></svg>`,
+  Ace: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 3 14.12 9.51 20.97 9.51 15.42 13.54 17.55 20.05 12 16.02 6.45 20.05 8.58 13.54 3.03 9.51 9.88 9.51Z"/></svg>`,
+  DragonKill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13 3C13.5 7 17 9 17 13.5A5 5 0 0 1 7 13.7C7 11.5 8.3 10.3 8.3 10.3C8.6 12 9.8 12.6 9.8 12.6C11 11.2 9.5 7.5 13 3Z"/></svg>`,
+  HeraldKill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M3 12C6 6.5 18 6.5 21 12C18 17.5 6 17.5 3 12Z"/><circle cx="12" cy="12" r="2.7" fill="currentColor" stroke="none"/></svg>`,
+  BaronKill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M4 18.5 4 8 8.5 11.5 12 5.5 15.5 11.5 20 8 20 18.5Z"/></svg>`,
+  TurretKilled: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M6 20.5 6 7 8.5 7 8.5 9 11 9 11 7 13 7 13 9 15.5 9 15.5 7 18 7 18 20.5Z"/></svg>`,
+  InhibKilled: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3 17 9 14 20.5 10 20.5 7 9Z"/><path d="M7 9 17 9M12 3 12 20.5"/></svg>`,
+  FirstBrick: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M5 20.5 5 8.5 7 8.5 7 10 9 10 9 8.5 11 8.5 11 10 13 10 13 8.5 14.5 8.5 14.5 20.5Z"/><path d="M19 3.2 19.7 5.6 22.1 6.3 19.7 7 19 9.4 18.3 7 15.9 6.3 18.3 5.6Z" fill="currentColor" stroke="none"/></svg>`,
+  GameStart: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 21 6.5 3"/><path d="M6.5 4 17 7 6.5 10"/></svg>`,
+  MinionsSpawning: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5 12 12 15 14"/></svg>`,
+  GameEnd: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4 17 4 17 7A5 5 0 0 1 7 7Z"/><path d="M7 5 4.5 5A2 2 0 0 0 7 8.7M17 5 19.5 5A2 2 0 0 1 17 8.7"/><path d="M12 12 12 16M8.5 19.5 15.5 19.5 15 16.5 9 16.5Z"/></svg>`,
+  Other: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="12" cy="12" r="3"/></svg>`,
+};
+// Unknown / future kinds fall back to a representative glyph for their category.
+const MARKER_ICON_FALLBACK = {
+  kill: MARKER_ICONS.ChampionKill,
+  spree: MARKER_ICONS.Ace,
+  objective: MARKER_ICONS.BaronKill,
+  structure: MARKER_ICONS.TurretKilled,
+  info: MARKER_ICONS.Other,
+};
+
 function renderMarkers() {
-  const timeline = $("timeline");
-  timeline.querySelectorAll(".tick").forEach((t) => t.remove());
+  const layer = $("marker-layer");
+  layer.replaceChildren();
   const dur = clipDuration();
   const markers = clipMarkers();
   for (const m of markers) {
-    const tick = document.createElement("button");
     const style = markerStyle(m.kind);
-    tick.className = `tick tick-${style.cls}`;
-    tick.textContent = style.glyph;
-    tick.style.left = `${percentFor(m.t_s, dur)}%`;
-    tick.title = `${m.kind}${m.subtype ? ` (${m.subtype})` : ""} — ${m.actor}${m.victim ? " → " + m.victim : ""} @ ${m.t_s.toFixed(1)}s`;
-    tick.addEventListener("pointerdown", (ev) => ev.stopPropagation());
-    tick.addEventListener("click", (ev) => {
+    const marker = document.createElement("button");
+    marker.className = `marker marker-${style.cls}`;
+    marker.style.left = `${percentFor(m.t_s, dur)}%`;
+    marker.title = `${m.kind}${m.subtype ? ` (${m.subtype})` : ""} — ${m.actor}${m.victim ? " → " + m.victim : ""} @ ${m.t_s.toFixed(1)}s`;
+
+    const glyph = document.createElement("span");
+    glyph.className = "glyph";
+    glyph.innerHTML = MARKER_ICONS[m.kind] || MARKER_ICON_FALLBACK[style.cls] || MARKER_ICONS.Other;
+    const hair = document.createElement("span");
+    hair.className = "hair";
+    marker.append(glyph, hair);
+
+    marker.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+    marker.addEventListener("click", (ev) => {
       ev.stopPropagation();
       seekTo(m.t_s);
     });
-    timeline.appendChild(tick);
+    layer.appendChild(marker);
   }
   $("marker-count").textContent = markerSummary(markers);
   $("prev-marker").disabled = !markers.length;
@@ -1524,12 +1559,32 @@ function renderMarkers() {
 function renderRuler() {
   const root = $("ruler");
   root.replaceChildren();
-  for (const mark of rulerMarks(clipDuration(), 8)) {
-    const span = document.createElement("span");
-    span.style.left = `${percentFor(mark.t, clipDuration())}%`;
-    span.textContent = mark.label;
-    root.appendChild(span);
+  const dur = clipDuration();
+  const marks = rulerMarks(dur, 8);
+  // Minor ticks between the labeled majors give the ruler a fine, precise feel.
+  if (marks.length >= 2) {
+    const step = marks[1].t - marks[0].t;
+    const minorStep = step / 3;
+    const isMajor = (t) => marks.some((m) => Math.abs(m.t - t) < minorStep / 2);
+    for (let t = minorStep; t < dur; t += minorStep) {
+      if (isMajor(t)) continue;
+      const tick = document.createElement("i");
+      tick.className = "tick";
+      tick.style.left = `${percentFor(t, dur)}%`;
+      root.appendChild(tick);
+    }
   }
+  marks.forEach((mark, i) => {
+    const tick = document.createElement("i");
+    tick.className = "tick major";
+    tick.style.left = `${percentFor(mark.t, dur)}%`;
+    root.appendChild(tick);
+    const lab = document.createElement("span");
+    lab.className = i === 0 ? "lab first" : "lab";
+    lab.style.left = `${percentFor(mark.t, dur)}%`;
+    lab.textContent = mark.label;
+    root.appendChild(lab);
+  });
 }
 
 function toggleRail() {
