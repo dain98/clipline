@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(amf.api, EncoderApi::Ffmpeg);
         assert_eq!(
             amf.codecs,
-            vec![Codec::Av1, Codec::H264],
+            vec![Codec::H264, Codec::Av1],
             "preference order, deduped"
         );
     }

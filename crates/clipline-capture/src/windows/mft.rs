@@ -12,14 +12,16 @@ use windows::Win32::Media::MediaFoundation::{
     ICodecAPI, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFSample, IMFTransform,
     METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
     MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample,
-    MFMediaType_Video, MFSampleExtension_CleanPoint, MFVideoFormat_H264, MFVideoFormat_NV12,
-    MFVideoInterlace_Progressive, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFT_ENUM_FLAG_HARDWARE,
+    MFMediaType_Video, MFNominalRange_16_235, MFSampleExtension_CleanPoint, MFVideoFormat_H264,
+    MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoTransFunc_709,
+    MFVideoTransferMatrix_BT709, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFT_ENUM_FLAG_HARDWARE,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
     MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MF_EVENT_FLAG_NO_WAIT,
     MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE,
     MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-    MF_MT_MPEG2_PROFILE, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK,
+    MF_MT_MPEG2_PROFILE, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION,
+    MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_TRANSFORM_ASYNC_UNLOCK,
 };
 
 use clipline_mp4::VideoTrackConfig;
@@ -172,6 +174,7 @@ impl MftH264Encoder {
             out_ty
                 .SetUINT32(&MF_MT_MPEG2_PROFILE, H264_PROFILE_HIGH)
                 .map_err(backend)?;
+            set_rec709_limited_attrs(&out_ty).map_err(backend)?;
             transform
                 .SetOutputType(output_id, &out_ty, 0)
                 .map_err(backend)?;
@@ -197,6 +200,7 @@ impl MftH264Encoder {
                 .map_err(backend)?;
                 ty.SetUINT64(&MF_MT_FRAME_RATE, ((cfg.fps as u64) << 32) | 1)
                     .map_err(backend)?;
+                set_rec709_limited_attrs(&ty).map_err(backend)?;
                 transform.SetInputType(input_id, &ty, 0).map_err(backend)?;
             }
             set_input = true;
@@ -282,6 +286,7 @@ impl MftH264Encoder {
                             .transform
                             .GetOutputAvailableType(self.output_id, 0)
                             .map_err(backend)?;
+                        set_rec709_limited_attrs(&ty).map_err(backend)?;
                         self.transform
                             .SetOutputType(self.output_id, &ty, 0)
                             .map_err(backend)?;
@@ -475,6 +480,18 @@ const CODECAPI_AVENC_MPV_GOP_SIZE: windows::core::GUID =
     windows::core::GUID::from_u128(0x95f31b26_95a4_41aa_9303_246a7fc6eef1);
 const CODECAPI_AVENC_MPV_DEFAULT_B_PICTURE_COUNT: windows::core::GUID =
     windows::core::GUID::from_u128(0x8c068bf2_3f0d_4dba_976d_1b3564d72e93);
+
+fn set_rec709_limited_attrs(
+    media_type: &windows::Win32::Media::MediaFoundation::IMFMediaType,
+) -> windows::core::Result<()> {
+    unsafe {
+        media_type.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32)?;
+        media_type.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32)?;
+        media_type.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32)?;
+        media_type.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)?;
+    }
+    Ok(())
+}
 
 fn sequence_header_sps_pps(
     media_type: &windows::Win32::Media::MediaFoundation::IMFMediaType,

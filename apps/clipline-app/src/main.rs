@@ -13,7 +13,11 @@ fn main() {
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod game_plugins;
+#[cfg(windows)]
 mod games;
+#[cfg(windows)]
+mod hotkeys;
 #[cfg(windows)]
 mod library;
 #[cfg(windows)]

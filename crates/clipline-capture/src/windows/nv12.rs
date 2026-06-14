@@ -5,16 +5,20 @@
 use windows::core::{Interface, Result as WinResult};
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
-    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
-    D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+    ID3D11Device, ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1,
+    ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
+    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
     D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
     D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_RATIONAL;
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+    DXGI_RATIONAL,
+};
 
 use crate::windows::d3d11;
 
@@ -111,6 +115,7 @@ impl VideoConverter {
         let video_context: ID3D11VideoContext = unsafe { device.GetImmediateContext()? }.cast()?;
         let (enumerator, processor) =
             create_video_processor(&video_device, in_w, in_h, out_w, out_h)?;
+        configure_video_processor_color_spaces(&video_context, &processor);
         Ok(Self {
             device: device.clone(),
             video_context,
@@ -137,6 +142,7 @@ impl VideoConverter {
                 self.out_width,
                 self.out_height,
             )?;
+            configure_video_processor_color_spaces(&self.video_context, &processor);
             self.enumerator = enumerator;
             self.processor = processor;
             self.in_width = in_width;
@@ -244,6 +250,42 @@ fn create_video_processor(
     // SAFETY: enumerator is valid; rate-conversion caps index 0 always exists.
     let processor = unsafe { video_device.CreateVideoProcessor(&enumerator, 0)? };
     Ok((enumerator, processor))
+}
+
+fn configure_video_processor_color_spaces(
+    video_context: &ID3D11VideoContext,
+    processor: &ID3D11VideoProcessor,
+) {
+    // WGC gives us SDR BGRA in full-range RGB. Encoders receive NV12, which
+    // standard players expect as limited-range Rec.709 for screen recordings.
+    // Letting drivers infer this caused dark/saturated clips on some systems.
+    if let Ok(ctx1) = video_context.cast::<ID3D11VideoContext1>() {
+        unsafe {
+            ctx1.VideoProcessorSetStreamColorSpace1(
+                processor,
+                0,
+                DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+            );
+            ctx1.VideoProcessorSetOutputColorSpace1(
+                processor,
+                DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+            );
+        }
+        return;
+    }
+
+    // Older D3D11.0 fallback: Usage=playback, RGB input full-range, YCbCr
+    // output with BT.709 matrix and 16-235 nominal range.
+    let rgb_full_709 = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+        _bitfield: (2 << 4),
+    };
+    let ycbcr_limited_709 = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+        _bitfield: (1 << 2) | (1 << 4),
+    };
+    unsafe {
+        video_context.VideoProcessorSetStreamColorSpace(processor, 0, &rgb_full_709);
+        video_context.VideoProcessorSetOutputColorSpace(processor, &ycbcr_limited_709);
+    }
 }
 
 /// Copy a GPU NV12 texture to a staging texture and pack it into contiguous

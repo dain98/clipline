@@ -122,26 +122,57 @@ fn setting_duration_labels_are_human_readable() {
 }
 
 #[test]
+fn capture_status_label_distinguishes_replay_capture_from_full_session_recording() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.captureStatusLabel('Game: SlayTheSpire', true, false)"
+        ),
+        "Capturing Game: SlayTheSpire"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.captureStatusLabel('Game: SlayTheSpire', true, true)"
+        ),
+        "Recording Game: SlayTheSpire"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.captureStatusLabel('Game: SlayTheSpire', false, true)"
+        ),
+        "Recording stopped"
+    );
+}
+
+#[test]
 fn recording_quality_labels_hide_bitrate_jargon() {
     let mut ctx = player_core_context();
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.recordingQualityPreset(0)"),
-        r#"{"label":"Compact","bitrate":6,"hint":"smaller files"}"#
+        r#"{"id":"compact","label":"Compact","hint":"smaller files","bitrate":6}"#
     );
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.recordingQualityPreset(1)"),
-        r#"{"label":"Balanced","bitrate":12,"hint":"good default"}"#
+        r#"{"id":"balanced","label":"Balanced","hint":"good default","bitrate":12}"#
     );
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.recordingQualityPreset(2)"),
-        r#"{"label":"Sharp","bitrate":24,"hint":"more detail"}"#
+        r#"{"id":"sharp","label":"Sharp","hint":"more detail","bitrate":24}"#
     );
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.recordingQualityPreset(3)"),
-        r#"{"label":"Maximum","bitrate":40,"hint":"largest files"}"#
+        r#"{"id":"maximum","label":"Maximum","hint":"largest files","bitrate":40}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.recordingQualityPreset(1, '720p')"),
+        r#"{"id":"balanced","label":"Balanced","hint":"good default","bitrate":5}"#
     );
     assert_eq!(eval(&mut ctx, "PlayerCore.qualityIndexForBitrate(13)"), "1");
     assert_eq!(eval(&mut ctx, "PlayerCore.qualityIndexForBitrate(35)"), "3");
+    assert_eq!(eval(&mut ctx, "PlayerCore.qualityIndexForId('sharp')"), "2");
 }
 
 #[test]
@@ -166,6 +197,19 @@ fn smoothness_slider_maps_to_valid_fps_values() {
     assert_eq!(eval(&mut ctx, "PlayerCore.smoothnessIndexForFps(60)"), "1");
     assert_eq!(eval(&mut ctx, "PlayerCore.smoothnessIndexForFps(90)"), "2");
     assert_eq!(eval(&mut ctx, "PlayerCore.smoothnessIndexForFps(120)"), "3");
+}
+
+#[test]
+fn output_resolution_options_have_stable_ids_and_fallback() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.outputResolutionOption('1080p')"),
+        r#"{"id":"1080p","label":"1080p","hint":"up to 1920 x 1080"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.outputResolutionOption('unknown')"),
+        r#"{"id":"source","label":"Source","hint":"uses the captured size"}"#
+    );
 }
 
 #[test]

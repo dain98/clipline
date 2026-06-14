@@ -102,6 +102,8 @@ fn review_player_owns_all_controls() {
         "id=\"set-buffer\"",
         "id=\"set-encoder\"",
         "id=\"encoder-summary\"",
+        "id=\"set-output-resolution\"",
+        "id=\"output-resolution-summary\"",
         "id=\"set-replay\"",
         "id=\"replay-summary\"",
         "id=\"replay-scale\"",
@@ -238,6 +240,22 @@ fn review_player_owns_all_controls() {
             && main_js().contains("full_session")
             && styles_css().contains(".custom-game-mode"),
         "custom games must expose and persist per-game recording mode choices"
+    );
+    assert!(
+        main_js().contains("await invoke(\"list_game_plugins\")")
+            && main_js().contains("renderGamePlugins")
+            && main_js().contains("gamePluginSettings")
+            && main_js().contains("games.plugins")
+            && main_js().contains("dataset.gamePluginEnabled")
+            && main_js().contains("game-plugin-mode-")
+            && main_js().contains("normalizeGamePluginId")
+            && main_js().contains("Takes priority over matching custom games.")
+            && styles_css().contains(".game-profile-mode"),
+        "supported games must render from backend game plugins, not hardcoded rows"
+    );
+    assert!(
+        !index_html().contains("game-profile planned"),
+        "planned game cards should not sit in static HTML where renderGamePlugins wipes them"
     );
 
     // Settings is a page in the main pane now, not a sidebar fold.
@@ -383,8 +401,10 @@ fn games_ui_wires_detection_commands() {
     let js = main_js();
 
     for required in [
+        "await invoke(\"list_game_plugins\")",
         "await invoke(\"list_game_windows\")",
         "listen(\"game-detection\"",
+        "renderGamePlugins",
         "renderCustomGames",
         "refreshGameWindows",
         "$(\"add-custom-game\").addEventListener(\"click\", showGameWindowPicker)",

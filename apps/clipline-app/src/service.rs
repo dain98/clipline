@@ -29,7 +29,7 @@ use clipline_storage::sessions::{session_label, SessionTracker};
 use clipline_storage::{enforce_quota, recover_recording_files, storage_status, StorageStatus};
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
-use crate::markers::{self, PollerMsg};
+use crate::markers::PollerMsg;
 
 /// Re-exported so the app layer can name codecs without its own
 /// clipline-capture import.
@@ -67,8 +67,8 @@ pub enum AudioChannelMode {
     Stereo,
 }
 
-/// The user's encoder choice. `Auto` follows the ddoc §4 merit order
-/// restricted to player-decodable codecs; the explicit variants force a
+/// The user's encoder choice. `Auto` prefers H.264 for playback compatibility while
+/// respecting backend merit order within a codec; the explicit variants force a
 /// (backend, codec) pair (still falling back through Auto if it can't open).
 /// Legacy saved values (`auto`, `nvenc_h264`, `amf_h264`, `quick_sync_h264`)
 /// still deserialize.
@@ -255,6 +255,33 @@ pub enum RecordingMode {
     ReplaysOnly,
 }
 
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum OutputResolution {
+    #[default]
+    #[serde(rename = "source")]
+    Source,
+    #[serde(rename = "1440p")]
+    P1440,
+    #[serde(rename = "1080p")]
+    P1080,
+    #[serde(rename = "720p")]
+    P720,
+    #[serde(rename = "480p")]
+    P480,
+}
+
+impl OutputResolution {
+    fn bounds(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Source => None,
+            Self::P1440 => Some((2560, 1440)),
+            Self::P1080 => Some((1920, 1080)),
+            Self::P720 => Some((1280, 720)),
+            Self::P480 => Some((854, 480)),
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
@@ -263,6 +290,9 @@ pub enum Event {
         segments: usize,
         buffered_s: f64,
         buffered_mb: f64,
+        /// True while a full-session writer is active in addition to the replay ring.
+        #[serde(default)]
+        full_session: bool,
         /// Active encoder label (e.g. "AMD AMF · H.264"); empty when stopped.
         #[serde(default)]
         encoder: String,
@@ -286,6 +316,8 @@ pub enum Event {
 
 pub struct ServiceOptions {
     pub capture_source: CaptureSource,
+    /// Built-in game plugin id for the active capture target, if any.
+    pub active_game_plugin_id: Option<String>,
     /// Root folder for saved media.
     pub media_dir: PathBuf,
     /// Override the League Live Client endpoint (mock servers).
@@ -302,6 +334,7 @@ pub struct ServiceOptions {
     pub fps: u32,
     pub bitrate_bps: u32,
     pub video_encoder: VideoEncoder,
+    pub output_resolution: OutputResolution,
     /// Codecs the in-app review player can decode. `Auto` is restricted to
     /// these so we never record a clip the user can't play back. The
     /// frontend reports the real set (canPlayType); H.264 is always safe.
@@ -315,6 +348,7 @@ impl Default for ServiceOptions {
     fn default() -> Self {
         Self {
             capture_source: CaptureSource::PrimaryMonitor,
+            active_game_plugin_id: None,
             media_dir: default_clips_dir(),
             lol_url: None,
             replay_window_s: 60.0,
@@ -326,6 +360,7 @@ impl Default for ServiceOptions {
             fps: 60,
             bitrate_bps: 12_000_000,
             video_encoder: VideoEncoder::Auto,
+            output_resolution: OutputResolution::Source,
             decodable_codecs: vec![Codec::H264],
             audio: AudioOptions::default(),
         }
@@ -347,6 +382,36 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
     (cmd_tx, event_rx)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkerSourceKind {
+    Plugin,
+    LegacyLeaguePoller,
+}
+
+fn marker_source_kind(opts: &ServiceOptions) -> MarkerSourceKind {
+    if crate::game_plugins::has_event_source(opts.active_game_plugin_id.as_deref()) {
+        MarkerSourceKind::Plugin
+    } else {
+        MarkerSourceKind::LegacyLeaguePoller
+    }
+}
+
+fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver<PollerMsg> {
+    let context = crate::game_plugins::GameEventSourceContext {
+        lol_url: opts.lol_url.clone(),
+        recording_t0,
+    };
+    match marker_source_kind(opts) {
+        MarkerSourceKind::Plugin => {
+            crate::game_plugins::spawn_event_source(opts.active_game_plugin_id.as_deref(), context)
+                .expect("marker source kind checked plugin event source")
+        }
+        MarkerSourceKind::LegacyLeaguePoller => {
+            crate::markers::spawn(context.lol_url, context.recording_t0)
+        }
+    }
+}
+
 fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> Result<(), String> {
     let init = |e: &dyn std::fmt::Display| format!("init: {e}");
     let (device, _ctx) = d3d11::create_device().map_err(|e| init(&e))?;
@@ -354,7 +419,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     // The wall-clock twin of the capture clock origin (both are QPC under
     // the hood; sampled together they describe one timeline — ddoc §5).
     let recording_t0 = Instant::now();
-    let marker_rx = markers::spawn(opts.lol_url.clone(), recording_t0);
+    let marker_rx = spawn_marker_source(&opts, recording_t0);
     let mut marker_log = MarkerLog::new();
     let mut cap = match &opts.capture_source {
         CaptureSource::WindowTitle(needle) => {
@@ -381,7 +446,8 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         }
     };
 
-    // First frame fixes the capture size; ultrawide scales to ≤2560.
+    // First frame fixes the capture size; output resolution caps scale down
+    // while preserving the captured aspect ratio.
     let first = cap
         .next_frame_timeout(Duration::from_secs(5))
         .map_err(|e| init(&e))?
@@ -390,15 +456,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         return Err("expected a GPU frame".into());
     };
     let (in_w, in_h) = d3d11::texture_size(tex);
-    let scale = if in_w > 2560 {
-        2560.0 / in_w as f64
-    } else {
-        1.0
-    };
-    let (enc_w, enc_h) = even_dimensions(
-        (in_w as f64 * scale).round() as u32,
-        (in_h as f64 * scale).round() as u32,
-    );
+    let (enc_w, enc_h) = output_dimensions(in_w, in_h, opts.output_resolution);
 
     let (encoder, active) = build_encoder(&device, &opts, in_w, in_h, enc_w, enc_h, events)?;
     let encoder_status = encoder_label(active);
@@ -453,6 +511,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         opts.recording_mode,
         events,
     );
+    send_recording_status(events, &rec, &full_session, &encoder_status);
 
     loop {
         match rec.step() {
@@ -477,7 +536,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             match msg {
                 PollerMsg::Event(event) => {
                     // GameEnd means the match is over even while the Live
-                    // Client API lingers — stop attributing saves to it.
+                    // Client API lingers; stop attributing saves to it.
                     if event.kind == EventKind::GameEnd {
                         session.match_ended();
                     }
@@ -490,13 +549,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
 
         if last_status.elapsed() >= Duration::from_secs(1) {
             last_status = Instant::now();
-            let _ = events.send(Event::Status {
-                recording: true,
-                segments: rec.ring_len(),
-                buffered_s: rec.buffered_span_s(),
-                buffered_mb: rec.ring_bytes() as f64 / (1024.0 * 1024.0),
-                encoder: encoder_status.clone(),
-            });
+            send_recording_status(events, &rec, &full_session, &encoder_status);
             if replay_cache_dir.is_some() {
                 ensure_replay_cache_free_space(&opts)?;
             }
@@ -666,6 +719,17 @@ fn encoder_capabilities() -> &'static [EncoderCapability] {
         caps.extend(ffmpeg::probe());
         caps
     })
+}
+
+fn output_dimensions(in_w: u32, in_h: u32, resolution: OutputResolution) -> (u32, u32) {
+    let max_box = resolution.bounds().unwrap_or((2560, u32::MAX));
+    let scale = (max_box.0 as f64 / in_w.max(1) as f64)
+        .min(max_box.1 as f64 / in_h.max(1) as f64)
+        .min(1.0);
+    even_dimensions(
+        (in_w as f64 * scale).round() as u32,
+        (in_h as f64 * scale).round() as u32,
+    )
 }
 
 /// Build the recorder's video encoder by walking the ranked candidate list
@@ -873,7 +937,24 @@ fn send_stopped(events: &Sender<Event>) {
         segments: 0,
         buffered_s: 0.0,
         buffered_mb: 0.0,
+        full_session: false,
         encoder: String::new(),
+    });
+}
+
+fn send_recording_status(
+    events: &Sender<Event>,
+    rec: &Recorder<WgcCapture, Box<dyn Encoder>>,
+    full_session: &Option<FullSessionRecording>,
+    encoder_status: &str,
+) {
+    let _ = events.send(Event::Status {
+        recording: true,
+        segments: rec.ring_len(),
+        buffered_s: rec.buffered_span_s(),
+        buffered_mb: rec.ring_bytes() as f64 / (1024.0 * 1024.0),
+        full_session: full_session.is_some(),
+        encoder: encoder_status.to_string(),
     });
 }
 
@@ -1313,6 +1394,71 @@ mod tests {
         }
         assert!(VideoEncoder::from_parts(EncoderBackend::MfSoftware, Codec::H264).is_none());
         assert!(VideoEncoder::from_parts(EncoderBackend::SvtAv1, Codec::H264).is_none());
+    }
+
+    #[test]
+    fn output_dimensions_scale_down_to_selected_resolution() {
+        assert_eq!(
+            output_dimensions(2560, 1440, OutputResolution::Source),
+            (2560, 1440)
+        );
+        assert_eq!(
+            output_dimensions(2560, 1440, OutputResolution::P1080),
+            (1920, 1080)
+        );
+        assert_eq!(
+            output_dimensions(2560, 1440, OutputResolution::P720),
+            (1280, 720)
+        );
+    }
+
+    #[test]
+    fn output_dimensions_preserve_aspect_and_never_upscale() {
+        assert_eq!(
+            output_dimensions(1600, 1000, OutputResolution::P1080),
+            (1600, 1000)
+        );
+        assert_eq!(
+            output_dimensions(5120, 1440, OutputResolution::P1080),
+            (1920, 540)
+        );
+        assert_eq!(
+            output_dimensions(5120, 1440, OutputResolution::Source),
+            (2560, 720)
+        );
+    }
+
+    #[test]
+    fn marker_source_falls_back_to_league_poller_without_active_plugin() {
+        let opts = ServiceOptions::default();
+
+        assert_eq!(
+            marker_source_kind(&opts),
+            MarkerSourceKind::LegacyLeaguePoller
+        );
+    }
+
+    #[test]
+    fn marker_source_uses_active_plugin_event_source_when_available() {
+        let opts = ServiceOptions {
+            active_game_plugin_id: Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into()),
+            ..ServiceOptions::default()
+        };
+
+        assert_eq!(marker_source_kind(&opts), MarkerSourceKind::Plugin);
+    }
+
+    #[test]
+    fn marker_source_falls_back_for_unknown_plugin_id() {
+        let opts = ServiceOptions {
+            active_game_plugin_id: Some("community_game_without_source".into()),
+            ..ServiceOptions::default()
+        };
+
+        assert_eq!(
+            marker_source_kind(&opts),
+            MarkerSourceKind::LegacyLeaguePoller
+        );
     }
 
     struct TestDir(PathBuf);

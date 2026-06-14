@@ -51,17 +51,33 @@ const PlayerCore = (() => {
   };
 
   const QUALITY_PRESETS = [
-    { label: "Compact", bitrate: 6, hint: "smaller files" },
-    { label: "Balanced", bitrate: 12, hint: "good default" },
-    { label: "Sharp", bitrate: 24, hint: "more detail" },
-    { label: "Maximum", bitrate: 40, hint: "largest files" },
+    { id: "compact", label: "Compact", hint: "smaller files" },
+    { id: "balanced", label: "Balanced", hint: "good default" },
+    { id: "sharp", label: "Sharp", hint: "more detail" },
+    { id: "maximum", label: "Maximum", hint: "largest files" },
   ];
+
+  const QUALITY_BITRATES_MBPS = {
+    source: [6, 12, 24, 40],
+    "1440p": [6, 12, 24, 40],
+    "1080p": [4, 8, 16, 24],
+    "720p": [2.5, 5, 8, 12],
+    "480p": [1.5, 3, 5, 8],
+  };
 
   const SMOOTHNESS_PRESETS = [
     { fps: 30, label: "30 FPS", hint: "lighter on the PC" },
     { fps: 60, label: "60 FPS", hint: "good default for most games" },
     { fps: 90, label: "90 FPS", hint: "smoother for high-refresh play" },
     { fps: 120, label: "120 FPS", hint: "best for high-refresh footage" },
+  ];
+
+  const OUTPUT_RESOLUTION_OPTIONS = [
+    { id: "source", label: "Source", hint: "uses the captured size" },
+    { id: "1440p", label: "1440p", hint: "up to 2560 x 1440" },
+    { id: "1080p", label: "1080p", hint: "up to 1920 x 1080" },
+    { id: "720p", label: "720p", hint: "up to 1280 x 720" },
+    { id: "480p", label: "480p", hint: "up to 854 x 480" },
   ];
 
   const nearestPresetIndex = (presets, value, field) => {
@@ -77,17 +93,33 @@ const PlayerCore = (() => {
     return best;
   };
 
-  const recordingQualityPreset = (index) =>
-    QUALITY_PRESETS[Math.max(0, Math.min(QUALITY_PRESETS.length - 1, Math.round(index || 0)))];
+  const qualityBitrates = (outputResolution) =>
+    QUALITY_BITRATES_MBPS[outputResolutionOption(outputResolution).id] || QUALITY_BITRATES_MBPS.source;
 
-  const qualityIndexForBitrate = (mbps) =>
-    nearestPresetIndex(QUALITY_PRESETS, Number(mbps) || QUALITY_PRESETS[1].bitrate, "bitrate");
+  const recordingQualityPreset = (index, outputResolution = "source") => {
+    const clamped = Math.max(0, Math.min(QUALITY_PRESETS.length - 1, Math.round(index || 0)));
+    return { ...QUALITY_PRESETS[clamped], bitrate: qualityBitrates(outputResolution)[clamped] };
+  };
+
+  const qualityIndexForBitrate = (mbps, outputResolution = "source") => {
+    const bitrates = qualityBitrates(outputResolution);
+    const presets = QUALITY_PRESETS.map((preset, index) => ({ ...preset, bitrate: bitrates[index] }));
+    return nearestPresetIndex(presets, Number(mbps) || bitrates[1], "bitrate");
+  };
+
+  const qualityIndexForId = (id) => {
+    const index = QUALITY_PRESETS.findIndex((preset) => preset.id === id);
+    return index >= 0 ? index : 1;
+  };
 
   const smoothnessPreset = (index) =>
     SMOOTHNESS_PRESETS[Math.max(0, Math.min(SMOOTHNESS_PRESETS.length - 1, Math.round(index || 0)))];
 
   const smoothnessIndexForFps = (fps) =>
     nearestPresetIndex(SMOOTHNESS_PRESETS, Number(fps) || SMOOTHNESS_PRESETS[1].fps, "fps");
+
+  const outputResolutionOption = (id) =>
+    OUTPUT_RESOLUTION_OPTIONS.find((option) => option.id === id) || OUTPUT_RESOLUTION_OPTIONS[0];
 
   const captureSourceLabel = (settings) => {
     switch (settings && settings.capture_mode) {
@@ -98,6 +130,11 @@ const PlayerCore = (() => {
       default:
         return "Desktop";
     }
+  };
+
+  const captureStatusLabel = (source, recording, fullSession) => {
+    if (!recording) return "Recording stopped";
+    return `${fullSession ? "Recording" : "Capturing"} ${source}`;
   };
 
   const clampTime = (value, duration) => {
@@ -448,9 +485,12 @@ const PlayerCore = (() => {
     settingDurationLabel,
     recordingQualityPreset,
     qualityIndexForBitrate,
+    qualityIndexForId,
     smoothnessPreset,
     smoothnessIndexForFps,
+    outputResolutionOption,
     captureSourceLabel,
+    captureStatusLabel,
     clampTime,
     percentFor,
     timelineTime,

@@ -31,12 +31,13 @@ pub enum EncoderBackend {
     MfSoftware,
 }
 
-/// Codec preference order (ddoc §4: AV1 → HEVC → H.264).
+/// Default codec preference order: H.264 first for broad playback
+/// compatibility, then HEVC/AV1 for explicit local-efficiency use cases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Codec {
-    Av1,
-    Hevc,
     H264,
+    Hevc,
+    Av1,
 }
 
 /// What one (api, backend) pair reported during startup probing.
@@ -69,11 +70,11 @@ pub enum EncoderPreference {
     },
 }
 
-/// Merit key: backend priority, then codec preference, then API (MFT before
+/// Merit key: codec compatibility, then backend priority, then API (MFT before
 /// FFmpeg for the same backend+codec). All three enums encode their order
 /// via declaration order + derived `Ord`.
-fn merit(c: &EncoderCandidate) -> (EncoderBackend, Codec, EncoderApi) {
-    (c.backend, c.codec, c.api)
+fn merit(c: &EncoderCandidate) -> (Codec, EncoderBackend, EncoderApi) {
+    (c.codec, c.backend, c.api)
 }
 
 /// Rank every available encoder into the order the recorder should try,
@@ -127,7 +128,7 @@ pub fn rank_encoders(
 mod tests {
     use super::*;
 
-    const ALL_CODECS: &[Codec] = &[Codec::Av1, Codec::Hevc, Codec::H264];
+    const ALL_CODECS: &[Codec] = &[Codec::H264, Codec::Hevc, Codec::Av1];
 
     fn cap(api: EncoderApi, backend: EncoderBackend, codecs: &[Codec]) -> EncoderCapability {
         EncoderCapability {
@@ -146,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_prefers_backend_then_codec() {
+    fn auto_prefers_h264_then_backend() {
         let caps = vec![
             cap(EncoderApi::Ffmpeg, EncoderBackend::Amf, &[Codec::Av1]),
             cap(
@@ -156,14 +157,15 @@ mod tests {
             ),
         ];
         let ranked = rank_encoders(&caps, ALL_CODECS, EncoderPreference::Auto);
-        // Nvenc wins on backend priority; HEVC beats H.264 within it.
+        // H.264 is the Automatic baseline; backend priority applies within
+        // the same codec.
         assert_eq!(
             ranked[0],
-            cand(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, Codec::Hevc)
+            cand(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, Codec::H264)
         );
         assert_eq!(
             ranked[1],
-            cand(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, Codec::H264)
+            cand(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, Codec::Hevc)
         );
         assert_eq!(
             ranked[2],
@@ -258,14 +260,14 @@ mod tests {
     }
 
     #[test]
-    fn software_av1_ranks_above_microsoft_h264_fallback() {
+    fn microsoft_h264_fallback_ranks_above_software_av1() {
         let caps = vec![
             cap(EncoderApi::Mft, EncoderBackend::MfSoftware, &[Codec::H264]),
             cap(EncoderApi::Ffmpeg, EncoderBackend::SvtAv1, &[Codec::Av1]),
         ];
         let ranked = rank_encoders(&caps, ALL_CODECS, EncoderPreference::Auto);
-        assert_eq!(ranked[0].backend, EncoderBackend::SvtAv1);
-        assert_eq!(ranked[1].backend, EncoderBackend::MfSoftware);
+        assert_eq!(ranked[0].backend, EncoderBackend::MfSoftware);
+        assert_eq!(ranked[1].backend, EncoderBackend::SvtAv1);
     }
 
     #[test]
