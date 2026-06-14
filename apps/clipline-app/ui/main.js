@@ -306,6 +306,7 @@ function normalizeCustomGame(game) {
     process_path: game.process_path ? String(game.process_path).trim() : null,
     window_title: String(game.window_title || "").trim(),
     recording_mode: normalizeGameRecordingMode(game.recording_mode),
+    icon: game.icon ? String(game.icon) : null,
   };
 }
 
@@ -429,6 +430,8 @@ function renderGamePlugins() {
     });
     enabled.appendChild(checkbox);
 
+    const icon = gameIconEl(plugin.icon, plugin.name);
+
     const meta = document.createElement("div");
     meta.className = "game-profile-meta";
     const name = document.createElement("strong");
@@ -438,7 +441,7 @@ function renderGamePlugins() {
     summary.textContent = gamePluginSummary(plugin, settings);
     meta.append(name, summary);
 
-    row.append(enabled, meta, renderGamePluginModeControl(plugin, settings));
+    row.append(enabled, icon, meta, renderGamePluginModeControl(plugin, settings));
     root.appendChild(row);
   }
 }
@@ -940,6 +943,8 @@ async function loadGamePlugins() {
     gamePlugins = await invoke("list_game_plugins");
     renderGamePlugins();
     updateGameDetectionStatus();
+    // Clips may have rendered before plugins loaded; refresh their game icons.
+    if (clipsCache.length) renderClips();
   } catch (e) {
     gamePlugins = [];
     $("error").textContent = e;
@@ -1014,6 +1019,8 @@ function renderCustomGames() {
     });
     enabled.appendChild(checkbox);
 
+    const icon = gameIconEl(game.icon, game.name);
+
     const meta = document.createElement("div");
     meta.className = "custom-game-meta";
     const name = document.createElement("strong");
@@ -1033,7 +1040,7 @@ function renderCustomGames() {
       renderCustomGames();
     });
 
-    row.append(enabled, meta, remove, gameRecordingModeControl(game, index));
+    row.append(enabled, icon, meta, remove, gameRecordingModeControl(game, index));
     root.appendChild(row);
   });
 }
@@ -1090,8 +1097,18 @@ function hideGameWindowPicker() {
   $("game-window-picker").hidden = true;
 }
 
-function addCustomGameFromWindow(win) {
+async function addCustomGameFromWindow(win) {
   const name = gameNameFromWindow(win);
+  // Pull the executable's icon now, while we still have its path. Best-effort:
+  // a missing path or icon just leaves the game with the placeholder glyph.
+  let icon = null;
+  if (win.exe_path) {
+    try {
+      icon = await invoke("extract_window_icon", { exePath: win.exe_path });
+    } catch (e) {
+      icon = null;
+    }
+  }
   customGames.push(normalizeCustomGame({
     id: customGameId(name),
     name,
@@ -1100,6 +1117,7 @@ function addCustomGameFromWindow(win) {
     process_path: win.exe_path || null,
     window_title: win.title || "",
     recording_mode: "replays_only",
+    icon,
   }));
   hideGameWindowPicker();
   renderCustomGames();
@@ -1329,6 +1347,44 @@ const CLIP_KIND_LABELS = {
   trim: "Trimmed export",
 };
 
+// Neutral fallback when a game has no extractable/bundled icon. Static markup.
+const GENERIC_GAME_ICON =
+  '<svg viewBox="0 0 24 24"><path d="M3 5h18a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-7l1 2h2v2H6v-2h2l1-2H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm1 2v7h16V7H4z"/></svg>';
+
+// A game-icon element: an <img> for a real icon (a plugin's bundled URL or an
+// extracted data URL), falling back to a neutral glyph when absent or broken.
+function gameIconEl(iconUrl, label) {
+  if (iconUrl) {
+    const img = document.createElement("img");
+    img.className = "game-icon";
+    img.src = iconUrl;
+    img.alt = "";
+    if (label) img.title = label;
+    img.addEventListener("error", () => img.replaceWith(gamePlaceholderEl()));
+    return img;
+  }
+  return gamePlaceholderEl();
+}
+function gamePlaceholderEl() {
+  const el = document.createElement("div");
+  el.className = "game-icon placeholder";
+  el.innerHTML = GENERIC_GAME_ICON; // static markup, safe
+  return el;
+}
+
+// Resolve a clip's recorded game to an icon, reusing the icons shown in
+// settings: a plugin's bundled icon, or a custom game's extracted icon.
+// Returns null for clips with no game, or a game no longer configured.
+function clipGameIcon(clip) {
+  const g = clip && clip.game;
+  if (!g || !g.id) return null;
+  const plugin = gamePlugins.find((p) => p.id === g.id);
+  if (plugin && plugin.icon) return { url: plugin.icon, label: plugin.name };
+  const custom = customGames.find((c) => c.id === g.id);
+  if (custom && custom.icon) return { url: custom.icon, label: custom.name };
+  return null;
+}
+
 // Clip names come from disk; build rows with textContent, never innerHTML.
 function clipRow(c) {
   const el = document.createElement("div");
@@ -1341,6 +1397,29 @@ function clipRow(c) {
   icon.title = CLIP_KIND_LABELS[kind];
   // Static per-kind markup, no clip data — innerHTML is safe here.
   icon.innerHTML = CLIP_KIND_ICONS[kind];
+
+  // Leading cluster: the game icon (when known) sits beside the kind marker.
+  const lead = document.createElement("div");
+  lead.className = "clip-lead";
+  const game = clipGameIcon(c);
+  if (game) {
+    const gi = document.createElement("img");
+    gi.className = "clip-game-icon";
+    gi.src = game.url;
+    gi.alt = "";
+    gi.title = game.label;
+    // Fall back to a neutral glyph if the icon can't load (e.g. a plugin icon
+    // asset that isn't present yet), so the badge stays visible.
+    gi.addEventListener("error", () => {
+      const ph = document.createElement("div");
+      ph.className = "clip-game-icon placeholder";
+      ph.title = game.label;
+      ph.innerHTML = GENERIC_GAME_ICON; // static markup, safe
+      gi.replaceWith(ph);
+    });
+    lead.appendChild(gi);
+  }
+  lead.appendChild(icon);
 
   const meta = document.createElement("div");
   const name = document.createElement("div");
@@ -1374,7 +1453,7 @@ function clipRow(c) {
     deleteClip(c.path);
   });
 
-  el.append(icon, meta, del);
+  el.append(lead, meta, del);
   return el;
 }
 
@@ -2084,6 +2163,8 @@ async function loadInitialSettings() {
   await loadGamePlugins();
   const settings = await invoke("get_settings");
   fillSettings(settings);
+  // Custom-game icons live in settings; refresh clip badges once they load.
+  if (clipsCache.length) renderClips();
 }
 loadInitialSettings().catch((e) => $("error").textContent = e);
 loadDisplays();

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::Mutex;
 
-use clipline_events::{ClipMarker, ClipMarkers};
+use clipline_events::{ClipMarker, ClipMarkers, GameId};
 use clipline_mp4::trim_keyframe_aligned_file;
 use clipline_mp4::walker::movie_duration_s;
 use clipline_storage::storage_status as read_storage_status;
@@ -62,6 +62,14 @@ impl StorageSettings {
     }
 }
 
+/// The game a clip's session folder is attributed to (see
+/// `clipline-session.json`). Drives the library's per-clip game icon.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct ClipGame {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(serde::Serialize)]
 pub struct ClipInfo {
     pub path: String,
@@ -72,6 +80,8 @@ pub struct ClipInfo {
     pub modified_unix: u64,
     pub duration_s: Option<f64>,
     pub markers: Option<ClipMarkers>,
+    /// Game this clip's session belongs to, if recorded under a detected game.
+    pub game: Option<ClipGame>,
 }
 
 #[derive(serde::Serialize)]
@@ -114,6 +124,10 @@ fn push_clips_from(
     session: Option<String>,
     clips: &mut Vec<ClipInfo>,
 ) -> Result<(), String> {
+    // One game tag per session folder, shared by every clip inside it.
+    let session_game: Option<ClipGame> = std::fs::read_to_string(dir.join("clipline-session.json"))
+        .ok()
+        .and_then(|json| serde_json::from_str::<ClipGame>(&json).ok());
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
@@ -141,6 +155,11 @@ fn push_clips_from(
         let markers = std::fs::read_to_string(path.with_extension("markers.json"))
             .ok()
             .and_then(|json| serde_json::from_str(&json).ok());
+        // Prefer the session sidecar; fall back to the game named in markers
+        // so clips recorded before session tagging still show an icon.
+        let game = session_game
+            .clone()
+            .or_else(|| game_from_markers(markers.as_ref()));
         clips.push(ClipInfo {
             path: path.display().to_string(),
             name: path
@@ -152,9 +171,30 @@ fn push_clips_from(
             modified_unix,
             duration_s,
             markers,
+            game,
         });
     }
     Ok(())
+}
+
+/// Fall back to the game named in a clip's markers when its session folder has
+/// no game sidecar (clips recorded before session tagging existed). Only games
+/// with a matching plugin resolve to an icon in the UI.
+fn game_from_markers(markers: Option<&ClipMarkers>) -> Option<ClipGame> {
+    let game_id = markers?.markers.first()?.event.game_id;
+    let plugin_id = match game_id {
+        GameId::LeagueOfLegends => crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+        // Valorant / CS2 have no plugin (and no icon) yet.
+        _ => return None,
+    };
+    let name = crate::game_plugins::all()
+        .iter()
+        .find(|plugin| plugin.id == plugin_id)
+        .map(|plugin| plugin.name.to_string())?;
+    Some(ClipGame {
+        id: plugin_id.to_string(),
+        name,
+    })
 }
 
 #[tauri::command]
