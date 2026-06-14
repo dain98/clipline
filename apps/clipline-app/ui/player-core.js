@@ -252,9 +252,14 @@ const PlayerCore = (() => {
   };
 
   // Classify a library clip by its on-disk name so each kind can carry its own
-  // icon. Trimmed exports always include a `_trim_` segment; everything else is
-  // a buffered replay today. Full-session recordings will add a kind here.
-  const clipKind = (name) => (/_trim_/.test(name || "") ? "trim" : "replay");
+  // icon. Trimmed exports always include `_trim_`; full-session captures are
+  // written with a `session_` prefix.
+  const clipKind = (name) => {
+    const n = name || "";
+    if (/_trim_/.test(n)) return "trim";
+    if (/^session_/.test(n)) return "session";
+    return "replay";
+  };
 
   const keyIntent = (code, shiftKey) => {
     switch (code) {

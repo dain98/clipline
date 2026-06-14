@@ -28,9 +28,47 @@ pub struct GcReport {
     pub status: StorageStatus,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingRecoveryReport {
+    pub recovered: Vec<PathBuf>,
+    pub deleted_empty: usize,
+}
+
 pub fn storage_status(dir: &Path, quota_bytes: Option<u64>) -> io::Result<StorageStatus> {
     let clips = inventory(dir)?;
     Ok(status_from_clips(&clips, quota_bytes))
+}
+
+pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport> {
+    let mut report = RecordingRecoveryReport {
+        recovered: Vec::new(),
+        deleted_empty: 0,
+    };
+    visit_media_dirs(dir, |media_dir| {
+        for entry in fs::read_dir(media_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !is_recording_mp4(&path) {
+                continue;
+            }
+            let meta = entry.metadata()?;
+            if !meta.is_file() {
+                continue;
+            }
+            if meta.len() == 0 {
+                remove_file_if_exists(&path)?;
+                report.deleted_empty += 1;
+                continue;
+            }
+            let final_path = recording_final_path(&path)
+                .map(|candidate| unique_recovered_path(&candidate))
+                .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "invalid recording name"))?;
+            fs::rename(&path, &final_path)?;
+            report.recovered.push(final_path);
+        }
+        Ok(())
+    })?;
+    Ok(report)
 }
 
 pub fn enforce_quota(
@@ -51,6 +89,19 @@ pub fn enforce_quota(
     let mut deleted_clips = 0usize;
     let mut freed_bytes = 0u64;
 
+    let undeletable_bytes = clips
+        .iter()
+        .filter(|clip| !clip.can_delete(protect))
+        .map(ClipFile::total_bytes)
+        .sum::<u64>();
+    if undeletable_bytes > quota {
+        return Ok(GcReport {
+            deleted_clips,
+            freed_bytes,
+            status: status_from_clips(&clips, quota_bytes),
+        });
+    }
+
     clips.sort_by(|a, b| {
         a.modified
             .cmp(&b.modified)
@@ -61,7 +112,7 @@ pub fn enforce_quota(
         if total_bytes <= quota {
             break;
         }
-        if protect.is_some_and(|protected| same_path(&clip.path, protected)) {
+        if !clip.can_delete(protect) {
             continue;
         }
 
@@ -96,24 +147,23 @@ struct ClipFile {
     mp4_bytes: u64,
     sidecar_bytes: u64,
     modified: SystemTime,
+    recording: bool,
 }
 
 impl ClipFile {
     fn total_bytes(&self) -> u64 {
         self.mp4_bytes + self.sidecar_bytes
     }
+
+    fn can_delete(&self, protect: Option<&Path>) -> bool {
+        !self.recording && !protect.is_some_and(|protected| same_path(&self.path, protected))
+    }
 }
 
 /// Clips live at the root (legacy) or one level down in session folders.
 fn inventory(dir: &Path) -> io::Result<Vec<ClipFile>> {
     let mut clips = Vec::new();
-    collect_clips(dir, &mut clips)?;
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        if entry.metadata()?.is_dir() {
-            collect_clips(&entry.path(), &mut clips)?;
-        }
-    }
+    visit_media_dirs(dir, |media_dir| collect_clips(media_dir, &mut clips))?;
     Ok(clips)
 }
 
@@ -121,7 +171,8 @@ fn collect_clips(dir: &Path, clips: &mut Vec<ClipFile>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if !is_mp4(&path) {
+        let recording = is_recording_mp4(&path);
+        if !is_mp4(&path) && !recording {
             continue;
         }
         let meta = entry.metadata()?;
@@ -129,13 +180,18 @@ fn collect_clips(dir: &Path, clips: &mut Vec<ClipFile>) -> io::Result<()> {
             continue;
         }
         let sidecar = sidecar_path(&path);
-        let sidecar_bytes = optional_file_len(&sidecar)?;
+        let sidecar_bytes = if recording {
+            0
+        } else {
+            optional_file_len(&sidecar)?
+        };
         clips.push(ClipFile {
             path,
             sidecar: (sidecar_bytes > 0 || sidecar.exists()).then_some(sidecar),
             mp4_bytes: meta.len(),
             sidecar_bytes,
             modified: meta.modified().unwrap_or(UNIX_EPOCH),
+            recording,
         });
     }
     Ok(())
@@ -143,7 +199,7 @@ fn collect_clips(dir: &Path, clips: &mut Vec<ClipFile>) -> io::Result<()> {
 
 fn status_from_clips(clips: &[ClipFile], quota_bytes: Option<u64>) -> StorageStatus {
     StorageStatus {
-        clip_count: clips.len(),
+        clip_count: clips.iter().filter(|clip| !clip.recording).count(),
         total_bytes: clips.iter().map(ClipFile::total_bytes).sum(),
         quota_bytes,
     }
@@ -153,6 +209,47 @@ fn is_mp4(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+}
+
+fn is_recording_mp4(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".mp4.recording"))
+}
+
+fn recording_final_path(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let final_name = name.strip_suffix(".recording")?;
+    Some(path.with_file_name(final_name))
+}
+
+fn unique_recovered_path(candidate: &Path) -> PathBuf {
+    if !candidate.exists() {
+        return candidate.to_path_buf();
+    }
+    let parent = candidate.parent().unwrap_or_else(|| Path::new(""));
+    let stem = candidate
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("session");
+    for attempt in 0u32..1024 {
+        let name = if attempt == 0 {
+            format!("{stem}_recovered.mp4")
+        } else {
+            format!("{stem}_recovered_{attempt}.mp4")
+        };
+        let recovered = parent.join(name);
+        if !recovered.exists() {
+            return recovered;
+        }
+    }
+    parent.join(format!(
+        "{stem}_recovered_{}.mp4",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ))
 }
 
 fn sidecar_path(path: &Path) -> PathBuf {
@@ -181,6 +278,17 @@ fn same_path(a: &Path, b: &Path) -> bool {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
     }
+}
+
+fn visit_media_dirs(dir: &Path, mut f: impl FnMut(&Path) -> io::Result<()>) -> io::Result<()> {
+    f(dir)?;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.metadata()?.is_dir() {
+            f(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -245,6 +353,18 @@ mod tests {
     }
 
     #[test]
+    fn status_counts_recording_bytes_without_counting_a_clip() {
+        let dir = TestDir::new("status-recording");
+        dir.write("saved.mp4", 10);
+        dir.write("session.mp4.recording", 90);
+
+        let status = storage_status(dir.path(), Some(100)).unwrap();
+
+        assert_eq!(status.clip_count, 1);
+        assert_eq!(status.total_bytes, 100);
+    }
+
+    #[test]
     fn inventory_ignores_non_mp4_files() {
         let dir = TestDir::new("ignore-non-mp4");
         dir.write("notes.txt", 99);
@@ -294,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn enforce_quota_protects_the_fresh_clip_even_if_still_over_budget() {
+    fn enforce_quota_leaves_library_when_protected_clip_alone_exceeds_budget() {
         let dir = TestDir::new("protect-fresh");
         let old = dir.write("old.mp4", 10);
         tick_mtime();
@@ -302,12 +422,52 @@ mod tests {
 
         let report = enforce_quota(dir.path(), Some(15), Some(&fresh)).unwrap();
 
-        assert_eq!(report.deleted_clips, 1);
-        assert_eq!(report.freed_bytes, 10);
-        assert!(!old.exists());
+        assert_eq!(report.deleted_clips, 0);
+        assert_eq!(report.freed_bytes, 0);
+        assert!(old.exists());
         assert!(fresh.exists());
-        assert_eq!(report.status.total_bytes, 20);
+        assert_eq!(report.status.total_bytes, 30);
         assert!(report.status.is_over_quota());
+    }
+
+    #[test]
+    fn enforce_quota_counts_active_recording_but_never_deletes_it() {
+        let dir = TestDir::new("recording-quota");
+        let old = dir.write("old.mp4", 10);
+        tick_mtime();
+        let recording = dir.write("session.mp4.recording", 12);
+        tick_mtime();
+        let keep = dir.write("keep.mp4", 5);
+
+        let report = enforce_quota(dir.path(), Some(20), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(!old.exists());
+        assert!(recording.exists());
+        assert!(keep.exists());
+        assert_eq!(report.status.clip_count, 1);
+        assert_eq!(report.status.total_bytes, 17);
+    }
+
+    #[test]
+    fn recover_recording_files_renames_non_empty_and_deletes_empty() {
+        let dir = TestDir::new("recording-recovery");
+        let recording = dir.write("2026-06-13 15-04/session_1.mp4.recording", 10);
+        let empty = dir.write("empty.mp4.recording", 0);
+
+        let report = recover_recording_files(dir.path()).unwrap();
+
+        assert_eq!(report.deleted_empty, 1);
+        assert!(!recording.exists());
+        assert!(!empty.exists());
+        assert_eq!(report.recovered.len(), 1);
+        assert_eq!(
+            report.recovered[0]
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("session_1.mp4")
+        );
+        assert!(report.recovered[0].exists());
     }
 
     #[test]

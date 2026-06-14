@@ -2,8 +2,8 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use crate::boxes::{full_box, mp4_box, Payload};
 use crate::fragment::{
-    fragment_moof_multi, fragment_multi, mdat_header, FragSample, FragSampleInfo, TrackRun,
-    TrackRunInfo,
+    fragment_moof_multi, fragment_multi, mdat_header, FragSample, FragSampleInfo, FragSampleRef,
+    TrackRun, TrackRunInfo,
 };
 use crate::init::{
     audio_trak_with_tables, free_placeholder, ftyp, moov_init_multi, mvhd, video_trak_with_tables,
@@ -126,6 +126,86 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
                 state.sync.push(s.is_sync);
                 state.next_decode_time += s.duration as u64;
                 sample_offset += s.data.len() as u64;
+            }
+        }
+        self.next_sequence += 1;
+        Ok(())
+    }
+
+    /// Borrowed variant for already-contiguous GOP buffers. This avoids
+    /// allocating one `Vec<u8>` per sample before immediately writing it out.
+    pub fn write_fragment_multi_borrowed(
+        &mut self,
+        per_track: &[&[FragSampleRef<'_>]],
+    ) -> io::Result<()> {
+        if per_track.len() != self.tracks.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "expected {} track slices, got {}",
+                    self.tracks.len(),
+                    per_track.len()
+                ),
+            ));
+        }
+        if per_track.iter().all(|s| s.is_empty()) {
+            return Ok(());
+        }
+
+        let info_storage: Vec<Vec<FragSampleInfo>> = per_track
+            .iter()
+            .map(|samples| {
+                samples
+                    .iter()
+                    .map(|s| FragSampleInfo {
+                        size: s.data.len() as u32,
+                        duration: s.duration,
+                        is_sync: s.is_sync,
+                    })
+                    .collect()
+            })
+            .collect();
+        let runs: Vec<TrackRunInfo<'_>> = info_storage
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(i, s)| TrackRunInfo {
+                track_id: i as u32 + 1,
+                base_decode_time: self.tracks[i].next_decode_time,
+                samples: s,
+            })
+            .collect();
+
+        let frag_start = self.w.stream_position()?;
+        let total_payload: u64 = per_track
+            .iter()
+            .flat_map(|samples| samples.iter())
+            .map(|s| s.data.len() as u64)
+            .sum();
+        let moof = fragment_moof_multi(self.next_sequence, &runs);
+        self.w.write_all(&moof)?;
+        let mdat_header = mdat_header(total_payload);
+        self.w.write_all(&mdat_header)?;
+
+        for run in &runs {
+            let idx = (run.track_id - 1) as usize;
+            for sample in per_track[idx] {
+                self.w.write_all(sample.data)?;
+            }
+        }
+
+        let mut sample_offset = frag_start + moof.len() as u64 + mdat_header.len() as u64;
+        for run in &runs {
+            let idx = (run.track_id - 1) as usize;
+            let state = &mut self.tracks[idx];
+            state.chunks.push((sample_offset, run.samples.len() as u32));
+            for s in per_track[idx] {
+                let size = s.data.len() as u32;
+                state.sizes.push(size);
+                state.durations.push(s.duration);
+                state.sync.push(s.is_sync);
+                state.next_decode_time += s.duration as u64;
+                sample_offset += size as u64;
             }
         }
         self.next_sequence += 1;

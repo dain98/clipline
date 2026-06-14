@@ -8,7 +8,7 @@ pub mod trim;
 pub mod walker;
 pub mod writer;
 
-pub use fragment::{FragSample, TrackRun};
+pub use fragment::{FragSample, FragSampleRef, TrackRun};
 pub use init::{AudioTrackConfig, TrackConfig, VideoCodecParams, VideoTrackConfig};
 pub use trim::{
     trim_keyframe_aligned, trim_keyframe_aligned_file, trim_keyframe_aligned_to_writer, TrimError,

@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use tauri_plugin_global_shortcut::Shortcut;
 
 use crate::service::{
-    default_clips_dir, AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource,
+    default_clips_dir, AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource, RecordingMode,
     ReplayStorageOptions, ServiceOptions, VideoEncoder,
 };
 
@@ -173,6 +173,15 @@ pub enum GameRecordingMode {
     FullSession,
     #[default]
     ReplaysOnly,
+}
+
+impl From<GameRecordingMode> for RecordingMode {
+    fn from(value: GameRecordingMode) -> Self {
+        match value {
+            GameRecordingMode::FullSession => Self::FullSession,
+            GameRecordingMode::ReplaysOnly => Self::ReplaysOnly,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -459,6 +468,7 @@ impl AppSettings {
             buffer_bytes: estimated_buffer_bytes(replay_buffer_seconds(self), self.bitrate_mbps),
             replay_storage: self.replay_storage.to_service_options()?,
             disk_quota_bytes: quota_bytes_from_gb(self.disk_quota_gb)?,
+            recording_mode: RecordingMode::ReplaysOnly,
             fps: self.fps,
             bitrate_bps: (self.bitrate_mbps * 1_000_000.0).round() as u32,
             video_encoder: self.video_encoder,

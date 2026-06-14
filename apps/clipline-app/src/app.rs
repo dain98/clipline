@@ -160,6 +160,7 @@ impl RuntimeState {
                 hwnd: game.hwnd,
                 title: game.window_title.clone(),
             };
+            opts.recording_mode = game.recording_mode.into();
         }
         Ok(opts)
     }
@@ -850,6 +851,7 @@ fn tray_icon() -> Image<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::GameRecordingMode;
 
     #[test]
     fn quota_parser_converts_gib_to_bytes() {
@@ -877,6 +879,7 @@ mod tests {
             window_title: "Loading".into(),
             process_id: 7,
             exe_name: "game.exe".into(),
+            recording_mode: GameRecordingMode::ReplaysOnly,
         };
         let updated_title = DetectedGame {
             window_title: "Paused".into(),
@@ -889,5 +892,35 @@ mod tests {
 
         assert!(same_game_window(Some(&current), Some(&updated_title)));
         assert!(!same_game_window(Some(&current), Some(&different_window)));
+    }
+
+    #[test]
+    fn active_full_session_game_sets_service_recording_mode() {
+        let inner = RuntimeInner {
+            tx: None,
+            settings: AppSettings::default(),
+            lol_url: None,
+            active_game: Some(DetectedGame {
+                id: "custom-game".into(),
+                name: "Game".into(),
+                hwnd: 42,
+                window_title: "Game Window".into(),
+                process_id: 7,
+                exe_name: "game.exe".into(),
+                recording_mode: GameRecordingMode::FullSession,
+            }),
+            decodable_codecs: vec![service::Codec::H264],
+        };
+
+        let opts = RuntimeState::options(&inner).unwrap();
+
+        assert_eq!(opts.recording_mode, service::RecordingMode::FullSession);
+        assert_eq!(
+            opts.capture_source,
+            service::CaptureSource::WindowHandle {
+                hwnd: 42,
+                title: "Game Window".into(),
+            }
+        );
     }
 }
