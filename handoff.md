@@ -189,11 +189,15 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     stop, capture end, or clean shutdown; if encoder finish fails, the temp session is discarded
     with a warning rather than emitted as a complete recording. The on-disk file uses a temporary
     `.mp4.recording` suffix until finalized so the Library cannot open an in-progress fragmented
-    recording. Non-empty orphaned `.mp4.recording` files are recovered to `.mp4` on next launch,
-    empty ones are removed, active recording bytes count toward storage usage, and GC avoids
-    deleting the rest of the library when a protected full session alone exceeds quota. Full
-    sessions use the same marker sidecar, quota cleanup, library refresh, and saved-event path as
-    manual replays, and the library labels them as "Full session".
+    recording. Non-empty orphaned `.mp4.recording` files are recovered to `.mp4` once per app
+    process on launch, empty ones are removed, active recording bytes count toward storage usage,
+    and GC avoids deleting the rest of the library when a protected full session alone exceeds
+    quota. Recovery deliberately does not run on every recorder restart; custom-game target
+    switches can overlap old/new service threads, and a repeated sweep can rename the active temp
+    file before the old thread finalizes it. Finalization also treats "temp missing but final file
+    already exists" as success so any session caught by that race is still emitted into the
+    Library. Full sessions use the same marker sidecar, quota cleanup, library refresh, and
+    saved-event path as manual replays, and the library labels them as "Full session".
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired

@@ -3,6 +3,7 @@
 //! shell over channels. No Tauri types in here.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
@@ -877,6 +878,10 @@ fn send_stopped(events: &Sender<Event>) {
 }
 
 fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Event>) {
+    static RECOVERED_THIS_PROCESS: AtomicBool = AtomicBool::new(false);
+    if RECOVERED_THIS_PROCESS.swap(true, Ordering::AcqRel) {
+        return;
+    }
     match recover_recording_files(clips_dir) {
         Ok(report) => {
             if !report.recovered.is_empty() {
@@ -1004,15 +1009,7 @@ fn finish_full_session_recording(
                 );
                 0.0
             };
-            if let Err(e) = std::fs::rename(&recording.temp_path, &recording.final_path) {
-                warn_user(
-                    events,
-                    format!(
-                        "finalize full session {:?} -> {:?}: {e}",
-                        recording.temp_path, recording.final_path
-                    ),
-                );
-                let _ = std::fs::remove_file(&recording.temp_path);
+            if !rename_finalized_session(&recording, events) {
                 return;
             }
             let markers = write_marker_sidecar(
@@ -1042,6 +1039,26 @@ fn finish_full_session_recording(
         Err(e) => {
             warn_user(events, format!("finish full session: {e}"));
             let _ = std::fs::remove_file(&recording.temp_path);
+        }
+    }
+}
+
+fn rename_finalized_session(recording: &FullSessionRecording, events: &Sender<Event>) -> bool {
+    match std::fs::rename(&recording.temp_path, &recording.final_path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && recording.final_path.is_file() => {
+            true
+        }
+        Err(e) => {
+            warn_user(
+                events,
+                format!(
+                    "finalize full session {:?} -> {:?}: {e}",
+                    recording.temp_path, recording.final_path
+                ),
+            );
+            let _ = std::fs::remove_file(&recording.temp_path);
+            false
         }
     }
 }
@@ -1374,5 +1391,36 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
 
         assert!(!is_within_temp(&outside, &temp_root));
+    }
+
+    #[test]
+    fn finalized_session_rename_accepts_preexisting_final_file() {
+        let dir = TestDir::new("session-rename-recovered");
+        let final_path = dir.path().join("session.mp4");
+        std::fs::write(&final_path, b"mp4").unwrap();
+        let recording = FullSessionRecording {
+            final_path,
+            temp_path: dir.path().join("session.mp4.recording"),
+        };
+        let (tx, rx) = mpsc::channel();
+
+        assert!(rename_finalized_session(&recording, &tx));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn finalized_session_rename_warns_when_temp_and_final_are_missing() {
+        let dir = TestDir::new("session-rename-missing");
+        let recording = FullSessionRecording {
+            final_path: dir.path().join("session.mp4"),
+            temp_path: dir.path().join("session.mp4.recording"),
+        };
+        let (tx, rx) = mpsc::channel();
+
+        assert!(!rename_finalized_session(&recording, &tx));
+        let Event::Error { message } = rx.try_recv().unwrap() else {
+            panic!("expected warning");
+        };
+        assert!(message.contains("finalize full session"));
     }
 }
