@@ -4,6 +4,7 @@
 //! in-game window from normal Win32 window/process metadata. Plugins must stay
 //! anti-cheat-safe: no injection, no memory reads, no game-process hooks.
 
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
@@ -31,6 +32,9 @@ pub struct GamePluginInfo {
     pub default_enabled: bool,
     pub default_recording_mode: GameRecordingMode,
     pub event_markers: bool,
+    /// Icon for the UI: the plugin's bundled icon URL, or a cached icon
+    /// extracted from the running game's executable. None when neither exists.
+    pub icon: Option<String>,
 }
 
 pub struct GamePlugin {
@@ -39,6 +43,9 @@ pub struct GamePlugin {
     pub summary: &'static str,
     pub default_enabled: bool,
     pub default_recording_mode: GameRecordingMode,
+    /// Bundled icon shipped with the plugin (a webview-relative URL). When
+    /// None, the icon is extracted from the game's executable on detection.
+    pub icon: Option<&'static str>,
     pub match_window: WindowMatcher,
     pub event_source: Option<EventSourceSpawner>,
 }
@@ -67,7 +74,51 @@ impl GamePlugin {
             default_enabled: self.default_enabled,
             default_recording_mode: self.default_recording_mode,
             event_markers: self.event_source.is_some(),
+            icon: self.icon_string(),
         }
+    }
+
+    /// Resolve the plugin's icon for the UI: prefer the bundled icon, else a
+    /// previously-cached icon extracted from the running game's executable.
+    fn icon_string(&self) -> Option<String> {
+        if let Some(icon) = self.icon {
+            return Some(icon.to_string());
+        }
+        let cache = plugin_icon_cache_path(self.id)?;
+        let bytes = std::fs::read(&cache).ok()?;
+        Some(crate::game_icon::png_data_url(&bytes))
+    }
+}
+
+fn plugin_icon_cache_path(plugin_id: &str) -> Option<PathBuf> {
+    // Plugin ids are simple slugs; reject anything that could escape the dir.
+    if plugin_id.is_empty() || plugin_id.contains(['/', '\\', '.']) {
+        return None;
+    }
+    Some(crate::settings::icon_cache_dir().join(format!("{plugin_id}.png")))
+}
+
+/// Cache an icon-less plugin's icon by extracting it from the running game's
+/// executable. No-op for plugins that ship an icon or already have a cache.
+/// Cheap to call on the detection poll loop: it short-circuits before any work.
+pub fn ensure_plugin_icon_cached(plugin_id: &str, exe_path: &str) {
+    let needs_extraction = all()
+        .iter()
+        .any(|plugin| plugin.id == plugin_id && plugin.icon.is_none());
+    if !needs_extraction {
+        return;
+    }
+    let Some(cache) = plugin_icon_cache_path(plugin_id) else {
+        return;
+    };
+    if cache.exists() {
+        return;
+    }
+    if let Some(png) = crate::game_icon::extract_exe_icon_png(exe_path) {
+        if let Some(parent) = cache.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&cache, png);
     }
 }
 
@@ -105,6 +156,7 @@ static GAME_PLUGINS: [GamePlugin; 1] = [GamePlugin {
     summary: "Auto-records full matches when the in-game window is active.",
     default_enabled: true,
     default_recording_mode: GameRecordingMode::FullSession,
+    icon: Some("assets/games/league-of-legends.png"),
     match_window: league_of_legends::match_window,
     event_source: Some(league_of_legends::spawn_event_source),
 }];

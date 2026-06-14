@@ -1,0 +1,146 @@
+//! Extract a Windows executable's embedded icon as a PNG `data:` URL so the UI
+//! can show real per-game icons. Uses only documented shell + GDI calls on the
+//! file path the user pointed us at — no injection, no game memory. Every GDI
+//! handle is released before returning.
+
+use std::ffi::OsStr;
+use std::mem::size_of;
+use std::os::windows::ffi::OsStrExt;
+
+use base64::Engine as _;
+use windows_sys::Win32::Graphics::Gdi::{
+    DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, DIB_RGB_COLORS,
+};
+use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+use windows_sys::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
+
+/// The shell's "large" icon is 32x32 — plenty for a list badge.
+pub fn extract_exe_icon_png(exe_path: &str) -> Option<Vec<u8>> {
+    let trimmed = exe_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let wide: Vec<u16> = OsStr::new(trimmed)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mut info: SHFILEINFOW = std::mem::zeroed();
+        let ok = SHGetFileInfoW(
+            wide.as_ptr(),
+            FILE_ATTRIBUTE_NORMAL,
+            &mut info,
+            size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        );
+        if ok == 0 || info.hIcon.is_null() {
+            return None;
+        }
+        let png = icon_to_png(info.hIcon);
+        DestroyIcon(info.hIcon);
+        png
+    }
+}
+
+/// Wrap PNG bytes as a `data:` URL the webview can use directly in `<img src>`.
+pub fn png_data_url(png: &[u8]) -> String {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+    format!("data:image/png;base64,{b64}")
+}
+
+/// Convenience: extract an exe's icon straight to a `data:` URL.
+pub fn extract_exe_icon_data_url(exe_path: &str) -> Option<String> {
+    extract_exe_icon_png(exe_path).map(|png| png_data_url(&png))
+}
+
+unsafe fn icon_to_png(hicon: HICON) -> Option<Vec<u8>> {
+    let mut icon_info: ICONINFO = std::mem::zeroed();
+    if GetIconInfo(hicon, &mut icon_info) == 0 {
+        return None;
+    }
+    let hbm_color = icon_info.hbmColor;
+    let hbm_mask = icon_info.hbmMask;
+
+    // Pull the color bitmap as top-down 32-bit BGRA, then free both bitmaps.
+    let result = color_bitmap_to_png(hbm_color);
+    if !hbm_color.is_null() {
+        DeleteObject(hbm_color as _);
+    }
+    if !hbm_mask.is_null() {
+        DeleteObject(hbm_mask as _);
+    }
+    result
+}
+
+unsafe fn color_bitmap_to_png(hbm_color: windows_sys::Win32::Graphics::Gdi::HBITMAP) -> Option<Vec<u8>> {
+    if hbm_color.is_null() {
+        return None;
+    }
+    let mut bm: BITMAP = std::mem::zeroed();
+    if GetObjectW(
+        hbm_color as _,
+        size_of::<BITMAP>() as i32,
+        (&mut bm as *mut BITMAP).cast(),
+    ) == 0
+    {
+        return None;
+    }
+    let (width, height) = (bm.bmWidth, bm.bmHeight);
+    if width <= 0 || height <= 0 || width > 1024 || height > 1024 {
+        return None;
+    }
+
+    let mut bmi: BITMAPINFO = std::mem::zeroed();
+    bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height; // negative => top-down rows
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB as u32;
+
+    let mut buf = vec![0u8; (width * height) as usize * 4];
+    let dc = GetDC(std::ptr::null_mut());
+    if dc.is_null() {
+        return None;
+    }
+    let lines = GetDIBits(
+        dc,
+        hbm_color,
+        0,
+        height as u32,
+        buf.as_mut_ptr().cast(),
+        &mut bmi,
+        DIB_RGB_COLORS,
+    );
+    ReleaseDC(std::ptr::null_mut(), dc);
+    if lines == 0 {
+        return None;
+    }
+
+    // GetDIBits hands back BGRA. Icons without a real alpha channel come back
+    // fully transparent; treat those as opaque so they don't vanish.
+    let has_alpha = buf.chunks_exact(4).any(|px| px[3] != 0);
+    for px in buf.chunks_exact_mut(4) {
+        px.swap(0, 2); // BGRA -> RGBA
+        if !has_alpha {
+            px[3] = 255;
+        }
+    }
+
+    encode_png(width as u32, height as u32, &buf)
+}
+
+fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(rgba).ok()?;
+    }
+    Some(out)
+}

@@ -128,6 +128,10 @@ pub struct AudioSettings {
     pub mic_channels: AudioChannelMode,
 }
 
+/// Guard against a pathological icon bloating settings.json. A 32x32 RGBA PNG
+/// data URL is a few KB; this leaves generous headroom for larger icons.
+const MAX_ICON_DATA_URL_LEN: usize = 256 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CustomGameSettings {
     pub id: String,
@@ -142,6 +146,10 @@ pub struct CustomGameSettings {
     pub window_title: String,
     #[serde(default)]
     pub recording_mode: GameRecordingMode,
+    /// Icon extracted from the game's executable, as a PNG `data:` URL. Shown
+    /// in the custom-games list and on the game's clips.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 impl CustomGameSettings {
@@ -155,6 +163,10 @@ impl CustomGameSettings {
             .take()
             .map(|path| path.trim().to_string())
             .filter(|path| !path.is_empty());
+        self.icon = self
+            .icon
+            .take()
+            .filter(|icon| icon.starts_with("data:image/") && icon.len() <= MAX_ICON_DATA_URL_LEN);
     }
 
     fn has_match_identity(&self) -> bool {
@@ -528,6 +540,7 @@ impl AppSettings {
                 }
             },
             active_game_plugin_id: None,
+            active_game: None,
             media_dir: self.media_dir_path()?,
             lol_url,
             replay_window_s: self.replay_window_s,
@@ -772,16 +785,25 @@ pub fn quota_bytes_from_gb(gb: f64) -> Result<Option<u64>, String> {
     Ok(Some(bytes.round() as u64))
 }
 
-pub fn settings_path() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
+fn config_base() -> PathBuf {
+    std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("USERPROFILE")
                 .map(PathBuf::from)
                 .map(|home| home.join("AppData").join("Roaming"))
         })
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("Clipline").join("settings.json")
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Clipline")
+}
+
+pub fn settings_path() -> PathBuf {
+    config_base().join("settings.json")
+}
+
+/// Where extracted plugin icons are cached (the bundled-icon fallback).
+pub fn icon_cache_dir() -> PathBuf {
+    config_base().join("icons")
 }
 
 pub fn default_media_dir() -> String {
@@ -1575,6 +1597,7 @@ mod tests {
                     process_path: Some(r"C:\Windows\System32\notepad.exe".into()),
                     window_title: "Untitled - Notepad".into(),
                     recording_mode: GameRecordingMode::FullSession,
+                    icon: None,
                 }],
             },
             ..AppSettings::default()
@@ -1600,6 +1623,7 @@ mod tests {
                     process_path: None,
                     window_title: " ".into(),
                     recording_mode: GameRecordingMode::ReplaysOnly,
+                    icon: None,
                 }],
             },
             ..AppSettings::default()
