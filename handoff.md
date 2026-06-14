@@ -148,8 +148,8 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     (`ffmpeg.rs`) locates `ffmpeg.exe` and reports `{h264,hevc,av1}_{nvenc,amf,qsv}` + `libsvtav1`
     by parsing `-encoders` and test-encoding each hardware encoder. `probe.rs` now carries an
     `EncoderApi` axis (Mft vs Ffmpeg) and `rank_encoders(caps, decodable, preference)` — backend
-    merit, then codec preference, MFT preferred over FFmpeg for the same combo, Auto restricted to
-    player-decodable codecs. The recorder walks the ranked candidates until one opens (behind
+    merit, MFT preferred over FFmpeg for the same combo, Auto restricted to player-decodable codecs
+    and now H.264-first for playback compatibility. The recorder walks the ranked candidates until one opens (behind
     `Box<dyn Encoder>`), reports the active encoder in the sidebar status, and warns on explicit
     fallback. Settings has one Encoder dropdown listing the machine's real backend×codec combos;
     the UI probes WebView2 (`canPlayType`) for HEVC/AV1, marks undecodable codecs "(limited

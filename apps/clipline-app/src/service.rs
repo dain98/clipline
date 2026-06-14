@@ -67,8 +67,8 @@ pub enum AudioChannelMode {
     Stereo,
 }
 
-/// The user's encoder choice. `Auto` follows the ddoc §4 merit order
-/// restricted to player-decodable codecs; the explicit variants force a
+/// The user's encoder choice. `Auto` prefers H.264 for playback compatibility while
+/// respecting backend merit order within a codec; the explicit variants force a
 /// (backend, codec) pair (still falling back through Auto if it can't open).
 /// Legacy saved values (`auto`, `nvenc_h264`, `amf_h264`, `quick_sync_h264`)
 /// still deserialize.

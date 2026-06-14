@@ -529,7 +529,7 @@ function syncRecordingFields() {
   const encoderSummary = $("encoder-summary");
   if (encoder.id === "auto") {
     encoderSummary.textContent =
-      "Clipline picks the best available encoder the review player can decode.";
+      "Clipline records H.264 when available for broad playback compatibility.";
     encoderSummary.classList.remove("warn");
   } else {
     const caveat = PlayerCore.encoderCodecCaveat(encoder.codec, decodableCodecs);
