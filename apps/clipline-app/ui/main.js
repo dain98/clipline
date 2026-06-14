@@ -43,7 +43,9 @@ const {
   qualityIndexForBitrate,
   smoothnessPreset,
   smoothnessIndexForFps,
+  outputResolutionOption,
   captureSourceLabel,
+  captureStatusLabel,
 } = PlayerCore;
 
 const video = $("video");
@@ -53,9 +55,12 @@ let currentClip = null;
 let clipsCache = [];
 let currentSettings = null;
 let recordingActive = true;
+let fullSessionRecordingActive = false;
 let displays = [];
 let audioDevices = { outputs: [], inputs: [] };
 let videoEncoders = [];
+let gamePlugins = [];
+let gamePluginSettings = {};
 let customGames = [];
 let gameWindows = [];
 let activeDetectedGame = null;
@@ -119,12 +124,17 @@ function fillSettings(s) {
   const audio = { ...defaultAudioSettings(), ...(s.audio || {}) };
   const replayStorage = { ...defaultReplayStorageSettings(), ...(s.replay_storage || {}) };
   const games = { ...defaultGameSettings(), ...(s.games || {}) };
+  gamePluginSettings = normalizeGamePluginSettingsMap(games.plugins || {});
   customGames = (games.custom_games || []).map(normalizeCustomGame);
   currentSettings = {
     ...s,
     audio,
     replay_storage: replayStorage,
-    games: { ...games, custom_games: customGames.map((game) => ({ ...game })) },
+    games: {
+      ...games,
+      plugins: { ...gamePluginSettings },
+      custom_games: customGames.map((game) => ({ ...game })),
+    },
   };
   regionState = s.capture_region ?? regionState;
   captureTargetDirty = false;
@@ -138,7 +148,10 @@ function fillSettings(s) {
   $("set-buffer").value = Number(s.buffer_seconds) || ((Number(s.replay_window_s) || 60) + 15);
   $("set-replay").value = Math.min(120, Number(s.replay_window_s) || 60);
   $("set-encoder").value = s.video_encoder || "auto";
-  $("set-bitrate").value = qualityIndexForBitrate(s.bitrate_mbps);
+  $("set-output-resolution").value = outputResolutionOption(s.output_resolution).id;
+  $("set-bitrate").value = s.video_quality
+    ? PlayerCore.qualityIndexForId(s.video_quality)
+    : qualityIndexForBitrate(s.bitrate_mbps, $("set-output-resolution").value);
   $("set-fps").value = smoothnessIndexForFps(s.fps);
   $("set-quota").value = s.disk_quota_gb;
   $("set-media-dir").value = s.media_dir ?? "";
@@ -155,6 +168,7 @@ function fillSettings(s) {
   syncAudioFields();
   syncRecordingFields();
   syncReplayStorageFields();
+  renderGamePlugins();
   renderCustomGames();
   updateGameDetectionStatus();
   updateCaptureStatus();
@@ -176,6 +190,7 @@ function readSettings() {
       : capture.capture_region,
     games: {
       auto_detect: $("set-games-auto-detect").checked,
+      plugins: readGamePluginSettings(),
       custom_games: customGames.map((game) => ({ ...game })),
     },
     audio: {
@@ -192,7 +207,12 @@ function readSettings() {
     buffer_seconds: replay + 15,
     replay_window_s: replay,
     video_encoder: $("set-encoder").value,
-    bitrate_mbps: recordingQualityPreset(Number($("set-bitrate").value)).bitrate,
+    output_resolution: outputResolutionOption($("set-output-resolution").value).id,
+    video_quality: recordingQualityPreset(Number($("set-bitrate").value)).id,
+    bitrate_mbps: recordingQualityPreset(
+      Number($("set-bitrate").value),
+      $("set-output-resolution").value
+    ).bitrate,
     fps: smoothnessPreset(Number($("set-fps").value)).fps,
     disk_quota_gb: Number($("set-quota").value),
     media_dir: $("set-media-dir").value.trim(),
@@ -230,12 +250,43 @@ function defaultReplayStorageSettings() {
 function defaultGameSettings() {
   return {
     auto_detect: true,
+    plugins: {},
     custom_games: [],
+  };
+}
+
+function defaultGamePluginSettings(plugin) {
+  return {
+    enabled: plugin ? plugin.default_enabled !== false : true,
+    recording_mode: normalizeGameRecordingMode(
+      plugin && plugin.default_recording_mode ? plugin.default_recording_mode : "full_session"
+    ),
   };
 }
 
 function normalizeGameRecordingMode(mode) {
   return mode === "full_session" ? "full_session" : "replays_only";
+}
+
+function normalizeGamePluginSettings(settings, plugin = null) {
+  const defaults = defaultGamePluginSettings(plugin);
+  return {
+    enabled: settings && Object.prototype.hasOwnProperty.call(settings, "enabled")
+      ? settings.enabled !== false
+      : defaults.enabled,
+    recording_mode: normalizeGameRecordingMode(
+      settings && settings.recording_mode ? settings.recording_mode : defaults.recording_mode
+    ),
+  };
+}
+
+function normalizeGamePluginSettingsMap(settings) {
+  const out = {};
+  for (const [id, value] of Object.entries(settings || {})) {
+    const cleanId = String(id || "").trim();
+    if (cleanId) out[cleanId] = normalizeGamePluginSettings(value);
+  }
+  return out;
 }
 
 function normalizeCustomGame(game) {
@@ -248,6 +299,135 @@ function normalizeCustomGame(game) {
     window_title: String(game.window_title || "").trim(),
     recording_mode: normalizeGameRecordingMode(game.recording_mode),
   };
+}
+
+function selectedRecordingMode(name) {
+  const input = document.querySelector(`input[name="${name}"]:checked`);
+  return normalizeGameRecordingMode(input && input.value);
+}
+
+function setRecordingMode(name, mode) {
+  const normalized = normalizeGameRecordingMode(mode);
+  document.querySelectorAll(`input[name="${name}"]`).forEach((input) => {
+    input.checked = input.value === normalized;
+  });
+}
+
+function gamePluginSetting(plugin) {
+  return normalizeGamePluginSettings(gamePluginSettings[plugin.id], plugin);
+}
+
+function readGamePluginSettings() {
+  const next = {
+    ...normalizeGamePluginSettingsMap(
+      currentSettings && currentSettings.games ? currentSettings.games.plugins : {}
+    ),
+  };
+  for (const plugin of gamePlugins) {
+    next[plugin.id] = normalizeGamePluginSettings({
+      enabled: document.querySelector(`[data-game-plugin-enabled="${plugin.id}"]`)?.checked,
+      recording_mode: selectedRecordingMode(`game-plugin-mode-${plugin.id}`),
+    }, plugin);
+  }
+  gamePluginSettings = next;
+  return { ...gamePluginSettings };
+}
+
+function gamePluginSummary(plugin, settings = gamePluginSetting(plugin)) {
+  if (!settings.enabled) {
+    return `Disabled. ${plugin.name} will not change capture or start session recordings.`;
+  }
+  if (settings.recording_mode === "full_session") {
+    return "Full-session recording starts when the match window appears.";
+  }
+  return "Replay capture switches to the match window without saving a full session.";
+}
+
+function updateGamePluginSummary(plugin) {
+  const summary = document.querySelector(`[data-game-plugin-summary="${plugin.id}"]`);
+  if (summary) summary.textContent = gamePluginSummary(plugin);
+}
+
+function renderGamePluginModeControl(plugin, settings) {
+  const control = document.createElement("div");
+  control.className = "segmented-control game-profile-mode";
+  control.setAttribute("role", "radiogroup");
+  control.setAttribute("aria-label", `${plugin.name} recording mode`);
+  [
+    ["replays_only", "Replays only"],
+    ["full_session", "Full session"],
+  ].forEach(([value, label]) => {
+    const option = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = `game-plugin-mode-${plugin.id}`;
+    input.value = value;
+    input.checked = settings.recording_mode === value;
+    input.addEventListener("change", () => {
+      if (input.checked) {
+        gamePluginSettings[plugin.id] = {
+          ...gamePluginSetting(plugin),
+          recording_mode: value,
+        };
+        updateGamePluginSummary(plugin);
+        updateGameDetectionStatus();
+      }
+    });
+    const text = document.createElement("span");
+    text.textContent = label;
+    option.append(input, text);
+    control.appendChild(option);
+  });
+  return control;
+}
+
+function renderGamePlugins() {
+  const root = $("supported-games");
+  root.replaceChildren();
+  if (!gamePlugins.length) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "no game plugins installed";
+    root.appendChild(empty);
+    return;
+  }
+
+  for (const plugin of gamePlugins) {
+    const settings = gamePluginSetting(plugin);
+    gamePluginSettings[plugin.id] = settings;
+
+    const row = document.createElement("div");
+    row.className = "game-profile supported";
+    row.dataset.gamePluginId = plugin.id;
+
+    const enabled = document.createElement("label");
+    enabled.className = "check-line";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = settings.enabled;
+    checkbox.dataset.gamePluginEnabled = plugin.id;
+    checkbox.addEventListener("change", () => {
+      gamePluginSettings[plugin.id] = {
+        ...gamePluginSetting(plugin),
+        enabled: checkbox.checked,
+      };
+      updateGamePluginSummary(plugin);
+      updateGameDetectionStatus();
+    });
+    enabled.appendChild(checkbox);
+
+    const meta = document.createElement("div");
+    meta.className = "game-profile-meta";
+    const name = document.createElement("strong");
+    name.textContent = plugin.name;
+    const summary = document.createElement("span");
+    summary.dataset.gamePluginSummary = plugin.id;
+    summary.textContent = gamePluginSummary(plugin, settings);
+    meta.append(name, summary);
+
+    row.append(enabled, meta, renderGamePluginModeControl(plugin, settings));
+    root.appendChild(row);
+  }
 }
 
 function displayCaptureValue(display) {
@@ -338,7 +518,8 @@ function syncCaptureFields() {
 function syncRecordingFields() {
   const replay = Number($("set-replay").value);
   const encoder = selectedVideoEncoder();
-  const quality = recordingQualityPreset(Number($("set-bitrate").value));
+  const outputResolution = outputResolutionOption($("set-output-resolution").value);
+  const quality = recordingQualityPreset(Number($("set-bitrate").value), outputResolution.id);
   const smoothness = smoothnessPreset(Number($("set-fps").value));
   syncRangeProgress($("set-replay"));
   syncRangeProgress($("set-bitrate"));
@@ -355,6 +536,10 @@ function syncRecordingFields() {
     encoderSummary.textContent = caveat || `${encoder.name} is used for new recordings.`;
     encoderSummary.classList.toggle("warn", Boolean(caveat));
   }
+  $("output-resolution-summary").textContent =
+    outputResolution.id === "source"
+      ? "Uses the captured size, capped only when needed for encoder compatibility."
+      : `${outputResolution.label} output, ${outputResolution.hint}.`;
   $("quality-summary").textContent = `${quality.label} quality - ${quality.hint}.`;
   $("fps-summary").textContent = `${smoothness.label} - ${smoothness.hint}.`;
   syncReplayStorageFields();
@@ -364,7 +549,7 @@ function syncReplayStorageFields() {
   const enabled = $("set-replay-disk-enabled").checked;
   const fields = $("replay-disk-fields");
   fields.hidden = !enabled;
-  const quality = recordingQualityPreset(Number($("set-bitrate").value));
+  const quality = recordingQualityPreset(Number($("set-bitrate").value), $("set-output-resolution").value);
   const gbPerHour = quality.bitrate * 1_000_000 / 8 * 3600 / (1000 ** 3);
   $("replay-disk-estimate").textContent =
     `${quality.bitrate} Mbps: about ${gbPerHour.toFixed(quality.bitrate >= 40 ? 0 : 1)} GB/hour written while recording.`;
@@ -578,7 +763,11 @@ function updateCaptureStatus() {
     activeDetectedGame && activeDetectedGame.active
       ? `Game: ${activeDetectedGame.name}`
       : fallbackCaptureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
-  $("capture-status-label").textContent = recordingActive ? `Capturing ${source}` : "Recording stopped";
+  $("capture-status-label").textContent = captureStatusLabel(
+    source,
+    recordingActive,
+    fullSessionRecordingActive
+  );
   $("capture-status").classList.toggle("stopped", !recordingActive);
   $("capture-status").setAttribute("aria-pressed", String(recordingActive));
   $("capture-status").title = recordingActive ? "Stop recording" : `Start ${source} recording`;
@@ -731,6 +920,18 @@ async function loadVideoEncoders() {
   }
   renderVideoEncoderSelect();
   if (currentSettings) syncRecordingFields();
+}
+
+async function loadGamePlugins() {
+  try {
+    gamePlugins = await invoke("list_game_plugins");
+    renderGamePlugins();
+    updateGameDetectionStatus();
+  } catch (e) {
+    gamePlugins = [];
+    $("error").textContent = e;
+    renderGamePlugins();
+  }
 }
 
 function gameNameFromWindow(win) {
@@ -897,9 +1098,19 @@ function updateGameDetectionStatus() {
     $("game-detection-status").textContent =
       `Active: ${activeDetectedGame.name} · ${activeDetectedGame.window_title}`;
   } else {
-    $("game-detection-status").textContent = customGames.length
-      ? "No saved custom game is active."
-      : "Add a running game window, then save.";
+    if (!$("set-games-auto-detect").checked) {
+      $("game-detection-status").textContent = "Game detection is off.";
+      return;
+    }
+    const enabledPlugins = gamePlugins.filter((plugin) => gamePluginSetting(plugin).enabled);
+    if (enabledPlugins.length) {
+      const names = enabledPlugins.map((plugin) => plugin.name).join(", ");
+      $("game-detection-status").textContent = `Waiting for: ${names}.`;
+    } else if (customGames.length) {
+      $("game-detection-status").textContent = "No saved custom game is active.";
+    } else {
+      $("game-detection-status").textContent = "Enable a game plugin or add a running game window, then save.";
+    }
   }
 }
 
@@ -1546,6 +1757,7 @@ async function chooseReplayCacheFolder() {
 listen("status", (e) => {
   const s = e.payload;
   recordingActive = s.recording;
+  fullSessionRecordingActive = Boolean(s.full_session);
   $("dot").className = "dot" + (s.recording ? " on" : "");
   $("rail-dot").className = "dot" + (s.recording ? " on" : "");
   updateCaptureStatus();
@@ -1589,6 +1801,10 @@ listen("mic-test-stopped", () => {
 
 listen("game-detection", (e) => {
   activeDetectedGame = e.payload || null;
+  fullSessionRecordingActive =
+    activeDetectedGame &&
+    activeDetectedGame.active &&
+    normalizeGameRecordingMode(activeDetectedGame.recording_mode) === "full_session";
   updateCaptureStatus();
   updateGameDetectionStatus();
 });
@@ -1624,7 +1840,8 @@ $("choose-replay-cache-folder").addEventListener("click", chooseReplayCacheFolde
 $("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);
 $("set-replay-disk-quota").addEventListener("input", syncReplayStorageFields);
 $("set-replay-disk-quota").addEventListener("change", syncReplayStorageFields);
-for (const id of ["set-buffer", "set-replay", "set-encoder", "set-bitrate", "set-fps"]) {
+$("set-games-auto-detect").addEventListener("change", updateGameDetectionStatus);
+for (const id of ["set-buffer", "set-replay", "set-encoder", "set-output-resolution", "set-bitrate", "set-fps"]) {
   $(id).addEventListener("input", syncRecordingFields);
   $(id).addEventListener("change", syncRecordingFields);
 }
@@ -1799,7 +2016,12 @@ updateViews();
 syncPlayState();
 syncVolume();
 syncAllRangeProgress();
-invoke("get_settings").then(fillSettings).catch((e) => $("error").textContent = e);
+async function loadInitialSettings() {
+  await loadGamePlugins();
+  const settings = await invoke("get_settings");
+  fillSettings(settings);
+}
+loadInitialSettings().catch((e) => $("error").textContent = e);
 loadDisplays();
 loadAudioDevices();
 loadVideoEncoders();

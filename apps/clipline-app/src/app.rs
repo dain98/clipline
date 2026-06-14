@@ -3,7 +3,7 @@
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
@@ -11,9 +11,12 @@ use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
+use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
 use crate::service::{self, Cmd, Event, ServiceOptions};
-use crate::settings::{parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode};
+use crate::settings::{
+    parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode, GameRecordingMode,
+};
 
 #[derive(serde::Serialize)]
 struct DisplayInfo {
@@ -46,6 +49,7 @@ struct GameDetectionEvent {
     window_title: Option<String>,
     process_id: Option<u32>,
     exe_name: Option<String>,
+    recording_mode: Option<GameRecordingMode>,
 }
 
 impl GameDetectionEvent {
@@ -57,6 +61,7 @@ impl GameDetectionEvent {
                 window_title: Some(game.window_title.clone()),
                 process_id: Some(game.process_id),
                 exe_name: Some(game.exe_name.clone()),
+                recording_mode: Some(game.recording_mode),
             },
             None => Self {
                 active: false,
@@ -64,6 +69,7 @@ impl GameDetectionEvent {
                 window_title: None,
                 process_id: None,
                 exe_name: None,
+                recording_mode: None,
             },
         }
     }
@@ -116,6 +122,7 @@ struct RuntimeInner {
     settings: AppSettings,
     lol_url: Option<String>,
     active_game: Option<DetectedGame>,
+    last_save_request: Option<Instant>,
     /// Codecs WebView2 can decode, reported by the frontend. Drives the
     /// recorder's Automatic selection; H.264 is the always-safe default.
     decodable_codecs: Vec<service::Codec>,
@@ -128,6 +135,7 @@ impl RuntimeState {
             settings,
             lol_url,
             active_game: None,
+            last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
         }))
     }
@@ -161,8 +169,32 @@ impl RuntimeState {
                 title: game.window_title.clone(),
             };
             opts.recording_mode = game.recording_mode.into();
+            if crate::game_plugins::contains(&game.id) {
+                opts.active_game_plugin_id = Some(game.id.clone());
+            }
         }
         Ok(opts)
+    }
+
+    fn request_save(&self) -> bool {
+        const DEBOUNCE: Duration = Duration::from_millis(500);
+
+        if let Ok(mut inner) = self.0.lock() {
+            let Some(tx) = inner.tx.as_ref().cloned() else {
+                return false;
+            };
+            let now = Instant::now();
+            if inner
+                .last_save_request
+                .is_some_and(|last| now.duration_since(last) < DEBOUNCE)
+            {
+                return false;
+            }
+            inner.last_save_request = Some(now);
+            let _ = tx.send(Cmd::Save);
+            return true;
+        }
+        false
     }
 
     fn send(&self, cmd: Cmd) -> bool {
@@ -270,7 +302,16 @@ impl RuntimeState {
         let (old_tx, next_options, emit_event) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
-                if inner.active_game != detected {
+                if game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref()) {
+                    inner.active_game = detected;
+                    let old_tx = inner.tx.take();
+                    let next_options = if old_tx.is_some() {
+                        Some(Self::options(&inner)?)
+                    } else {
+                        None
+                    };
+                    (old_tx, next_options, true)
+                } else if inner.active_game != detected {
                     inner.active_game = detected;
                     (None, None, true)
                 } else {
@@ -313,19 +354,30 @@ fn same_game_window(current: Option<&DetectedGame>, next: Option<&DetectedGame>)
     }
 }
 
+fn game_recording_mode_changed(
+    current: Option<&DetectedGame>,
+    next: Option<&DetectedGame>,
+) -> bool {
+    match (current, next) {
+        (Some(current), Some(next)) => current.recording_mode != next.recording_mode,
+        _ => false,
+    }
+}
+
 fn active_game_still_configured(settings: &AppSettings, active: Option<&DetectedGame>) -> bool {
     let Some(active) = active else { return true };
     settings.games.auto_detect
-        && settings
-            .games
-            .custom_games
-            .iter()
-            .any(|game| game.enabled && game.id == active.id)
+        && (crate::games::built_in_game_still_configured(&settings.games, &active.id)
+            || settings
+                .games
+                .custom_games
+                .iter()
+                .any(|game| game.enabled && game.id == active.id))
 }
 
 #[tauri::command]
 fn save_replay(state: tauri::State<RuntimeState>) {
-    state.send(Cmd::Save);
+    state.request_save();
 }
 
 #[tauri::command]
@@ -447,6 +499,11 @@ fn probe_encoders() -> Vec<service::EncoderOption> {
 #[tauri::command]
 fn list_game_windows() -> Vec<GameWindowInfo> {
     crate::games::list_game_windows()
+}
+
+#[tauri::command]
+fn list_game_plugins() -> Vec<GamePluginInfo> {
+    crate::games::game_plugin_catalog()
 }
 
 /// The frontend reports which codecs WebView2 can decode (canPlayType) so
@@ -572,6 +629,7 @@ fn save_settings<R: Runtime>(
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
     state.restart(app, settings.clone())?;
     tray_items.set_hotkey_label(&settings.hotkey)?;
+    crate::hotkeys::set_save_hotkey(&settings.hotkey)?;
     storage_settings.set_quota_bytes(quota_bytes);
     storage_settings.set_media_dir(media_dir);
     Ok(settings)
@@ -633,7 +691,7 @@ pub fn run() {
                     if event.state() == ShortcutState::Pressed {
                         let state = _app.state::<RuntimeState>();
                         if state.active_shortcut_matches(shortcut) {
-                            state.send(Cmd::Save);
+                            state.request_save();
                         }
                     }
                 })
@@ -649,6 +707,7 @@ pub fn run() {
             list_audio_devices,
             probe_encoders,
             report_decode_support,
+            list_game_plugins,
             list_game_windows,
             memory_status,
             start_microphone_test,
@@ -664,6 +723,14 @@ pub fn run() {
         ])
         .setup(move |app| {
             app.global_shortcut().register(hotkey)?;
+            if let Err(e) = crate::hotkeys::install_save_hook(&settings.hotkey, {
+                let app = app.handle().clone();
+                move || {
+                    app.state::<RuntimeState>().request_save();
+                }
+            }) {
+                eprintln!("low-level save hotkey unavailable: {e}");
+            }
             // Bound the asset protocol to the configured media folder so clips
             // under a custom root play back, while the static config scope stays
             // narrow (the default Videos/Clipline location).
@@ -695,7 +762,7 @@ pub fn run() {
                         }
                     }
                     "save" => {
-                        app.state::<RuntimeState>().send(Cmd::Save);
+                        app.state::<RuntimeState>().request_save();
                     }
                     "quit" => {
                         app.state::<MicTestState>().stop();
@@ -895,6 +962,62 @@ mod tests {
     }
 
     #[test]
+    fn detected_game_recording_mode_change_requires_service_restart() {
+        let current = DetectedGame {
+            id: "custom-game".into(),
+            name: "Game".into(),
+            hwnd: 42,
+            window_title: "Game".into(),
+            process_id: 7,
+            exe_name: "game.exe".into(),
+            recording_mode: GameRecordingMode::ReplaysOnly,
+        };
+        let updated_mode = DetectedGame {
+            recording_mode: GameRecordingMode::FullSession,
+            ..current.clone()
+        };
+        let updated_title = DetectedGame {
+            window_title: "Game - Loading".into(),
+            ..current.clone()
+        };
+
+        assert!(same_game_window(Some(&current), Some(&updated_mode)));
+        assert!(game_recording_mode_changed(
+            Some(&current),
+            Some(&updated_mode)
+        ));
+        assert!(!game_recording_mode_changed(
+            Some(&current),
+            Some(&updated_title)
+        ));
+    }
+
+    #[test]
+    fn built_in_league_profile_counts_as_active_game_configuration() {
+        let active = DetectedGame {
+            id: crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+            name: "League of Legends".into(),
+            hwnd: 42,
+            window_title: "League of Legends (TM) Client".into(),
+            process_id: 7,
+            exe_name: "League of Legends.exe".into(),
+            recording_mode: GameRecordingMode::FullSession,
+        };
+        let mut settings = AppSettings::default();
+
+        assert!(active_game_still_configured(&settings, Some(&active)));
+
+        settings.games.plugins.insert(
+            crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+            crate::settings::GamePluginSettings {
+                enabled: false,
+                recording_mode: GameRecordingMode::FullSession,
+            },
+        );
+        assert!(!active_game_still_configured(&settings, Some(&active)));
+    }
+
+    #[test]
     fn active_full_session_game_sets_service_recording_mode() {
         let inner = RuntimeInner {
             tx: None,
@@ -909,11 +1032,13 @@ mod tests {
                 exe_name: "game.exe".into(),
                 recording_mode: GameRecordingMode::FullSession,
             }),
+            last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
         };
 
         let opts = RuntimeState::options(&inner).unwrap();
 
+        assert_eq!(opts.active_game_plugin_id, None);
         assert_eq!(opts.recording_mode, service::RecordingMode::FullSession);
         assert_eq!(
             opts.capture_source,
@@ -922,5 +1047,33 @@ mod tests {
                 title: "Game Window".into(),
             }
         );
+    }
+
+    #[test]
+    fn active_built_in_game_sets_service_plugin_id_for_event_sources() {
+        let inner = RuntimeInner {
+            tx: None,
+            settings: AppSettings::default(),
+            lol_url: Some("http://mock".into()),
+            active_game: Some(DetectedGame {
+                id: crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+                name: "League of Legends".into(),
+                hwnd: 42,
+                window_title: "League".into(),
+                process_id: 7,
+                exe_name: "League of Legends.exe".into(),
+                recording_mode: GameRecordingMode::FullSession,
+            }),
+            last_save_request: None,
+            decodable_codecs: vec![service::Codec::H264],
+        };
+
+        let opts = RuntimeState::options(&inner).unwrap();
+
+        assert_eq!(
+            opts.active_game_plugin_id.as_deref(),
+            Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID)
+        );
+        assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
     }
 }

@@ -1,6 +1,6 @@
 //! Persisted application settings and mapping to recorder service options.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -8,8 +8,8 @@ use serde_json::{Map, Value};
 use tauri_plugin_global_shortcut::Shortcut;
 
 use crate::service::{
-    default_clips_dir, AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource, RecordingMode,
-    ReplayStorageOptions, ServiceOptions, VideoEncoder,
+    default_clips_dir, AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource,
+    OutputResolution, RecordingMode, ReplayStorageOptions, ServiceOptions, VideoEncoder,
 };
 
 const MAX_REPLAY_WINDOW_S: f64 = 120.0;
@@ -184,10 +184,60 @@ impl From<GameRecordingMode> for RecordingMode {
     }
 }
 
+fn default_game_recording_mode_full_session() -> GameRecordingMode {
+    GameRecordingMode::FullSession
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GamePluginSettings {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_game_recording_mode_full_session")]
+    pub recording_mode: GameRecordingMode,
+}
+
+impl Default for GamePluginSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            recording_mode: GameRecordingMode::FullSession,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoQuality {
+    Compact,
+    #[default]
+    Balanced,
+    Sharp,
+    Maximum,
+}
+
+impl VideoQuality {
+    fn bitrate_mbps(self, resolution: OutputResolution) -> f64 {
+        let table = match resolution {
+            OutputResolution::Source | OutputResolution::P1440 => [6.0, 12.0, 24.0, 40.0],
+            OutputResolution::P1080 => [4.0, 8.0, 16.0, 24.0],
+            OutputResolution::P720 => [2.5, 5.0, 8.0, 12.0],
+            OutputResolution::P480 => [1.5, 3.0, 5.0, 8.0],
+        };
+        match self {
+            Self::Compact => table[0],
+            Self::Balanced => table[1],
+            Self::Sharp => table[2],
+            Self::Maximum => table[3],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct GameSettings {
     #[serde(default = "default_enabled")]
     pub auto_detect: bool,
+    #[serde(default)]
+    pub plugins: BTreeMap<String, GamePluginSettings>,
     #[serde(default)]
     pub custom_games: Vec<CustomGameSettings>,
 }
@@ -196,6 +246,8 @@ pub struct GameSettings {
 struct GameSettingsWire {
     #[serde(default = "default_enabled")]
     auto_detect: bool,
+    #[serde(default)]
+    plugins: BTreeMap<String, GamePluginSettings>,
     #[serde(default, rename = "recording_mode")]
     legacy_recording_mode: Option<GameRecordingMode>,
     #[serde(default)]
@@ -206,6 +258,7 @@ impl Default for GameSettings {
     fn default() -> Self {
         Self {
             auto_detect: true,
+            plugins: BTreeMap::new(),
             custom_games: Vec::new(),
         }
     }
@@ -224,6 +277,7 @@ impl<'de> Deserialize<'de> for GameSettings {
         }
         Ok(Self {
             auto_detect: wire.auto_detect,
+            plugins: wire.plugins,
             custom_games: wire.custom_games,
         })
     }
@@ -231,6 +285,11 @@ impl<'de> Deserialize<'de> for GameSettings {
 
 impl GameSettings {
     fn normalize(&mut self) {
+        self.plugins = std::mem::take(&mut self.plugins)
+            .into_iter()
+            .map(|(id, settings)| (normalize_game_plugin_id(&id), settings))
+            .filter(|(id, _)| !id.is_empty())
+            .collect();
         for game in &mut self.custom_games {
             game.normalize();
         }
@@ -350,10 +409,14 @@ pub struct AppSettings {
     pub audio: AudioSettings,
     pub buffer_seconds: f64,
     pub replay_window_s: f64,
+    #[serde(default)]
+    pub video_quality: VideoQuality,
     pub bitrate_mbps: f64,
     pub fps: u32,
     #[serde(default, deserialize_with = "deserialize_video_encoder")]
     pub video_encoder: VideoEncoder,
+    #[serde(default)]
+    pub output_resolution: OutputResolution,
     pub disk_quota_gb: f64,
     #[serde(default = "default_media_dir")]
     pub media_dir: String,
@@ -372,9 +435,11 @@ impl Default for AppSettings {
             audio: AudioSettings::default(),
             buffer_seconds: 60.0 + BUFFER_HEADROOM_S,
             replay_window_s: 60.0,
+            video_quality: VideoQuality::Balanced,
             bitrate_mbps: 12.0,
             fps: 60,
             video_encoder: VideoEncoder::Auto,
+            output_resolution: OutputResolution::Source,
             disk_quota_gb: 10.0,
             media_dir: default_media_dir(),
             replay_storage: ReplayStorageSettings::default(),
@@ -432,7 +497,7 @@ impl AppSettings {
         }
         validate_range(
             "bitrate Mbps",
-            self.bitrate_mbps,
+            self.effective_bitrate_mbps(),
             MIN_BITRATE_MBPS,
             MAX_BITRATE_MBPS,
         )?;
@@ -462,16 +527,21 @@ impl AppSettings {
                     CaptureSource::DisplayRegion(self.capture_region.to_service_region())
                 }
             },
+            active_game_plugin_id: None,
             media_dir: self.media_dir_path()?,
             lol_url,
             replay_window_s: self.replay_window_s,
-            buffer_bytes: estimated_buffer_bytes(replay_buffer_seconds(self), self.bitrate_mbps),
+            buffer_bytes: estimated_buffer_bytes(
+                replay_buffer_seconds(self),
+                self.effective_bitrate_mbps(),
+            ),
             replay_storage: self.replay_storage.to_service_options()?,
             disk_quota_bytes: quota_bytes_from_gb(self.disk_quota_gb)?,
             recording_mode: RecordingMode::ReplaysOnly,
             fps: self.fps,
-            bitrate_bps: (self.bitrate_mbps * 1_000_000.0).round() as u32,
+            bitrate_bps: (self.effective_bitrate_mbps() * 1_000_000.0).round() as u32,
             video_encoder: self.video_encoder,
+            output_resolution: self.output_resolution,
             // Codecs the in-app player can decode are reported by the frontend
             // at spawn (see app.rs); H.264 is the always-safe default so Auto
             // never records an unplayable clip if that probe hasn't run.
@@ -493,6 +563,13 @@ impl AppSettings {
 
     fn load_from_object(object: &Map<String, Value>) -> Self {
         let defaults = Self::default();
+        let output_resolution =
+            deserialize_field(object, "output_resolution").unwrap_or(defaults.output_resolution);
+        let legacy_bitrate_mbps = f64_field(object, "bitrate_mbps")
+            .map(|value| value.clamp(MIN_BITRATE_MBPS, MAX_BITRATE_MBPS))
+            .unwrap_or(defaults.bitrate_mbps);
+        let video_quality = deserialize_field(object, "video_quality")
+            .unwrap_or_else(|| repair_video_quality_from_legacy_bitrate(legacy_bitrate_mbps));
         let mut settings = Self {
             capture_mode: deserialize_field(object, "capture_mode")
                 .unwrap_or_else(|| defaults.capture_mode.clone()),
@@ -505,14 +582,14 @@ impl AppSettings {
             replay_window_s: f64_field(object, "replay_window_s")
                 .map(|value| value.clamp(MIN_REPLAY_WINDOW_S, MAX_REPLAY_WINDOW_S))
                 .unwrap_or(defaults.replay_window_s),
-            bitrate_mbps: f64_field(object, "bitrate_mbps")
-                .map(|value| value.clamp(MIN_BITRATE_MBPS, MAX_BITRATE_MBPS))
-                .unwrap_or(defaults.bitrate_mbps),
+            video_quality,
+            bitrate_mbps: legacy_bitrate_mbps,
             fps: integer_field(object, "fps")
                 .map(repair_fps)
                 .unwrap_or(defaults.fps),
             video_encoder: deserialize_field(object, "video_encoder")
                 .unwrap_or(defaults.video_encoder),
+            output_resolution,
             disk_quota_gb: f64_field(object, "disk_quota_gb")
                 .map(repair_disk_quota_gb)
                 .unwrap_or(defaults.disk_quota_gb),
@@ -534,6 +611,7 @@ impl AppSettings {
         // persisted. This migrates old fixed 120 s buffers down and keeps the
         // recording footprint proportional to what a save actually needs.
         settings.buffer_seconds = replay_buffer_seconds(&settings);
+        settings.bitrate_mbps = settings.effective_bitrate_mbps();
         if matches!(settings.capture_mode, CaptureMode::WindowTitle)
             && settings.window_title.trim().is_empty()
         {
@@ -547,6 +625,7 @@ impl AppSettings {
         settings.hotkey = normalize_hotkey(&settings.hotkey)?;
         settings.games.normalize();
         settings.media_dir = settings.media_dir_path()?.display().to_string();
+        settings.bitrate_mbps = settings.effective_bitrate_mbps();
         if matches!(settings.replay_storage.mode, ReplayStorageMode::Disk) {
             settings.replay_storage.disk_dir =
                 normalize_replay_cache_dir(&settings.replay_storage.disk_dir)?
@@ -609,6 +688,10 @@ impl AppSettings {
             }
         }
         Ok(())
+    }
+
+    fn effective_bitrate_mbps(&self) -> f64 {
+        self.video_quality.bitrate_mbps(self.output_resolution)
     }
 }
 
@@ -716,6 +799,23 @@ pub fn normalize_media_dir(raw: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn normalize_game_plugin_id(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
 fn deserialize_field<T>(object: &Map<String, Value>, key: &str) -> Option<T>
 where
     T: DeserializeOwned,
@@ -780,6 +880,24 @@ fn repair_fps(value: i64) -> u32 {
         .into_iter()
         .min_by_key(|candidate| value.abs_diff(*candidate))
         .unwrap_or(AppSettings::default().fps)
+}
+
+fn repair_video_quality_from_legacy_bitrate(mbps: f64) -> VideoQuality {
+    [
+        (VideoQuality::Compact, 6.0),
+        (VideoQuality::Balanced, 12.0),
+        (VideoQuality::Sharp, 24.0),
+        (VideoQuality::Maximum, 40.0),
+    ]
+    .into_iter()
+    .min_by(|(_, left), (_, right)| {
+        (mbps - *left)
+            .abs()
+            .partial_cmp(&(mbps - *right).abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
+    .map(|(quality, _)| quality)
+    .unwrap_or_default()
 }
 
 fn repair_disk_quota_gb(value: f64) -> f64 {
@@ -896,6 +1014,7 @@ mod tests {
 
         assert_eq!(settings.capture_mode, CaptureMode::PrimaryMonitor);
         assert!(settings.games.auto_detect);
+        assert!(settings.games.plugins.is_empty());
         assert!(settings.games.custom_games.is_empty());
         assert!(settings.audio.output_enabled);
         assert_eq!(settings.audio.output_device_id, None);
@@ -906,9 +1025,11 @@ mod tests {
         assert_eq!(settings.audio.mic_channels, AudioChannelMode::Mono);
         assert_eq!(settings.replay_window_s, 60.0);
         assert_eq!(settings.buffer_seconds, 75.0);
+        assert_eq!(settings.video_quality, VideoQuality::Balanced);
         assert_eq!(settings.bitrate_mbps, 12.0);
         assert_eq!(settings.fps, 60);
         assert_eq!(settings.video_encoder, VideoEncoder::Auto);
+        assert_eq!(settings.output_resolution, OutputResolution::Source);
         assert_eq!(settings.disk_quota_gb, 10.0);
         assert_eq!(settings.media_dir, default_media_dir());
         assert_eq!(settings.replay_storage, ReplayStorageSettings::default());
@@ -957,6 +1078,7 @@ mod tests {
         assert_eq!(settings.games, GameSettings::default());
         assert_eq!(settings.media_dir, default_media_dir());
         assert_eq!(settings.video_encoder, VideoEncoder::Auto);
+        assert_eq!(settings.output_resolution, OutputResolution::Source);
         assert!(settings.validate().is_ok());
     }
 
@@ -1063,6 +1185,37 @@ mod tests {
         assert_eq!(settings.fps, 90);
         assert_eq!(settings.disk_quota_gb, 6.0);
         assert_eq!(settings.hotkey, "Alt+F9");
+    }
+
+    #[test]
+    fn legacy_bitrate_migrates_to_quality_before_resolution_scaling() {
+        let dir = TestDir::new("legacy-quality-resolution");
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "buffer_seconds": 120.0,
+                "replay_window_s": 60.0,
+                "output_resolution": "720p",
+                "bitrate_mbps": 12.0,
+                "fps": 60,
+                "disk_quota_gb": 10.0,
+                "hotkey": "Alt+F10"
+            }"#,
+        )
+        .unwrap();
+
+        let settings = AppSettings::load_from(&path).unwrap();
+
+        assert_eq!(settings.output_resolution, OutputResolution::P720);
+        assert_eq!(settings.video_quality, VideoQuality::Balanced);
+        assert_eq!(settings.bitrate_mbps, 5.0);
+        assert_eq!(
+            settings.to_service_options(None).unwrap().bitrate_bps,
+            5_000_000
+        );
     }
 
     #[test]
@@ -1241,7 +1394,8 @@ mod tests {
         assert_eq!(settings.audio.mic_channels, AudioChannelMode::Mono);
         assert_eq!(settings.replay_window_s, 120.0);
         assert_eq!(settings.buffer_seconds, 120.0 + 15.0);
-        assert_eq!(settings.bitrate_mbps, 100.0);
+        assert_eq!(settings.video_quality, VideoQuality::Maximum);
+        assert_eq!(settings.bitrate_mbps, 40.0);
         assert_eq!(settings.fps, 120);
         assert_eq!(settings.video_encoder, VideoEncoder::Auto);
         assert_eq!(settings.disk_quota_gb, 0.0);
@@ -1298,6 +1452,7 @@ mod tests {
         assert_eq!(opts.fps, 60);
         assert_eq!(opts.bitrate_bps, 12_000_000);
         assert_eq!(opts.video_encoder, VideoEncoder::Auto);
+        assert_eq!(opts.output_resolution, OutputResolution::Source);
         assert_eq!(opts.disk_quota_bytes, Some(DEFAULT_DISK_QUOTA_BYTES));
         assert_eq!(opts.media_dir, PathBuf::from(default_media_dir()));
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
@@ -1348,6 +1503,20 @@ mod tests {
     }
 
     #[test]
+    fn service_options_include_output_resolution_choice() {
+        let settings = AppSettings {
+            output_resolution: OutputResolution::P720,
+            video_quality: VideoQuality::Sharp,
+            ..AppSettings::default()
+        };
+
+        let opts = settings.to_service_options(None).unwrap();
+
+        assert_eq!(opts.output_resolution, OutputResolution::P720);
+        assert_eq!(opts.bitrate_bps, 8_000_000);
+    }
+
+    #[test]
     fn service_options_include_display_region_source() {
         let settings = AppSettings {
             capture_mode: CaptureMode::DisplayRegion,
@@ -1380,10 +1549,19 @@ mod tests {
         let dir = TestDir::new("round-trip");
         let path = dir.path().join("settings.json");
         let settings = AppSettings {
-            bitrate_mbps: 18.0,
+            video_quality: VideoQuality::Sharp,
+            bitrate_mbps: 16.0,
+            output_resolution: OutputResolution::P1080,
             hotkey: "Ctrl+Alt+F9".into(),
             games: GameSettings {
                 auto_detect: true,
+                plugins: BTreeMap::from([(
+                    "league_of_legends".into(),
+                    GamePluginSettings {
+                        enabled: true,
+                        recording_mode: GameRecordingMode::FullSession,
+                    },
+                )]),
                 custom_games: vec![CustomGameSettings {
                     id: "custom-notepad".into(),
                     name: "Notepad".into(),
@@ -1408,6 +1586,7 @@ mod tests {
         let settings = AppSettings {
             games: GameSettings {
                 auto_detect: true,
+                plugins: BTreeMap::new(),
                 custom_games: vec![CustomGameSettings {
                     id: "custom-empty".into(),
                     name: "Mystery".into(),

@@ -825,6 +825,32 @@ label span { white-space: nowrap; }
   border-style: dashed;
 }
 
+.game-profile.supported {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 8px;
+}
+
+.game-profile.supported .check-line {
+  justify-content: center;
+}
+
+.game-profile-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.game-profile-mode {
+  grid-column: 2 / 3;
+  width: min(100%, 320px);
+}
+
+.game-profile-mode span {
+  font-size: 12px;
+}
+
 .games-panel {
   display: grid;
   gap: 10px;

@@ -376,7 +376,18 @@ fn visual_sample_entry(fourcc: [u8; 4], width: u16, height: u16, codec_box: Vec<
         .u16(0xFFFF); // pre_defined = -1
     let mut payload = p.into_vec();
     payload.extend(codec_box);
+    payload.extend(nclx_rec709_limited_colr());
     mp4_box(fourcc, payload)
+}
+
+fn nclx_rec709_limited_colr() -> Vec<u8> {
+    let mut p = Payload::new();
+    p.bytes(b"nclx")
+        .u16(1) // colour_primaries: BT.709
+        .u16(1) // transfer_characteristics: BT.709
+        .u16(1) // matrix_coefficients: BT.709
+        .u8(0); // full_range_flag = 0 (limited/video range), 7 reserved bits
+    mp4_box(*b"colr", p.into_vec())
 }
 
 fn avcc(sps: &[u8], pps: &[u8]) -> Vec<u8> {
@@ -526,6 +537,23 @@ mod tests {
         assert!(buf
             .windows(8)
             .any(|w| w == [0x07, 0x80, 0, 0, 0x04, 0x38, 0, 0]));
+    }
+
+    #[test]
+    fn video_sample_entry_embeds_rec709_limited_color_info() {
+        let buf = moov_init(&cfg());
+        let colr = buf.windows(4).position(|w| w == b"colr").expect("colr box");
+        let payload = &buf[colr + 4..colr + 15];
+
+        assert_eq!(
+            payload,
+            &[
+                b'n', b'c', b'l', b'x', 0, 1, // BT.709 primaries
+                0, 1, // BT.709 transfer
+                0, 1, // BT.709 matrix
+                0, // limited range
+            ]
+        );
     }
 
     #[test]

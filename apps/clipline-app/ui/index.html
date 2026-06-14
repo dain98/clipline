@@ -305,14 +305,11 @@
             </div>
             <div class="setting-row">
               <div class="setting-info">
-                <strong>Supported games</strong>
-                <span>Built-in profiles will appear here as game adapters land.</span>
+                <strong>Game plugins</strong>
+                <span>Enable game-specific capture behavior and recording modes.</span>
               </div>
               <div id="supported-games" class="supported-games">
-                <div class="game-profile planned">
-                  <strong>League of Legends</strong>
-                  <span>events supported · window profile planned</span>
-                </div>
+                <div class="hint">loading game plugins...</div>
                 <div class="game-profile planned">
                   <strong>VALORANT</strong>
                   <span>planned</span>
@@ -355,6 +352,22 @@
               <div class="recording-control">
                 <select id="set-encoder"></select>
                 <span id="encoder-summary" class="setting-summary"></span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Output size</strong>
+                <span>Caps saved video resolution while preserving aspect ratio.</span>
+              </div>
+              <div class="recording-control">
+                <select id="set-output-resolution">
+                  <option value="source">Source</option>
+                  <option value="1440p">1440p</option>
+                  <option value="1080p">1080p</option>
+                  <option value="720p">720p</option>
+                  <option value="480p">480p</option>
+                </select>
+                <span id="output-resolution-summary" class="setting-summary"></span>
               </div>
             </div>
             <div class="setting-row">

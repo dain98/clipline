@@ -430,6 +430,14 @@ fn build_args(
         "rawvideo".into(),
         "-pix_fmt".into(),
         "nv12".into(),
+        "-color_range".into(),
+        "tv".into(),
+        "-colorspace".into(),
+        "bt709".into(),
+        "-color_primaries".into(),
+        "bt709".into(),
+        "-color_trc".into(),
+        "bt709".into(),
         "-s".into(),
         format!("{width}x{height}"),
         "-r".into(),
@@ -445,8 +453,25 @@ fn build_args(
         "0".into(),
     ];
     a.extend(backend_rate_control(backend, bitrate_bps, bufsize));
+    a.extend(rec709_limited_flags());
     a.extend(["-f".into(), out_format.into(), "pipe:1".into()]);
     a
+}
+
+fn rec709_limited_flags() -> Vec<String> {
+    [
+        "-color_range",
+        "tv",
+        "-colorspace",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 /// Per-backend rate control. Hardware encoders use low-latency CBR (capped
@@ -509,6 +534,10 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.contains("rawvideo"));
         assert!(joined.contains("nv12"));
+        assert!(joined.contains("-color_range tv"));
+        assert!(joined.contains("-colorspace bt709"));
+        assert!(joined.contains("-color_primaries bt709"));
+        assert!(joined.contains("-color_trc bt709"));
         assert!(joined.contains("-s 1920x1080"));
         assert!(joined.contains("-r 60"));
         assert!(joined.contains("-c:v libsvtav1"));

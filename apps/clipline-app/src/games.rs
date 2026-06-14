@@ -3,6 +3,7 @@
 
 use clipline_capture::windows::{enumerate_capturable_windows, CapturableWindow};
 
+use crate::game_plugins::{self, GamePluginInfo};
 use crate::settings::{CustomGameSettings, GameRecordingMode, GameSettings};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -22,6 +23,13 @@ pub struct DetectedGame {
     pub process_id: u32,
     pub exe_name: String,
     pub recording_mode: GameRecordingMode,
+}
+
+pub fn game_plugin_catalog() -> Vec<GamePluginInfo> {
+    game_plugins::all()
+        .iter()
+        .map(|plugin| plugin.info())
+        .collect()
 }
 
 pub fn list_game_windows() -> Vec<GameWindowInfo> {
@@ -50,7 +58,7 @@ pub fn list_game_windows() -> Vec<GameWindowInfo> {
 }
 
 pub fn detect_active_game(settings: &GameSettings) -> Option<DetectedGame> {
-    if !has_enabled_custom_games(settings) {
+    if !has_enabled_games(settings) {
         return None;
     }
     detect_active_game_from_windows(settings, enumerate_capturable_windows())
@@ -62,6 +70,9 @@ pub fn detect_active_game_from_windows(
 ) -> Option<DetectedGame> {
     if !settings.auto_detect {
         return None;
+    }
+    if let Some(game) = detect_built_in_game_from_windows(settings, &windows) {
+        return Some(game);
     }
     for game in settings.custom_games.iter().filter(|game| game.enabled) {
         if let Some(window) = best_window_for_game(game, &windows) {
@@ -79,6 +90,38 @@ pub fn detect_active_game_from_windows(
     None
 }
 
+pub fn built_in_game_still_configured(settings: &GameSettings, id: &str) -> bool {
+    settings.auto_detect
+        && game_plugins::all()
+            .iter()
+            .find(|plugin| plugin.id == id)
+            .is_some_and(|plugin| plugin.settings(settings).enabled)
+}
+
+fn detect_built_in_game_from_windows(
+    settings: &GameSettings,
+    windows: &[CapturableWindow],
+) -> Option<DetectedGame> {
+    for plugin in game_plugins::all() {
+        let plugin_settings = plugin.settings(settings);
+        if !plugin_settings.enabled {
+            continue;
+        }
+        if let Some(window) = (plugin.match_window)(windows) {
+            return Some(DetectedGame {
+                id: plugin.id.into(),
+                name: plugin.name.into(),
+                hwnd: window.handle,
+                window_title: window.title.clone(),
+                process_id: window.process_id,
+                exe_name: window.exe_name.clone(),
+                recording_mode: plugin_settings.recording_mode,
+            });
+        }
+    }
+    None
+}
+
 fn best_window_for_game<'a>(
     game: &CustomGameSettings,
     windows: &'a [CapturableWindow],
@@ -90,8 +133,12 @@ fn best_window_for_game<'a>(
         .map(|(_, window)| window)
 }
 
-fn has_enabled_custom_games(settings: &GameSettings) -> bool {
-    settings.auto_detect && settings.custom_games.iter().any(|game| game.enabled)
+fn has_enabled_games(settings: &GameSettings) -> bool {
+    settings.auto_detect
+        && (game_plugins::all()
+            .iter()
+            .any(|plugin| plugin.settings(settings).enabled)
+            || settings.custom_games.iter().any(|game| game.enabled))
 }
 
 fn match_score(game: &CustomGameSettings, window: &CapturableWindow) -> Option<u16> {
@@ -155,6 +202,18 @@ mod tests {
         }
     }
 
+    fn settings_with_league(enabled: bool, recording_mode: GameRecordingMode) -> GameSettings {
+        let mut settings = GameSettings::default();
+        settings.plugins.insert(
+            crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+            crate::settings::GamePluginSettings {
+                enabled,
+                recording_mode,
+            },
+        );
+        settings
+    }
+
     #[test]
     fn detects_first_enabled_custom_game_by_process_path() {
         let settings = GameSettings {
@@ -163,6 +222,7 @@ mod tests {
                 recording_mode: GameRecordingMode::FullSession,
                 ..game()
             }],
+            ..GameSettings::default()
         };
         let detected = detect_active_game_from_windows(
             &settings,
@@ -185,6 +245,7 @@ mod tests {
         let settings = GameSettings {
             auto_detect: true,
             custom_games: vec![game()],
+            ..GameSettings::default()
         };
         let detected = detect_active_game_from_windows(
             &settings,
@@ -212,6 +273,7 @@ mod tests {
             &GameSettings {
                 auto_detect: true,
                 custom_games: vec![disabled],
+                ..GameSettings::default()
             },
             windows.clone(),
         )
@@ -220,6 +282,7 @@ mod tests {
             &GameSettings {
                 auto_detect: false,
                 custom_games: vec![game()],
+                ..GameSettings::default()
             },
             windows,
         )
@@ -228,20 +291,105 @@ mod tests {
 
     #[test]
     fn no_enabled_games_can_skip_window_enumeration() {
-        assert!(!has_enabled_custom_games(&GameSettings {
+        assert!(!has_enabled_games(&GameSettings {
             auto_detect: true,
+            plugins: settings_with_league(false, GameRecordingMode::FullSession).plugins,
             custom_games: Vec::new(),
         }));
-        assert!(!has_enabled_custom_games(&GameSettings {
+        assert!(!has_enabled_games(&GameSettings {
             auto_detect: true,
+            plugins: settings_with_league(false, GameRecordingMode::FullSession).plugins,
             custom_games: vec![CustomGameSettings {
                 enabled: false,
                 ..game()
             }],
         }));
-        assert!(has_enabled_custom_games(&GameSettings {
+        assert!(has_enabled_games(&GameSettings {
+            auto_detect: true,
+            custom_games: Vec::new(),
+            ..GameSettings::default()
+        }));
+        assert!(has_enabled_games(&GameSettings {
             auto_detect: true,
             custom_games: vec![game()],
+            ..GameSettings::default()
+        }));
+    }
+
+    #[test]
+    fn detects_league_in_game_window_as_built_in_full_session() {
+        let detected = detect_active_game_from_windows(
+            &GameSettings::default(),
+            vec![
+                window(1, "League of Legends", "LeagueClientUx.exe", None),
+                window(
+                    2,
+                    "League of Legends (TM) Client",
+                    "League of Legends.exe",
+                    Some(r"C:\Riot Games\League of Legends\Game\League of Legends.exe"),
+                ),
+            ],
+        )
+        .expect("League game window should match");
+
+        assert_eq!(detected.id, crate::game_plugins::LEAGUE_OF_LEGENDS_ID);
+        assert_eq!(detected.name, "League of Legends");
+        assert_eq!(detected.hwnd, 2);
+        assert_eq!(detected.recording_mode, GameRecordingMode::FullSession);
+    }
+
+    #[test]
+    fn league_client_alone_does_not_count_as_in_game() {
+        assert!(detect_active_game_from_windows(
+            &GameSettings::default(),
+            vec![window(1, "League of Legends", "LeagueClientUx.exe", None)],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn disabling_built_in_league_allows_custom_rules_to_take_over() {
+        let settings = GameSettings {
+            auto_detect: true,
+            plugins: settings_with_league(false, GameRecordingMode::FullSession).plugins,
+            custom_games: vec![game()],
+        };
+
+        let detected = detect_active_game_from_windows(
+            &settings,
+            vec![window(7, "Test Game", "game.exe", None)],
+        )
+        .expect("custom game should still match");
+
+        assert_eq!(detected.id, "custom-test");
+    }
+
+    #[test]
+    fn league_plugin_uses_saved_recording_mode() {
+        let detected = detect_active_game_from_windows(
+            &settings_with_league(true, GameRecordingMode::ReplaysOnly),
+            vec![window(
+                2,
+                "League of Legends (TM) Client",
+                "League of Legends.exe",
+                None,
+            )],
+        )
+        .expect("League game window should match");
+
+        assert_eq!(detected.recording_mode, GameRecordingMode::ReplaysOnly);
+    }
+
+    #[test]
+    fn plugin_catalog_exposes_league_metadata() {
+        let plugins = game_plugin_catalog();
+
+        assert!(plugins.iter().any(|plugin| {
+            plugin.id == crate::game_plugins::LEAGUE_OF_LEGENDS_ID
+                && plugin.name == "League of Legends"
+                && plugin.default_enabled
+                && plugin.default_recording_mode == GameRecordingMode::FullSession
+                && plugin.event_markers
         }));
     }
 }

@@ -11,9 +11,9 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-13): a working tray recorder with a first-party review player
+## Current state (2026-06-14): a working tray recorder with a first-party review player
 
-Twenty-five milestones executed (plans in `docs/superpowers/plans/*.md` — twenty-nine plan docs, all
+Twenty-eight milestones executed (plans in `docs/superpowers/plans/*.md` — thirty-two plan docs, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -198,6 +198,31 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     already exists" as success so any session caught by that race is still emitted into the
     Library. Full sessions use the same marker sidecar, quota cleanup, library refresh, and
     saved-event path as manual replays, and the library labels them as "Full session".
+26. **Game plugins + League auto-recording** — Game-specific behavior now sits behind a built-in
+    plugin registry (`apps/clipline-app/src/game_plugins.rs`) instead of hardcoded UI/settings
+    branches. Settings persist generic plugin state under `games.plugins.<plugin_id>` with
+    enabled + recording-mode fields, and the frontend renders Settings > Games from the backend
+    `list_game_plugins` catalog. The first plugin is `league_of_legends`: it matches only the
+    real in-game `League of Legends.exe` top-level window, not `LeagueClientUx.exe` or Riot
+    launcher windows, so champion select/client activity does not start full-session recording.
+    League is enabled by default and defaults to `full_session`; when the match window appears,
+    Clipline switches capture to that window and starts a shared-encoder session recording, then
+    finalizes it when the window disappears. Custom games remain as the generic fallback layer
+    beneath plugins.
+27. **Plugin event sources + in-game hotkey fallback** — Built-in game plugins can now expose an
+    optional event-source spawner in addition to their window matcher. The recorder carries the
+    active built-in plugin id in `ServiceOptions` and asks that plugin for markers; League owns the
+    Live Client Data API poller, while custom games record with no marker source unless a future
+    plugin adds one. Save Replay now also has a Windows `WH_KEYBOARD_LL` fallback hook, kept in sync
+    with the Settings > Hotkeys shortcut, so games that suppress Tauri/Win32 registered global
+    shortcuts still reach the recorder. All save triggers share a short debounce to avoid double
+    saves when both hotkey paths fire.
+28. **Explicit SDR color metadata** — Desktop/game captures are no longer left to driver,
+    encoder, or player color-range inference. The WGC BGRA path is treated as full-range RGB
+    Rec.709 and the D3D11 video processor converts to limited-range NV12 Rec.709; MFT and FFmpeg
+    encoders receive matching color attrs/flags, and `clipline-mp4` writes `colr`/`nclx` sample
+    entry metadata. A real smoke recording now probes as `color_range=tv`,
+    `color_space=bt709`, `color_transfer=bt709`, and `color_primaries=bt709`.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -219,8 +244,8 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 | `clipline-lol` | League Live Client adapter: client, dedupe, normalization, `poll_once` | httpmock integration + `markers_e2e` |
 | `clipline-buffer` | Replay ring of GOP segments (video + N audio tracks), byte eviction, `save_window` smart mode | unit tests |
 | `clipline-storage` | Saved-clip inventory, sidecar-aware size accounting, oldest-first quota GC with protected fresh saves | unit tests |
-| `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), **codec-aware** (H.264/HEVC/AV1: avc1/hvc1/av01 + avcC/hvcC/av1C), multi-track + Opus, box walker, `movie_duration_s`, codec-agnostic keyframe-aligned stream-copy trim | ffprobe + unit tests |
-| `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`, `window`) + the **FFmpeg subprocess encoder** (`ffmpeg`, `ffmpeg_encoder`, `framing`) + neutral `annexb`/`hevc`/`av1`/`opus`/`pcm`/`clock`/`avsync`/`probe`; WASAPI covers selectable output loopback, mic capture, mic level testing, PCM decode, and resampling to 48 kHz; window helpers enumerate visible HWND/process metadata for custom game detection | mocks on CI; CI-skipped device + ffmpeg tests run real on the dev machine |
+| `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), **codec-aware** (H.264/HEVC/AV1: avc1/hvc1/av01 + avcC/hvcC/av1C), Rec.709 limited `colr` metadata, multi-track + Opus, box walker, `movie_duration_s`, codec-agnostic keyframe-aligned stream-copy trim | ffprobe + unit tests |
+| `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`, `window`) + the **FFmpeg subprocess encoder** (`ffmpeg`, `ffmpeg_encoder`, `framing`) + explicit SDR Rec.709 limited-range conversion/encoder metadata + neutral `annexb`/`hevc`/`av1`/`opus`/`pcm`/`clock`/`avsync`/`probe`; WASAPI covers selectable output loopback, mic capture, mic level testing, PCM decode, and resampling to 48 kHz; window helpers enumerate visible HWND/process metadata for custom game detection | mocks on CI; CI-skipped device + ffmpeg tests run real on the dev machine |
 | `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/settings plus the first-party review player; Settings > Games persists custom game rules and auto-switches capture to detected game windows | live e2e (screenshots in the session logs) + `player_core` (Boa) + `ui_contract` |
 
 ## Machine setup (already done on this machine; for a fresh clone elsewhere)
@@ -275,6 +300,11 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   the constructors force it (`WgcCapture::new_clock()`, `*_on(device, …, clock)`).
 - H.264 hardware encoders cap near 4096 wide; the 5120-wide monitor scales to ≤2560
   (`even_dimensions` + scale in service/smokes).
+- SDR color is explicit end-to-end: WGC BGRA is treated as full-range RGB Rec.709, the D3D11
+  video processor outputs limited-range NV12 Rec.709, MFT/FFmpeg are given matching metadata,
+  and MP4 sample entries write `colr`/`nclx`. If recordings look dark or oversaturated again,
+  check this path before assuming a blue-light filter or player issue. HDR capture/display
+  management remains separate future work.
 
 **FFmpeg encoder tier (milestone 23)**
 - It's a **subprocess**, never linked. `FfmpegVideoEncoder` spawns `ffmpeg.exe`; killing the
@@ -317,7 +347,9 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   directory over budget.
 - Settings saves restart the recorder service immediately. Bad window-capture titles pass
   validation if non-empty, then surface as service init errors. Hotkey support is intentionally
-  limited to modifiers plus F-keys (`Alt+F10`, `Ctrl+Alt+F10`, `Ctrl+Shift+F9`, etc.).
+  limited to modifiers plus F-keys (`Alt+F10`, `Ctrl+Alt+F10`, `Ctrl+Shift+F9`, etc.). The Tauri
+  global shortcut path remains registered, and a low-level Windows keyboard hook is installed as a
+  fallback for focused games that do not deliver the registered shortcut.
 - Trim/export is intentionally v1: finalized Clipline-authored MP4s only, H.264 video with optional
   Opus audio, one sample description per track, no frame-accurate boundary re-encode yet. Exports
   are keyframe-aligned: in snaps backward to the previous sync sample and out snaps forward to the

@@ -1,7 +1,8 @@
-//! League event poller (ddoc §5a): a thread with a current-thread tokio
+//! League event source (ddoc §5a): a thread with a current-thread tokio
 //! runtime polling the Live Client Data API at ~1 Hz, forwarding anchored
-//! events to the recorder service. Quietly waits while no game runs —
-//! the API only exists in-game.
+//! events to the recorder service. Quietly waits while no game runs; the
+//! API only exists in-game. The League game plugin owns when this source is
+//! attached to a recorder session.
 
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
