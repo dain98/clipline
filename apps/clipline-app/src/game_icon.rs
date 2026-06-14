@@ -99,7 +99,7 @@ unsafe fn color_bitmap_to_png(hbm_color: windows_sys::Win32::Graphics::Gdi::HBIT
     bmi.bmiHeader.biHeight = -height; // negative => top-down rows
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB as u32;
+    bmi.bmiHeader.biCompression = BI_RGB;
 
     let mut buf = vec![0u8; (width * height) as usize * 4];
     let dc = GetDC(std::ptr::null_mut());
