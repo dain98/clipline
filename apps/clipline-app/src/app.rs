@@ -13,9 +13,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 use crate::games::{DetectedGame, GameWindowInfo};
 use crate::service::{self, Cmd, Event, ServiceOptions};
-use crate::settings::{
-    parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode, GameRecordingMode,
-};
+use crate::settings::{parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode};
 
 #[derive(serde::Serialize)]
 struct DisplayInfo {
@@ -162,10 +160,7 @@ impl RuntimeState {
                 hwnd: game.hwnd,
                 title: game.window_title.clone(),
             };
-            opts.recording_mode = match game.recording_mode {
-                GameRecordingMode::FullSession => service::RecordingMode::FullSession,
-                GameRecordingMode::ReplaysOnly => service::RecordingMode::ReplaysOnly,
-            };
+            opts.recording_mode = game.recording_mode.into();
         }
         Ok(opts)
     }
@@ -856,6 +851,7 @@ fn tray_icon() -> Image<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::GameRecordingMode;
 
     #[test]
     fn quota_parser_converts_gib_to_bytes() {

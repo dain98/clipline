@@ -175,6 +175,15 @@ pub enum GameRecordingMode {
     ReplaysOnly,
 }
 
+impl From<GameRecordingMode> for RecordingMode {
+    fn from(value: GameRecordingMode) -> Self {
+        match value {
+            GameRecordingMode::FullSession => Self::FullSession,
+            GameRecordingMode::ReplaysOnly => Self::ReplaysOnly,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct GameSettings {
     #[serde(default = "default_enabled")]

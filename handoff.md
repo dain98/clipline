@@ -179,15 +179,21 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 25. **Full-session game recording** — Each saved custom game persists its own recording-mode
     preference (`replays_only` default, `full_session` selectable). Games set to full session start
     a shared-encoder Hybrid MP4 sink when the detected window becomes the active capture target,
-    while continuing to feed the replay ring so Save Replay still works. The session sink writes
-    sealed GOP segments as they are produced, so it keeps footage after the replay ring evicts old
-    GOPs, then finalizes `session_<unix>.mp4` in the run's session folder on game disappearance,
-    target switch, service stop, capture end, or capture error. The MP4 writer is initialized
-    lazily on the first sealed GOP so codec parameter sets discovered from the first HEVC/AV1/H.264
-    packets land in the final `hvcC`/`av1C`/`avcC`; the on-disk file uses a temporary
+    while continuing to feed the replay ring so Save Replay still works. The session sink now runs
+    on a dedicated writer thread: sealed GOPs are cloned once and queued after the replay ring push,
+    so disk stalls or secondary file-write failures cannot abort primary replay capture. The MP4
+    writer is initialized lazily on the first queued GOP so codec parameter sets discovered from
+    the first HEVC/AV1/H.264 packets land in the final `hvcC`/`av1C`/`avcC`, and segment muxing uses
+    borrowed sample slices instead of per-sample `Vec` copies. Full sessions finalize
+    `session_<unix>.mp4` in the run's session folder on game disappearance, target switch, service
+    stop, capture end, or clean shutdown; if encoder finish fails, the temp session is discarded
+    with a warning rather than emitted as a complete recording. The on-disk file uses a temporary
     `.mp4.recording` suffix until finalized so the Library cannot open an in-progress fragmented
-    recording. Full sessions use the same marker sidecar, quota cleanup, library refresh, and
-    saved-event path as manual replays, and the library labels them as "Full session".
+    recording. Non-empty orphaned `.mp4.recording` files are recovered to `.mp4` on next launch,
+    empty ones are removed, active recording bytes count toward storage usage, and GC avoids
+    deleting the rest of the library when a protected full session alone exceeds quota. Full
+    sessions use the same marker sidecar, quota cleanup, library refresh, and saved-event path as
+    manual replays, and the library labels them as "Full session".
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired

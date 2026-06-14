@@ -22,6 +22,16 @@ pub struct FragSampleInfo {
     pub is_sync: bool,
 }
 
+/// One encoded sample borrowed from an existing GOP segment.
+#[derive(Debug, Clone, Copy)]
+pub struct FragSampleRef<'a> {
+    /// Encoded bytes in MP4 stream format (length-prefixed NALs for AVC).
+    pub data: &'a [u8],
+    /// Duration in media-timescale ticks.
+    pub duration: u32,
+    pub is_sync: bool,
+}
+
 /// One track's slice of a fragment.
 #[derive(Debug)]
 pub struct TrackRun<'a> {

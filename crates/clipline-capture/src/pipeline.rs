@@ -1,8 +1,10 @@
 use std::io::{self, Seek, Write};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::{self, JoinHandle};
 
 use clipline_buffer::{DiskReplayRing, ReplayRing, SampleInfo, Segment, TrackSamples};
-use clipline_mp4::{FragSample, HybridMp4Writer, TrackConfig};
+use clipline_mp4::{FragSampleRef, HybridMp4Writer, TrackConfig};
 
 use crate::traits::{
     AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket, Encoder,
@@ -29,10 +31,11 @@ enum ReplayStorage {
     Disk(DiskReplayRing),
 }
 
-pub trait WriteSeek: Write + Seek {}
+pub trait WriteSeek: Write + Seek + Send {}
 
-impl<T: Write + Seek> WriteSeek for T {}
+impl<T: Write + Seek + Send> WriteSeek for T {}
 
+#[derive(Debug)]
 pub struct FullSessionSummary {
     pub start_s: f64,
     pub end_s: f64,
@@ -40,11 +43,24 @@ pub struct FullSessionSummary {
 }
 
 struct FullSessionSink {
-    target: Option<Box<dyn WriteSeek>>,
-    writer: Option<HybridMp4Writer<Box<dyn WriteSeek>>>,
+    tx: Sender<FullSessionWriteMsg>,
+    join: JoinHandle<()>,
     audio_cfgs: Vec<clipline_mp4::AudioTrackConfig>,
+    video_cfg: Option<clipline_mp4::VideoTrackConfig>,
     start_s: Option<f64>,
     end_s: Option<f64>,
+    send_error: Option<String>,
+}
+
+struct FullSessionSegment {
+    video_cfg: clipline_mp4::VideoTrackConfig,
+    audio_cfgs: Vec<clipline_mp4::AudioTrackConfig>,
+    segment: Segment,
+}
+
+enum FullSessionWriteMsg {
+    Segment(FullSessionSegment),
+    Finish(Sender<io::Result<()>>),
 }
 
 /// The recording pipeline (ddoc §3): capture → encode → GOP-aligned
@@ -228,7 +244,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         &self.encoder
     }
 
-    pub fn start_full_session<W: Write + Seek + 'static>(&mut self, w: W) -> io::Result<()> {
+    pub fn start_full_session<W: Write + Seek + Send + 'static>(&mut self, w: W) -> io::Result<()> {
         if self.full_session.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -240,30 +256,34 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             .iter()
             .map(|source| source.track_config())
             .collect();
+        let (tx, join) = spawn_full_session_writer(Box::new(w) as Box<dyn WriteSeek>);
         self.full_session = Some(FullSessionSink {
-            target: Some(Box::new(w) as Box<dyn WriteSeek>),
-            writer: None,
+            tx,
+            join,
             audio_cfgs,
+            video_cfg: None,
             start_s: None,
             end_s: None,
+            send_error: None,
         });
         Ok(())
-    }
-
-    pub fn full_session_active(&self) -> bool {
-        self.full_session.is_some()
     }
 
     pub fn finish_full_session(&mut self) -> io::Result<Option<FullSessionSummary>> {
         let Some(sink) = self.full_session.take() else {
             return Ok(None);
         };
-        let Some(writer) = sink.writer else {
+        let start_s = sink.start_s;
+        let end_s = sink.end_s;
+        let send_error = sink.send_error.clone();
+        finish_full_session_writer(sink)?;
+        if let Some(error) = send_error {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, error));
+        }
+        let Some(start_s) = start_s else {
             return Ok(None);
         };
-        let start_s = sink.start_s.unwrap_or(0.0);
-        let end_s = sink.end_s.unwrap_or(start_s);
-        let _ = writer.finalize()?;
+        let end_s = end_s.unwrap_or(start_s);
         Ok(Some(FullSessionSummary {
             start_s,
             end_s,
@@ -303,9 +323,10 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         }
         let mut writer = HybridMp4Writer::new_multi(w, track_cfgs)?;
         for seg in &segments {
-            let per_track = segment_fragments(seg, &video_cfg, &audio_cfgs);
-            let slices: Vec<&[FragSample]> = per_track.iter().map(|v| v.as_slice()).collect();
-            writer.write_fragment_multi(&slices)?;
+            let per_track = segment_fragment_refs(seg, &video_cfg, &audio_cfgs);
+            let slices: Vec<&[FragSampleRef<'_>]> =
+                per_track.iter().map(|v| v.as_slice()).collect();
+            writer.write_fragment_multi_borrowed(&slices)?;
         }
         let end_pts = segments.last().expect("non-empty").pts_end_s();
         Ok((writer.finalize()?, end_pts))
@@ -396,69 +417,162 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             samples,
             audio,
         };
-        self.write_full_session_segment(&seg)?;
+        let full_session_segment = self
+            .full_session
+            .as_ref()
+            .and_then(|sink| sink.send_error.is_none().then(|| seg.clone()));
         match &mut self.ring {
             ReplayStorage::Memory(ring) => ring.push(seg),
             ReplayStorage::Disk(ring) => ring.push(seg)?,
         }
+        if let Some(seg) = full_session_segment {
+            self.queue_full_session_segment(seg);
+        }
         Ok(())
     }
 
-    fn write_full_session_segment(&mut self, seg: &Segment) -> Result<(), PipelineError> {
+    fn queue_full_session_segment(&mut self, seg: Segment) {
         let Some(sink) = &mut self.full_session else {
-            return Ok(());
+            return;
         };
-        if sink.writer.is_none() {
-            let video_cfg = self.encoder.track_config();
-            let mut track_cfgs = vec![TrackConfig::Video(video_cfg)];
-            for cfg in &sink.audio_cfgs {
-                track_cfgs.push(TrackConfig::Audio(cfg.clone()));
-            }
-            let target = sink.target.take().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "full session writer target missing",
-                )
-            })?;
-            sink.writer = Some(HybridMp4Writer::new_multi(target, track_cfgs)?);
+        if sink.send_error.is_some() {
+            return;
         }
         sink.start_s.get_or_insert(seg.pts_start_s);
         sink.end_s = Some(seg.pts_end_s());
-        let video_cfg = self.encoder.track_config();
-        let per_track = segment_fragments(seg, &video_cfg, &sink.audio_cfgs);
-        let slices: Vec<&[FragSample]> = per_track.iter().map(|v| v.as_slice()).collect();
-        sink.writer
-            .as_mut()
-            .expect("writer initialized")
-            .write_fragment_multi(&slices)?;
-        Ok(())
+        let video_cfg = sink
+            .video_cfg
+            .get_or_insert_with(|| self.encoder.track_config())
+            .clone();
+        let msg = FullSessionWriteMsg::Segment(FullSessionSegment {
+            video_cfg,
+            audio_cfgs: sink.audio_cfgs.clone(),
+            segment: seg,
+        });
+        if let Err(e) = sink.tx.send(msg) {
+            sink.send_error = Some(format!("full session writer stopped: {e}"));
+        }
     }
 }
 
-fn segment_fragments(
-    seg: &Segment,
+fn spawn_full_session_writer(
+    target: Box<dyn WriteSeek>,
+) -> (Sender<FullSessionWriteMsg>, JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel();
+    let join = thread::Builder::new()
+        .name("clipline-full-session-writer".into())
+        .spawn(move || full_session_writer_loop(target, rx))
+        .expect("spawn full-session writer thread");
+    (tx, join)
+}
+
+fn finish_full_session_writer(sink: FullSessionSink) -> io::Result<()> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    sink.tx
+        .send(FullSessionWriteMsg::Finish(reply_tx))
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "full session writer stopped"))?;
+    let result = reply_rx.recv().unwrap_or_else(|_| {
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "full session writer stopped before finalizing",
+        ))
+    });
+    let join_result = sink.join.join();
+    match (result, join_result) {
+        (Err(e), _) => Err(e),
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(_)) => Err(io::Error::other("full session writer thread panicked")),
+    }
+}
+
+fn full_session_writer_loop(target: Box<dyn WriteSeek>, rx: Receiver<FullSessionWriteMsg>) {
+    let mut target = Some(target);
+    let mut writer: Option<HybridMp4Writer<Box<dyn WriteSeek>>> = None;
+    let mut first_error: Option<io::Error> = None;
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            FullSessionWriteMsg::Segment(segment) => {
+                if first_error.is_some() {
+                    continue;
+                }
+                if let Err(e) = write_full_session_segment(
+                    &mut target,
+                    &mut writer,
+                    segment.video_cfg,
+                    segment.audio_cfgs,
+                    segment.segment,
+                ) {
+                    first_error = Some(e);
+                    writer = None;
+                }
+            }
+            FullSessionWriteMsg::Finish(reply) => {
+                let result = if let Some(e) = first_error.take() {
+                    Err(e)
+                } else if let Some(writer) = writer.take() {
+                    writer.finalize().map(|_| ())
+                } else {
+                    Ok(())
+                };
+                let _ = reply.send(result);
+                break;
+            }
+        }
+    }
+}
+
+fn write_full_session_segment(
+    target: &mut Option<Box<dyn WriteSeek>>,
+    writer: &mut Option<HybridMp4Writer<Box<dyn WriteSeek>>>,
+    video_cfg: clipline_mp4::VideoTrackConfig,
+    audio_cfgs: Vec<clipline_mp4::AudioTrackConfig>,
+    seg: Segment,
+) -> io::Result<()> {
+    if writer.is_none() {
+        let mut track_cfgs = vec![TrackConfig::Video(video_cfg.clone())];
+        for cfg in &audio_cfgs {
+            track_cfgs.push(TrackConfig::Audio(cfg.clone()));
+        }
+        let target = target.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "full session writer target missing",
+            )
+        })?;
+        *writer = Some(HybridMp4Writer::new_multi(target, track_cfgs)?);
+    }
+    let per_track = segment_fragment_refs(&seg, &video_cfg, &audio_cfgs);
+    let slices: Vec<&[FragSampleRef<'_>]> = per_track.iter().map(|v| v.as_slice()).collect();
+    writer
+        .as_mut()
+        .expect("writer initialized")
+        .write_fragment_multi_borrowed(&slices)
+}
+
+fn segment_fragment_refs<'a>(
+    seg: &'a Segment,
     video_cfg: &clipline_mp4::VideoTrackConfig,
     audio_cfgs: &[clipline_mp4::AudioTrackConfig],
-) -> Vec<Vec<FragSample>> {
+) -> Vec<Vec<FragSampleRef<'a>>> {
     let video_ts = video_cfg.timescale as f64;
-    let video: Vec<FragSample> = seg
+    let video: Vec<FragSampleRef<'a>> = seg
         .sample_slices()
         .zip(&seg.samples)
-        .map(|(slice, info)| FragSample {
-            data: slice.to_vec(),
+        .map(|(slice, info)| FragSampleRef {
+            data: slice,
             duration: (info.duration_s * video_ts).round() as u32,
             is_sync: info.is_sync,
         })
         .collect();
-    let mut per_track: Vec<Vec<FragSample>> = vec![video];
+    let mut per_track: Vec<Vec<FragSampleRef<'a>>> = vec![video];
     for (track, cfg) in seg.audio.iter().zip(audio_cfgs) {
         let ts = cfg.sample_rate as f64;
         per_track.push(
             track
                 .sample_slices()
                 .zip(&track.samples)
-                .map(|(slice, info)| FragSample {
-                    data: slice.to_vec(),
+                .map(|(slice, info)| FragSampleRef {
+                    data: slice,
                     duration: (info.duration_s * ts).round() as u32,
                     is_sync: info.is_sync,
                 })
@@ -665,6 +779,41 @@ mod tests {
             data.windows(DELAYED_SPS.len()).any(|w| w == DELAYED_SPS),
             "full-session moov must use the encoder config populated by the first packets"
         );
+    }
+
+    #[test]
+    fn full_session_write_failure_does_not_abort_replay_capture() {
+        let mut rec = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        );
+
+        rec.start_full_session(FailingWriter).unwrap();
+        rec.run_to_end()
+            .expect("secondary session sink must not stop capture");
+
+        assert_eq!(rec.ring().unwrap().len(), 3);
+        let err = rec.finish_full_session().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("disk full"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for FailingWriter {
+        fn seek(&mut self, _pos: io::SeekFrom) -> io::Result<u64> {
+            Ok(0)
+        }
     }
 
     const DELAYED_SPS: &[u8] = &[0x67, 0x64, 0x00, 0x0A, 0xAC];

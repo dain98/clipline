@@ -25,7 +25,7 @@ use clipline_capture::{
 };
 use clipline_events::{EventKind, MarkerLog};
 use clipline_storage::sessions::{session_label, SessionTracker};
-use clipline_storage::{enforce_quota, storage_status, StorageStatus};
+use clipline_storage::{enforce_quota, recover_recording_files, storage_status, StorageStatus};
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 use crate::markers::{self, PollerMsg};
@@ -439,13 +439,19 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             ),
         );
     }
+    recover_abandoned_recordings(&clips_dir, events);
     // Saves land in a session folder: one per recorder run, with a dedicated
     // folder per detected match. Folders are created lazily at save time.
     let mut session = SessionTracker::new(local_session_label(false));
     let mut last_save_end: Option<f64> = None;
     let mut last_status = Instant::now();
-    let mut full_session =
-        begin_full_session_recording(&mut rec, &clips_dir, session.current(), opts.recording_mode)?;
+    let mut full_session = begin_full_session_recording(
+        &mut rec,
+        &clips_dir,
+        session.current(),
+        opts.recording_mode,
+        events,
+    );
 
     loop {
         match rec.step() {
@@ -454,10 +460,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             // Idle screen: WGC delivers nothing — keep serving commands.
             Err(PipelineError::Capture(CaptureError::Timeout(_))) => {}
             Err(e) => {
-                if let Err(finish_err) = rec.finish_stream() {
-                    warn_user(events, format!("finish: {finish_err}"));
-                }
-                finish_full_session_recording(
+                let _ = shutdown_recorder(
                     &mut rec,
                     &mut full_session,
                     &marker_log,
@@ -532,10 +535,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     }
                 }
                 Ok(Cmd::Stop { announce }) => {
-                    if let Err(e) = rec.finish_stream() {
-                        warn_user(events, format!("finish: {e}"));
-                    }
-                    finish_full_session_recording(
+                    let _ = shutdown_recorder(
                         &mut rec,
                         &mut full_session,
                         &marker_log,
@@ -549,10 +549,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     return Ok(());
                 }
                 Err(TryRecvError::Disconnected) => {
-                    if let Err(e) = rec.finish_stream() {
-                        warn_user(events, format!("finish: {e}"));
-                    }
-                    finish_full_session_recording(
+                    let _ = shutdown_recorder(
                         &mut rec,
                         &mut full_session,
                         &marker_log,
@@ -567,25 +564,16 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             }
         }
     }
-    if let Err(e) = rec.finish_stream() {
-        finish_full_session_recording(
-            &mut rec,
-            &mut full_session,
-            &marker_log,
-            &clips_dir,
-            &opts,
-            events,
-        );
-        return Err(format!("finish: {e}"));
-    }
-    finish_full_session_recording(
+    if let Some(err) = shutdown_recorder(
         &mut rec,
         &mut full_session,
         &marker_log,
         &clips_dir,
         &opts,
         events,
-    );
+    ) {
+        return Err(err);
+    }
     send_stopped(events);
     Ok(())
 }
@@ -888,31 +876,102 @@ fn send_stopped(events: &Sender<Event>) {
     });
 }
 
+fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Event>) {
+    match recover_recording_files(clips_dir) {
+        Ok(report) => {
+            if !report.recovered.is_empty() {
+                warn_user(
+                    events,
+                    format!(
+                        "recovered {} unfinished full-session recording(s)",
+                        report.recovered.len()
+                    ),
+                );
+            }
+            if report.deleted_empty > 0 {
+                warn_user(
+                    events,
+                    format!(
+                        "cleaned up {} empty unfinished full-session recording(s)",
+                        report.deleted_empty
+                    ),
+                );
+            }
+        }
+        Err(e) => warn_user(events, format!("recover unfinished recordings: {e}")),
+    }
+}
+
+fn shutdown_recorder(
+    rec: &mut Recorder<WgcCapture, Box<dyn Encoder>>,
+    full_session: &mut Option<FullSessionRecording>,
+    marker_log: &MarkerLog,
+    clips_dir: &Path,
+    opts: &ServiceOptions,
+    events: &Sender<Event>,
+) -> Option<String> {
+    match rec.finish_stream() {
+        Ok(()) => {
+            finish_full_session_recording(rec, full_session, marker_log, clips_dir, opts, events);
+            None
+        }
+        Err(e) => {
+            let message = format!("finish: {e}");
+            warn_user(events, message.clone());
+            discard_full_session_recording(
+                rec,
+                full_session,
+                events,
+                "full session discarded because recording could not finish cleanly",
+            );
+            Some(message)
+        }
+    }
+}
+
 fn begin_full_session_recording(
     rec: &mut Recorder<WgcCapture, Box<dyn Encoder>>,
     clips_dir: &Path,
     session_label: &str,
     mode: RecordingMode,
-) -> Result<Option<FullSessionRecording>, String> {
+    events: &Sender<Event>,
+) -> Option<FullSessionRecording> {
     if mode != RecordingMode::FullSession {
-        return Ok(None);
+        return None;
     }
 
     let session_dir = clips_dir.join(session_label);
-    std::fs::create_dir_all(&session_dir)
-        .map_err(|e| format!("create session folder {session_dir:?}: {e}"))?;
+    if let Err(e) = std::fs::create_dir_all(&session_dir) {
+        warn_user(
+            events,
+            format!("full-session recording unavailable; create {session_dir:?}: {e}"),
+        );
+        return None;
+    }
     let final_path = unique_media_path(&session_dir, "session");
     let temp_path = final_path.with_extension("mp4.recording");
-    let file =
-        std::fs::File::create(&temp_path).map_err(|e| format!("create {temp_path:?}: {e}"))?;
+    let file = match std::fs::File::create(&temp_path) {
+        Ok(file) => file,
+        Err(e) => {
+            warn_user(
+                events,
+                format!("full-session recording unavailable; create {temp_path:?}: {e}"),
+            );
+            return None;
+        }
+    };
     if let Err(e) = rec.start_full_session(file) {
         let _ = std::fs::remove_file(&temp_path);
-        return Err(format!("start full session: {e}"));
+        warn_user(
+            events,
+            format!("full-session recording unavailable; start writer: {e}"),
+        );
+        return None;
     }
-    Ok(Some(FullSessionRecording {
+    Some(FullSessionRecording {
         final_path,
         temp_path,
-    }))
+    })
 }
 
 fn finish_full_session_recording(
@@ -927,7 +986,24 @@ fn finish_full_session_recording(
         return;
     };
     match rec.finish_full_session() {
-        Ok(Some(summary)) if summary.duration_s > 0.0 => {
+        Ok(Some(summary)) if summary.duration_s.is_finite() && summary.duration_s <= 0.0 => {
+            warn_user(
+                events,
+                "full session ended before any footage was written".into(),
+            );
+            let _ = std::fs::remove_file(&recording.temp_path);
+        }
+        Ok(Some(summary)) => {
+            let seconds = if summary.duration_s.is_finite() {
+                summary.duration_s
+            } else {
+                warn_user(
+                    events,
+                    "full session duration was invalid; keeping the recording with an unknown duration"
+                        .into(),
+                );
+                0.0
+            };
             if let Err(e) = std::fs::rename(&recording.temp_path, &recording.final_path) {
                 warn_user(
                     events,
@@ -950,13 +1026,17 @@ fn finish_full_session_recording(
                 events,
                 clips_dir,
                 &recording.final_path,
-                summary.duration_s,
+                seconds,
                 markers,
                 true,
                 opts,
             );
         }
-        Ok(_) => {
+        Ok(None) => {
+            warn_user(
+                events,
+                "full session ended before any footage was written".into(),
+            );
             let _ = std::fs::remove_file(&recording.temp_path);
         }
         Err(e) => {
@@ -964,6 +1044,22 @@ fn finish_full_session_recording(
             let _ = std::fs::remove_file(&recording.temp_path);
         }
     }
+}
+
+fn discard_full_session_recording(
+    rec: &mut Recorder<WgcCapture, Box<dyn Encoder>>,
+    recording: &mut Option<FullSessionRecording>,
+    events: &Sender<Event>,
+    reason: &str,
+) {
+    let Some(recording) = recording.take() else {
+        return;
+    };
+    if let Err(e) = rec.finish_full_session() {
+        warn_user(events, format!("stop full-session writer: {e}"));
+    }
+    let _ = std::fs::remove_file(&recording.temp_path);
+    warn_user(events, reason.to_string());
 }
 
 struct FullSessionRecording {
