@@ -14,17 +14,36 @@
 
 ---
 
-Clipline is a game recorder built around three commitments: **never inject code into your games** (so it stays safe with anti‑cheats like Vanguard, EAC, and BattlEye), **never run ads, telemetry, or accounts** (so your clips and your machine stay yours), and **automatically mark the moments that matter** on the timeline — using official, local game APIs.
+Clipline is a game recorder built around three commitments: **never inject code into your games** (so it avoids the injected‑capture pattern that anti‑cheats like Vanguard, EAC, and BattlEye flag), **never run ads, telemetry, or accounts** (so your clips and your machine stay yours), and **automatically mark the moments that matter** on the timeline — using official, local game APIs.
 
 Under the hood it pairs a native **Rust** capture/encode core with a small **Tauri (WebView2)** UI: capture via **Windows.Graphics.Capture**, hardware encoding on **NVENC / AMF / QuickSync** (plus software **AV1**), and a crash‑safe MP4 writer. The result is a ShadowPlay‑style replay buffer with near‑zero gameplay impact — cross‑GPU, open source, and free.
 
-> **Status:** `v0.1.0`, nightly. A working tray recorder with a first‑party review/trim player, 29 development milestones deep. Windows‑only. [Download the installer](#-install) or build from source. The installer isn't code‑signed yet, so Windows SmartScreen will warn on first run — signing is on the roadmap.
+> **Status:** `v0.1.0`, nightly — testing‑grade, not stable. A working tray recorder with a first‑party review/trim player, 29 development milestones deep. Windows‑only. [Download the installer](#-install) or build from source. The installer binary isn't Authenticode code‑signed yet, so Windows SmartScreen will warn on first run — Authenticode signing is [on the roadmap](#-roadmap). (The auto‑updater *is* signed; the two are different — see [Install](#-install).)
+
+<!--
+  SCREENSHOTS — drop a visual-first impression here, above the text/badges.
+  For a recorder/editor, gamers want to *see* the flow before reading architecture.
+  Recommended (commit images under docs/screenshots/ and uncomment):
+
+  <div align="center">
+    <img src="docs/screenshots/review-timeline.png" alt="Review player with event-marker timeline" width="800"><br>
+    <em>Review player — scrub past automatic League event markers and trim losslessly.</em>
+  </div>
+
+  Four shots worth capturing: tray flow · replay save toast · marker timeline · trim UI.
+  A short GIF of "save replay → markers → trim → export" near the top is even better.
+-->
 
 ---
 
 ## 📥 Install
 
-Download the latest **[nightly installer](https://github.com/dain98/clipline/releases)** (`Clipline_<version>_x64-setup.exe`) and run it. It installs per‑user, starts in the tray, and keeps itself up to date on the nightly channel. Because it isn't code‑signed yet, Windows SmartScreen may warn on first launch — choose **More info → Run anyway**. You'll also need the [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (preinstalled on Windows 11).
+Download the latest **[nightly installer](https://github.com/dain98/clipline/releases)** (`Clipline_<version>_x64-setup.exe`) and run it. It installs per‑user, starts in the tray, and keeps itself up to date on the nightly channel. You'll also need the [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (preinstalled on Windows 11).
+
+**On signing — two different things, only one is done yet:**
+
+- ✅ **The auto‑updater is signed.** Every update bundle carries a cryptographic signature that's verified against a public key committed in the repo before it's applied, so the update channel is tamper‑resistant.
+- ⚠️ **The installer binary is *not* yet Authenticode code‑signed.** Authenticode is the separate, paid certificate Windows SmartScreen checks. Until Clipline has one, SmartScreen may warn on first launch — choose **More info → Run anyway**. This is the same warning every unsigned indie installer triggers; it isn't a malware detection. Authenticode signing is [on the roadmap](#-roadmap).
 
 Prefer to build it yourself? See **Building from source** below.
 
@@ -32,7 +51,7 @@ Prefer to build it yourself? See **Building from source** below.
 
 ## ✨ Features
 
-- 🛡️ **Anti‑cheat safe by design** — capture happens at the desktop‑compositor level via Windows.Graphics.Capture. No DLL injection, no kernel driver, no memory reading, so it works with **Riot Vanguard** (VALORANT), **Easy Anti‑Cheat**, and **BattlEye**.
+- 🛡️ **Anti‑cheat safe by design** — capture happens at the desktop‑compositor level via Windows.Graphics.Capture. No DLL injection, no kernel driver, no memory reading — so Clipline avoids the injected‑capture pattern that anti‑cheats like **Riot Vanguard** (VALORANT), **Easy Anti‑Cheat**, and **BattlEye** flag. This is an auditable architectural property, not a vendor‑approval guarantee — see [Known limitations](#-known-limitations).
 - 🏷️ **Automatic event markers** — Clipline polls **League of Legends'** official local *Live Client Data API* and drops timeline markers for kills, multikills, dragons, barons, towers, aces, and more — just the data the game already exposes locally, no account or injection.
 - ⚡ **Lightweight & hardware‑accelerated** — a thin capture → encode → mux pipeline with hardware encoders (NVENC / AMF / QuickSync, plus software AV1) keeps gameplay impact in the low single digits, with a live RAM readout in the app.
 - 🎞️ **Replay buffer + full‑session recording** — retroactively save the last N seconds with a hotkey (**Alt+F10** by default), ShadowPlay‑style, *and* optionally record full sessions per game — both fed by a single encoder.
@@ -60,6 +79,12 @@ Prefer to build it yourself? See **Building from source** below.
 | **Vendor lock‑in**      | 🟢 Any GPU | 🟢 Any GPU | 🟢 Any GPU | 🟢 Any GPU | 🔴 NVIDIA only | 🟢 Any GPU |
 
 **Where Clipline is different:** it combines no‑injection anti‑cheat safety, automatic event markers for League, a local‑first privacy stance, and a permissive open‑source license — without locking you to one GPU vendor.
+
+### Why not just use…?
+
+- **OBS?** OBS is the power tool — but its low‑overhead Game Capture works by injecting into your game, the replay buffer is RAM‑only and fiddly to configure, and there's no automatic event tagging or built‑in trim. Clipline trades OBS's breadth for a no‑injection capture path, one‑hotkey replay save, and automatic League markers out of the box.
+- **ShadowPlay?** Lowest overhead in the category, but **NVIDIA‑only**, ties you to an NVIDIA account, has a barely‑there editor, and tags no game events. Clipline runs on any GPU, needs no account, and marks the moments on the timeline.
+- **Outplayed / Medal?** They have event markers, but via the Overwolf platform with ads, accounts, telemetry, and cloud uploads. Clipline keeps everything local — no ads, no account, no phone‑home — and reads the same data straight from League's official local API.
 
 ---
 
@@ -103,6 +128,8 @@ The workspace is split into focused crates so platform‑agnostic logic stays te
 - **[Rust](https://rustup.rs/) stable** toolchain (with `clippy`)
 - **[WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/)** — preinstalled on Windows 11; Windows 10 may need the Evergreen runtime
 - **FFmpeg** *(optional)* — only needed for **HEVC/AV1** recording and to run the full test suite. H.264 works with no extra dependencies via the OS Media Foundation encoder.
+
+See **[Compatibility & tested configurations](docs/COMPATIBILITY.md)** for the GPU/encoder, Windows‑version, and per‑game support matrix.
 
 ### Build & run
 
@@ -165,13 +192,27 @@ Clipline is built on a hard line: **it never injects DLLs, never loads a kernel 
 
 ---
 
+## ⚠️ Known limitations
+
+Clipline is **nightly, testing‑grade software**. Going in with clear expectations:
+
+- **Not code‑signed.** The installer isn't Authenticode‑signed yet, so SmartScreen warns on first run (see [Install](#-install)).
+- **Anti‑cheat compatibility is a design property, not a promise.** "No injection / no kernel driver / no memory reading" is architecturally true and auditable — that's the part Clipline controls. Whether any given anti‑cheat *permits* desktop‑compositor capture is the vendor's call, and policies can change without notice. Clipline avoids the failure mode most likely to trip a cheat; it can't guarantee any vendor will keep allowing every capture path.
+- **Windows 10/11 only**, x64. No Linux/macOS, no 32‑bit, no DirectX‑exclusive‑fullscreen edge cases that WGC can't see.
+- **League of Legends is the only built‑in event source today.** Other games record fine, but get no automatic markers yet (VALORANT, CS2, and more are [planned](#-roadmap)).
+- **HEVC/AV1 needs FFmpeg and can't preview in‑app yet.** The WebView2 player decodes H.264; HEVC/AV1 clips require an external player until native decode lands.
+- **Trim is keyframe‑aligned (lossless), not frame‑accurate.** In/out points snap to the nearest keyframe so export is an instant stream‑copy; frame‑accurate trim is [on the roadmap](#-roadmap).
+- **Hardware coverage isn't exhaustively validated.** Encoder probing covers NVENC/AMF/QuickSync plus software AV1, but the matrix of GPU + driver + Windows build combinations is large — and only the AMD/RDNA2 path is verified live so far. See **[Compatibility & tested configurations](docs/COMPATIBILITY.md)** for the current matrix. If something misbehaves, a [bug report](https://github.com/dain98/clipline/issues/new?template=bug_report.yml) with your GPU, encoder, Windows build, game, and capture mode is the fastest path to a fix.
+
+---
+
 ## 🗺️ Roadmap
 
 Implemented today: WGC capture, hardware + AV1 encoding, replay buffer, full‑session recording, multi‑track audio, the review/trim player, custom‑game detection, League event markers and auto‑recording, disk quota/GC, startup‑on‑login, and a self‑updating nightly installer.
 
 Planned (each gets its own design + TDD plan):
 
-- **Code signing** for the installer to clear the SmartScreen warning.
+- **Authenticode code signing** for the installer binary to clear the SmartScreen warning (distinct from the already‑signed updater).
 - **Auto‑clip on importance** — automatically save when a high‑importance event fires (marker importance is already tracked).
 - **Frame‑accurate trim** — re‑encode only the boundary GOPs, keeping the instant lossless path as the default.
 - **In‑app HEVC/AV1 playback** — a native FFmpeg decode path so the review player can preview codecs WebView2 can't decode on its own.

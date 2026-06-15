@@ -1,0 +1,120 @@
+name: Bug report
+description: Report something broken or unexpected in Clipline
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Clipline! The details below let us reproduce the
+        issue and grow the [compatibility matrix](https://github.com/dain98/clipline/blob/main/docs/COMPATIBILITY.md).
+        Please don't include logs that contain personal information.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: |
+        1. Started a League match with auto-record on
+        2. Pressed Alt+F10 to save a replay
+        3. Expected a clip with markers; got an empty file
+    validations:
+      required: true
+
+  - type: input
+    id: clipline-version
+    attributes:
+      label: Clipline version
+      description: Shown in Settings → About (e.g. 0.1.0 nightly).
+      placeholder: "0.1.0 nightly"
+    validations:
+      required: true
+
+  - type: input
+    id: windows-build
+    attributes:
+      label: Windows edition + build
+      description: Run `winver` and copy the version/build (e.g. "Windows 11 23H2, build 22631.3447").
+      placeholder: "Windows 11 23H2, build 22631.xxxx"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU + driver version
+      description: GPU model and the installed driver version.
+      placeholder: "AMD RX 6700 XT, Adrenalin 24.x.x"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: encoder
+    attributes:
+      label: Encoder in use
+      description: Which encoder did Clipline select? (Settings → Capture)
+      options:
+        - "Not sure"
+        - "H.264 (NVENC)"
+        - "H.264 (AMF)"
+        - "H.264 (QuickSync)"
+        - "H.264 (Media Foundation / software)"
+        - "HEVC (NVENC)"
+        - "HEVC (AMF)"
+        - "HEVC (QuickSync)"
+        - "AV1 (NVENC)"
+        - "AV1 (AMF)"
+        - "AV1 (QuickSync)"
+        - "AV1 (SVT-AV1 / software)"
+    validations:
+      required: true
+
+  - type: input
+    id: game
+    attributes:
+      label: Game
+      description: Which game (or app) were you capturing? Include "desktop / full monitor" if not a game.
+      placeholder: "League of Legends"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: capture-mode
+    attributes:
+      label: Capture mode
+      options:
+        - "Replay buffer (Alt+F10)"
+        - "Full-session recording"
+        - "Both"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: capture-target
+    attributes:
+      label: Capture target
+      options:
+        - "Per-window / per-game"
+        - "Full monitor"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant log output if you have it. Logs are stored under `%APPDATA%\Clipline\`.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, recordings, multi-monitor / HDR / VRR setup, anything else that might matter.
+    validations:
+      required: false
