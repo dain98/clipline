@@ -1608,11 +1608,21 @@ function applyView(next) {
   paintTimeline();
 }
 
+// After a manual view change (wheel zoom/pan, zoom buttons, navigator drag) hold
+// auto-follow off briefly, so playback doesn't immediately yank the view back to
+// the playhead while the user is deliberately looking elsewhere.
+const FOLLOW_SUPPRESS_MS = 1500;
+let suppressFollowUntil = 0;
+function noteViewActivity() {
+  suppressFollowUntil = performance.now() + FOLLOW_SUPPRESS_MS;
+}
+
 // Keep the playhead in view while it moves on its own (playback, keyboard jumps,
-// marker clicks). Gated on no active drag so the window never pages out from
-// under a scrub/trim/navigator drag; only re-renders when the window moves.
+// marker clicks). Gated on no active drag and a quiet period after a manual view
+// change so it never pages out from under the user; only re-renders on a change.
 function maybeFollow(playhead) {
   if (dragging || overviewDrag) return;
+  if (performance.now() < suppressFollowUntil) return;
   if (!(zoomSpan > 0)) return; // zoomed out: the whole clip is already in view
   const v = timelineView();
   const next = followView(v.start, v.span, clipDuration(), playhead, DEFAULT_FOLLOW_MODE);
@@ -1627,6 +1637,7 @@ function maybeFollow(playhead) {
 function zoomAtPlayhead(factor) {
   const dur = clipDuration();
   if (!(dur > 0)) return;
+  noteViewActivity();
   const v = timelineView();
   const ph = clampTime(video.currentTime || 0, dur);
   const frac = v.span > 0 ? Math.max(0, Math.min(1, (ph - v.start) / v.span)) : 0.5;
@@ -1641,6 +1652,7 @@ function zoomFit() {
 function zoomToSelection() {
   const dur = clipDuration();
   if (!(dur > 0)) return;
+  noteViewActivity();
   applyView(viewForRange(trimStart, trimEnd, dur));
 }
 
@@ -1958,14 +1970,27 @@ function startDrag(kind, ev) {
   // Scrub paused so every pointer position shows its frame, then restore.
   resumeAfterDrag = !video.paused;
   if (resumeAfterDrag) video.pause();
-  // Exclude the element(s) being moved so the drag never snaps to itself:
-  // a scrub/slide must not snap to the playhead, and trim edges are dropped
-  // (the dragged one for an edge drag, both when sliding the whole selection).
-  const exclude =
-    kind === "scrub" ? ["playhead"] : kind === "slide" ? ["in", "out"] : [kind, "playhead"];
-  dragCandidates = snapCandidates(
-    clipDuration(), clipMarkers(), video.currentTime || 0, trimStart, trimEnd, exclude
-  );
+  // Exclude the element(s) being moved so a drag never snaps to itself.
+  const playhead = video.currentTime || 0;
+  let exclude;
+  if (kind === "scrub") {
+    exclude = ["playhead"]; // the playhead rides the pointer
+  } else if (kind === "slide") {
+    exclude = ["in", "out"]; // both edges move together
+  } else {
+    // Trim edge: always drop the dragged edge. The playhead rides that edge once
+    // the drag starts, so drop it too ONLY if it's already within snap range of
+    // the edge (else the handle would stick to its own start) — a playhead parked
+    // elsewhere stays a useful snap target.
+    exclude = [kind];
+    const rect = $("timeline").getBoundingClientRect();
+    const v = timelineView();
+    const pps = rect.width && v.span > 0 ? rect.width / v.span : 0;
+    const tol = pps > 0 ? SNAP_THRESHOLD_PX / pps : 0.05;
+    const edge = kind === "in" ? trimStart : trimEnd;
+    if (Math.abs(playhead - edge) <= tol) exclude.push("playhead");
+  }
+  dragCandidates = snapCandidates(clipDuration(), clipMarkers(), playhead, trimStart, trimEnd, exclude);
   if (kind === "slide") {
     const rect = $("timeline").getBoundingClientRect();
     const v = timelineView();
@@ -2057,6 +2082,7 @@ function onTimelineWheel(ev) {
   const dur = clipDuration();
   if (!currentClip || !(dur > 0)) return;
   ev.preventDefault();
+  noteViewActivity();
   const rect = $("timeline").getBoundingClientRect();
   if (!rect.width) return;
   // Normalize line/page wheels (Firefox-style) to roughly pixel scale.
@@ -2128,6 +2154,7 @@ function endOverviewDrag() {
   if (!overviewDrag) return;
   overviewDrag = null;
   $("overview-window").classList.remove("grabbing");
+  noteViewActivity(); // don't snap back to the playhead the instant the drag ends
 }
 
 // Navigator scroll pans the visible window left/right. The strip spans the whole
@@ -2136,6 +2163,7 @@ function onOverviewWheel(ev) {
   const dur = clipDuration();
   if (!currentClip || !(dur > 0)) return;
   ev.preventDefault();
+  noteViewActivity();
   const rect = $("overview").getBoundingClientRect();
   if (!rect.width) return;
   const unit = ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? rect.width : 1;
