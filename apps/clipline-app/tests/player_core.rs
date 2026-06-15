@@ -324,6 +324,25 @@ fn trim_drag_keeps_handles_apart() {
 }
 
 #[test]
+fn slide_trim_moves_the_selection_and_clamps() {
+    let mut ctx = player_core_context();
+    // Mid-clip slide preserves the length.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.slideTrim(10, 30, 15, 100)"),
+        r#"{"start":15,"end":35}"#
+    );
+    // Sliding past either end clamps while keeping the length.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.slideTrim(70, 90, 95, 100)"),
+        r#"{"start":80,"end":100}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.slideTrim(10, 30, -5, 100)"),
+        r#"{"start":0,"end":20}"#
+    );
+}
+
+#[test]
 fn trim_summary_reports_range_and_length() {
     let mut ctx = player_core_context();
     assert_eq!(
@@ -379,23 +398,32 @@ fn key_intents_cover_the_documented_shortcuts() {
             r#"{"kind":"toggle-play"}"#
         );
     }
+    // Arrows step one frame; Shift+arrow nudges a second; J/L jump 5s (Shift 1s).
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowLeft', false)"),
-        r#"{"kind":"seek-by","seconds":-5}"#
+        r#"{"kind":"step-frame","dir":-1}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowRight', false)"),
+        r#"{"kind":"step-frame","dir":1}"#
     );
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowLeft', true)"),
         r#"{"kind":"seek-by","seconds":-1}"#
     );
     assert_eq!(
-        eval_json(&mut ctx, "PlayerCore.keyIntent('KeyL', false)"),
-        r#"{"kind":"seek-by","seconds":5}"#
-    );
-    assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowRight', true)"),
         r#"{"kind":"seek-by","seconds":1}"#
     );
-    // Fine stepping for precise trim placement.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('KeyJ', false)"),
+        r#"{"kind":"seek-by","seconds":-5}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('KeyL', false)"),
+        r#"{"kind":"seek-by","seconds":5}"#
+    );
+    // ,/. are a fixed 0.1s nudge regardless of Shift (arrows own per-frame now).
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('Comma', false)"),
         r#"{"kind":"seek-by","seconds":-0.1}"#
@@ -427,6 +455,62 @@ fn key_intents_cover_the_documented_shortcuts() {
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('KeyZ', false)"),
         "null"
+    );
+    // Per-frame stepping lives on the arrow keys.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowLeft', false)"),
+        r#"{"kind":"step-frame","dir":-1}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowRight', false)"),
+        r#"{"kind":"step-frame","dir":1}"#
+    );
+    // Zoom controls.
+    for code in ["Equal", "NumpadAdd"] {
+        assert_eq!(
+            eval_json(&mut ctx, &format!("PlayerCore.keyIntent('{code}', false)")),
+            r#"{"kind":"zoom","factor":0.5}"#
+        );
+    }
+    for code in ["Minus", "NumpadSubtract"] {
+        assert_eq!(
+            eval_json(&mut ctx, &format!("PlayerCore.keyIntent('{code}', false)")),
+            r#"{"kind":"zoom","factor":2}"#
+        );
+    }
+    // \ fits the trim selection (the editing default); Shift+\ fits the whole clip.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('Backslash', false)"),
+        r#"{"kind":"zoom-selection"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('Backslash', true)"),
+        r#"{"kind":"zoom-fit"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('KeyZ', true)"),
+        r#"{"kind":"zoom-fit"}"#
+    );
+    // Jump controls.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('Home', false)"),
+        r#"{"kind":"seek-to","seconds":0}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('End', false)"),
+        r#"{"kind":"seek-to-end"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowUp', false)"),
+        r#"{"kind":"prev-edit"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowDown', false)"),
+        r#"{"kind":"next-edit"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('KeyS', false)"),
+        r#"{"kind":"toggle-snap"}"#
     );
 }
 
@@ -553,6 +637,296 @@ fn ruler_marks_pick_nice_steps() {
 }
 
 #[test]
+fn ruler_marks_range_covers_a_zoomed_window() {
+    let mut ctx = player_core_context();
+    // A 20s window at 30s: 5s steps, only the marks that fall inside the window.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.rulerMarksRange(30, 20, 8).map(m => m.t)"),
+        "[30,35,40,45,50]"
+    );
+    // A start off the step grid rounds up to the first mark in view.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.rulerMarksRange(32, 20, 8).map(m => m.t)"),
+        "[35,40,45,50]"
+    );
+    // Starting at zero matches the whole-clip ruler.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.rulerMarksRange(0, 22, 8).map(m => m.t)"),
+        "[0,5,10,15,20]"
+    );
+    assert_eq!(eval_json(&mut ctx, "PlayerCore.rulerMarksRange(0, 0, 8)"), "[]");
+}
+
+#[test]
+fn timeline_view_window_maps_positions_and_pointer() {
+    let mut ctx = player_core_context();
+    // percentForView locates a time within the visible window, unclamped so the
+    // caller can clip content that lies outside 0–100%.
+    assert_eq!(eval(&mut ctx, "PlayerCore.percentForView(15, 10, 20)"), "25");
+    assert_eq!(eval(&mut ctx, "PlayerCore.percentForView(5, 10, 20)"), "-25");
+    assert_eq!(eval(&mut ctx, "PlayerCore.percentForView(5, 0, 0)"), "0");
+
+    // timelineTimeView maps pointer x into the window, then clamps to the clip.
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.timelineTimeView(150, 100, 200, 10, 20, 60)"),
+        "15"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.timelineTimeView(50, 100, 200, 10, 20, 60)"),
+        "10"
+    );
+
+    // clampView pins the window inside [0, duration]; span 0 means whole clip.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.clampView(0, 0, 60)"),
+        r#"{"start":0,"span":60}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.clampView(55, 20, 60)"),
+        r#"{"start":40,"span":20}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.clampView(-5, 100, 60)"),
+        r#"{"start":0,"span":60}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.clampView(0, 20, 0)"),
+        r#"{"start":0,"span":0}"#
+    );
+}
+
+#[test]
+fn zoom_view_keeps_the_anchor_time_fixed() {
+    let mut ctx = player_core_context();
+    // Zoom in to half span, anchored mid-window: the center time stays put.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.zoomView(0, 60, 60, 0.5, 0.5, 1)"),
+        r#"{"start":15,"span":30}"#
+    );
+    // Anchored at the left edge keeps the left time pinned.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.zoomView(0, 60, 60, 0, 0.5, 1)"),
+        r#"{"start":0,"span":30}"#
+    );
+    // Zooming back out never exceeds the clip and re-pins to the start.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.zoomView(15, 30, 60, 0.5, 4, 1)"),
+        r#"{"start":0,"span":60}"#
+    );
+    // The span floor caps how far in you can zoom.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.zoomView(0, 60, 60, 0, 0.001, 1)"),
+        r#"{"start":0,"span":1}"#
+    );
+    // Zero duration is a no-op window.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.zoomView(0, 0, 0, 0.5, 0.5, 1)"),
+        r#"{"start":0,"span":0}"#
+    );
+}
+
+#[test]
+fn pan_view_slides_and_clamps_the_window() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.panView(10, 20, 100, 5)"),
+        r#"{"start":15,"span":20}"#
+    );
+    // Panning past either end stops at the edge.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.panView(10, 20, 100, -50)"),
+        r#"{"start":0,"span":20}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.panView(90, 20, 100, 50)"),
+        r#"{"start":80,"span":20}"#
+    );
+    // Zoomed out (span 0) is a no-op: the whole clip stays in view.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.panView(0, 0, 100, 30)"),
+        r#"{"start":0,"span":100}"#
+    );
+}
+
+#[test]
+fn set_view_edge_moves_one_boundary() {
+    let mut ctx = player_core_context();
+    // Drag the left edge in: the right edge stays, the span shrinks.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.setViewEdge(10, 40, 100, 'left', 20, 1)"),
+        r#"{"start":20,"span":30}"#
+    );
+    // Drag the right edge out: the left edge stays.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.setViewEdge(10, 40, 100, 'right', 80, 1)"),
+        r#"{"start":10,"span":70}"#
+    );
+    // The min span floors how far an edge can close.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.setViewEdge(10, 40, 100, 'left', 49.5, 1)"),
+        r#"{"start":49,"span":1}"#
+    );
+    // Edges clamp to the clip bounds.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.setViewEdge(10, 40, 100, 'right', 200, 1)"),
+        r#"{"start":10,"span":90}"#
+    );
+}
+
+#[test]
+fn view_for_range_frames_the_selection() {
+    let mut ctx = player_core_context();
+    // A mid-clip range gets symmetric padding.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.viewForRange(20, 40, 100, 0.05, 1)"),
+        r#"{"start":19,"span":22}"#
+    );
+    // A zero-width selection floors to the min span, recentered on the point.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.viewForRange(50, 50, 100, 0.05, 1)"),
+        r#"{"start":49.5,"span":1}"#
+    );
+    // The padded span never exceeds the clip.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.viewForRange(0, 100, 100, 0.05, 1)"),
+        r#"{"start":0,"span":100}"#
+    );
+    // Zero duration is a no-op window.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.viewForRange(0, 10, 0, 0.05, 1)"),
+        r#"{"start":0,"span":0}"#
+    );
+}
+
+#[test]
+fn follow_view_pages_and_centers() {
+    let mut ctx = player_core_context();
+    // Page: no change while the playhead is inside the window.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.followView(10, 20, 100, 15, 'page')"),
+        r#"{"start":10,"span":20}"#
+    );
+    // Page: re-page when the playhead leaves the right / left edge.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.followView(10, 20, 100, 35, 'page')"),
+        r#"{"start":33,"span":20}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.followView(50, 20, 100, 40, 'page')"),
+        r#"{"start":38,"span":20}"#
+    );
+    // Smooth keeps the playhead centered.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.followView(0, 20, 100, 50, 'smooth')"),
+        r#"{"start":40,"span":20}"#
+    );
+    // None leaves the window alone.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.followView(10, 20, 100, 99, 'none')"),
+        r#"{"start":10,"span":20}"#
+    );
+    // Zoomed out never follows.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.followView(0, 0, 100, 50, 'page')"),
+        r#"{"start":0,"span":100}"#
+    );
+}
+
+#[test]
+fn snap_time_snaps_within_a_pixel_tolerance() {
+    let mut ctx = player_core_context();
+    // 8px / 100 px-per-s = 0.08s tolerance; 0.05s away snaps.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.snapTime(10.05, [10, 20], 100, 8)"),
+        r#"{"t":10,"snapped":true,"target":10}"#
+    );
+    // Beyond tolerance, the time passes through untouched.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.snapTime(10.2, [10, 20], 100, 8)"),
+        r#"{"t":10.2,"snapped":false,"target":null}"#
+    );
+    // Picks the closer of two candidates.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.snapTime(10.6, [10, 11], 100, 80)"),
+        r#"{"t":11,"snapped":true,"target":11}"#
+    );
+    // No candidates / non-positive scale never snap.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.snapTime(5, [], 100, 8)"),
+        r#"{"t":5,"snapped":false,"target":null}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.snapTime(5, [1, 2], 0, 8)"),
+        r#"{"t":5,"snapped":false,"target":null}"#
+    );
+    // Tolerance scales with pixels-per-second (more zoom => tighter snap).
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.snapTime(10.1, [10], 50, 8).snapped"),
+        "true"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.snapTime(10.1, [10], 200, 8).snapped"),
+        "false"
+    );
+}
+
+#[test]
+fn snap_candidates_collect_and_exclude() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.snapCandidates(100, [{t_s:30}], 50, 10, 90)"),
+        "[0,10,30,50,90,100]"
+    );
+    // The moving element (here the in-edge and the playhead) is excluded.
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.snapCandidates(100, [{t_s:30}], 50, 10, 90, ['in','playhead'])"
+        ),
+        "[0,30,90,100]"
+    );
+    // Duplicates collapse and the list stays sorted.
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.snapCandidates(100, [{t_s:0},{t_s:100}], 0, 0, 100)"
+        ),
+        "[0,100]"
+    );
+}
+
+#[test]
+fn frame_step_falls_back_when_fps_unknown() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(&mut ctx, "Math.round(PlayerCore.frameStep(60) * 1e6)"),
+        "16667"
+    );
+    // 0 / NaN / negative fps all fall back to the 1/30 default.
+    assert_eq!(
+        eval(&mut ctx, "Math.round(PlayerCore.frameStep(0) * 1e6)"),
+        "33333"
+    );
+    assert_eq!(
+        eval(&mut ctx, "Math.round(PlayerCore.frameStep(NaN) * 1e6)"),
+        "33333"
+    );
+    assert_eq!(eval(&mut ctx, "PlayerCore.frameStep(-5, 0.5)"), "0.5");
+}
+
+#[test]
+fn edit_points_are_sorted_unique_stops() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.editPoints([{t_s:30}], 10, 90, 100).map(p => p.t_s)"
+        ),
+        "[0,10,30,90,100]"
+    );
+}
+
+#[test]
 fn clip_titles_use_twelve_hour_time() {
     let mut ctx = player_core_context();
     assert_eq!(
@@ -669,6 +1043,13 @@ fn shared_constants_are_exposed() {
     let mut ctx = player_core_context();
     assert_eq!(eval(&mut ctx, "PlayerCore.MIN_TRIM_GAP_S"), "0.1");
     assert_eq!(eval(&mut ctx, "PlayerCore.MARKER_EPSILON_S"), "0.05");
+    assert_eq!(eval(&mut ctx, "PlayerCore.MIN_VIEW_SPAN_S"), "1");
+    assert_eq!(eval(&mut ctx, "PlayerCore.DEFAULT_FOLLOW_MODE"), "page");
+    assert_eq!(eval(&mut ctx, "PlayerCore.SNAP_THRESHOLD_PX"), "8");
+    assert_eq!(
+        eval(&mut ctx, "Math.round(PlayerCore.DEFAULT_FINE_STEP_S * 1e6)"),
+        "16667"
+    );
 }
 
 #[test]

@@ -5,6 +5,16 @@ const PlayerCore = (() => {
   const MIN_TRIM_GAP_S = 0.1;
   const MARKER_EPSILON_S = 0.05;
   const OVERLAY_HIDE_MS = 2000;
+  // The most you can zoom the edit timeline in: the visible window never shrinks
+  // below this many seconds (kept above the trim gap so handles stay grabbable).
+  const MIN_VIEW_SPAN_S = 1;
+  // Auto-scroll the zoomed window to keep the playhead in view: "page" re-pages
+  // only when the playhead leaves the window (cheap, the default).
+  const DEFAULT_FOLLOW_MODE = "page";
+  // How close (in pixels) a drag must be to a salient time before snapping.
+  const SNAP_THRESHOLD_PX = 8;
+  // Fine-step fallback when the clip's true frame rate is unknown.
+  const DEFAULT_FINE_STEP_S = 1 / 60;
 
   // YouTube grammar: controls pin while paused, fade when playing and idle.
   const overlayVisible = (paused, idleMs) => paused || idleMs < OVERLAY_HIDE_MS;
@@ -153,6 +163,168 @@ const PlayerCore = (() => {
     return clampTime((x / rectWidth) * duration, duration);
   };
 
+  // --- Timeline zoom ---
+  // The timeline shows a window [viewStart, viewStart + viewSpan] of the clip.
+  // viewSpan === duration is fully zoomed out; smaller spans zoom in. Positions
+  // are percentages of the visible window, so off-window content lands outside
+  // 0–100% and is clipped by the track. Times stay absolute throughout.
+
+  // Where `time` sits in the visible window, as a percent. Unclamped on purpose:
+  // points outside the window return <0 or >100 so the caller can clip them.
+  const percentForView = (time, viewStart, viewSpan) => {
+    if (!(viewSpan > 0)) return 0;
+    return ((time - viewStart) / viewSpan) * 100;
+  };
+
+  // Pointer x -> clip time, accounting for the visible window (the zoomed-in
+  // counterpart of timelineTime).
+  const timelineTimeView = (clientX, rectLeft, rectWidth, viewStart, viewSpan, duration) => {
+    if (!(rectWidth > 0)) return clampTime(viewStart, duration);
+    const x = Math.max(0, Math.min(rectWidth, clientX - rectLeft));
+    return clampTime(viewStart + (x / rectWidth) * viewSpan, duration);
+  };
+
+  // Normalize a stored window to a valid one for the current duration: a span of
+  // 0 (or any value >= duration) means "whole clip", and the start is pinned so
+  // the window never runs past either end.
+  const clampView = (viewStart, viewSpan, duration) => {
+    if (!(duration > 0)) return { start: 0, span: 0 };
+    const span = viewSpan > 0 ? Math.min(viewSpan, duration) : duration;
+    const start = Math.max(0, Math.min(duration - span, Number.isFinite(viewStart) ? viewStart : 0));
+    return { start, span };
+  };
+
+  // Zoom the window by `factor` (>1 zooms out, <1 zooms in) while keeping the
+  // clip time under `anchorFrac` (0–1 across the window, e.g. the cursor) fixed.
+  const zoomView = (viewStart, viewSpan, duration, anchorFrac, factor, minSpan = MIN_VIEW_SPAN_S) => {
+    if (!(duration > 0)) return { start: 0, span: 0 };
+    const cur = clampView(viewStart, viewSpan, duration);
+    const floor = Math.min(minSpan, duration);
+    const nextSpan = Math.max(floor, Math.min(duration, cur.span * factor));
+    const frac = Math.max(0, Math.min(1, anchorFrac));
+    const anchorTime = cur.start + frac * cur.span;
+    return clampView(anchorTime - frac * nextSpan, nextSpan, duration);
+  };
+
+  // Slide the window by deltaSeconds, keeping its span. clampView pins it inside
+  // the clip, so panning into an edge simply stops and panning while zoomed out
+  // (span >= duration) is a natural no-op.
+  const panView = (viewStart, viewSpan, duration, deltaSeconds) =>
+    clampView(
+      (Number.isFinite(viewStart) ? viewStart : 0) +
+        (Number.isFinite(deltaSeconds) ? deltaSeconds : 0),
+      viewSpan,
+      duration
+    );
+
+  // Drag one edge of the window to a clip time, leaving the other edge fixed —
+  // the navigator's resize grips. Honors the min span and clamps to the clip.
+  const setViewEdge = (viewStart, viewSpan, duration, edge, timeAtEdge, minSpan = MIN_VIEW_SPAN_S) => {
+    if (!(duration > 0)) return { start: 0, span: 0 };
+    const cur = clampView(viewStart, viewSpan, duration);
+    const floor = Math.min(minSpan, duration);
+    const t = clampTime(timeAtEdge, duration);
+    if (edge === "left") {
+      const right = cur.start + cur.span; // fixed
+      const start = Math.min(t, right - floor);
+      return clampView(start, right - start, duration);
+    }
+    const left = cur.start; // fixed
+    const end = Math.max(t, left + floor);
+    return clampView(left, end - left, duration);
+  };
+
+  // A window that frames [startS, endS] with padding on each side, floored to the
+  // min span and clamped to the clip — the "zoom to selection" target.
+  const viewForRange = (startS, endS, duration, paddingFrac = 0.05, minSpan = MIN_VIEW_SPAN_S) => {
+    if (!(duration > 0)) return { start: 0, span: 0 };
+    const lo = Math.min(startS, endS);
+    const hi = Math.max(startS, endS);
+    const rangeSpan = Math.max(0, hi - lo);
+    const padded = rangeSpan + rangeSpan * paddingFrac * 2;
+    const span = Math.max(Math.min(minSpan, duration), Math.min(duration, padded));
+    const center = (lo + hi) / 2;
+    return clampView(center - span / 2, span, duration);
+  };
+
+  // Keep the playhead in view during playback. "page" re-pages only once the
+  // playhead leaves the window; "smooth" centers it; "none" leaves it alone.
+  // Zoomed out (span >= duration) is always a no-op.
+  const followView = (viewStart, viewSpan, duration, playhead, mode) => {
+    const cur = clampView(viewStart, viewSpan, duration);
+    if (!(duration > 0) || cur.span >= duration) return cur;
+    const ph = clampTime(playhead, duration);
+    const end = cur.start + cur.span;
+    if (mode === "smooth") {
+      return clampView(ph - cur.span * 0.5, cur.span, duration);
+    }
+    if (mode === "page") {
+      if (ph < cur.start || ph > end) {
+        return clampView(ph - cur.span * 0.1, cur.span, duration);
+      }
+    }
+    return cur;
+  };
+
+  // Snap t to the nearest candidate within a pixel tolerance (converted to
+  // seconds via pxPerSec, so the feel is constant at any zoom). Returns the
+  // possibly-snapped time and what it hit.
+  const snapTime = (t, candidates, pxPerSec, thresholdPx = SNAP_THRESHOLD_PX) => {
+    if (!(pxPerSec > 0) || !candidates || !candidates.length) {
+      return { t, snapped: false, target: null };
+    }
+    const tolerance = thresholdPx / pxPerSec;
+    let best = null;
+    let bestDist = Infinity;
+    for (const c of candidates) {
+      const d = Math.abs(c - t);
+      if (d < bestDist) {
+        bestDist = d;
+        best = c;
+      }
+    }
+    if (best != null && bestDist <= tolerance) {
+      return { t: best, snapped: true, target: best };
+    }
+    return { t, snapped: false, target: null };
+  };
+
+  // Salient times a drag can snap to: clip ends, markers, the playhead, and the
+  // trim edges. `excludeEdge` ("in"|"out"|"playhead", or an array) drops the
+  // element being dragged so it never snaps to its own previous position.
+  const snapCandidates = (duration, markers, playhead, trimStart, trimEnd, excludeEdge) => {
+    const exclude = new Set(
+      Array.isArray(excludeEdge) ? excludeEdge : excludeEdge ? [excludeEdge] : []
+    );
+    const out = [0];
+    if (duration > 0) out.push(duration);
+    for (const m of markers || []) {
+      if (m && Number.isFinite(m.t_s)) out.push(m.t_s);
+    }
+    if (!exclude.has("playhead") && Number.isFinite(playhead)) out.push(playhead);
+    if (!exclude.has("in") && Number.isFinite(trimStart)) out.push(trimStart);
+    if (!exclude.has("out") && Number.isFinite(trimEnd)) out.push(trimEnd);
+    return [...new Set(out)].sort((a, b) => a - b);
+  };
+
+  // Seconds per frame from a frame rate; falls back when fps is unknown (HTML
+  // <video> doesn't expose it) so fine-stepping always does something sane.
+  const frameStep = (fps, fallback = 1 / 30) =>
+    Number.isFinite(fps) && fps > 0 ? 1 / fps : fallback;
+
+  // Sorted-unique navigation stops for Up/Down jumps: clip ends, trim edges, and
+  // markers — shaped like markers ({t_s}) so nextMarker/prevMarker can traverse.
+  const editPoints = (markers, trimStart, trimEnd, duration) => {
+    const out = [0];
+    if (duration > 0) out.push(duration);
+    if (Number.isFinite(trimStart)) out.push(trimStart);
+    if (Number.isFinite(trimEnd)) out.push(trimEnd);
+    for (const m of markers || []) {
+      if (m && Number.isFinite(m.t_s)) out.push(m.t_s);
+    }
+    return [...new Set(out)].sort((a, b) => a - b).map((t) => ({ t_s: t }));
+  };
+
   const resolveTrim = (start, end, duration) => {
     let nextStart = clampTime(Number.isFinite(start) ? start : 0, duration);
     let nextEnd = clampTime(
@@ -173,6 +345,15 @@ const PlayerCore = (() => {
       return resolveTrim(Math.min(time, end - MIN_TRIM_GAP_S), end, duration);
     }
     return resolveTrim(start, Math.max(time, start + MIN_TRIM_GAP_S), duration);
+  };
+
+  // Slide the whole selection so its start lands at newStart, preserving its
+  // length and clamping so it never runs past either end of the clip.
+  const slideTrim = (start, end, newStart, duration) => {
+    const len = Math.max(0, end - start);
+    const max = (duration > 0 ? duration : len) - len;
+    const s = Math.max(0, Math.min(max, Number.isFinite(newStart) ? newStart : start));
+    return { start: s, end: s + len };
   };
 
   const trimSummary = (start, end) =>
@@ -247,16 +428,27 @@ const PlayerCore = (() => {
 
   const RULER_STEPS_S = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
 
-  const rulerMarks = (duration, maxMarks) => {
-    if (!Number.isFinite(duration) || duration <= 0) return [];
+  // Labeled marks at "nice" intervals across an arbitrary window. Picks the step
+  // from the visible span (not the clip length) so a zoomed-in ruler stays
+  // readable, and emits only the marks that fall inside the window.
+  const rulerMarksRange = (viewStart, viewSpan, maxMarks) => {
+    if (!Number.isFinite(viewSpan) || viewSpan <= 0) return [];
     const step =
-      RULER_STEPS_S.find((s) => duration / s <= maxMarks - 1) ??
+      RULER_STEPS_S.find((s) => viewSpan / s <= maxMarks - 1) ??
       RULER_STEPS_S[RULER_STEPS_S.length - 1];
+    const viewEnd = viewStart + viewSpan;
+    const first = Math.ceil(viewStart / step - 1e-9) * step;
     const marks = [];
-    for (let t = 0; t <= duration; t += step) {
+    for (let t = first; t <= viewEnd + 1e-6; t += step) {
       marks.push({ t, label: fmtDur(t) });
     }
     return marks;
+  };
+
+  // Whole-clip ruler (window starting at 0) — the zoomed-out default.
+  const rulerMarks = (duration, maxMarks) => {
+    if (!Number.isFinite(duration) || duration <= 0) return [];
+    return rulerMarksRange(0, duration, maxMarks);
   };
 
   // Bucket clips by session folder; legacy root clips fall under "Earlier".
@@ -303,10 +495,14 @@ const PlayerCore = (() => {
       case "Space":
       case "KeyK":
         return { kind: "toggle-play" };
+      // Arrows step a single frame; Shift+arrow nudges a second. J/L stay the
+      // coarse 5s scrub (Shift 1s) for getting around quickly.
       case "ArrowLeft":
+        return shiftKey ? { kind: "seek-by", seconds: -1 } : { kind: "step-frame", dir: -1 };
+      case "ArrowRight":
+        return shiftKey ? { kind: "seek-by", seconds: 1 } : { kind: "step-frame", dir: 1 };
       case "KeyJ":
         return { kind: "seek-by", seconds: shiftKey ? -1 : -5 };
-      case "ArrowRight":
       case "KeyL":
         return { kind: "seek-by", seconds: shiftKey ? 1 : 5 };
       case "Comma":
@@ -321,6 +517,27 @@ const PlayerCore = (() => {
         return { kind: shiftKey ? "prev-marker" : "next-marker" };
       case "KeyF":
         return { kind: "toggle-focus" };
+      // Zoom: +/- step at the playhead, \ fits the clip, Shift+\ fits the trim.
+      case "Equal":
+      case "NumpadAdd":
+        return { kind: "zoom", factor: 0.5 };
+      case "Minus":
+      case "NumpadSubtract":
+        return { kind: "zoom", factor: 2 };
+      case "Backslash":
+        return shiftKey ? { kind: "zoom-fit" } : { kind: "zoom-selection" };
+      case "KeyZ":
+        return shiftKey ? { kind: "zoom-fit" } : null;
+      case "Home":
+        return { kind: "seek-to", seconds: 0 };
+      case "End":
+        return { kind: "seek-to-end" };
+      case "ArrowUp":
+        return { kind: "prev-edit" };
+      case "ArrowDown":
+        return { kind: "next-edit" };
+      case "KeyS":
+        return { kind: "toggle-snap" };
       case "Escape":
         return { kind: "close" };
       default:
@@ -475,6 +692,10 @@ const PlayerCore = (() => {
     MIN_TRIM_GAP_S,
     MARKER_EPSILON_S,
     OVERLAY_HIDE_MS,
+    MIN_VIEW_SPAN_S,
+    DEFAULT_FOLLOW_MODE,
+    SNAP_THRESHOLD_PX,
+    DEFAULT_FINE_STEP_S,
     overlayVisible,
     videoDecodeProbes,
     encoderCodecCaveat,
@@ -494,8 +715,21 @@ const PlayerCore = (() => {
     clampTime,
     percentFor,
     timelineTime,
+    percentForView,
+    timelineTimeView,
+    clampView,
+    zoomView,
+    panView,
+    setViewEdge,
+    viewForRange,
+    followView,
+    snapTime,
+    snapCandidates,
+    frameStep,
+    editPoints,
     resolveTrim,
     trimDrag,
+    slideTrim,
     trimSummary,
     nextMarker,
     prevMarker,
@@ -503,6 +737,7 @@ const PlayerCore = (() => {
     markerStyle,
     markerDigest,
     rulerMarks,
+    rulerMarksRange,
     sessionGroups,
     formatClipTitle,
     clipKind,

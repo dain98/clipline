@@ -42,6 +42,7 @@ fn review_player_owns_all_controls() {
         "id=\"next-marker\"",
         "id=\"marker-count\"",
         "id=\"timeline\"",
+        "id=\"trim-band\"",
         "id=\"handle-in\"",
         "id=\"handle-out\"",
         "id=\"time-readout\"",
@@ -50,8 +51,22 @@ fn review_player_owns_all_controls() {
         "id=\"volume-slider\"",
         "id=\"export-clip\"",
         "id=\"trim-summary\"",
+        "id=\"keys-help\"",
+        "id=\"keys-dialog\"",
+        "id=\"keys-close\"",
         "id=\"delete-clip\"",
         "id=\"ruler\"",
+        "id=\"overview\"",
+        "id=\"overview-trim\"",
+        "id=\"overview-markers\"",
+        "id=\"overview-playhead\"",
+        "id=\"overview-window\"",
+        "id=\"overview-window-l\"",
+        "id=\"overview-window-r\"",
+        "id=\"zoom-out\"",
+        "id=\"zoom-fit\"",
+        "id=\"zoom-in\"",
+        "id=\"snap-toggle\"",
         "id=\"open-folder\"",
         "id=\"stage-frame\"",
         "id=\"copy-clip\"",
@@ -326,6 +341,10 @@ fn review_player_owns_all_controls() {
         "id=\"delete-clip\"",
         "id=\"export-clip\"",
         "id=\"open-settings\"",
+        "id=\"zoom-out\"",
+        "id=\"zoom-fit\"",
+        "id=\"zoom-in\"",
+        "id=\"snap-toggle\"",
     ] {
         let start = html.find(id).expect("transport button exists");
         let body_end = html[start..]
@@ -337,6 +356,47 @@ fn review_player_owns_all_controls() {
             "{id} must render an SVG icon, not a text label"
         );
     }
+}
+
+#[test]
+fn timeline_navigator_and_zoom_controls_are_wired() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    // The whole-clip navigator sits between the ruler and the export row.
+    let ruler = html.find("id=\"ruler\"").expect("ruler");
+    let overview = html.find("id=\"overview\"").expect("overview");
+    let export_row = html.find("class=\"export-row\"").expect("export row");
+    assert!(
+        ruler < overview && overview < export_row,
+        "the navigator minimap must sit between the ruler and the export row"
+    );
+
+    // Central view setter + paint/rebuild split keep the navigator in sync, and
+    // every view change routes through the pure helpers.
+    for required in [
+        "function applyView",
+        "function paintOverview",
+        "function renderOverviewMarkers",
+        "function maybeFollow",
+        "onOverviewPointerDown",
+        "function zoomAtPlayhead",
+        "function zoomToSelection",
+        "zoomView(",
+        "panView(",
+        "setViewEdge(",
+        "followView(",
+        "snapTime(",
+    ] {
+        assert!(js.contains(required), "main.js must wire the timeline through {required}");
+    }
+
+    // Navigator window, markers, and snap feedback need styles.
+    assert!(
+        css.contains("#overview-window") && css.contains(".ov-marker") && css.contains(".snapped"),
+        "navigator window, marker ticks, and snap feedback must be styled"
+    );
 }
 
 #[test]

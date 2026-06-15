@@ -306,7 +306,8 @@ label span { white-space: nowrap; }
 }
 
 .memory-usage {
-  grid-column: 1 / -1;
+  grid-column: 1;
+  grid-row: 2;
   min-width: 0;
   padding-left: calc(var(--brand-logo-size) + var(--brand-gap));
   color: var(--muted);
@@ -315,6 +316,11 @@ label span { white-space: nowrap; }
   line-height: 1.2;
   white-space: nowrap;
 }
+
+/* The shortcuts key sits at the far right of the Save Replay row — the bottom
+   of the sidebar header chrome. (It lives in .sidebar-full, which the collapsed
+   rail already hides, so no separate rail rule is needed.) */
+.save-row #keys-help { margin-left: auto; }
 
 #sidebar-toggle {
   width: 34px;
@@ -1438,11 +1444,27 @@ label span { white-space: nowrap; }
   background: var(--accent);
   opacity: 0.9;
   cursor: ew-resize;
-  z-index: 5;
+  z-index: 6;
 }
 .handle:hover { opacity: 1; }
 #handle-in { border-radius: 6px 0 0 6px; }
 #handle-out { border-radius: 0 6px 6px 0; }
+
+/* The kept region is a draggable selection block: grab anywhere on it to slide
+   the whole selection (a click without dragging just seeks). It sits below the
+   playhead (z 4) and edge handles (z 6) so both stay visible and grabbable. */
+#trim-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  background: rgba(61, 123, 253, 0.14);
+  cursor: grab;
+  z-index: 3;
+}
+#trim-band:hover { background: rgba(61, 123, 253, 0.22); }
+#trim-band.grabbing { cursor: grabbing; background: rgba(61, 123, 253, 0.26); }
 
 /* Event markers: a small flat glyph rides just above the track, tied to the
    exact moment by a fading hairline. Restrained, Outplayed-style — the track
@@ -1527,6 +1549,115 @@ label span { white-space: nowrap; }
   white-space: nowrap;
 }
 .ruler .lab.first { transform: none; }
+
+/* ---- timeline navigator (whole-clip minimap + zoom/snap controls) ---- */
+.nav-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+/* The minimap always shows the whole clip; the window box marks what the track
+   above is zoomed into, so the trim handles/markers are never lost off-screen. */
+#overview {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #161c26;
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: none;
+}
+#overview-trim {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  background: rgba(61, 123, 253, 0.16);
+  border-left: 1px solid rgba(61, 123, 253, 0.5);
+  border-right: 1px solid rgba(61, 123, 253, 0.5);
+  pointer-events: none;
+}
+#overview-markers {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.ov-marker {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--mc, #aeb6c4);
+  opacity: 0.85;
+}
+#overview-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #f4f6fa;
+  box-shadow: 0 0 5px rgba(244, 246, 250, 0.55);
+  pointer-events: none;
+  z-index: 3;
+}
+#overview-window {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: rgba(61, 123, 253, 0.14);
+  cursor: grab;
+  z-index: 2;
+}
+#overview-window.grabbing { cursor: grabbing; }
+.ov-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+}
+#overview-window-l { left: -4px; }
+#overview-window-r { right: -4px; }
+
+.timeline-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.timeline-tools button {
+  width: 30px;
+  height: 26px;
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+}
+.timeline-tools button:hover { background: rgba(255, 255, 255, 0.1); }
+.timeline-tools button svg { display: block; width: 100%; height: 100%; }
+#snap-toggle.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(61, 123, 253, 0.12);
+}
+
+/* Brief accent glow when a scrub/trim drag locks onto a snap target. */
+.snapped { box-shadow: 0 0 0 2px var(--accent), 0 0 8px var(--accent); }
 
 /* ---- stage overlay transport ---- */
 .stage-overlay {
@@ -1652,12 +1783,105 @@ label span { white-space: nowrap; }
   font-size: 12px;
   color: var(--ok);
 }
-.export-row .keys {
-  margin-left: auto;
-  white-space: nowrap;
+/* The corner key opens the shortcuts guide (replaces the old always-on legend).
+   Sculpted as a physical "?" keycap — top highlight, a thick bottom "skirt",
+   and a drop shadow — so it reads as the universal "show shortcuts" key. */
+.keycap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  padding: 0 0 1px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--muted);
+  background: linear-gradient(#2c3441, #1b222d);
+  border: 1px solid #3b4555;
+  border-radius: 7px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    0 2px 0 #10141b,
+    0 3px 5px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  transition: transform 0.05s ease, box-shadow 0.05s ease, color 0.1s ease, border-color 0.1s ease;
+}
+.keycap:hover { color: var(--text); border-color: var(--accent); }
+.keycap:active {
+  transform: translateY(2px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 0 #10141b,
+    0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
-/* Near the minimum window size the shortcut legend costs more than it gives. */
-@media (max-width: 1020px) {
-  .export-row .keys { display: none; }
+/* ---- keyboard shortcuts guide ---- */
+.keys-dialog {
+  width: 600px;
+  max-width: 92vw;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+.keys-dialog::backdrop { background: rgba(5, 7, 10, 0.62); }
+.keys-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.keys-head strong { font-size: 15px; }
+#keys-close {
+  width: 30px;
+  height: 30px;
+  padding: 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+#keys-close:hover { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+#keys-close svg { display: block; width: 100%; height: 100%; }
+.keys-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 28px;
+  padding: 14px 18px 20px;
+}
+.keys-grid h4 {
+  margin: 10px 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.keys-grid dl { margin: 0; display: grid; gap: 8px; }
+.keys-grid dl > div {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  align-items: baseline;
+  gap: 12px;
+}
+.keys-grid dt { white-space: nowrap; }
+.keys-grid dd { margin: 0; font-size: 12.5px; color: var(--text); }
+.keys-dialog kbd {
+  display: inline-block;
+  min-width: 12px;
+  padding: 2px 6px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: center;
+  color: var(--text);
+  background: #232b37;
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: 5px;
 }

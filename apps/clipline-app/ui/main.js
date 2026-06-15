@@ -18,16 +18,32 @@ const {
   overlayVisible,
   clampTime,
   percentFor,
-  timelineTime,
+  percentForView,
+  timelineTimeView,
+  clampView,
+  zoomView,
+  panView,
+  setViewEdge,
+  viewForRange,
+  followView,
+  snapTime,
+  snapCandidates,
+  frameStep,
+  editPoints,
+  MIN_VIEW_SPAN_S,
+  DEFAULT_FOLLOW_MODE,
+  SNAP_THRESHOLD_PX,
+  DEFAULT_FINE_STEP_S,
   resolveTrim,
   trimDrag,
+  slideTrim,
   trimSummary,
   nextMarker,
   prevMarker,
   markerSummary,
   markerStyle,
   markerDigest,
-  rulerMarks,
+  rulerMarksRange,
   sessionGroups,
   formatClipTitle,
   clipKind,
@@ -82,6 +98,14 @@ let trimStart = 0;
 let trimEnd = 0;
 let dragging = null;
 let rafId = 0;
+// Timeline zoom: the visible window into the clip. zoomSpan === 0 means fully
+// zoomed out (the whole clip is shown); a smaller span shows [zoomStart, +span].
+let zoomStart = 0;
+let zoomSpan = 0;
+// Active navigator drag: { mode:"pan"|"left"|"right", grab?, pointerId } or null.
+let overviewDrag = null;
+// Magnetic snapping for scrub/trim drags (toggle with S, hold Alt to bypass).
+let snapEnabled = true;
 const MIC_MONITOR_START_DELAY_S = 0.02;
 const MIC_MONITOR_MAX_LATENCY_S = 0.25;
 
@@ -1490,11 +1514,11 @@ function openClip(clip) {
   updateStageFrame();
   video.src = convertFileSrc(clip.path);
   video.playbackRate = Number($("rate-select").value);
+  resetZoom();
   setTrim(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
-  renderMarkers();
-  renderRuler();
+  renderOverviewMarkers();
+  applyView({ start: 0, span: 0 });
   renderClips();
-  paintTimeline();
   noteActivity();
   requestAnimationFrame(updateStageFrame);
   video.play().catch(() => syncPlayState());
@@ -1506,6 +1530,7 @@ function closeReview() {
   video.removeAttribute("src");
   video.load();
   currentClip = null;
+  resetZoom();
   updateViews();
   $("deck-status").textContent = "";
   $("stage-note").textContent = "";
@@ -1557,20 +1582,162 @@ function setTrim(start, end) {
   paintTimeline();
 }
 
+// The slice of the clip the timeline currently shows. Normalized every read so
+// a stale zoom from a previous clip (or a shrunk duration) can never escape the
+// bounds — when not zoomed this is just [0, duration].
+function timelineView() {
+  return clampView(zoomStart, zoomSpan, clipDuration());
+}
+
+function resetZoom() {
+  zoomStart = 0;
+  zoomSpan = 0;
+}
+
+// Central view setter: normalize the window, store it (collapsing a full-width
+// span back to the zoomed-out sentinel), then re-render everything the window
+// affects. Every zoom/pan/fit/follow path routes through here so the ruler,
+// markers, track, and navigator can never drift out of sync.
+function applyView(next) {
+  const dur = clipDuration();
+  const v = clampView(next.start, next.span, dur);
+  zoomStart = v.start;
+  zoomSpan = dur > 0 && v.span >= dur ? 0 : v.span;
+  renderRuler();
+  renderMarkers();
+  paintTimeline();
+}
+
+// Keep the playhead in view while it moves on its own (playback, keyboard jumps,
+// marker clicks). Gated on no active drag so the window never pages out from
+// under a scrub/trim/navigator drag; only re-renders when the window moves.
+function maybeFollow(playhead) {
+  if (dragging || overviewDrag) return;
+  if (!(zoomSpan > 0)) return; // zoomed out: the whole clip is already in view
+  const v = timelineView();
+  const next = followView(v.start, v.span, clipDuration(), playhead, DEFAULT_FOLLOW_MODE);
+  if (Math.abs(next.start - v.start) > 1e-3 || Math.abs(next.span - v.span) > 1e-3) {
+    applyView(next);
+  }
+}
+
+/* ---- zoom / snap controls ---- */
+
+// Zoom by a factor (<1 in, >1 out) anchored on the playhead so it stays in view.
+function zoomAtPlayhead(factor) {
+  const dur = clipDuration();
+  if (!(dur > 0)) return;
+  const v = timelineView();
+  const ph = clampTime(video.currentTime || 0, dur);
+  const frac = v.span > 0 ? Math.max(0, Math.min(1, (ph - v.start) / v.span)) : 0.5;
+  applyView(zoomView(v.start, v.span, dur, frac, factor, MIN_VIEW_SPAN_S));
+}
+
+function zoomFit() {
+  applyView({ start: 0, span: 0 });
+}
+
+// Frame the current trim selection (zoom to selection).
+function zoomToSelection() {
+  const dur = clipDuration();
+  if (!(dur > 0)) return;
+  applyView(viewForRange(trimStart, trimEnd, dur));
+}
+
+function setSnap(on) {
+  snapEnabled = on;
+  $("snap-toggle").classList.toggle("active", snapEnabled);
+}
+
+function toggleSnap() {
+  setSnap(!snapEnabled);
+}
+
+// Best-effort clip frame rate: the recorder's configured fps, else a fine
+// fallback. HTML <video> doesn't expose true fps, so frameStep degrades safely.
+function clipFps() {
+  return currentSettings && Number.isFinite(currentSettings.fps) ? currentSettings.fps : 0;
+}
+
+// Arrow keys jump several frames at once — one frame is too fine to navigate
+// with, but the step stays frame-aligned (nice for landing trims on a frame).
+const ARROW_STEP_FRAMES = 10;
+
+function stepFrame(dir) {
+  seekBy(dir * ARROW_STEP_FRAMES * frameStep(clipFps(), DEFAULT_FINE_STEP_S));
+}
+
+// Jump to the previous/next edit point (clip ends, trim edges, markers).
+function jumpEdit(direction) {
+  const points = editPoints(clipMarkers(), trimStart, trimEnd, clipDuration());
+  const current = video.currentTime || 0;
+  const target = direction > 0 ? nextMarker(points, current) : prevMarker(points, current);
+  if (target) seekTo(target.t_s);
+}
+
 function paintTimeline() {
   const dur = clipDuration();
+  const view = timelineView();
   const current = dur ? clampTime(video.currentTime || 0, dur) : 0;
+  // Off-window positions fall outside 0–100% and are clipped by the track; the
+  // dimmed trim ends are clamped so they fill the visible side they cover.
+  const pct = (t) => percentForView(t, view.start, view.span);
+  const edge = (t) => Math.max(0, Math.min(100, pct(t)));
   $("time-readout").textContent = `${fmtTenths(current)} / ${fmtTenths(dur)}`;
-  $("playhead").style.left = `${percentFor(current, dur)}%`;
-  $("dim-in").style.width = `${percentFor(trimStart, dur)}%`;
-  $("dim-out").style.width = `${100 - percentFor(trimEnd, dur)}%`;
-  $("handle-in").style.left = `${percentFor(trimStart, dur)}%`;
-  $("handle-out").style.left = `${percentFor(trimEnd, dur)}%`;
+  $("playhead").style.left = `${pct(current)}%`;
+  $("dim-in").style.width = `${edge(trimStart)}%`;
+  $("dim-out").style.width = `${100 - edge(trimEnd)}%`;
+  $("handle-in").style.left = `${pct(trimStart)}%`;
+  $("handle-out").style.left = `${pct(trimEnd)}%`;
+  // The slide strip only appears when there's an actual selection to move (not
+  // the whole clip), so the top of the track still scrubs by default.
+  const band = $("trim-band");
+  const full = !dur || (trimStart <= 0.05 && trimEnd >= dur - 0.05);
+  band.style.display = full ? "none" : "block";
+  if (!full) {
+    band.style.left = `${pct(trimStart)}%`;
+    band.style.width = `${Math.max(0, pct(trimEnd) - pct(trimStart))}%`;
+  }
+  paintOverview();
+}
+
+// Cheap per-frame navigator update, in whole-clip coordinates: the trim band,
+// the playhead, and the visible-window rectangle. The marker ticks are rebuilt
+// separately (renderOverviewMarkers) only when the clip changes.
+function paintOverview() {
+  const win = $("overview-window");
+  if (!win) return;
+  const dur = clipDuration();
+  const view = timelineView();
+  const current = dur ? clampTime(video.currentTime || 0, dur) : 0;
+  const a = percentFor(trimStart, dur);
+  const b = percentFor(trimEnd, dur);
+  $("overview-trim").style.left = `${a}%`;
+  $("overview-trim").style.width = `${Math.max(0, b - a)}%`;
+  $("overview-playhead").style.left = `${percentFor(current, dur)}%`;
+  win.style.left = `${percentFor(view.start, dur)}%`;
+  win.style.width = `${dur ? Math.max(0, Math.min(100, (view.span / dur) * 100)) : 100}%`;
+}
+
+// Rebuild the whole-clip marker ticks in the navigator. View-independent, so it
+// runs on clip/marker change only — never per frame and never on zoom.
+function renderOverviewMarkers() {
+  const layer = $("overview-markers");
+  if (!layer) return;
+  layer.replaceChildren();
+  const dur = clipDuration();
+  for (const m of clipMarkers()) {
+    const tick = document.createElement("i");
+    tick.className = `ov-marker marker-${markerStyle(m.kind).cls}`;
+    tick.style.left = `${percentFor(m.t_s, dur)}%`;
+    layer.appendChild(tick);
+  }
 }
 
 // timeupdate fires ~4 Hz; animate the playhead per-frame while playing.
 // The same loop re-evaluates overlay fade (no timers to manage).
 function animatePlayhead() {
+  maybeFollow(video.currentTime || 0);
   paintTimeline();
   updateOverlay();
   if (!video.paused && !video.ended) rafId = requestAnimationFrame(animatePlayhead);
@@ -1607,13 +1774,17 @@ const MARKER_ICON_FALLBACK = {
 function renderMarkers() {
   const layer = $("marker-layer");
   layer.replaceChildren();
-  const dur = clipDuration();
+  const view = timelineView();
   const markers = clipMarkers();
   for (const m of markers) {
+    const left = percentForView(m.t_s, view.start, view.span);
+    // The marker band isn't clipped like the track, so drop glyphs that would
+    // ride outside the visible window (a small margin keeps edge glyphs whole).
+    if (left < -2 || left > 102) continue;
     const style = markerStyle(m.kind);
     const marker = document.createElement("button");
     marker.className = `marker marker-${style.cls}`;
-    marker.style.left = `${percentFor(m.t_s, dur)}%`;
+    marker.style.left = `${left}%`;
     marker.title = `${m.kind}${m.subtype ? ` (${m.subtype})` : ""} — ${m.actor}${m.victim ? " → " + m.victim : ""} @ ${m.t_s.toFixed(1)}s`;
 
     const glyph = document.createElement("span");
@@ -1638,29 +1809,35 @@ function renderMarkers() {
 function renderRuler() {
   const root = $("ruler");
   root.replaceChildren();
-  const dur = clipDuration();
-  const marks = rulerMarks(dur, 8);
+  const view = timelineView();
+  if (!(view.span > 0)) return;
+  const viewEnd = view.start + view.span;
+  const pct = (t) => percentForView(t, view.start, view.span);
+  const marks = rulerMarksRange(view.start, view.span, 8);
   // Minor ticks between the labeled majors give the ruler a fine, precise feel.
   if (marks.length >= 2) {
     const step = marks[1].t - marks[0].t;
     const minorStep = step / 3;
     const isMajor = (t) => marks.some((m) => Math.abs(m.t - t) < minorStep / 2);
-    for (let t = minorStep; t < dur; t += minorStep) {
-      if (isMajor(t)) continue;
+    const firstMinor = Math.ceil(view.start / minorStep - 1e-9) * minorStep;
+    for (let t = firstMinor; t <= viewEnd + 1e-6; t += minorStep) {
+      if (t <= 0 || isMajor(t)) continue;
       const tick = document.createElement("i");
       tick.className = "tick";
-      tick.style.left = `${percentFor(t, dur)}%`;
+      tick.style.left = `${pct(t)}%`;
       root.appendChild(tick);
     }
   }
-  marks.forEach((mark, i) => {
+  marks.forEach((mark) => {
     const tick = document.createElement("i");
     tick.className = "tick major";
-    tick.style.left = `${percentFor(mark.t, dur)}%`;
+    tick.style.left = `${pct(mark.t)}%`;
     root.appendChild(tick);
     const lab = document.createElement("span");
-    lab.className = i === 0 ? "lab first" : "lab";
-    lab.style.left = `${percentFor(mark.t, dur)}%`;
+    // The 0:00 label hugs the left edge (no centering) only when it sits there.
+    const atLeftEdge = view.start === 0 && mark.t <= 1e-6;
+    lab.className = atLeftEdge ? "lab first" : "lab";
+    lab.style.left = `${pct(mark.t)}%`;
     lab.textContent = mark.label;
     root.appendChild(lab);
   });
@@ -1685,6 +1862,7 @@ function seekTo(time) {
     pendingSeek = null;
     video.currentTime = t;
   }
+  maybeFollow(t);
   paintTimeline();
 }
 
@@ -1694,6 +1872,7 @@ video.addEventListener("seeked", () => {
     pendingSeek = null;
     video.currentTime = t;
   }
+  maybeFollow(video.currentTime || 0);
   paintTimeline();
 });
 
@@ -1755,6 +1934,23 @@ function jumpMarker(direction) {
 /* ---- timeline pointer interaction ---- */
 
 let resumeAfterDrag = false;
+// Snap targets snapshotted at pointerdown so a drag never snaps to its own
+// moving position (the dragged edge and the playhead are excluded up front).
+let dragCandidates = [];
+// Sliding the whole selection: offset from pointer to selection start, the click
+// time, and whether the pointer moved enough to count as a drag (vs a seek).
+let slideGrab = 0;
+let slideClickT = 0;
+let slideStartX = 0;
+let slideMoved = false;
+const SLIDE_THRESHOLD_PX = 4;
+
+function clearSnapFeedback() {
+  $("playhead").classList.remove("snapped");
+  $("handle-in").classList.remove("snapped");
+  $("handle-out").classList.remove("snapped");
+  $("trim-band").classList.remove("snapped");
+}
 
 function startDrag(kind, ev) {
   if (!currentClip) return;
@@ -1762,6 +1958,24 @@ function startDrag(kind, ev) {
   // Scrub paused so every pointer position shows its frame, then restore.
   resumeAfterDrag = !video.paused;
   if (resumeAfterDrag) video.pause();
+  // Exclude the element(s) being moved so the drag never snaps to itself:
+  // a scrub/slide must not snap to the playhead, and trim edges are dropped
+  // (the dragged one for an edge drag, both when sliding the whole selection).
+  const exclude =
+    kind === "scrub" ? ["playhead"] : kind === "slide" ? ["in", "out"] : [kind, "playhead"];
+  dragCandidates = snapCandidates(
+    clipDuration(), clipMarkers(), video.currentTime || 0, trimStart, trimEnd, exclude
+  );
+  if (kind === "slide") {
+    const rect = $("timeline").getBoundingClientRect();
+    const v = timelineView();
+    const t = timelineTimeView(ev.clientX, rect.left, rect.width, v.start, v.span, clipDuration());
+    slideGrab = t - trimStart;
+    slideClickT = t;
+    slideStartX = ev.clientX;
+    slideMoved = false;
+    $("trim-band").classList.add("grabbing");
+  }
   $("timeline").setPointerCapture(ev.pointerId);
   moveDrag(ev);
 }
@@ -1769,11 +1983,49 @@ function startDrag(kind, ev) {
 function moveDrag(ev) {
   if (!dragging) return;
   const rect = $("timeline").getBoundingClientRect();
-  const t = timelineTime(ev.clientX, rect.left, rect.width, clipDuration());
+  const view = timelineView();
+  const dur = clipDuration();
+  const rawT = timelineTimeView(ev.clientX, rect.left, rect.width, view.start, view.span, dur);
+  const pps = rect.width && view.span > 0 ? rect.width / view.span : 0;
+  const doSnap = snapEnabled && !ev.altKey && pps > 0;
+  clearSnapFeedback();
+
+  if (dragging === "slide") {
+    // Hold still and release to seek; move past the threshold to start sliding.
+    if (!slideMoved && Math.abs(ev.clientX - slideStartX) <= SLIDE_THRESHOLD_PX) return;
+    slideMoved = true;
+    // Move the whole selection, keeping its length. Snap whichever edge lands
+    // closest to a salient time so either end can lock cleanly.
+    const len = trimEnd - trimStart;
+    let newStart = rawT - slideGrab;
+    let snapped = false;
+    if (doSnap) {
+      const a = snapTime(newStart, dragCandidates, pps, SNAP_THRESHOLD_PX);
+      const b = snapTime(newStart + len, dragCandidates, pps, SNAP_THRESHOLD_PX);
+      const da = a.snapped ? Math.abs(a.t - newStart) : Infinity;
+      const db = b.snapped ? Math.abs(b.t - (newStart + len)) : Infinity;
+      if (da <= db && a.snapped) { newStart = a.t; snapped = true; }
+      else if (b.snapped) { newStart = b.t - len; snapped = true; }
+    }
+    const next = slideTrim(trimStart, trimEnd, newStart, dur);
+    setTrim(next.start, next.end);
+    if (snapped) $("trim-band").classList.add("snapped");
+    return;
+  }
+
+  let t = rawT;
+  let snapped = false;
+  if (doSnap) {
+    const res = snapTime(t, dragCandidates, pps, SNAP_THRESHOLD_PX);
+    t = res.t;
+    snapped = res.snapped;
+  }
   if (dragging === "scrub") {
+    if (snapped) $("playhead").classList.add("snapped");
     seekTo(t);
   } else {
-    const next = trimDrag(dragging, t, trimStart, trimEnd, clipDuration());
+    if (snapped) $(dragging === "in" ? "handle-in" : "handle-out").classList.add("snapped");
+    const next = trimDrag(dragging, t, trimStart, trimEnd, dur);
     setTrim(next.start, next.end);
     // The playhead rides the dragged edge — you trim on the frame you see.
     seekTo(dragging === "in" ? next.start : next.end);
@@ -1782,11 +2034,114 @@ function moveDrag(ev) {
 
 function endDrag() {
   if (!dragging) return;
+  // A press-and-release on the selection without dragging just seeks there.
+  const clickSeek = dragging === "slide" && !slideMoved;
   dragging = null;
+  dragCandidates = [];
+  clearSnapFeedback();
+  $("trim-band").classList.remove("grabbing");
+  if (clickSeek) seekTo(slideClickT);
   if (resumeAfterDrag) {
     resumeAfterDrag = false;
     video.play().catch(() => syncPlayState());
   }
+}
+
+// Higher = faster zoom per wheel notch. e^(±notch·sensitivity) is the span
+// multiplier, so it zooms by the same ratio whichever way you scroll.
+const ZOOM_SENSITIVITY = 0.0015;
+
+// Scroll over the timeline to zoom, keeping the clip moment under the cursor
+// pinned. Scroll up (deltaY < 0) zooms in, down zooms back out.
+function onTimelineWheel(ev) {
+  const dur = clipDuration();
+  if (!currentClip || !(dur > 0)) return;
+  ev.preventDefault();
+  const rect = $("timeline").getBoundingClientRect();
+  if (!rect.width) return;
+  // Normalize line/page wheels (Firefox-style) to roughly pixel scale.
+  const unit = ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? rect.width : 1;
+  const view = timelineView();
+  // Shift+wheel, or a genuinely horizontal trackpad gesture, pans instead of
+  // zooming. Requiring |deltaX| > |deltaY| keeps trackpad noise during a
+  // vertical scroll from misfiring a pan.
+  if (ev.shiftKey || Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) {
+    const raw = ev.shiftKey ? ev.deltaY || ev.deltaX : ev.deltaX;
+    const seconds = ((raw * unit) / rect.width) * view.span;
+    applyView(panView(view.start, view.span, dur, seconds));
+    return;
+  }
+  const anchorFrac = (ev.clientX - rect.left) / rect.width;
+  const factor = Math.max(0.5, Math.min(2, Math.exp(ev.deltaY * unit * ZOOM_SENSITIVITY)));
+  applyView(zoomView(view.start, view.span, dur, anchorFrac, factor, MIN_VIEW_SPAN_S));
+}
+
+/* ---- navigator (whole-clip minimap) drag: body pans, grips zoom ---- */
+
+// Clip time under the pointer in the whole-clip navigator.
+function overviewTime(ev) {
+  const rect = $("overview").getBoundingClientRect();
+  const dur = clipDuration();
+  if (!rect.width || !dur) return 0;
+  const x = Math.max(0, Math.min(rect.width, ev.clientX - rect.left));
+  return (x / rect.width) * dur;
+}
+
+function onOverviewPointerDown(ev) {
+  if (!currentClip || !(clipDuration() > 0)) return;
+  ev.preventDefault();
+  const dur = clipDuration();
+  const v = timelineView();
+  const t = overviewTime(ev);
+  if (ev.target === $("overview-window-l")) {
+    overviewDrag = { mode: "left", pointerId: ev.pointerId };
+    moveOverviewDrag(ev);
+  } else if (ev.target === $("overview-window-r")) {
+    overviewDrag = { mode: "right", pointerId: ev.pointerId };
+    moveOverviewDrag(ev);
+  } else if (ev.target === $("overview-window")) {
+    // Grab the box where you clicked it and pan, keeping that point under the cursor.
+    overviewDrag = { mode: "pan", grab: t - v.start, pointerId: ev.pointerId };
+  } else {
+    // Clicking the empty track jumps the window to center on the click, then pans.
+    const nv = clampView(t - v.span / 2, v.span, dur);
+    applyView(nv);
+    overviewDrag = { mode: "pan", grab: t - nv.start, pointerId: ev.pointerId };
+  }
+  $("overview").setPointerCapture(ev.pointerId);
+  $("overview-window").classList.add("grabbing");
+}
+
+function moveOverviewDrag(ev) {
+  if (!overviewDrag) return;
+  const dur = clipDuration();
+  const v = timelineView();
+  const t = overviewTime(ev);
+  if (overviewDrag.mode === "pan") {
+    applyView(clampView(t - overviewDrag.grab, v.span, dur));
+  } else {
+    applyView(setViewEdge(v.start, v.span, dur, overviewDrag.mode, t));
+  }
+}
+
+function endOverviewDrag() {
+  if (!overviewDrag) return;
+  overviewDrag = null;
+  $("overview-window").classList.remove("grabbing");
+}
+
+// Navigator scroll pans the visible window left/right. The strip spans the whole
+// clip, so map pixels scrolled to clip seconds (no-op when fully zoomed out).
+function onOverviewWheel(ev) {
+  const dur = clipDuration();
+  if (!currentClip || !(dur > 0)) return;
+  ev.preventDefault();
+  const rect = $("overview").getBoundingClientRect();
+  if (!rect.width) return;
+  const unit = ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? rect.width : 1;
+  const raw = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+  const view = timelineView();
+  applyView(panView(view.start, view.span, dur, ((raw * unit) / rect.width) * dur));
 }
 
 /* ---- clip actions ---- */
@@ -2053,8 +2408,9 @@ video.addEventListener("loadedmetadata", () => {
   if (currentClip) {
     $("pmeta").textContent = `${fmtDur(video.duration)} · ${currentClip.size_mb.toFixed(1)} MB · ${currentClip.path}`;
     setTrim(0, video.duration);
-    renderMarkers();
-    renderRuler();
+    // Duration is now exact: rebuild the whole-clip navigator and re-render.
+    renderOverviewMarkers();
+    applyView({ start: zoomStart, span: zoomSpan });
   }
 });
 video.addEventListener("error", () => {
@@ -2081,6 +2437,21 @@ $("export-clip").addEventListener("click", exportTrim);
 $("delete-clip").addEventListener("click", () => deleteClip());
 $("open-folder").addEventListener("click", openFolder);
 $("copy-clip").addEventListener("click", copyClipToClipboard);
+
+$("zoom-in").addEventListener("click", () => zoomAtPlayhead(0.5));
+$("zoom-out").addEventListener("click", () => zoomAtPlayhead(2));
+// Plain click frames the trim selection (the editing default); Shift-click fits
+// the whole clip — mirroring \ and Shift+\.
+$("zoom-fit").addEventListener("click", (ev) => (ev.shiftKey ? zoomFit() : zoomToSelection()));
+$("snap-toggle").addEventListener("click", toggleSnap);
+
+// Keyboard shortcuts guide — the corner "K" keycap opens it; click the X or the
+// backdrop (or press Esc, which the modal dialog handles) to close.
+$("keys-help").addEventListener("click", () => $("keys-dialog").showModal());
+$("keys-close").addEventListener("click", () => $("keys-dialog").close());
+$("keys-dialog").addEventListener("click", (ev) => {
+  if (ev.target === $("keys-dialog")) $("keys-dialog").close();
+});
 
 $("sidebar-toggle").addEventListener("click", toggleRail);
 $("rail-save").addEventListener("click", () => invoke("save_replay"));
@@ -2110,9 +2481,26 @@ document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
 $("timeline").addEventListener("pointerdown", (ev) => {
   if (ev.target === $("handle-in")) startDrag("in", ev);
   else if (ev.target === $("handle-out")) startDrag("out", ev);
+  else if (ev.target === $("trim-band")) startDrag("slide", ev);
   else startDrag("scrub", ev);
 });
 $("timeline").addEventListener("pointermove", moveDrag);
+
+// Scroll to zoom. Bound on the stack (covers the track and the marker band
+// above it via bubbling) and the ruler below; passive:false so we can stop the
+// page from scrolling instead.
+document
+  .querySelector(".timeline-stack")
+  .addEventListener("wheel", onTimelineWheel, { passive: false });
+$("ruler").addEventListener("wheel", onTimelineWheel, { passive: false });
+
+// Navigator (whole-clip minimap): drag the box to pan, its grips to zoom.
+$("overview").addEventListener("pointerdown", onOverviewPointerDown);
+$("overview").addEventListener("pointermove", moveOverviewDrag);
+$("overview").addEventListener("pointerup", endOverviewDrag);
+$("overview").addEventListener("pointercancel", endOverviewDrag);
+$("overview").addEventListener("lostpointercapture", endOverviewDrag);
+$("overview").addEventListener("wheel", onOverviewWheel, { passive: false });
 
 stage.addEventListener("pointermove", noteActivity);
 stage.addEventListener("pointerdown", noteActivity);
@@ -2127,16 +2515,22 @@ $("timeline").addEventListener("pointercancel", endDrag);
 $("timeline").addEventListener("lostpointercapture", endDrag);
 
 document.addEventListener("keydown", (ev) => {
-  if ($("confirm-dialog").open) return; // the dialog owns the keyboard
+  if ($("confirm-dialog").open || $("keys-dialog").open) return; // a dialog owns the keyboard
   if (ev.code === "Escape" && settingsOpen) {
     ev.preventDefault();
     toggleSettings(false);
     return;
   }
   if (settingsOpen) return; // player shortcuts are inert behind the page
-  if (!currentClip) return;
   const tag = ev.target && ev.target.tagName;
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+  // "?" opens the shortcuts guide from anywhere in the player (clip or not).
+  if (ev.code === "Slash" && ev.shiftKey) {
+    ev.preventDefault();
+    $("keys-dialog").showModal();
+    return;
+  }
+  if (!currentClip) return;
   const intent = keyIntent(ev.code, ev.shiftKey);
   if (!intent) return;
   ev.preventDefault();
@@ -2144,10 +2538,19 @@ document.addEventListener("keydown", (ev) => {
   switch (intent.kind) {
     case "toggle-play": togglePlay(); break;
     case "seek-by": seekBy(intent.seconds); break;
+    case "step-frame": stepFrame(intent.dir); break;
+    case "seek-to": seekTo(intent.seconds); break;
+    case "seek-to-end": seekTo(clipDuration()); break;
     case "set-in": setTrim(video.currentTime || 0, trimEnd); break;
     case "set-out": setTrim(trimStart, video.currentTime || 0); break;
     case "next-marker": jumpMarker(1); break;
     case "prev-marker": jumpMarker(-1); break;
+    case "next-edit": jumpEdit(1); break;
+    case "prev-edit": jumpEdit(-1); break;
+    case "zoom": zoomAtPlayhead(intent.factor); break;
+    case "zoom-fit": zoomFit(); break;
+    case "zoom-selection": zoomToSelection(); break;
+    case "toggle-snap": toggleSnap(); break;
     case "toggle-focus": toggleRail(); break;
     case "close": closeReview(); break;
   }
