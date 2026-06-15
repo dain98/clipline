@@ -401,8 +401,7 @@ fn get_autostart_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
     app.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-fn set_autostart<R: Runtime>(app: AppHandle<R>, enabled: bool) -> Result<bool, String> {
+fn set_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<bool, String> {
     let autostart = app.autolaunch();
     if enabled {
         autostart.enable().map_err(|e| e.to_string())?;
@@ -643,6 +642,14 @@ fn save_settings<R: Runtime>(
         .map_err(|e| format!("scope media folder for playback: {e}"))?;
 
     let old = state.settings();
+
+    // Apply the autostart registry change before persisting so settings.json
+    // can never say "enabled" while the Run key update failed.
+    if settings.open_on_startup != old.open_on_startup {
+        set_autostart(&app, settings.open_on_startup)
+            .map_err(|e| format!("update Windows startup registration: {e}"))?;
+    }
+
     if settings.hotkey != old.hotkey {
         let old_shortcut = parse_hotkey(&old.hotkey)?;
         let new_shortcut = parse_hotkey(&settings.hotkey)?;
@@ -666,8 +673,7 @@ fn save_settings<R: Runtime>(
     }
 
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
-    state.restart(app.clone(), settings.clone())?;
-    let _ = set_autostart(app, settings.open_on_startup);
+    state.restart(app, settings.clone())?;
     tray_items.set_hotkey_label(&settings.hotkey)?;
     crate::hotkeys::set_save_hotkey(&settings.hotkey)?;
     storage_settings.set_quota_bytes(quota_bytes);
@@ -758,7 +764,6 @@ pub fn run() {
             start_microphone_test,
             stop_microphone_test,
             get_autostart_status,
-            set_autostart,
             save_settings,
             crate::library::list_clips,
             crate::library::delete_clip,
@@ -847,9 +852,11 @@ pub fn run() {
             pump_events(app.handle().clone(), event_rx);
             spawn_game_detector(app.handle().clone());
 
-            if launched_by_autostart {
+            // The main window is created hidden by default so autostart launches
+            // don't flash it. Show it for normal launches.
+            if !launched_by_autostart {
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
+                    let _ = window.show();
                 }
             }
 
