@@ -435,6 +435,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub replay_storage: ReplayStorageSettings,
     pub hotkey: String,
+    #[serde(default)]
+    pub open_on_startup: bool,
 }
 
 impl Default for AppSettings {
@@ -456,6 +458,7 @@ impl Default for AppSettings {
             media_dir: default_media_dir(),
             replay_storage: ReplayStorageSettings::default(),
             hotkey: "Alt+F10".into(),
+            open_on_startup: false,
         }
     }
 }
@@ -618,6 +621,8 @@ impl AppSettings {
             hotkey: string_field(object, "hotkey")
                 .and_then(|raw| normalize_hotkey(&raw).ok())
                 .unwrap_or_else(|| defaults.hotkey.clone()),
+            open_on_startup: bool_field(object, "open_on_startup")
+                .unwrap_or(defaults.open_on_startup),
         };
 
         settings.games.normalize();
@@ -1061,6 +1066,7 @@ mod tests {
         assert_eq!(settings.media_dir, default_media_dir());
         assert_eq!(settings.replay_storage, ReplayStorageSettings::default());
         assert_eq!(settings.hotkey, "Alt+F10");
+        assert!(!settings.open_on_startup);
     }
 
     #[test]

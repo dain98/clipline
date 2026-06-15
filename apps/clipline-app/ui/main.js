@@ -185,6 +185,7 @@ function fillSettings(s) {
   $("set-replay-disk-ack").checked = !!replayStorage.disk_acknowledged;
   $("set-hotkey").value = s.hotkey;
   $("save-hotkey").textContent = s.hotkey;
+  $("set-open-on-startup").checked = !!s.open_on_startup;
   endHotkeyCapture("Click the field to record a new shortcut.");
   syncCaptureFields();
   renderAudioDeviceSelects();
@@ -247,6 +248,7 @@ function readSettings() {
       disk_acknowledged: $("set-replay-disk-ack").checked,
     },
     hotkey: $("set-hotkey").value,
+    open_on_startup: $("set-open-on-startup").checked,
   };
 }
 
@@ -2592,7 +2594,14 @@ syncVolume();
 syncAllRangeProgress();
 async function loadInitialSettings() {
   await loadGamePlugins();
-  const settings = await invoke("get_settings");
+  let settings = await invoke("get_settings");
+  // The registry Run key is the ground truth for startup. Reconcile the UI
+  // in case the entry was changed externally since the last save.
+  try {
+    settings = { ...settings, open_on_startup: await invoke("get_autostart_status") };
+  } catch (e) {
+    console.warn("could not read autostart status:", e);
+  }
   fillSettings(settings);
   // Custom-game icons live in settings; refresh clip badges once they load.
   if (clipsCache.length) renderClips();

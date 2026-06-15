@@ -218,11 +218,16 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     shortcuts still reach the recorder. All save triggers share a short debounce to avoid double
     saves when both hotkey paths fire.
 28. **Explicit SDR color metadata** — Desktop/game captures are no longer left to driver,
-    encoder, or player color-range inference. The WGC BGRA path is treated as full-range RGB
-    Rec.709 and the D3D11 video processor converts to limited-range NV12 Rec.709; MFT and FFmpeg
-    encoders receive matching color attrs/flags, and `clipline-mp4` writes `colr`/`nclx` sample
-    entry metadata. A real smoke recording now probes as `color_range=tv`,
-    `color_space=bt709`, `color_transfer=bt709`, and `color_primaries=bt709`.
+     encoder, or player color-range inference. The WGC BGRA path is treated as full-range RGB
+     Rec.709 and the D3D11 video processor converts to limited-range NV12 Rec.709; MFT and FFmpeg
+     encoders receive matching color attrs/flags, and `clipline-mp4` writes `colr`/`nclx` sample
+     entry metadata. A real smoke recording now probes as `color_range=tv`,
+     `color_space=bt709`, `color_transfer=bt709`, and `color_primaries=bt709`.
+29. **Startup on Windows login** — Settings now has a General tab with an "Open on startup"
+     toggle. When enabled, Clipline registers itself in the Windows Run registry key
+     (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) via `tauri-plugin-autostart`,
+     passing `--autostart` so launches from the registry start minimized to the tray instead
+     of opening the main window.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
