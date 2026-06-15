@@ -132,9 +132,20 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
     /// callers running live decide how to treat `CaptureError::Timeout`
     /// (an idle screen delivers no frames; that is not fatal).
     pub fn step(&mut self) -> Result<bool, PipelineError> {
+        self.step_with_frame(|_| {})
+    }
+
+    /// Process one captured frame and expose it before encoding. This keeps
+    /// side-channel observers (like the app's low-rate preview) out of the
+    /// core capture/encode path when they are not installed.
+    pub fn step_with_frame(
+        &mut self,
+        mut observe: impl FnMut(&crate::traits::Frame),
+    ) -> Result<bool, PipelineError> {
         let Some(frame) = self.capture.next_frame()? else {
             return Ok(false);
         };
+        observe(&frame);
         for (src, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
             pending.extend(src.poll_packets(frame.pts_s)?);
         }

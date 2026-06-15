@@ -479,13 +479,7 @@ label span { white-space: nowrap; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: #4a5160; flex: none; }
 .dot.on {
   background: var(--rec);
-  box-shadow: 0 0 10px rgba(229, 72, 77, 0.8);
-  animation: recording-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes recording-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(229, 72, 77, 0.55), 0 0 10px rgba(229, 72, 77, 0.8); }
-  50% { box-shadow: 0 0 0 6px rgba(229, 72, 77, 0), 0 0 14px rgba(229, 72, 77, 0.95); }
+  box-shadow: 0 0 0 2px rgba(229, 72, 77, 0.18);
 }
 
 .save-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
@@ -1245,17 +1239,86 @@ label span { white-space: nowrap; }
   grid-area: 1 / 1;
   display: grid;
   place-items: center;
-  padding: 40px;
+  min-height: 0;
+  overflow: auto;
+  padding: 34px;
   text-align: center;
   color: var(--muted);
 }
-.review-empty strong {
+
+.capture-preview {
+  width: min(100%, 1120px);
+  display: grid;
+  gap: 18px;
+}
+
+.capture-preview-frame {
+  position: relative;
+  justify-self: center;
+  overflow: hidden;
+  width: min(100%, calc((100vh - var(--titlebar-h) - 170px) * 16 / 9));
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--line);
+  background: #080a0e;
+}
+
+.capture-preview-frame::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+  background-size: 36px 36px;
+  opacity: .35;
+}
+
+#capture-preview-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #05070a;
+}
+
+#capture-preview-image[hidden] { display: none; }
+
+.capture-preview-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  padding: 24px;
+  background: rgba(5, 7, 10, .72);
+  color: var(--muted);
+}
+
+.capture-preview-overlay.ready {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.capture-preview-overlay strong,
+.capture-preview-foot strong {
   display: block;
   margin-bottom: 6px;
   color: var(--text);
   font-size: 16px;
 }
-.review-empty span { display: block; max-width: 420px; }
+
+.capture-preview-overlay span,
+.capture-preview-foot span {
+  display: block;
+  max-width: 520px;
+}
+
+.capture-preview-foot {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+}
 /* display:grid above beats the UA [hidden] rule — restate it. */
 .review-empty[hidden] { display: none; }
 

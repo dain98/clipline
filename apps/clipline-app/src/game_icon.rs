@@ -75,7 +75,9 @@ unsafe fn icon_to_png(hicon: HICON) -> Option<Vec<u8>> {
     result
 }
 
-unsafe fn color_bitmap_to_png(hbm_color: windows_sys::Win32::Graphics::Gdi::HBITMAP) -> Option<Vec<u8>> {
+unsafe fn color_bitmap_to_png(
+    hbm_color: windows_sys::Win32::Graphics::Gdi::HBITMAP,
+) -> Option<Vec<u8>> {
     if hbm_color.is_null() {
         return None;
     }
@@ -130,10 +132,10 @@ unsafe fn color_bitmap_to_png(hbm_color: windows_sys::Win32::Graphics::Gdi::HBIT
         }
     }
 
-    encode_png(width as u32, height as u32, &buf)
+    encode_rgba_png(width as u32, height as u32, &buf)
 }
 
-fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+pub fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, width, height);
