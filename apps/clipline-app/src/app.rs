@@ -9,6 +9,7 @@ use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 use crate::game_plugins::GamePluginInfo;
@@ -396,6 +397,22 @@ fn save_replay(state: tauri::State<RuntimeState>) {
 }
 
 #[tauri::command]
+fn get_autostart_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_autostart<R: Runtime>(app: AppHandle<R>, enabled: bool) -> Result<bool, String> {
+    let autostart = app.autolaunch();
+    if enabled {
+        autostart.enable().map_err(|e| e.to_string())?;
+    } else {
+        autostart.disable().map_err(|e| e.to_string())?;
+    }
+    autostart.is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn set_recording<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<RuntimeState>,
@@ -649,7 +666,8 @@ fn save_settings<R: Runtime>(
     }
 
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
-    state.restart(app, settings.clone())?;
+    state.restart(app.clone(), settings.clone())?;
+    let _ = set_autostart(app, settings.open_on_startup);
     tray_items.set_hotkey_label(&settings.hotkey)?;
     crate::hotkeys::set_save_hotkey(&settings.hotkey)?;
     storage_settings.set_quota_bytes(quota_bytes);
@@ -707,6 +725,10 @@ pub fn run() {
         .manage(RuntimeState::new(cmd_tx, settings.clone(), lol_url))
         .manage(MicTestState::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autostart"]),
+        ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |_app, shortcut, event| {
@@ -735,6 +757,8 @@ pub fn run() {
             memory_status,
             start_microphone_test,
             stop_microphone_test,
+            get_autostart_status,
+            set_autostart,
             save_settings,
             crate::library::list_clips,
             crate::library::delete_clip,
@@ -760,6 +784,18 @@ pub fn run() {
             if let Err(e) = app.asset_protocol_scope().allow_directory(&scope_dir, true) {
                 eprintln!("could not scope media folder {scope_dir:?} for playback: {e}");
             }
+
+            // Keep the Windows Run registry entry in sync with the user's setting.
+            let autostart = app.autolaunch();
+            let _ = if settings.open_on_startup {
+                autostart.enable()
+            } else {
+                autostart.disable()
+            };
+
+            // When launched by the autostart registry entry, start in the tray
+            // instead of flashing the main window.
+            let launched_by_autostart = std::env::args().any(|arg| arg == "--autostart");
 
             let save_item = MenuItem::with_id(
                 app,
@@ -810,6 +846,13 @@ pub fn run() {
 
             pump_events(app.handle().clone(), event_rx);
             spawn_game_detector(app.handle().clone());
+
+            if launched_by_autostart {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+
             Ok(())
         })
         .build(tauri::generate_context!())
