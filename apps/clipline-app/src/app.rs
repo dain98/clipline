@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -51,6 +51,13 @@ struct GameDetectionEvent {
     process_id: Option<u32>,
     exe_name: Option<String>,
     recording_mode: Option<GameRecordingMode>,
+}
+
+#[derive(serde::Serialize)]
+struct PreviewActivationResult {
+    active: bool,
+    focused: bool,
+    enabled: bool,
 }
 
 impl GameDetectionEvent {
@@ -419,6 +426,85 @@ fn set_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<bool, 
     autostart.is_enabled().map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseRequestAction {
+    Tray,
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MinimizeRequestAction {
+    Taskbar,
+    Tray,
+}
+
+fn close_request_action(settings: &AppSettings) -> CloseRequestAction {
+    if settings.close_to_tray {
+        CloseRequestAction::Tray
+    } else {
+        CloseRequestAction::Quit
+    }
+}
+
+fn minimize_request_action(settings: &AppSettings) -> MinimizeRequestAction {
+    if settings.minimize_to_tray {
+        MinimizeRequestAction::Tray
+    } else {
+        MinimizeRequestAction::Taskbar
+    }
+}
+
+fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>, destroy: bool) -> Result<(), String> {
+    app.state::<MicTestState>().stop();
+    app.state::<RuntimeState>().set_preview_active(false);
+    if let Some(window) = app.get_webview_window("main") {
+        if destroy {
+            window.destroy().map_err(|e| e.to_string())?;
+        } else {
+            window.hide().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn quit_app<R: Runtime>(app: &AppHandle<R>) {
+    app.state::<MicTestState>().stop();
+    app.state::<RuntimeState>()
+        .send(Cmd::Stop { announce: false });
+    app.exit(0);
+}
+
+fn should_open_on_tray_event(event: &TrayIconEvent) -> bool {
+    match event {
+        TrayIconEvent::Click {
+            button,
+            button_state,
+            ..
+        } => should_open_on_tray_click(*button, *button_state),
+        _ => false,
+    }
+}
+
+fn should_open_on_tray_click(button: MouseButton, button_state: MouseButtonState) -> bool {
+    button == MouseButton::Left && button_state == MouseButtonState::Up
+}
+
+#[tauri::command]
+fn minimize_main_window<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<RuntimeState>,
+) -> Result<(), String> {
+    match minimize_request_action(&state.settings()) {
+        MinimizeRequestAction::Taskbar => {
+            if let Some(window) = app.get_webview_window("main") {
+                window.minimize().map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+        MinimizeRequestAction::Tray => send_main_window_to_tray(&app, false),
+    }
+}
+
 #[tauri::command]
 fn set_recording<R: Runtime>(
     app: AppHandle<R>,
@@ -428,9 +514,35 @@ fn set_recording<R: Runtime>(
     state.set_recording(app, recording)
 }
 
+fn main_window_focused<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.get_webview_window("main")
+        .and_then(|window| window.is_focused().ok())
+        .unwrap_or(false)
+}
+
+fn preview_active_for_settings(
+    requested_active: bool,
+    focused: bool,
+    preview_enabled: bool,
+) -> bool {
+    requested_active && focused && preview_enabled
+}
+
 #[tauri::command]
-fn set_preview_active(state: tauri::State<RuntimeState>, active: bool) -> bool {
-    state.set_preview_active(active)
+fn set_preview_active<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<RuntimeState>,
+    active: bool,
+) -> PreviewActivationResult {
+    let focused = main_window_focused(&app);
+    let preview_enabled = state.settings().capture_preview_enabled;
+    let next_active = preview_active_for_settings(active, focused, preview_enabled);
+    let sent = state.set_preview_active(next_active);
+    PreviewActivationResult {
+        active: sent && next_active,
+        focused,
+        enabled: preview_enabled,
+    }
 }
 
 #[tauri::command]
@@ -769,6 +881,7 @@ pub fn run() {
             set_recording,
             set_preview_active,
             get_settings,
+            minimize_main_window,
             choose_media_folder,
             choose_replay_cache_folder,
             list_displays,
@@ -847,19 +960,12 @@ pub fn run() {
                         app.state::<RuntimeState>().request_save();
                     }
                     "quit" => {
-                        app.state::<MicTestState>().stop();
-                        app.state::<RuntimeState>()
-                            .send(Cmd::Stop { announce: false });
-                        app.exit(0);
+                        quit_app(app);
                     }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::DoubleClick {
-                        button: MouseButton::Left,
-                        ..
-                    } = event
-                    {
+                    if should_open_on_tray_event(&event) {
                         if let Err(e) = open_main_window(tray.app_handle()) {
                             eprintln!("open window: {e}");
                         }
@@ -889,10 +995,13 @@ pub fn run() {
                 ..
             } if label == "main" => {
                 api.prevent_close();
-                app.state::<MicTestState>().stop();
-                app.state::<RuntimeState>().set_preview_active(false);
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.destroy();
+                match close_request_action(&app.state::<RuntimeState>().settings()) {
+                    CloseRequestAction::Tray => {
+                        if let Err(e) = send_main_window_to_tray(app, true) {
+                            eprintln!("close to tray: {e}");
+                        }
+                    }
+                    CloseRequestAction::Quit => quit_app(app),
                 }
             }
             tauri::RunEvent::WindowEvent {
@@ -980,6 +1089,13 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>) {
                 Event::Error { message } => handle.emit("error", message.clone()),
                 Event::PreviewFrame { .. } => handle.emit("preview-frame", &event),
             };
+            if let Event::Saved {
+                full_session: false,
+                ..
+            } = &event
+            {
+                crate::sound::play_replay_saved();
+            }
         }
     });
 }
@@ -1143,6 +1259,55 @@ mod tests {
             },
         );
         assert!(!active_game_still_configured(&settings, Some(&active)));
+    }
+
+    #[test]
+    fn window_request_actions_follow_general_settings() {
+        let defaults = AppSettings::default();
+        assert_eq!(close_request_action(&defaults), CloseRequestAction::Tray);
+        assert_eq!(
+            minimize_request_action(&defaults),
+            MinimizeRequestAction::Taskbar
+        );
+
+        let settings = AppSettings {
+            close_to_tray: false,
+            minimize_to_tray: true,
+            ..AppSettings::default()
+        };
+        assert_eq!(close_request_action(&settings), CloseRequestAction::Quit);
+        assert_eq!(
+            minimize_request_action(&settings),
+            MinimizeRequestAction::Tray
+        );
+    }
+
+    #[test]
+    fn tray_left_click_opens_only_on_button_release() {
+        assert!(should_open_on_tray_click(
+            MouseButton::Left,
+            MouseButtonState::Up
+        ));
+        assert!(!should_open_on_tray_click(
+            MouseButton::Left,
+            MouseButtonState::Down
+        ));
+        assert!(!should_open_on_tray_click(
+            MouseButton::Right,
+            MouseButtonState::Up
+        ));
+        assert!(!should_open_on_tray_click(
+            MouseButton::Middle,
+            MouseButtonState::Up
+        ));
+    }
+
+    #[test]
+    fn preview_activation_requires_focus_and_enabled_setting() {
+        assert!(preview_active_for_settings(true, true, true));
+        assert!(!preview_active_for_settings(true, false, true));
+        assert!(!preview_active_for_settings(true, true, false));
+        assert!(!preview_active_for_settings(false, true, true));
     }
 
     #[test]

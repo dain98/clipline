@@ -14,7 +14,9 @@ use clipline_capture::probe::{
     rank_encoders, EncoderApi, EncoderBackend, EncoderCandidate, EncoderCapability,
     EncoderPreference,
 };
-use clipline_capture::traits::{AudioSource, CaptureError, Encoder, FrameData};
+use clipline_capture::traits::{
+    AudioSource, CaptureEngine, CaptureError, Encoder, Frame, FrameData,
+};
 use clipline_capture::windows::nv12::CropRect;
 use clipline_capture::windows::wasapi::{WasapiChannelMode, WasapiMixedLoopback};
 use clipline_capture::windows::{
@@ -46,6 +48,77 @@ pub enum Cmd {
     SetPreview { active: bool },
     PausePreview { duration: Duration },
 }
+
+trait TimedFrameSource {
+    fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError>;
+}
+
+impl TimedFrameSource for WgcCapture {
+    fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+        WgcCapture::next_frame_timeout(self, timeout)
+    }
+}
+
+/// WGC can go quiet when the captured image is unchanged. Keep the encoder
+/// moving at the configured cadence by reusing the latest texture during
+/// idle gaps, so GOP/keyframe spacing follows wall-clock time.
+struct CadencedCapture<C> {
+    inner: C,
+    frame_interval: Duration,
+    frame_interval_s: f64,
+    last_data: Option<FrameData>,
+    last_emit_pts_s: Option<f64>,
+    next_pts_s: Option<f64>,
+}
+
+impl<C> CadencedCapture<C> {
+    fn new(inner: C, fps: u32, seed: &Frame) -> Self {
+        let frame_interval_s = 1.0 / fps.max(1) as f64;
+        Self {
+            inner,
+            frame_interval: Duration::from_secs_f64(frame_interval_s),
+            frame_interval_s,
+            last_data: Some(seed.data.clone()),
+            last_emit_pts_s: Some(seed.pts_s),
+            next_pts_s: Some(seed.pts_s + frame_interval_s),
+        }
+    }
+
+    fn remember(&mut self, frame: &Frame) {
+        self.last_data = Some(frame.data.clone());
+        self.last_emit_pts_s = Some(frame.pts_s);
+        self.next_pts_s = Some(frame.pts_s + self.frame_interval_s);
+    }
+}
+
+impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
+    fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError> {
+        match self.inner.next_frame_timeout(self.frame_interval) {
+            Ok(Some(mut frame)) => {
+                if let Some(last) = self.last_emit_pts_s {
+                    frame.pts_s = frame.pts_s.max(last + 1e-4);
+                }
+                self.remember(&frame);
+                Ok(Some(frame))
+            }
+            Ok(None) => Ok(None),
+            Err(CaptureError::Timeout(_)) => {
+                let Some(data) = self.last_data.clone() else {
+                    return Err(CaptureError::Timeout(self.frame_interval));
+                };
+                let min_pts = self.last_emit_pts_s.map(|last| last + 1e-4).unwrap_or(0.0);
+                let pts_s = self.next_pts_s.unwrap_or(min_pts).max(min_pts);
+                self.last_emit_pts_s = Some(pts_s);
+                self.next_pts_s = Some(pts_s + self.frame_interval_s);
+                Ok(Some(Frame { pts_s, data }))
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+type LiveCapture = CadencedCapture<WgcCapture>;
+type LiveRecorder = Recorder<LiveCapture, Box<dyn Encoder>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureRegion {
@@ -583,6 +656,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                 .ok_or_else(|| "disk replay cache was not prepared".to_string())?,
         },
     };
+    let cap = CadencedCapture::new(cap, opts.fps, &first);
     let mut rec = Recorder::new_with_replay_storage(cap, encoder, replay_storage)
         .map_err(|e| format!("replay cache: {e}"))?;
     if let Some(audio) = audio_source_from_options(clock, &opts.audio, events) {
@@ -612,7 +686,6 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     // Saves land in a session folder: one per recorder run, with a dedicated
     // folder per detected match. Folders are created lazily at save time.
     let mut session = SessionTracker::new(local_session_label(false));
-    let mut last_save_end: Option<f64> = None;
     let mut last_status = Instant::now();
     let mut preview = PreviewState::default();
     let mut full_session = begin_full_session_recording(
@@ -680,9 +753,8 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     }
                     write_session_game_meta(&session_dir, opts.active_game.as_ref());
                     let path = unique_media_path(&session_dir, "clip");
-                    match save(&rec, &path, opts.replay_window_s, last_save_end) {
+                    match save(&rec, &path, opts.replay_window_s) {
                         Ok((end, seconds)) => {
-                            last_save_end = Some(end);
                             // Markers inside the saved window ride along as
                             // a sidecar (ddoc §5) — only when there are any.
                             let markers = write_marker_sidecar(
@@ -1077,7 +1149,7 @@ fn send_stopped(events: &Sender<Event>) {
 
 fn send_recording_status(
     events: &Sender<Event>,
-    rec: &Recorder<WgcCapture, Box<dyn Encoder>>,
+    rec: &LiveRecorder,
     full_session: &Option<FullSessionRecording>,
     encoder_status: &str,
 ) {
@@ -1122,7 +1194,7 @@ fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Event>) {
 }
 
 fn shutdown_recorder(
-    rec: &mut Recorder<WgcCapture, Box<dyn Encoder>>,
+    rec: &mut LiveRecorder,
     full_session: &mut Option<FullSessionRecording>,
     marker_log: &MarkerLog,
     clips_dir: &Path,
@@ -1166,7 +1238,7 @@ fn write_session_game_meta(session_dir: &Path, active_game: Option<&ActiveGame>)
 }
 
 fn begin_full_session_recording(
-    rec: &mut Recorder<WgcCapture, Box<dyn Encoder>>,
+    rec: &mut LiveRecorder,
     clips_dir: &Path,
     session_label: &str,
     mode: RecordingMode,
@@ -1213,7 +1285,7 @@ fn begin_full_session_recording(
 }
 
 fn finish_full_session_recording(
-    rec: &mut Recorder<WgcCapture, Box<dyn Encoder>>,
+    rec: &mut LiveRecorder,
     recording: &mut Option<FullSessionRecording>,
     marker_log: &MarkerLog,
     clips_dir: &Path,
@@ -1297,7 +1369,7 @@ fn rename_finalized_session(recording: &FullSessionRecording, events: &Sender<Ev
 }
 
 fn discard_full_session_recording(
-    rec: &mut Recorder<WgcCapture, Box<dyn Encoder>>,
+    rec: &mut LiveRecorder,
     recording: &mut Option<FullSessionRecording>,
     events: &Sender<Event>,
     reason: &str,
@@ -1409,17 +1481,16 @@ fn emit_saved_clip(
 }
 
 fn save(
-    rec: &Recorder<WgcCapture, Box<dyn Encoder>>,
+    rec: &Recorder<impl CaptureEngine, impl Encoder>,
     path: &Path,
     window_s: f64,
-    exclude_before_s: Option<f64>,
 ) -> Result<(f64, f64), String> {
     let saved_from = rec
-        .save_window_bounds(window_s, exclude_before_s)
+        .save_window_bounds(window_s, None)
         .map(|(start, _)| start);
     let file = std::fs::File::create(path).map_err(|e| format!("create {path:?}: {e}"))?;
     let (_, end) = rec
-        .save_replay(file, window_s, exclude_before_s)
+        .save_replay(file, window_s, None)
         .map_err(|e| format!("save: {e}"))?;
     Ok((end, end - saved_from.unwrap_or(end)))
 }
@@ -1505,7 +1576,16 @@ fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clipline_capture::{MockCapture, MockEncoder};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TimeoutSource;
+
+    impl TimedFrameSource for TimeoutSource {
+        fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+            Err(CaptureError::Timeout(timeout))
+        }
+    }
 
     #[test]
     fn video_encoder_id_matches_serde_serialization() {
@@ -1611,6 +1691,50 @@ mod tests {
             marker_source_kind(&opts),
             MarkerSourceKind::LegacyLeaguePoller
         );
+    }
+
+    #[test]
+    fn cadenced_capture_duplicates_seed_on_idle_timeout() {
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![7, 8, 9]),
+        };
+        let mut cap = CadencedCapture::new(TimeoutSource, 60, &seed);
+
+        let first = cap
+            .next_frame()
+            .expect("duplicate frame")
+            .expect("capture still open");
+        let second = cap
+            .next_frame()
+            .expect("duplicate frame")
+            .expect("capture still open");
+
+        assert!((first.pts_s - (1.0 + 1.0 / 60.0)).abs() < 1e-9);
+        assert!((second.pts_s - (1.0 + 2.0 / 60.0)).abs() < 1e-9);
+        assert!(matches!(first.data, FrameData::Cpu(ref data) if data == &[7, 8, 9]));
+        assert!(matches!(second.data, FrameData::Cpu(ref data) if data == &[7, 8, 9]));
+    }
+
+    #[test]
+    fn manual_replay_save_does_not_shrink_after_previous_save() {
+        let dir = TestDir::new("manual-save-window");
+        let mut rec = Recorder::new(
+            MockCapture::new(120, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        );
+        rec.run_to_end().unwrap();
+
+        let first_path = dir.path().join("clip_first.mp4");
+        let second_path = dir.path().join("clip_second.mp4");
+        let (first_end, first_seconds) = save(&rec, &first_path, 2.0).unwrap();
+        let (second_end, second_seconds) = save(&rec, &second_path, 2.0).unwrap();
+
+        assert!((first_end - 4.0).abs() < 1e-6);
+        assert!((second_end - 4.0).abs() < 1e-6);
+        assert!((first_seconds - 2.0).abs() < 1e-6);
+        assert!((second_seconds - 2.0).abs() < 1e-6);
     }
 
     struct TestDir(PathBuf);

@@ -7,9 +7,15 @@ const appWindow = window.__TAURI__.window.getCurrentWindow();
 const $ = (id) => document.getElementById(id);
 
 // Custom window chrome — the native title bar is disabled (decorations: false).
-$("win-min").addEventListener("click", () => appWindow.minimize());
+$("win-min").addEventListener("click", async () => {
+  try {
+    await invoke("minimize_main_window");
+  } catch (e) {
+    $("error").textContent = e;
+  }
+});
 $("win-max").addEventListener("click", () => appWindow.toggleMaximize());
-$("win-close").addEventListener("click", () => appWindow.close());
+$("win-close").addEventListener("click", requestWindowClose);
 const {
   fmtBytes,
   fmtDur,
@@ -192,6 +198,9 @@ function fillSettings(s) {
   $("set-hotkey").value = s.hotkey;
   $("save-hotkey").textContent = s.hotkey;
   $("set-open-on-startup").checked = !!s.open_on_startup;
+  $("set-close-to-tray").checked = s.close_to_tray !== false;
+  $("set-minimize-to-tray").checked = !!s.minimize_to_tray;
+  $("set-capture-preview-enabled").checked = s.capture_preview_enabled !== false;
   endHotkeyCapture("Click the field to record a new shortcut.");
   syncCaptureFields();
   renderAudioDeviceSelects();
@@ -255,6 +264,9 @@ function readSettings() {
     },
     hotkey: $("set-hotkey").value,
     open_on_startup: $("set-open-on-startup").checked,
+    close_to_tray: $("set-close-to-tray").checked,
+    minimize_to_tray: $("set-minimize-to-tray").checked,
+    capture_preview_enabled: $("set-capture-preview-enabled").checked,
   };
 }
 
@@ -841,7 +853,13 @@ function emptyPreviewVisible() {
 }
 
 function previewShouldRun() {
-  return emptyPreviewVisible() && recordingActive && windowFocused && !previewWindowMovePaused;
+  return (
+    emptyPreviewVisible()
+    && recordingActive
+    && currentSettings?.capture_preview_enabled !== false
+    && windowFocused
+    && !previewWindowMovePaused
+  );
 }
 
 function setPreviewOverlay(title, message, ready = false) {
@@ -867,7 +885,10 @@ function updateCapturePreview() {
 
   if (!shouldRun && previewHasFrame) resetCapturePreviewFrame();
 
-  if (!recordingActive) {
+  if (visible && currentSettings?.capture_preview_enabled === false) {
+    setPreviewOverlay("Capture preview", "Display preview is off");
+    $("capture-preview-meta").textContent = metaSource;
+  } else if (!recordingActive) {
     setPreviewOverlay("Capture preview", "Recording is off");
     $("capture-preview-meta").textContent = "Start recording to show the active target";
   } else if (previewWindowMovePaused && visible) {
@@ -888,8 +909,21 @@ function updateCapturePreview() {
 
   if (shouldRun === previewRequested) return;
   previewRequested = shouldRun;
-  invoke("set_preview_active", { active: shouldRun }).then((active) => {
-    if (shouldRun && !active) {
+  invoke("set_preview_active", { active: shouldRun }).then((activation) => {
+    if (shouldRun && activation?.focused === false) {
+      windowFocused = false;
+      previewRequested = false;
+      resetCapturePreviewFrame();
+      updateCapturePreview();
+      return;
+    }
+    if (shouldRun && activation?.enabled === false) {
+      previewRequested = false;
+      resetCapturePreviewFrame();
+      updateCapturePreview();
+      return;
+    }
+    if (shouldRun && !activation?.active) {
       previewRequested = false;
       setPreviewOverlay("Capture preview", "Preview unavailable");
     }
@@ -2327,6 +2361,29 @@ function confirmDelete(name) {
   });
 }
 
+function confirmQuit() {
+  return new Promise((resolve) => {
+    const dlg = $("quit-dialog");
+    const finish = (ok) => {
+      dlg.removeEventListener("close", onClose);
+      if (dlg.open) dlg.close();
+      resolve(ok);
+    };
+    const onClose = () => finish(false); // Esc / backdrop paths
+    dlg.addEventListener("close", onClose);
+    $("quit-cancel").onclick = () => finish(false);
+    $("quit-accept").onclick = () => finish(true);
+    dlg.showModal();
+  });
+}
+
+async function requestWindowClose() {
+  if (currentSettings && currentSettings.close_to_tray === false) {
+    if (!(await confirmQuit())) return;
+  }
+  await appWindow.close();
+}
+
 async function deleteClip(path = currentClip && currentClip.path) {
   if (!path) return;
   const name = path.split(/[\\/]/).pop();
@@ -2570,6 +2627,7 @@ $("settings-save").addEventListener("click", async () => {
     const saved = await invoke("save_settings", { settings: readSettings() });
     resetCapturePreviewFrame();
     fillSettings(saved);
+    updateCapturePreview();
     $("settings-status").textContent = "saved";
     await refresh();
   } catch (e) {
@@ -2703,7 +2761,7 @@ $("timeline").addEventListener("pointercancel", endDrag);
 $("timeline").addEventListener("lostpointercapture", endDrag);
 
 document.addEventListener("keydown", (ev) => {
-  if ($("confirm-dialog").open || $("keys-dialog").open) return; // a dialog owns the keyboard
+  if ($("confirm-dialog").open || $("quit-dialog").open || $("keys-dialog").open) return; // a dialog owns the keyboard
   if (ev.code === "Escape" && settingsOpen) {
     ev.preventDefault();
     toggleSettings(false);

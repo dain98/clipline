@@ -641,20 +641,32 @@ fn ruler_marks_range_covers_a_zoomed_window() {
     let mut ctx = player_core_context();
     // A 20s window at 30s: 5s steps, only the marks that fall inside the window.
     assert_eq!(
-        eval_json(&mut ctx, "PlayerCore.rulerMarksRange(30, 20, 8).map(m => m.t)"),
+        eval_json(
+            &mut ctx,
+            "PlayerCore.rulerMarksRange(30, 20, 8).map(m => m.t)"
+        ),
         "[30,35,40,45,50]"
     );
     // A start off the step grid rounds up to the first mark in view.
     assert_eq!(
-        eval_json(&mut ctx, "PlayerCore.rulerMarksRange(32, 20, 8).map(m => m.t)"),
+        eval_json(
+            &mut ctx,
+            "PlayerCore.rulerMarksRange(32, 20, 8).map(m => m.t)"
+        ),
         "[35,40,45,50]"
     );
     // Starting at zero matches the whole-clip ruler.
     assert_eq!(
-        eval_json(&mut ctx, "PlayerCore.rulerMarksRange(0, 22, 8).map(m => m.t)"),
+        eval_json(
+            &mut ctx,
+            "PlayerCore.rulerMarksRange(0, 22, 8).map(m => m.t)"
+        ),
         "[0,5,10,15,20]"
     );
-    assert_eq!(eval_json(&mut ctx, "PlayerCore.rulerMarksRange(0, 0, 8)"), "[]");
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.rulerMarksRange(0, 0, 8)"),
+        "[]"
+    );
 }
 
 #[test]
@@ -662,17 +674,29 @@ fn timeline_view_window_maps_positions_and_pointer() {
     let mut ctx = player_core_context();
     // percentForView locates a time within the visible window, unclamped so the
     // caller can clip content that lies outside 0–100%.
-    assert_eq!(eval(&mut ctx, "PlayerCore.percentForView(15, 10, 20)"), "25");
-    assert_eq!(eval(&mut ctx, "PlayerCore.percentForView(5, 10, 20)"), "-25");
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.percentForView(15, 10, 20)"),
+        "25"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.percentForView(5, 10, 20)"),
+        "-25"
+    );
     assert_eq!(eval(&mut ctx, "PlayerCore.percentForView(5, 0, 0)"), "0");
 
     // timelineTimeView maps pointer x into the window, then clamps to the clip.
     assert_eq!(
-        eval(&mut ctx, "PlayerCore.timelineTimeView(150, 100, 200, 10, 20, 60)"),
+        eval(
+            &mut ctx,
+            "PlayerCore.timelineTimeView(150, 100, 200, 10, 20, 60)"
+        ),
         "15"
     );
     assert_eq!(
-        eval(&mut ctx, "PlayerCore.timelineTimeView(50, 100, 200, 10, 20, 60)"),
+        eval(
+            &mut ctx,
+            "PlayerCore.timelineTimeView(50, 100, 200, 10, 20, 60)"
+        ),
         "10"
     );
 
@@ -753,22 +777,34 @@ fn set_view_edge_moves_one_boundary() {
     let mut ctx = player_core_context();
     // Drag the left edge in: the right edge stays, the span shrinks.
     assert_eq!(
-        eval_json(&mut ctx, "PlayerCore.setViewEdge(10, 40, 100, 'left', 20, 1)"),
+        eval_json(
+            &mut ctx,
+            "PlayerCore.setViewEdge(10, 40, 100, 'left', 20, 1)"
+        ),
         r#"{"start":20,"span":30}"#
     );
     // Drag the right edge out: the left edge stays.
     assert_eq!(
-        eval_json(&mut ctx, "PlayerCore.setViewEdge(10, 40, 100, 'right', 80, 1)"),
+        eval_json(
+            &mut ctx,
+            "PlayerCore.setViewEdge(10, 40, 100, 'right', 80, 1)"
+        ),
         r#"{"start":10,"span":70}"#
     );
     // The min span floors how far an edge can close.
     assert_eq!(
-        eval_json(&mut ctx, "PlayerCore.setViewEdge(10, 40, 100, 'left', 49.5, 1)"),
+        eval_json(
+            &mut ctx,
+            "PlayerCore.setViewEdge(10, 40, 100, 'left', 49.5, 1)"
+        ),
         r#"{"start":49,"span":1}"#
     );
     // Edges clamp to the clip bounds.
     assert_eq!(
-        eval_json(&mut ctx, "PlayerCore.setViewEdge(10, 40, 100, 'right', 200, 1)"),
+        eval_json(
+            &mut ctx,
+            "PlayerCore.setViewEdge(10, 40, 100, 'right', 200, 1)"
+        ),
         r#"{"start":10,"span":90}"#
     );
 }
@@ -874,7 +910,10 @@ fn snap_time_snaps_within_a_pixel_tolerance() {
 fn snap_candidates_collect_and_exclude() {
     let mut ctx = player_core_context();
     assert_eq!(
-        eval_json(&mut ctx, "PlayerCore.snapCandidates(100, [{t_s:30}], 50, 10, 90)"),
+        eval_json(
+            &mut ctx,
+            "PlayerCore.snapCandidates(100, [{t_s:30}], 50, 10, 90)"
+        ),
         "[0,10,30,50,90,100]"
     );
     // The moving element (here the in-edge and the playhead) is excluded.

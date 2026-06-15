@@ -30,3 +30,7 @@ pub use traits::{
     AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket, Encoder,
     Frame, FrameData,
 };
+
+pub(crate) fn replay_gop_frames(fps: u32) -> u32 {
+    (fps / 2).max(1)
+}

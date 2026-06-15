@@ -212,7 +212,7 @@ impl MftH264Encoder {
 
         // Rate-control / GOP knobs (best-effort — vendors vary).
         if let Ok(codec_api) = transform.cast::<ICodecAPI>() {
-            let gop = variant_u32(cfg.fps * 2); // ~2 s keyframe interval
+            let gop = variant_u32(crate::replay_gop_frames(cfg.fps)); // ~0.5 s keyframe interval
             let zero = variant_u32(0);
             // SAFETY: SetValue with VT_UI4 variants per codecapi contract.
             unsafe {

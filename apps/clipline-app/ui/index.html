@@ -245,9 +245,39 @@
                 <span>Start Clipline on Windows login</span>
               </label>
             </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Close to Tray</strong>
+                <span>Keep recording in the tray when the window is closed.</span>
+              </div>
+              <label class="check-line">
+                <input id="set-close-to-tray" type="checkbox" />
+                <span>Send Close to the system tray</span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Minimize to Tray</strong>
+                <span>Hide the window in the tray instead of the taskbar when minimized.</span>
+              </div>
+              <label class="check-line">
+                <input id="set-minimize-to-tray" type="checkbox" />
+                <span>Send Minimize to the system tray</span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Display Preview</strong>
+                <span>Show the live capture preview in the empty review pane.</span>
+              </div>
+              <label class="check-line">
+                <input id="set-capture-preview-enabled" type="checkbox" />
+                <span>Show display preview</span>
+              </label>
+            </div>
           </div>
 
-          <div class="settings-section" data-section="capture">
+          <div class="settings-section" data-section="capture" hidden>
             <div class="setting-row">
               <div class="setting-info">
                 <strong>Capture target</strong>
@@ -555,6 +585,18 @@
     <div class="confirm-actions">
       <button id="confirm-accept" class="danger">Delete</button>
       <button id="confirm-cancel">Cancel</button>
+    </div>
+  </dialog>
+
+  <dialog id="quit-dialog">
+    <div class="confirm-body">
+      <strong>Close Clipline?</strong>
+      <span>Recording and hotkeys will stop until you reopen the app.</span>
+      <span class="hint">Enable Close to Tray to keep Clipline running when you close the window.</span>
+    </div>
+    <div class="confirm-actions">
+      <button id="quit-accept" class="danger">Close App</button>
+      <button id="quit-cancel">Cancel</button>
     </div>
   </dialog>
 

@@ -437,6 +437,12 @@ pub struct AppSettings {
     pub hotkey: String,
     #[serde(default)]
     pub open_on_startup: bool,
+    #[serde(default = "default_enabled")]
+    pub close_to_tray: bool,
+    #[serde(default)]
+    pub minimize_to_tray: bool,
+    #[serde(default = "default_enabled")]
+    pub capture_preview_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -459,6 +465,9 @@ impl Default for AppSettings {
             replay_storage: ReplayStorageSettings::default(),
             hotkey: "Alt+F10".into(),
             open_on_startup: false,
+            close_to_tray: true,
+            minimize_to_tray: false,
+            capture_preview_enabled: true,
         }
     }
 }
@@ -623,6 +632,11 @@ impl AppSettings {
                 .unwrap_or_else(|| defaults.hotkey.clone()),
             open_on_startup: bool_field(object, "open_on_startup")
                 .unwrap_or(defaults.open_on_startup),
+            close_to_tray: bool_field(object, "close_to_tray").unwrap_or(defaults.close_to_tray),
+            minimize_to_tray: bool_field(object, "minimize_to_tray")
+                .unwrap_or(defaults.minimize_to_tray),
+            capture_preview_enabled: bool_field(object, "capture_preview_enabled")
+                .unwrap_or(defaults.capture_preview_enabled),
         };
 
         settings.games.normalize();
@@ -986,11 +1000,11 @@ fn replay_buffer_seconds(settings: &AppSettings) -> f64 {
 }
 
 fn estimated_buffer_bytes(buffer_seconds: f64, bitrate_mbps: f64) -> usize {
-    const MIN_BUFFER_BYTES: f64 = 32.0 * 1024.0 * 1024.0;
-    const AUDIO_AND_MOTION_HEADROOM: f64 = 1.30;
+    const MIN_BUFFER_BYTES: f64 = 64.0 * 1024.0 * 1024.0;
+    const ENCODER_OVERSHOOT_HEADROOM: f64 = 2.0;
 
     let video_bytes = bitrate_mbps * 1_000_000.0 / 8.0 * buffer_seconds;
-    (video_bytes * AUDIO_AND_MOTION_HEADROOM).max(MIN_BUFFER_BYTES) as usize
+    (video_bytes * ENCODER_OVERSHOOT_HEADROOM).max(MIN_BUFFER_BYTES) as usize
 }
 
 fn same_or_nested_path(child: &Path, parent: &Path) -> bool {
@@ -1067,6 +1081,9 @@ mod tests {
         assert_eq!(settings.replay_storage, ReplayStorageSettings::default());
         assert_eq!(settings.hotkey, "Alt+F10");
         assert!(!settings.open_on_startup);
+        assert!(settings.close_to_tray);
+        assert!(!settings.minimize_to_tray);
+        assert!(settings.capture_preview_enabled);
     }
 
     #[test]
@@ -1112,6 +1129,9 @@ mod tests {
         assert_eq!(settings.media_dir, default_media_dir());
         assert_eq!(settings.video_encoder, VideoEncoder::Auto);
         assert_eq!(settings.output_resolution, OutputResolution::Source);
+        assert!(settings.close_to_tray);
+        assert!(!settings.minimize_to_tray);
+        assert!(settings.capture_preview_enabled);
         assert!(settings.validate().is_ok());
     }
 
@@ -1491,10 +1511,10 @@ mod tests {
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
         assert_eq!(opts.audio, AudioOptions::default());
         assert_eq!(opts.replay_storage, ReplayStorageOptions::Memory);
-        // Ring tracks the 60 s window + 15 s headroom at 12 Mbps (~146 MB),
-        // not the old fixed 120 s (~234 MB).
-        assert!(opts.buffer_bytes >= 120 * 1024 * 1024);
-        assert!(opts.buffer_bytes < 180 * 1024 * 1024);
+        // Ring tracks the 60 s window + 15 s headroom with enough byte
+        // slack for hardware encoders that overshoot their target bitrate.
+        assert!(opts.buffer_bytes >= 200 * 1024 * 1024);
+        assert!(opts.buffer_bytes < 240 * 1024 * 1024);
     }
 
     #[test]
@@ -1586,6 +1606,9 @@ mod tests {
             bitrate_mbps: 16.0,
             output_resolution: OutputResolution::P1080,
             hotkey: "Ctrl+Alt+F9".into(),
+            close_to_tray: false,
+            minimize_to_tray: true,
+            capture_preview_enabled: false,
             games: GameSettings {
                 auto_detect: true,
                 plugins: BTreeMap::from([(
@@ -1673,8 +1696,21 @@ mod tests {
         let small = estimated_buffer_bytes(60.0, 8.0);
         let large = estimated_buffer_bytes(120.0, 16.0);
 
-        assert!(small >= 32 * 1024 * 1024);
+        assert!(small >= 64 * 1024 * 1024);
         assert!(large > small * 3);
+    }
+
+    #[test]
+    fn thirty_second_replay_has_buffer_slack_for_encoder_overshoot() {
+        let settings = AppSettings {
+            replay_window_s: 30.0,
+            buffer_seconds: 45.0,
+            bitrate_mbps: 5.0,
+            ..AppSettings::default()
+        };
+        let opts = settings.to_service_options(None).unwrap();
+
+        assert!(opts.buffer_bytes >= 64 * 1024 * 1024);
     }
 
     #[test]

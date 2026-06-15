@@ -105,7 +105,7 @@ fn spawn_process(
     let codec_params = Arc::new(Mutex::new(None));
     let (tx, rx) = std::sync::mpsc::channel();
     let reader_params = Arc::clone(&codec_params);
-    let gop_frames = (fps * 2).max(1);
+    let gop_frames = crate::replay_gop_frames(fps);
     let reader = std::thread::Builder::new()
         .name("clipline-ffmpeg-reader".into())
         .spawn(move || run_reader(stdout, codec, gop_frames, reader_params, tx))
@@ -407,7 +407,7 @@ fn set_params_if_empty(codec: Codec, au: &[u8], params: &Arc<Mutex<Option<VideoC
 }
 
 /// Build the ffmpeg argument vector: NV12 rawvideo in, elementary stream out,
-/// 2-second GOP, no B-frames, CBR for replay-buffer size predictability.
+/// Short GOP, no B-frames, CBR for replay-buffer size predictability.
 fn build_args(
     encoder: &str,
     backend: EncoderBackend,
@@ -417,7 +417,7 @@ fn build_args(
     fps: u32,
     bitrate_bps: u32,
 ) -> Vec<String> {
-    let gop = (fps * 2).max(1);
+    let gop = crate::replay_gop_frames(fps);
     let bufsize = bitrate_bps as u64 * 2;
     let out_format = match codec {
         Codec::H264 => "h264",
@@ -539,7 +539,7 @@ mod tests {
         assert!(joined.contains("-s 1920x1080"));
         assert!(joined.contains("-r 60"));
         assert!(joined.contains("-c:v libsvtav1"));
-        assert!(joined.contains("-g 120"), "2-second GOP at 60 fps");
+        assert!(joined.contains("-g 30"), "half-second GOP at 60 fps");
         assert!(joined.contains("-bf 0"), "no B-frames");
         assert!(joined.ends_with("-f ivf pipe:1"), "AV1 → IVF: {joined}");
     }
@@ -577,10 +577,10 @@ mod tests {
             &[0, 0, 1, 0x65, 0x88][..],
         ]
         .concat();
-        let (_sample, is_key) = finish_unit(Codec::H264, &key, 120, 0);
+        let (_sample, is_key) = finish_unit(Codec::H264, &key, 30, 0);
         assert!(is_key);
         let inter = [0, 0, 0, 1, 0x41, 0x9A];
-        let (_s, is_key) = finish_unit(Codec::H264, &inter, 120, 7);
+        let (_s, is_key) = finish_unit(Codec::H264, &inter, 30, 7);
         assert!(!is_key);
     }
 
@@ -588,13 +588,13 @@ mod tests {
     fn finish_unit_uses_position_for_av1_keyframes() {
         let au = [0x12, 0x00]; // arbitrary OBU bytes; framing tested elsewhere
         assert!(
-            finish_unit(Codec::Av1, &au, 120, 0).1,
+            finish_unit(Codec::Av1, &au, 30, 0).1,
             "frame 0 is a keyframe"
         );
         assert!(
-            !finish_unit(Codec::Av1, &au, 120, 60).1,
+            !finish_unit(Codec::Av1, &au, 30, 15).1,
             "mid-GOP frame is not"
         );
-        assert!(finish_unit(Codec::Av1, &au, 120, 120).1, "GOP boundary is");
+        assert!(finish_unit(Codec::Av1, &au, 30, 30).1, "GOP boundary is");
     }
 }

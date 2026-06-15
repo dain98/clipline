@@ -19,6 +19,18 @@ fn styles_css() -> String {
     fs::read_to_string(path).expect("read ui/styles.css")
 }
 
+fn app_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs");
+    fs::read_to_string(path).expect("read src/app.rs")
+}
+
+fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let prefix = format!("{name}=\"");
+    let start = tag.find(&prefix)? + prefix.len();
+    let end = tag[start..].find('"')? + start;
+    Some(&tag[start..end])
+}
+
 #[test]
 fn review_player_owns_all_controls() {
     let html = index_html();
@@ -91,9 +103,16 @@ fn review_player_owns_all_controls() {
         "id=\"confirm-dialog\"",
         "id=\"confirm-accept\"",
         "id=\"confirm-cancel\"",
+        "id=\"quit-dialog\"",
+        "id=\"quit-accept\"",
+        "id=\"quit-cancel\"",
         "id=\"settings-page\"",
         "id=\"settings-tabs\"",
         "id=\"open-settings\"",
+        "id=\"set-open-on-startup\"",
+        "id=\"set-close-to-tray\"",
+        "id=\"set-minimize-to-tray\"",
+        "id=\"set-capture-preview-enabled\"",
         "id=\"set-capture\"",
         "id=\"set-output-enabled\"",
         "id=\"set-output-device\"",
@@ -166,6 +185,23 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains("value=\"display_region\""),
         "capture target must expose the display_region mode"
+    );
+    assert!(
+        html.contains("Close to Tray")
+            && html.contains("Minimize to Tray")
+            && html.contains("Display Preview")
+            && main_js().contains("close_to_tray")
+            && main_js().contains("minimize_to_tray")
+            && main_js().contains("capture_preview_enabled")
+            && main_js().contains("minimize_main_window"),
+        "general settings must expose and persist tray close/minimize/preview behavior"
+    );
+    assert!(
+        main_js().contains("requestWindowClose")
+            && main_js().contains("confirmQuit")
+            && main_js().contains("close_to_tray === false")
+            && styles_css().contains("#quit-dialog"),
+        "the window close button must confirm before quitting when Close to Tray is disabled"
     );
     assert!(
         !html.contains(">primary monitor<")
@@ -333,9 +369,15 @@ fn review_player_owns_all_controls() {
         main_js().contains("set_preview_active")
             && main_js().contains("listen(\"preview-frame\"")
             && main_js().contains("Focus Clipline to show preview")
+            && main_js().contains("Display preview is off")
+            && main_js().contains("activation?.focused === false")
+            && main_js().contains("activation?.enabled === false")
             && main_js().contains("pausePreviewForWindowMove")
+            && app_rs().contains("is_focused()")
+            && app_rs().contains("capture_preview_enabled")
+            && app_rs().contains("preview_active_for_settings(active, focused, preview_enabled)")
             && styles_css().contains(".capture-preview-frame"),
-        "the empty review pane must render a focus-gated capture preview"
+        "the empty review pane must render a native-focus-gated capture preview"
     );
 
     // Icon buttons carry SVG icons; text labels are a regression.
@@ -369,6 +411,69 @@ fn review_player_owns_all_controls() {
             "{id} must render an SVG icon, not a text label"
         );
     }
+}
+
+#[test]
+fn initial_settings_tab_state_matches_visible_section() {
+    let html = index_html();
+    let tabs_start = html.find("id=\"settings-tabs\"").expect("settings tabs");
+    let tabs_end = html[tabs_start..]
+        .find("</nav>")
+        .map(|offset| tabs_start + offset)
+        .expect("settings tabs close");
+    let tabs = &html[tabs_start..tabs_end];
+
+    let mut active_tabs = Vec::new();
+    let mut cursor = 0;
+    while let Some(offset) = tabs[cursor..].find("<button") {
+        let start = cursor + offset;
+        let end = tabs[start..]
+            .find('>')
+            .map(|tag_end| start + tag_end)
+            .expect("tab button closes");
+        let tag = &tabs[start..=end];
+        if tag_attr(tag, "class")
+            .is_some_and(|class| class.split_whitespace().any(|c| c == "active"))
+        {
+            active_tabs.push(tag_attr(tag, "data-tab").expect("active tab has data-tab"));
+        }
+        cursor = end + 1;
+    }
+    assert_eq!(
+        active_tabs.len(),
+        1,
+        "settings must have exactly one active initial tab"
+    );
+    let active_tab = active_tabs[0];
+
+    let mut visible_sections = Vec::new();
+    cursor = 0;
+    while let Some(offset) = html[cursor..].find("<div class=\"settings-section\"") {
+        let start = cursor + offset;
+        let end = html[start..]
+            .find('>')
+            .map(|tag_end| start + tag_end)
+            .expect("settings section opens");
+        let tag = &html[start..=end];
+        let section = tag_attr(tag, "data-section").expect("settings section has data-section");
+        let hidden = tag
+            .split_whitespace()
+            .any(|part| part == "hidden" || part == "hidden>");
+        if hidden {
+            assert_ne!(
+                section, active_tab,
+                "the initially active settings section must not be hidden"
+            );
+        } else {
+            visible_sections.push(section);
+        }
+        cursor = end + 1;
+    }
+    assert_eq!(
+        visible_sections,
+        vec![active_tab],
+        "only the active settings tab's section should be visible before first interaction"
+    );
 }
 
 #[test]

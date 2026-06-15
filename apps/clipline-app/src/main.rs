@@ -30,3 +30,5 @@ mod memory;
 mod service;
 #[cfg(windows)]
 mod settings;
+#[cfg(windows)]
+mod sound;
