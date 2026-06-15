@@ -70,8 +70,14 @@ const stageFrame = $("stage-frame");
 let currentClip = null;
 let clipsCache = [];
 let currentSettings = null;
-let recordingActive = true;
+let recordingActive = false;
 let fullSessionRecordingActive = false;
+let windowFocused = document.hasFocus();
+let previewRequested = false;
+let previewHasFrame = false;
+let previewWindowMovePaused = false;
+let previewWindowMoveTimer = 0;
+let previewWindowMoveStart = null;
 let displays = [];
 let audioDevices = { outputs: [], inputs: [] };
 let videoEncoders = [];
@@ -819,6 +825,7 @@ function updateCaptureStatus() {
   $("rail-status-text").textContent = recordingActive ? "Rec" : "Off";
   $("save").disabled = !recordingActive;
   $("rail-save").disabled = !recordingActive;
+  updateCapturePreview();
 }
 
 function fallbackCaptureSourceLabel(settings) {
@@ -827,6 +834,108 @@ function fallbackCaptureSourceLabel(settings) {
     if (display) return `Display: ${display.name}`;
   }
   return captureSourceLabel(settings);
+}
+
+function emptyPreviewVisible() {
+  return !settingsOpen && !currentClip;
+}
+
+function previewShouldRun() {
+  return emptyPreviewVisible() && recordingActive && windowFocused && !previewWindowMovePaused;
+}
+
+function setPreviewOverlay(title, message, ready = false) {
+  $("capture-preview-title").textContent = title;
+  $("capture-preview-status").textContent = message;
+  $("capture-preview-overlay").classList.toggle("ready", ready);
+}
+
+function resetCapturePreviewFrame() {
+  previewHasFrame = false;
+  const image = $("capture-preview-image");
+  image.hidden = true;
+  image.removeAttribute("src");
+}
+
+function updateCapturePreview() {
+  const visible = emptyPreviewVisible();
+  const shouldRun = previewShouldRun();
+  const metaSource =
+    activeDetectedGame && activeDetectedGame.active
+      ? `Game: ${activeDetectedGame.name}`
+      : fallbackCaptureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
+
+  if (!shouldRun && previewHasFrame) resetCapturePreviewFrame();
+
+  if (!recordingActive) {
+    setPreviewOverlay("Capture preview", "Recording is off");
+    $("capture-preview-meta").textContent = "Start recording to show the active target";
+  } else if (previewWindowMovePaused && visible) {
+    setPreviewOverlay("Preview paused", "Moving window...");
+    $("capture-preview-meta").textContent = metaSource;
+  } else if (!windowFocused && visible) {
+    setPreviewOverlay("Preview paused", "Focus Clipline to show preview");
+    $("capture-preview-meta").textContent = metaSource;
+  } else if (visible && previewHasFrame) {
+    setPreviewOverlay("Capture preview", "", true);
+    $("capture-preview-meta").textContent = metaSource;
+  } else if (visible) {
+    setPreviewOverlay("Capture preview", "Waiting for capture…");
+    $("capture-preview-meta").textContent = metaSource;
+  } else {
+    setPreviewOverlay("Capture preview", "");
+  }
+
+  if (shouldRun === previewRequested) return;
+  previewRequested = shouldRun;
+  invoke("set_preview_active", { active: shouldRun }).then((active) => {
+    if (shouldRun && !active) {
+      previewRequested = false;
+      setPreviewOverlay("Capture preview", "Preview unavailable");
+    }
+  }).catch((e) => {
+    previewRequested = false;
+    if (shouldRun) setPreviewOverlay("Capture preview", String(e));
+  });
+}
+
+function setPreviewWindowMovePaused(paused) {
+  if (previewWindowMovePaused === paused) return;
+  previewWindowMovePaused = paused;
+  if (!paused) previewRequested = false;
+  updateCapturePreview();
+}
+
+function pausePreviewForWindowMove() {
+  if (!emptyPreviewVisible()) return;
+  clearTimeout(previewWindowMoveTimer);
+  setPreviewWindowMovePaused(true);
+  // Native window dragging can delay pointerup/timers until the move ends.
+  // This fallback keeps preview from staying paused if the release event is
+  // swallowed by the system drag.
+  previewWindowMoveTimer = setTimeout(() => setPreviewWindowMovePaused(false), 900);
+}
+
+function resumePreviewAfterWindowMove() {
+  previewWindowMoveStart = null;
+  clearTimeout(previewWindowMoveTimer);
+  previewWindowMoveTimer = setTimeout(() => setPreviewWindowMovePaused(false), 120);
+}
+
+function armPreviewWindowMovePause(ev) {
+  clearTimeout(previewWindowMoveTimer);
+  previewWindowMoveStart = { pointerId: ev.pointerId, x: ev.clientX, y: ev.clientY };
+  previewWindowMoveTimer = setTimeout(() => { previewWindowMoveStart = null; }, 700);
+}
+
+function maybePausePreviewForWindowMove(ev) {
+  if (!previewWindowMoveStart || ev.pointerId !== previewWindowMoveStart.pointerId) return;
+  const dx = ev.clientX - previewWindowMoveStart.x;
+  const dy = ev.clientY - previewWindowMoveStart.y;
+  if ((dx * dx + dy * dy) < 16) return;
+  previewWindowMoveStart = null;
+  clearTimeout(previewWindowMoveTimer);
+  pausePreviewForWindowMove();
 }
 
 async function toggleRecording() {
@@ -1505,6 +1614,7 @@ function renderClips() {
 /* ---- review player ---- */
 
 function openClip(clip) {
+  resetCapturePreviewFrame();
   currentClip = clip;
   $("error").textContent = "";
   $("deck-status").textContent = "";
@@ -1548,6 +1658,7 @@ function updateViews() {
   $("settings-page").hidden = !settingsOpen;
   $("review-viewer").hidden = settingsOpen || !currentClip;
   $("review-empty").hidden = settingsOpen || !!currentClip;
+  updateCapturePreview();
 }
 
 function renderVisibleSettingsSection() {
@@ -2288,8 +2399,10 @@ async function chooseReplayCacheFolder() {
 
 listen("status", (e) => {
   const s = e.payload;
+  const wasRecording = recordingActive;
   recordingActive = s.recording;
   fullSessionRecordingActive = Boolean(s.full_session);
+  if (wasRecording !== recordingActive) resetCapturePreviewFrame();
   $("dot").className = "dot" + (s.recording ? " on" : "");
   $("rail-dot").className = "dot" + (s.recording ? " on" : "");
   updateCaptureStatus();
@@ -2331,10 +2444,22 @@ listen("mic-test-stopped", () => {
   if (micTestRunning) stopMicTestUi("stopped");
 });
 
+listen("preview-frame", (e) => {
+  if (!previewShouldRun()) return;
+  const frame = e.payload || {};
+  if (!frame.data_url) return;
+  $("capture-preview-image").src = frame.data_url;
+  $("capture-preview-image").hidden = false;
+  previewHasFrame = true;
+  updateCapturePreview();
+});
+
 listen("game-detection", (e) => {
   activeDetectedGame = e.payload || null;
+  resetCapturePreviewFrame();
   updateCaptureStatus();
   updateGameDetectionStatus();
+  updateCapturePreview();
 });
 
 /* ---- wiring ---- */
@@ -2406,11 +2531,44 @@ window.addEventListener("resize", () => {
   renderRegionEditor();
   updateStageFrame();
 });
+document.querySelector(".titlebar").addEventListener("pointerdown", (ev) => {
+  if (ev.button !== 0 || ev.target.closest(".titlebar-btn")) return;
+  armPreviewWindowMovePause(ev);
+});
+window.addEventListener("pointermove", maybePausePreviewForWindowMove);
+window.addEventListener("pointerup", resumePreviewAfterWindowMove);
+window.addEventListener("pointercancel", resumePreviewAfterWindowMove);
+window.addEventListener("focus", () => {
+  windowFocused = true;
+  previewWindowMovePaused = false;
+  clearTimeout(previewWindowMoveTimer);
+  previewRequested = false;
+  updateCapturePreview();
+});
+window.addEventListener("blur", () => {
+  windowFocused = false;
+  clearTimeout(previewWindowMoveTimer);
+  previewWindowMovePaused = false;
+  resetCapturePreviewFrame();
+  updateCapturePreview();
+});
+document.addEventListener("visibilitychange", () => {
+  windowFocused = !document.hidden && document.hasFocus();
+  if (windowFocused) {
+    previewWindowMovePaused = false;
+    clearTimeout(previewWindowMoveTimer);
+    previewRequested = false;
+  } else {
+    resetCapturePreviewFrame();
+  }
+  updateCapturePreview();
+});
 $("settings-save").addEventListener("click", async () => {
   $("settings-status").textContent = "";
   $("error").textContent = "";
   try {
     const saved = await invoke("save_settings", { settings: readSettings() });
+    resetCapturePreviewFrame();
     fillSettings(saved);
     $("settings-status").textContent = "saved";
     await refresh();

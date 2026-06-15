@@ -215,6 +215,14 @@ impl RuntimeState {
         false
     }
 
+    fn set_preview_active(&self, active: bool) -> bool {
+        self.send(Cmd::SetPreview { active })
+    }
+
+    fn pause_preview_temporarily(&self, duration: Duration) -> bool {
+        self.send(Cmd::PausePreview { duration })
+    }
+
     fn settings(&self) -> AppSettings {
         self.0
             .lock()
@@ -418,6 +426,11 @@ fn set_recording<R: Runtime>(
     recording: bool,
 ) -> Result<bool, String> {
     state.set_recording(app, recording)
+}
+
+#[tauri::command]
+fn set_preview_active(state: tauri::State<RuntimeState>, active: bool) -> bool {
+    state.set_preview_active(active)
 }
 
 #[tauri::command]
@@ -750,6 +763,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_replay,
             set_recording,
+            set_preview_active,
             get_settings,
             choose_media_folder,
             choose_replay_cache_folder,
@@ -872,9 +886,25 @@ pub fn run() {
             } if label == "main" => {
                 api.prevent_close();
                 app.state::<MicTestState>().stop();
+                app.state::<RuntimeState>().set_preview_active(false);
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.destroy();
                 }
+            }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Focused(false),
+                ..
+            } if label == "main" => {
+                app.state::<RuntimeState>().set_preview_active(false);
+            }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Moved(_) | WindowEvent::Resized(_),
+                ..
+            } if label == "main" => {
+                app.state::<RuntimeState>()
+                    .pause_preview_temporarily(Duration::from_millis(750));
             }
             tauri::RunEvent::ExitRequested {
                 code: None, api, ..
@@ -944,6 +974,7 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>) {
                 Event::Status { .. } => handle.emit("status", &event),
                 Event::Saved { .. } => handle.emit("saved", &event),
                 Event::Error { message } => handle.emit("error", message.clone()),
+                Event::PreviewFrame { .. } => handle.emit("preview-frame", &event),
             };
         }
     });

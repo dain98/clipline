@@ -84,9 +84,18 @@
 
     <main class="review">
       <div id="review-empty" class="review-empty">
-        <div>
-          <strong>Nothing open</strong>
-          <span>Save a replay with Alt+F10, then pick a clip from the library to scrub, trim, and export.</span>
+        <div class="capture-preview">
+          <div class="capture-preview-frame">
+            <img id="capture-preview-image" alt="" decoding="async" hidden />
+            <div id="capture-preview-overlay" class="capture-preview-overlay">
+              <strong id="capture-preview-title">Capture preview</strong>
+              <span id="capture-preview-status">Waiting for capture…</span>
+            </div>
+          </div>
+          <div class="capture-preview-foot">
+            <strong>Nothing open</strong>
+            <span id="capture-preview-meta">Live view of the active recorder target</span>
+          </div>
         </div>
       </div>
 

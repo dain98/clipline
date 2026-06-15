@@ -35,6 +35,11 @@ fn review_player_owns_all_controls() {
 
     for required in [
         "id=\"review-empty\"",
+        "id=\"capture-preview-image\"",
+        "id=\"capture-preview-overlay\"",
+        "id=\"capture-preview-title\"",
+        "id=\"capture-preview-status\"",
+        "id=\"capture-preview-meta\"",
         "id=\"play-toggle\"",
         "id=\"seek-back\"",
         "id=\"seek-forward\"",
@@ -324,6 +329,14 @@ fn review_player_owns_all_controls() {
             && main_js().contains("updateStageFrame"),
         "the review stage must size an aspect-locked frame around the video"
     );
+    assert!(
+        main_js().contains("set_preview_active")
+            && main_js().contains("listen(\"preview-frame\"")
+            && main_js().contains("Focus Clipline to show preview")
+            && main_js().contains("pausePreviewForWindowMove")
+            && styles_css().contains(".capture-preview-frame"),
+        "the empty review pane must render a focus-gated capture preview"
+    );
 
     // Icon buttons carry SVG icons; text labels are a regression.
     for id in [
@@ -389,7 +402,10 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         "followView(",
         "snapTime(",
     ] {
-        assert!(js.contains(required), "main.js must wire the timeline through {required}");
+        assert!(
+            js.contains(required),
+            "main.js must wire the timeline through {required}"
+        );
     }
 
     // Navigator window, markers, and snap feedback need styles.
