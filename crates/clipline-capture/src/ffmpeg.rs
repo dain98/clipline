@@ -14,6 +14,18 @@ use std::time::{Duration, Instant};
 
 use crate::probe::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
 
+/// Stop Windows from flashing a console window for each `ffmpeg` child we
+/// spawn (startup probing alone launches ~11 of them). No-op off Windows.
+#[cfg(windows)]
+pub(crate) fn suppress_console(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+pub(crate) fn suppress_console(_cmd: &mut Command) {}
+
 /// The FFmpeg encoder names Clipline targets, mapped to (backend, codec).
 /// Software AV1 is SVT-AV1 (LGPL-clean); no GPL x264/x265, no software HEVC.
 const KNOWN_ENCODERS: &[(&str, EncoderBackend, Codec)] = &[
@@ -138,6 +150,7 @@ fn run_bounded(mut cmd: Command) -> Option<Output> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    suppress_console(&mut cmd);
     let mut child = cmd.spawn().ok()?;
     let deadline = Instant::now() + PROBE_TIMEOUT;
     loop {

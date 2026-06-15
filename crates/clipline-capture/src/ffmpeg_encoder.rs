@@ -82,11 +82,14 @@ fn spawn_process(
         EncodeError::Backend(format!("no ffmpeg encoder for {backend:?}/{codec:?}"))
     })?;
     let args = build_args(encoder, backend, codec, width, height, fps, bitrate_bps);
-    let mut child = Command::new(ffmpeg)
+    let mut command = Command::new(ffmpeg);
+    command
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    crate::ffmpeg::suppress_console(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|e| EncodeError::Backend(format!("spawn ffmpeg: {e}")))?;
 

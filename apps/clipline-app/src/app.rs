@@ -535,7 +535,11 @@ fn list_audio_devices() -> Result<AudioDeviceLists, String> {
 /// Every encoder this machine can use, for the Settings dropdown. Each
 /// option carries its codec key so the frontend can flag codecs the in-app
 /// player cannot decode.
-#[tauri::command]
+///
+/// `(async)` so Tauri runs this off the main thread: the first call triggers
+/// FFmpeg encoder probing (several test-encode subprocesses, ~5s), which would
+/// otherwise freeze the UI since synchronous commands run on the main thread.
+#[tauri::command(async)]
 fn probe_encoders() -> Vec<service::EncoderOption> {
     service::available_encoder_options()
 }
