@@ -275,6 +275,20 @@
                 <span>Show display preview</span>
               </label>
             </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Updates</strong>
+                <span>Choose which GitHub release channel Clipline checks for app updates.</span>
+              </div>
+              <div class="update-controls">
+                <select id="set-update-channel">
+                  <option value="nightly">Nightly</option>
+                  <option value="stable" disabled>Stable (coming soon)</option>
+                </select>
+                <button id="check-updates" type="button">Check</button>
+                <span id="update-status" class="hint"></span>
+              </div>
+            </div>
           </div>
 
           <div class="settings-section" data-section="capture" hidden>
@@ -597,6 +611,18 @@
     <div class="confirm-actions">
       <button id="quit-accept" class="danger">Close App</button>
       <button id="quit-cancel">Cancel</button>
+    </div>
+  </dialog>
+
+  <dialog id="update-dialog">
+    <div class="confirm-body">
+      <strong id="update-dialog-title">Update available</strong>
+      <span id="update-dialog-body"></span>
+      <span id="update-dialog-notes" class="hint"></span>
+    </div>
+    <div class="confirm-actions">
+      <button id="update-install" class="primary">Install Update</button>
+      <button id="update-cancel">Not Now</button>
     </div>
   </dialog>
 

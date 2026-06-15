@@ -11,6 +11,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_updater::UpdaterExt;
 
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
@@ -18,6 +19,7 @@ use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode, GameRecordingMode,
 };
+use crate::updates::UpdateChannel;
 
 #[derive(serde::Serialize)]
 struct DisplayInfo {
@@ -58,6 +60,19 @@ struct PreviewActivationResult {
     active: bool,
     focused: bool,
     enabled: bool,
+}
+
+#[derive(serde::Serialize)]
+struct UpdateCheckResult {
+    channel: UpdateChannel,
+    channel_label: &'static str,
+    current_version: String,
+    available: bool,
+    version: Option<String>,
+    date: Option<String>,
+    notes: Option<String>,
+    endpoint: &'static str,
+    status: Option<String>,
 }
 
 impl GameDetectionEvent {
@@ -545,6 +560,88 @@ fn set_preview_active<R: Runtime>(
     }
 }
 
+async fn check_update_for_channel<R: Runtime>(
+    app: &AppHandle<R>,
+    channel: UpdateChannel,
+) -> Result<(Option<tauri_plugin_updater::Update>, Option<String>), String> {
+    if !channel.enabled() {
+        return Err(format!("{} updates are not available yet", channel.label()));
+    }
+
+    let endpoint = channel
+        .endpoint()
+        .parse()
+        .map_err(|e| format!("parse update endpoint: {e}"))?;
+    let updater = app
+        .updater_builder()
+        .timeout(Duration::from_secs(20))
+        .endpoints(vec![endpoint])
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match updater.check().await {
+        Ok(update) => Ok((update, None)),
+        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
+            Ok((None, Some(missing_release_metadata_message(channel))))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn missing_release_metadata_message(channel: UpdateChannel) -> String {
+    format!(
+        "No {} release metadata is published yet. Publish a {} release first.",
+        channel.label(),
+        channel.label()
+    )
+}
+
+#[tauri::command]
+async fn check_for_updates<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, RuntimeState>,
+) -> Result<UpdateCheckResult, String> {
+    let settings = state.settings();
+    let channel = settings.update_channel;
+    let current_version = app.package_info().version.to_string();
+    let (update, status) = check_update_for_channel(&app, channel).await?;
+
+    Ok(UpdateCheckResult {
+        channel,
+        channel_label: channel.label(),
+        current_version,
+        available: update.is_some(),
+        version: update.as_ref().map(|update| update.version.clone()),
+        date: update
+            .as_ref()
+            .and_then(|update| update.date.map(|date| date.to_string())),
+        notes: update.as_ref().and_then(|update| update.body.clone()),
+        endpoint: channel.endpoint(),
+        status,
+    })
+}
+
+#[tauri::command]
+async fn install_update<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, RuntimeState>,
+) -> Result<(), String> {
+    let channel = state.settings().update_channel;
+    let (update, status) = check_update_for_channel(&app, channel).await?;
+    let Some(update) = update else {
+        return Err(status.unwrap_or_else(|| "no update is available".into()));
+    };
+
+    state.set_preview_active(false);
+    app.state::<MicTestState>().stop();
+    state.send(Cmd::Stop { announce: false });
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
     state.settings()
@@ -864,6 +961,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |_app, shortcut, event| {
@@ -895,6 +993,8 @@ pub fn run() {
             start_microphone_test,
             stop_microphone_test,
             get_autostart_status,
+            check_for_updates,
+            install_update,
             save_settings,
             crate::library::list_clips,
             crate::library::delete_clip,
@@ -1308,6 +1408,20 @@ mod tests {
         assert!(!preview_active_for_settings(true, false, true));
         assert!(!preview_active_for_settings(true, true, false));
         assert!(!preview_active_for_settings(false, true, true));
+    }
+
+    #[test]
+    fn disabled_stable_channel_cannot_check_updates_yet() {
+        assert!(!UpdateChannel::Stable.enabled());
+        assert!(UpdateChannel::Nightly.enabled());
+    }
+
+    #[test]
+    fn missing_release_metadata_message_names_channel_workflow() {
+        assert_eq!(
+            missing_release_metadata_message(UpdateChannel::Nightly),
+            "No Nightly release metadata is published yet. Publish a Nightly release first."
+        );
     }
 
     #[test]

@@ -106,6 +106,11 @@ fn review_player_owns_all_controls() {
         "id=\"quit-dialog\"",
         "id=\"quit-accept\"",
         "id=\"quit-cancel\"",
+        "id=\"update-dialog\"",
+        "id=\"update-install\"",
+        "id=\"update-cancel\"",
+        "id=\"update-dialog-title\"",
+        "id=\"update-dialog-body\"",
         "id=\"settings-page\"",
         "id=\"settings-tabs\"",
         "id=\"open-settings\"",
@@ -113,6 +118,9 @@ fn review_player_owns_all_controls() {
         "id=\"set-close-to-tray\"",
         "id=\"set-minimize-to-tray\"",
         "id=\"set-capture-preview-enabled\"",
+        "id=\"set-update-channel\"",
+        "id=\"check-updates\"",
+        "id=\"update-status\"",
         "id=\"set-capture\"",
         "id=\"set-output-enabled\"",
         "id=\"set-output-device\"",
@@ -190,11 +198,18 @@ fn review_player_owns_all_controls() {
         html.contains("Close to Tray")
             && html.contains("Minimize to Tray")
             && html.contains("Display Preview")
+            && html.contains("Updates")
+            && html.contains("value=\"stable\" disabled")
             && main_js().contains("close_to_tray")
             && main_js().contains("minimize_to_tray")
             && main_js().contains("capture_preview_enabled")
+            && main_js().contains("update_channel")
+            && main_js().contains("check_for_updates")
+            && main_js().contains("install_update")
+            && main_js().contains("checkForUpdates({ manual: false })")
+            && app_rs().contains("tauri_plugin_updater::Builder::new().build()")
             && main_js().contains("minimize_main_window"),
-        "general settings must expose and persist tray close/minimize/preview behavior"
+        "general settings must expose and persist tray close/minimize/preview/update behavior"
     );
     assert!(
         main_js().contains("requestWindowClose")

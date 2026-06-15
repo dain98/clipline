@@ -105,6 +105,8 @@ let micTestRunning = false;
 let micAudioContext = null;
 let micAudioCursor = 0;
 let micAudioSources = [];
+let pendingUpdate = null;
+let updateCheckRunning = false;
 let hotkeyCaptureActive = false;
 let trimStart = 0;
 let trimEnd = 0;
@@ -201,6 +203,7 @@ function fillSettings(s) {
   $("set-close-to-tray").checked = s.close_to_tray !== false;
   $("set-minimize-to-tray").checked = !!s.minimize_to_tray;
   $("set-capture-preview-enabled").checked = s.capture_preview_enabled !== false;
+  $("set-update-channel").value = s.update_channel || "nightly";
   endHotkeyCapture("Click the field to record a new shortcut.");
   syncCaptureFields();
   renderAudioDeviceSelects();
@@ -267,6 +270,7 @@ function readSettings() {
     close_to_tray: $("set-close-to-tray").checked,
     minimize_to_tray: $("set-minimize-to-tray").checked,
     capture_preview_enabled: $("set-capture-preview-enabled").checked,
+    update_channel: $("set-update-channel").value,
   };
 }
 
@@ -2384,6 +2388,63 @@ async function requestWindowClose() {
   await appWindow.close();
 }
 
+function setUpdateStatus(message) {
+  $("update-status").textContent = message;
+}
+
+function updateNotesPreview(notes) {
+  const text = String(notes || "").trim();
+  if (!text) return "";
+  return text.length > 220 ? `${text.slice(0, 217)}...` : text;
+}
+
+function showUpdateDialog(update) {
+  pendingUpdate = update;
+  $("update-install").disabled = false;
+  $("update-cancel").disabled = false;
+  $("update-dialog-title").textContent = `${update.channel_label} update available`;
+  $("update-dialog-body").textContent =
+    `Clipline ${update.version} is available. Current version: ${update.current_version}.`;
+  $("update-dialog-notes").textContent = updateNotesPreview(update.notes);
+  $("update-dialog").showModal();
+}
+
+async function checkForUpdates({ manual = false } = {}) {
+  if (updateCheckRunning) return;
+  updateCheckRunning = true;
+  if (manual) setUpdateStatus("checking...");
+  try {
+    const update = await invoke("check_for_updates");
+    if (update.available) {
+      setUpdateStatus(`${update.channel_label} ${update.version} available`);
+      showUpdateDialog(update);
+    } else if (manual) {
+      setUpdateStatus(update.status || `${update.channel_label} is up to date`);
+    }
+  } catch (e) {
+    if (manual) {
+      setUpdateStatus(String(e));
+    } else {
+      console.warn("update check failed:", e);
+    }
+  } finally {
+    updateCheckRunning = false;
+  }
+}
+
+async function installPendingUpdate() {
+  $("update-install").disabled = true;
+  $("update-cancel").disabled = true;
+  setUpdateStatus("installing update...");
+  try {
+    await invoke("install_update");
+  } catch (e) {
+    $("update-install").disabled = false;
+    $("update-cancel").disabled = false;
+    setUpdateStatus(String(e));
+  }
+}
+
 async function deleteClip(path = currentClip && currentClip.path) {
   if (!path) return;
   const name = path.split(/[\\/]/).pop();
@@ -2547,6 +2608,12 @@ $("refresh-game-windows").addEventListener("click", refreshGameWindows);
 $("cancel-game-picker").addEventListener("click", hideGameWindowPicker);
 $("choose-media-folder").addEventListener("click", chooseMediaFolder);
 $("choose-replay-cache-folder").addEventListener("click", chooseReplayCacheFolder);
+$("check-updates").addEventListener("click", () => checkForUpdates({ manual: true }));
+$("update-install").addEventListener("click", installPendingUpdate);
+$("update-cancel").addEventListener("click", () => {
+  pendingUpdate = null;
+  $("update-dialog").close();
+});
 $("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);
 $("set-replay-disk-quota").addEventListener("input", syncReplayStorageFields);
 $("set-replay-disk-quota").addEventListener("change", syncReplayStorageFields);
@@ -2761,7 +2828,7 @@ $("timeline").addEventListener("pointercancel", endDrag);
 $("timeline").addEventListener("lostpointercapture", endDrag);
 
 document.addEventListener("keydown", (ev) => {
-  if ($("confirm-dialog").open || $("quit-dialog").open || $("keys-dialog").open) return; // a dialog owns the keyboard
+  if ($("confirm-dialog").open || $("quit-dialog").open || $("update-dialog").open || $("keys-dialog").open) return; // a dialog owns the keyboard
   if (ev.code === "Escape" && settingsOpen) {
     ev.preventDefault();
     toggleSettings(false);
@@ -2819,6 +2886,7 @@ async function loadInitialSettings() {
     console.warn("could not read autostart status:", e);
   }
   fillSettings(settings);
+  window.setTimeout(() => checkForUpdates({ manual: false }), 1500);
   // Custom-game icons live in settings; refresh clip badges once they load.
   if (clipsCache.length) renderClips();
 }

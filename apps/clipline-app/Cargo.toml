@@ -19,6 +19,7 @@ tokio = { workspace = true }
 tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-updater = "2"
 chrono = "0.4.45"
 rfd = "0.15"
 png = "0.17"

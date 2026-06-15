@@ -32,3 +32,5 @@ mod service;
 mod settings;
 #[cfg(windows)]
 mod sound;
+#[cfg(windows)]
+mod updates;

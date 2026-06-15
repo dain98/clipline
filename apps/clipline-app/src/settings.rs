@@ -11,6 +11,7 @@ use crate::service::{
     default_clips_dir, AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource,
     OutputResolution, RecordingMode, ReplayStorageOptions, ServiceOptions, VideoEncoder,
 };
+use crate::updates::{normalize_channel, UpdateChannel};
 
 const MAX_REPLAY_WINDOW_S: f64 = 120.0;
 const MIN_REPLAY_WINDOW_S: f64 = 5.0;
@@ -443,6 +444,8 @@ pub struct AppSettings {
     pub minimize_to_tray: bool,
     #[serde(default = "default_enabled")]
     pub capture_preview_enabled: bool,
+    #[serde(default)]
+    pub update_channel: UpdateChannel,
 }
 
 impl Default for AppSettings {
@@ -468,6 +471,7 @@ impl Default for AppSettings {
             close_to_tray: true,
             minimize_to_tray: false,
             capture_preview_enabled: true,
+            update_channel: UpdateChannel::Nightly,
         }
     }
 }
@@ -527,6 +531,12 @@ impl AppSettings {
         )?;
         if !matches!(self.fps, 30 | 60 | 90 | 120) {
             return Err("fps must be 30, 60, 90, or 120".into());
+        }
+        if !self.update_channel.enabled() {
+            return Err(format!(
+                "{} update channel is not available yet",
+                self.update_channel.label()
+            ));
         }
         quota_bytes_from_gb(self.disk_quota_gb)?;
         self.media_dir_path()?;
@@ -637,6 +647,9 @@ impl AppSettings {
                 .unwrap_or(defaults.minimize_to_tray),
             capture_preview_enabled: bool_field(object, "capture_preview_enabled")
                 .unwrap_or(defaults.capture_preview_enabled),
+            update_channel: deserialize_field(object, "update_channel")
+                .map(normalize_channel)
+                .unwrap_or(defaults.update_channel),
         };
 
         settings.games.normalize();
@@ -1084,6 +1097,7 @@ mod tests {
         assert!(settings.close_to_tray);
         assert!(!settings.minimize_to_tray);
         assert!(settings.capture_preview_enabled);
+        assert_eq!(settings.update_channel, UpdateChannel::Nightly);
     }
 
     #[test]
@@ -1132,7 +1146,32 @@ mod tests {
         assert!(settings.close_to_tray);
         assert!(!settings.minimize_to_tray);
         assert!(settings.capture_preview_enabled);
+        assert_eq!(settings.update_channel, UpdateChannel::Nightly);
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn load_repairs_disabled_stable_update_channel() {
+        let dir = TestDir::new("stable-update-channel");
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 12.0,
+                "fps": 60,
+                "disk_quota_gb": 10.0,
+                "hotkey": "Alt+F10",
+                "update_channel": "stable"
+            }"#,
+        )
+        .unwrap();
+
+        let settings = AppSettings::load_from(&path).unwrap();
+
+        assert_eq!(settings.update_channel, UpdateChannel::Nightly);
     }
 
     #[test]
@@ -1609,6 +1648,7 @@ mod tests {
             close_to_tray: false,
             minimize_to_tray: true,
             capture_preview_enabled: false,
+            update_channel: UpdateChannel::Nightly,
             games: GameSettings {
                 auto_detect: true,
                 plugins: BTreeMap::from([(
