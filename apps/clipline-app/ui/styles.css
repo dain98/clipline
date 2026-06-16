@@ -570,7 +570,21 @@ label span { white-space: nowrap; }
   font-size: 11px;
 }
 
-.clip .del { height: 26px; min-width: 26px; padding: 0 8px; font-size: 12px; }
+.clip .cloud,
+.clip .del {
+  height: 26px;
+  min-width: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+.clip .cloud svg,
+.clip .del svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+.clip .cloud.uploaded { color: var(--ok); }
+.clip .cloud.busy { color: var(--accent); }
 
 .sidebar-settings {
   display: flex;
@@ -658,6 +672,28 @@ label span { white-space: nowrap; }
 .update-controls .hint {
   grid-column: 1 / -1;
   min-height: 18px;
+}
+
+.cloud-connect-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.cloud-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.cloud-actions button {
+  min-width: 106px;
+}
+
+.cloud-http-confirm {
+  align-items: flex-start;
+  color: var(--warn);
 }
 
 .setting-row {

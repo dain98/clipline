@@ -126,7 +126,7 @@ impl MicTestState {
     }
 }
 
-struct RuntimeState(Mutex<RuntimeInner>);
+pub(crate) struct RuntimeState(Mutex<RuntimeInner>);
 
 struct TrayItems<R: Runtime> {
     save_item: MenuItem<R>,
@@ -245,11 +245,26 @@ impl RuntimeState {
         self.send(Cmd::PausePreview { duration })
     }
 
-    fn settings(&self) -> AppSettings {
+    pub(crate) fn settings(&self) -> AppSettings {
         self.0
             .lock()
             .map(|inner| inner.settings.clone())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn update_cloud<F>(&self, update: F) -> Result<AppSettings, String>
+    where
+        F: FnOnce(&mut crate::settings::CloudSettings),
+    {
+        // Atomic read-modify-write: hold the lock across the mutation and the
+        // persist so concurrent uploads can't each read the same `uploads` map,
+        // insert their own record, and have the later write-back drop the other.
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        update(&mut inner.settings.cloud);
+        inner.settings.cloud.normalize();
+        let next = inner.settings.clone();
+        next.save()?;
+        Ok(next)
     }
 
     fn active_shortcut_matches(&self, shortcut: &Shortcut) -> bool {
@@ -869,6 +884,20 @@ fn save_settings<R: Runtime>(
 
     let old = state.settings();
 
+    // Cloud connection + upload state is backend-owned (mutated by cloud_connect
+    // and upload_clip_to_cloud via update_cloud). A settings Save carries the
+    // frontend's snapshot of these fields, which can be stale — e.g. a Save
+    // fired during an in-flight upload would clobber freshly written records or
+    // the connection identity. Keep the authoritative backend values; only the
+    // user-editable cloud preferences below come from the payload.
+    settings.cloud.host_url = old.cloud.host_url.clone();
+    settings.cloud.public_url = old.cloud.public_url.clone();
+    settings.cloud.connected_user_id = old.cloud.connected_user_id.clone();
+    settings.cloud.connected_username = old.cloud.connected_username.clone();
+    settings.cloud.credential_target = old.cloud.credential_target.clone();
+    settings.cloud.uploads = old.cloud.uploads.clone();
+    // (default_visibility, delete_local_after_upload, auto_upload_rules stay as sent.)
+
     // Apply the autostart registry change before persisting so settings.json
     // can never say "enabled" while the Run key update failed.
     if settings.open_on_startup != old.open_on_startup {
@@ -996,6 +1025,10 @@ pub fn run() {
             check_for_updates,
             install_update,
             save_settings,
+            crate::cloud::cloud_status,
+            crate::cloud::cloud_connect,
+            crate::cloud::cloud_disconnect,
+            crate::cloud::upload_clip_to_cloud,
             crate::library::list_clips,
             crate::library::delete_clip,
             crate::library::export_clip,

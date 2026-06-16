@@ -170,6 +170,19 @@ fn review_player_owns_all_controls() {
         "id=\"set-replay-disk-quota\"",
         "id=\"replay-disk-estimate\"",
         "id=\"set-replay-disk-ack\"",
+        "data-tab=\"cloud\"",
+        "data-section=\"cloud\"",
+        "id=\"cloud-host-url\"",
+        "id=\"cloud-username\"",
+        "id=\"cloud-password\"",
+        "id=\"cloud-http-confirm\"",
+        "id=\"cloud-connect\"",
+        "id=\"cloud-disconnect\"",
+        "id=\"cloud-connect-status\"",
+        "id=\"cloud-connection-status\"",
+        "id=\"cloud-default-visibility\"",
+        "id=\"cloud-delete-local-after-upload\"",
+        "id=\"cloud-auto-upload-rules\"",
         "data-tab=\"games\"",
         "data-section=\"games\"",
         "id=\"set-games-auto-detect\"",
@@ -298,6 +311,20 @@ fn review_player_owns_all_controls() {
                 "I understand this continuously writes to disk and can shorten SSD life."
             ),
         "disk replay buffer settings must carry explicit advanced SSD-wear warnings"
+    );
+    assert!(
+        html.contains(">Cloud<")
+            && html.contains("I understand HTTP sends my password in plaintext")
+            && main_js().contains("cloud_connect")
+            && main_js().contains("cloud_disconnect")
+            && main_js().contains("upload_clip_to_cloud")
+            && main_js().contains("listen(\"cloud-upload-progress\"")
+            && main_js().contains("navigator.clipboard.writeText(record.remote_url)")
+            && app_rs().contains("crate::cloud::cloud_connect")
+            && app_rs().contains("crate::cloud::upload_clip_to_cloud")
+            && styles_css().contains(".cloud-connect-grid")
+            && styles_css().contains(".clip .cloud"),
+        "cloud settings and per-clip upload controls must stay wired"
     );
     assert!(
         html.contains(">Games<") && html.contains("Add Custom Game"),
