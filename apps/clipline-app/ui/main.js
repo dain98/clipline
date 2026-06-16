@@ -1933,6 +1933,18 @@ const MARKER_ICON_FALLBACK = {
   structure: MARKER_ICONS.TurretKilled,
   info: MARKER_ICONS.Other,
 };
+// Clicking a marker starts playback this many seconds before the event, so its
+// lead-up plays rather than dropping the viewer right on the moment.
+const MARKER_LEAD_S = 3;
+// Game-authentic art for the kinds that actually reach the review timeline
+// (is_timeline_marker). Used as a CSS mask so each silhouette still tints with
+// its category color (--mc); kinds without art fall back to the SVGs above.
+const MARKER_IMAGES = {
+  ChampionKill: "assets/markers/kill.png",
+  DragonKill: "assets/markers/dragon.png",
+  BaronKill: "assets/markers/baron.png",
+  TurretKilled: "assets/markers/turret.png",
+};
 
 function renderMarkers() {
   const layer = $("marker-layer");
@@ -1952,7 +1964,13 @@ function renderMarkers() {
 
     const glyph = document.createElement("span");
     glyph.className = "glyph";
-    glyph.innerHTML = MARKER_ICONS[m.kind] || MARKER_ICON_FALLBACK[style.cls] || MARKER_ICONS.Other;
+    const img = MARKER_IMAGES[m.kind];
+    if (img) {
+      glyph.classList.add("img");
+      glyph.style.setProperty("--marker-img", `url("${img}")`);
+    } else {
+      glyph.innerHTML = MARKER_ICONS[m.kind] || MARKER_ICON_FALLBACK[style.cls] || MARKER_ICONS.Other;
+    }
     const hair = document.createElement("span");
     hair.className = "hair";
     marker.append(glyph, hair);
@@ -1960,7 +1978,9 @@ function renderMarkers() {
     marker.addEventListener("pointerdown", (ev) => ev.stopPropagation());
     marker.addEventListener("click", (ev) => {
       ev.stopPropagation();
-      seekTo(m.t_s);
+      // Start a beat before the event so its lead-up plays, then roll.
+      seekTo(m.t_s - MARKER_LEAD_S);
+      video.play().catch(() => syncPlayState());
     });
     layer.appendChild(marker);
   }
