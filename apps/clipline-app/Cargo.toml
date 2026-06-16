@@ -13,7 +13,9 @@ clipline-events = { path = "../../crates/clipline-events" }
 clipline-lol = { path = "../../crates/clipline-lol" }
 clipline-mp4 = { path = "../../crates/clipline-mp4" }
 clipline-storage = { path = "../../crates/clipline-storage" }
-clipline-cloud-api = { git = "https://github.com/dain98/clipline-cloud", branch = "codex/cloud-platform-foundation" }
+# Pinned to an immutable rev (not a branch): a branch ref isn't reproducible —
+# a force-push or rename silently breaks every build. Bump the rev deliberately.
+clipline-cloud-api = { git = "https://github.com/dain98/clipline-cloud", rev = "8b0b173c966e79b6d25f7ca726584efa4916e292" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

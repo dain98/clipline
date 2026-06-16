@@ -28,6 +28,7 @@ use crate::settings::{normalize_cloud_visibility, CloudSettings, CloudUploadReco
 const DEFAULT_DEVICE_NAME: &str = "Clipline Desktop";
 const READY_POLL_ATTEMPTS: usize = 30;
 const READY_POLL_DELAY: Duration = Duration::from_secs(1);
+const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 
 #[derive(Debug, Deserialize)]
 pub struct CloudConnectRequest {
@@ -193,7 +194,10 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     let local_clip_id = local_clip_id(&target, &meta, &checksum)?;
     let mut record = CloudUploadRecord {
         local_clip_id: local_clip_id.clone(),
-        path: target.display().to_string(),
+        // Store the path exactly as `list_clips` emits it (non-canonical), so the
+        // UI can pair this record to its clip row by string equality. `target` is
+        // the canonicalized form (`\\?\D:\…` on Windows) and is used only for I/O.
+        path: path.clone(),
         remote_clip_id: None,
         remote_url: None,
         visibility: visibility.clone(),
@@ -212,6 +216,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         &checksum,
         &visibility,
         markers.as_ref(),
+        &local_clip_id,
     )?;
     let upload_result = client
         .upload_mp4_bytes_with_progress(&request, &bytes, |progress| {
@@ -223,7 +228,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
             };
             let event = CloudUploadProgressEvent {
                 local_clip_id: local_clip_id.clone(),
-                path: target.display().to_string(),
+                path: path.clone(),
                 upload_status: status.to_string(),
                 received_size_bytes: progress.received_size_bytes,
                 file_size_bytes: progress.file_size_bytes,
@@ -231,7 +236,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                 remote_url: url,
                 error: None,
             };
-            let _ = app.emit("cloud-upload-progress", event);
+            let _ = app.emit(CLOUD_UPLOAD_PROGRESS_EVENT, event);
         })
         .await;
 
@@ -337,10 +342,11 @@ fn create_upload_request(
     checksum: &str,
     visibility: &str,
     markers: Option<&ClipMarkers>,
+    client_clip_id: &str,
 ) -> Result<CreateUploadRequest, String> {
     let game = read_clip_game(path, markers);
     Ok(CreateUploadRequest {
-        client_clip_id: Some(local_clip_id(path, meta, checksum)?),
+        client_clip_id: Some(client_clip_id.to_string()),
         title: clip_title(path),
         game_name: game.as_ref().map(|game| game.name.clone()),
         game_id: game.as_ref().map(|game| game.id.clone()),
@@ -496,7 +502,7 @@ fn emit_upload_progress<R: Runtime>(
     error: Option<String>,
 ) {
     let _ = app.emit(
-        "cloud-upload-progress",
+        CLOUD_UPLOAD_PROGRESS_EVENT,
         CloudUploadProgressEvent {
             local_clip_id: record.local_clip_id.clone(),
             path: record.path.clone(),

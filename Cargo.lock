@@ -957,7 +957,7 @@ dependencies = [
 [[package]]
 name = "clipline-cloud-api"
 version = "0.1.0"
-source = "git+https://github.com/dain98/clipline-cloud?branch=codex%2Fcloud-platform-foundation#8b0b173c966e79b6d25f7ca726584efa4916e292"
+source = "git+https://github.com/dain98/clipline-cloud?rev=8b0b173c966e79b6d25f7ca726584efa4916e292#8b0b173c966e79b6d25f7ca726584efa4916e292"
 dependencies = [
  "bytes",
  "clipline-cloud-api-types",
@@ -972,7 +972,7 @@ dependencies = [
 [[package]]
 name = "clipline-cloud-api-types"
 version = "0.1.0"
-source = "git+https://github.com/dain98/clipline-cloud?branch=codex%2Fcloud-platform-foundation#8b0b173c966e79b6d25f7ca726584efa4916e292"
+source = "git+https://github.com/dain98/clipline-cloud?rev=8b0b173c966e79b6d25f7ca726584efa4916e292#8b0b173c966e79b6d25f7ca726584efa4916e292"
 dependencies = [
  "chrono",
  "serde",
