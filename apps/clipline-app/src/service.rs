@@ -483,6 +483,43 @@ enum MarkerSourceKind {
     LegacyLeaguePoller,
 }
 
+#[derive(Default)]
+struct PlayerSummaryState {
+    in_match: bool,
+    active_replay: Option<PlayerSummary>,
+    full_session: Option<PlayerSummary>,
+}
+
+impl PlayerSummaryState {
+    fn match_started(&mut self) {
+        self.in_match = true;
+        self.active_replay = None;
+        self.full_session = None;
+    }
+
+    fn update(&mut self, summary: PlayerSummary) {
+        if self.in_match {
+            self.active_replay = Some(summary.clone());
+        }
+        if self.in_match || self.full_session.is_some() {
+            self.full_session = Some(summary);
+        }
+    }
+
+    fn match_ended(&mut self) {
+        self.in_match = false;
+        self.active_replay = None;
+    }
+
+    fn active_replay_summary(&self) -> Option<&PlayerSummary> {
+        self.active_replay.as_ref()
+    }
+
+    fn full_session_summary(&self) -> Option<&PlayerSummary> {
+        self.active_replay.as_ref().or(self.full_session.as_ref())
+    }
+}
+
 fn marker_source_kind(opts: &ServiceOptions) -> MarkerSourceKind {
     if crate::game_plugins::has_event_source(opts.active_game_plugin_id.as_deref()) {
         MarkerSourceKind::Plugin
@@ -604,7 +641,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let recording_t0 = Instant::now();
     let marker_rx = spawn_marker_source(&opts, recording_t0);
     let mut marker_log = MarkerLog::new();
-    let mut player_summary: Option<PlayerSummary> = None;
+    let mut player_summary = PlayerSummaryState::default();
     let mut cap = match &opts.capture_source {
         CaptureSource::WindowTitle(needle) => {
             let hwnd = find_window_by_title(needle)
@@ -711,7 +748,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     &mut rec,
                     &mut full_session,
                     &marker_log,
-                    player_summary.as_ref(),
+                    player_summary.full_session_summary(),
                     &clips_dir,
                     &opts,
                     events,
@@ -726,18 +763,22 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     // GameEnd means the match is over even while the Live
                     // Client API lingers; stop attributing saves to it.
                     if event.kind == EventKind::GameEnd {
+                        player_summary.match_ended();
                         session.match_ended();
                     }
                     if is_timeline_marker(&event) {
                         marker_log.push(event);
                     }
                 }
-                PollerMsg::PlayerSummary(summary) => player_summary = Some(summary),
+                PollerMsg::PlayerSummary(summary) => player_summary.update(summary),
                 PollerMsg::MatchStarted => {
-                    player_summary = None;
+                    player_summary.match_started();
                     session.match_started(local_session_label(true));
                 }
-                PollerMsg::MatchEnded => session.match_ended(),
+                PollerMsg::MatchEnded => {
+                    player_summary.match_ended();
+                    session.match_ended();
+                }
             }
         }
 
@@ -771,7 +812,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                                 &path,
                                 end - seconds,
                                 end,
-                                player_summary.as_ref(),
+                                player_summary.active_replay_summary(),
                             );
                             emit_saved_clip(
                                 events, &clips_dir, &path, seconds, markers, false, &opts,
@@ -788,7 +829,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         &mut rec,
                         &mut full_session,
                         &marker_log,
-                        player_summary.as_ref(),
+                        player_summary.full_session_summary(),
                         &clips_dir,
                         &opts,
                         events,
@@ -822,7 +863,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         &mut rec,
                         &mut full_session,
                         &marker_log,
-                        player_summary.as_ref(),
+                        player_summary.full_session_summary(),
                         &clips_dir,
                         &opts,
                         events,
@@ -838,7 +879,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         &mut rec,
         &mut full_session,
         &marker_log,
-        player_summary.as_ref(),
+        player_summary.full_session_summary(),
         &clips_dir,
         &opts,
         events,
@@ -1717,6 +1758,39 @@ mod tests {
             marker_source_kind(&opts),
             MarkerSourceKind::LegacyLeaguePoller
         );
+    }
+
+    fn player_summary(champion_name: &str, kills: u32, deaths: u32, assists: u32) -> PlayerSummary {
+        PlayerSummary {
+            champion_name: champion_name.into(),
+            kills,
+            deaths,
+            assists,
+        }
+    }
+
+    #[test]
+    fn player_summary_state_stops_replay_attribution_after_match_end() {
+        let mut state = PlayerSummaryState::default();
+        let mid_match = player_summary("Nautilus", 3, 4, 22);
+        let final_match = player_summary("Nautilus", 3, 4, 23);
+
+        state.match_started();
+        state.update(mid_match.clone());
+        assert_eq!(state.active_replay_summary(), Some(&mid_match));
+        assert_eq!(state.full_session_summary(), Some(&mid_match));
+
+        state.match_ended();
+        assert_eq!(state.active_replay_summary(), None);
+        assert_eq!(state.full_session_summary(), Some(&mid_match));
+
+        state.update(final_match.clone());
+        assert_eq!(state.active_replay_summary(), None);
+        assert_eq!(state.full_session_summary(), Some(&final_match));
+
+        state.match_started();
+        assert_eq!(state.active_replay_summary(), None);
+        assert_eq!(state.full_session_summary(), None);
     }
 
     #[test]

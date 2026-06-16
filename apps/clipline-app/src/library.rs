@@ -224,7 +224,7 @@ pub fn export_clip(
 
     if let Some(markers) = read_markers(&source) {
         let cropped = crop_markers(&markers, info.aligned_start_s, info.aligned_end_s);
-        if !cropped.markers.is_empty() {
+        if has_marker_sidecar_content(&cropped) {
             let json = serde_json::to_string_pretty(&cropped).map_err(|e| e.to_string())?;
             std::fs::write(target.with_extension("markers.json"), json)
                 .map_err(|e| e.to_string())?;
@@ -438,6 +438,10 @@ fn filter_timeline_markers(mut markers: ClipMarkers) -> ClipMarkers {
     markers
 }
 
+fn has_marker_sidecar_content(markers: &ClipMarkers) -> bool {
+    !markers.markers.is_empty() || markers.player_summary.is_some()
+}
+
 fn crop_markers(markers: &ClipMarkers, start_s: f64, end_s: f64) -> ClipMarkers {
     let cropped = markers
         .markers
@@ -630,6 +634,35 @@ mod tests {
             )),
             Some(("Nautilus", 3, 4, 23))
         );
+    }
+
+    #[test]
+    fn summary_only_markers_are_export_sidecar_content() {
+        let markers = ClipMarkers {
+            recording_start_s: 10.0,
+            duration_s: 20.0,
+            player_summary: Some(PlayerSummary {
+                champion_name: "Nautilus".into(),
+                kills: 3,
+                deaths: 4,
+                assists: 23,
+            }),
+            markers: Vec::new(),
+        };
+
+        assert!(has_marker_sidecar_content(&markers));
+    }
+
+    #[test]
+    fn empty_markers_are_not_export_sidecar_content() {
+        let markers = ClipMarkers {
+            recording_start_s: 10.0,
+            duration_s: 20.0,
+            player_summary: None,
+            markers: Vec::new(),
+        };
+
+        assert!(!has_marker_sidecar_content(&markers));
     }
 
     #[test]
