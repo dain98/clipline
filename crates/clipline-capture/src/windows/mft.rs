@@ -146,6 +146,20 @@ impl MftH264Encoder {
         let _ = unsafe { transform.GetStreamIDs(&mut in_ids, &mut out_ids) };
         let (input_id, output_id) = (in_ids[0], out_ids[0]);
 
+        // Rate control must be configured BEFORE the output type. AMD's MFT
+        // otherwise treats MF_MT_AVG_BITRATE as a peak hint and the stream
+        // overshoots ~2x; setting CBR + mean bitrate here pins the real target.
+        // (GOP/B-frames are set after the output type, which they tolerate.)
+        if let Ok(codec_api) = transform.cast::<ICodecAPI>() {
+            let rc_mode = variant_u32(RATE_CONTROL_MODE_CBR);
+            let mean_bitrate = variant_u32(cfg.bitrate_bps);
+            // SAFETY: SetValue with VT_UI4 variants per codecapi contract.
+            unsafe {
+                let _ = codec_api.SetValue(&CODECAPI_AVENC_COMMON_RATE_CONTROL_MODE, &rc_mode);
+                let _ = codec_api.SetValue(&CODECAPI_AVENC_COMMON_MEAN_BIT_RATE, &mean_bitrate);
+            }
+        }
+
         // Output type first (encoder MFTs require it before input).
         let out_ty = unsafe { MFCreateMediaType() }.map_err(backend)?;
         // SAFETY: setters on a fresh media type.
@@ -210,7 +224,8 @@ impl MftH264Encoder {
             return Err(EncodeError::Backend("MFT offers no NV12 input type".into()));
         }
 
-        // Rate-control / GOP knobs (best-effort — vendors vary).
+        // GOP / B-frame knobs (best-effort — vendors vary). Rate control is
+        // set earlier, before the output type. These tolerate being set here.
         if let Ok(codec_api) = transform.cast::<ICodecAPI>() {
             let gop = variant_u32(crate::replay_gop_frames(cfg.fps)); // ~0.5 s keyframe interval
             let zero = variant_u32(0);
@@ -480,6 +495,12 @@ const CODECAPI_AVENC_MPV_GOP_SIZE: windows::core::GUID =
     windows::core::GUID::from_u128(0x95f31b26_95a4_41aa_9303_246a7fc6eef1);
 const CODECAPI_AVENC_MPV_DEFAULT_B_PICTURE_COUNT: windows::core::GUID =
     windows::core::GUID::from_u128(0x8c068bf2_3f0d_4dba_976d_1b3564d72e93);
+const CODECAPI_AVENC_COMMON_RATE_CONTROL_MODE: windows::core::GUID =
+    windows::core::GUID::from_u128(0x1c0608e9_370c_4710_8a58_cb6181c42423);
+const CODECAPI_AVENC_COMMON_MEAN_BIT_RATE: windows::core::GUID =
+    windows::core::GUID::from_u128(0xf7222374_2144_4815_b550_a37f8e12ee52);
+/// eAVEncCommonRateControlMode_CBR (codecapi.h).
+const RATE_CONTROL_MODE_CBR: u32 = 0;
 
 fn set_rec709_limited_attrs(
     media_type: &windows::Win32::Media::MediaFoundation::IMFMediaType,
