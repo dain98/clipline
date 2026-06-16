@@ -26,7 +26,7 @@ use clipline_capture::windows::{
 use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
 };
-use clipline_events::{EventKind, MarkerLog};
+use clipline_events::{is_timeline_marker, EventKind, MarkerLog, PlayerSummary};
 use clipline_storage::sessions::{session_label, SessionTracker};
 use clipline_storage::{enforce_quota, recover_recording_files, storage_status, StorageStatus};
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
@@ -604,6 +604,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let recording_t0 = Instant::now();
     let marker_rx = spawn_marker_source(&opts, recording_t0);
     let mut marker_log = MarkerLog::new();
+    let mut player_summary: Option<PlayerSummary> = None;
     let mut cap = match &opts.capture_source {
         CaptureSource::WindowTitle(needle) => {
             let hwnd = find_window_by_title(needle)
@@ -710,6 +711,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     &mut rec,
                     &mut full_session,
                     &marker_log,
+                    player_summary.as_ref(),
                     &clips_dir,
                     &opts,
                     events,
@@ -726,9 +728,15 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     if event.kind == EventKind::GameEnd {
                         session.match_ended();
                     }
-                    marker_log.push(event);
+                    if is_timeline_marker(&event) {
+                        marker_log.push(event);
+                    }
                 }
-                PollerMsg::MatchStarted => session.match_started(local_session_label(true)),
+                PollerMsg::PlayerSummary(summary) => player_summary = Some(summary),
+                PollerMsg::MatchStarted => {
+                    player_summary = None;
+                    session.match_started(local_session_label(true));
+                }
                 PollerMsg::MatchEnded => session.match_ended(),
             }
         }
@@ -755,14 +763,15 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     let path = unique_media_path(&session_dir, "clip");
                     match save(&rec, &path, opts.replay_window_s) {
                         Ok((end, seconds)) => {
-                            // Markers inside the saved window ride along as
-                            // a sidecar (ddoc §5) — only when there are any.
+                            // Markers and match summary ride along as a
+                            // sidecar (ddoc §5) when either is available.
                             let markers = write_marker_sidecar(
                                 events,
                                 &marker_log,
                                 &path,
                                 end - seconds,
                                 end,
+                                player_summary.as_ref(),
                             );
                             emit_saved_clip(
                                 events, &clips_dir, &path, seconds, markers, false, &opts,
@@ -779,6 +788,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         &mut rec,
                         &mut full_session,
                         &marker_log,
+                        player_summary.as_ref(),
                         &clips_dir,
                         &opts,
                         events,
@@ -812,6 +822,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         &mut rec,
                         &mut full_session,
                         &marker_log,
+                        player_summary.as_ref(),
                         &clips_dir,
                         &opts,
                         events,
@@ -827,6 +838,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         &mut rec,
         &mut full_session,
         &marker_log,
+        player_summary.as_ref(),
         &clips_dir,
         &opts,
         events,
@@ -1197,13 +1209,22 @@ fn shutdown_recorder(
     rec: &mut LiveRecorder,
     full_session: &mut Option<FullSessionRecording>,
     marker_log: &MarkerLog,
+    player_summary: Option<&PlayerSummary>,
     clips_dir: &Path,
     opts: &ServiceOptions,
     events: &Sender<Event>,
 ) -> Option<String> {
     match rec.finish_stream() {
         Ok(()) => {
-            finish_full_session_recording(rec, full_session, marker_log, clips_dir, opts, events);
+            finish_full_session_recording(
+                rec,
+                full_session,
+                marker_log,
+                player_summary,
+                clips_dir,
+                opts,
+                events,
+            );
             None
         }
         Err(e) => {
@@ -1288,6 +1309,7 @@ fn finish_full_session_recording(
     rec: &mut LiveRecorder,
     recording: &mut Option<FullSessionRecording>,
     marker_log: &MarkerLog,
+    player_summary: Option<&PlayerSummary>,
     clips_dir: &Path,
     opts: &ServiceOptions,
     events: &Sender<Event>,
@@ -1323,6 +1345,7 @@ fn finish_full_session_recording(
                 &recording.final_path,
                 summary.start_s,
                 summary.end_s,
+                player_summary,
             );
             emit_saved_clip(
                 events,
@@ -1418,10 +1441,13 @@ fn write_marker_sidecar(
     path: &Path,
     start_s: f64,
     end_s: f64,
+    player_summary: Option<&PlayerSummary>,
 ) -> usize {
-    let clip = marker_log.clip_markers(start_s, end_s);
+    let mut clip = marker_log.clip_markers(start_s, end_s);
+    clip.markers.retain(|m| is_timeline_marker(&m.event));
+    clip.player_summary = player_summary.cloned();
     let markers = clip.markers.len();
-    if markers == 0 {
+    if markers == 0 && clip.player_summary.is_none() {
         return 0;
     }
     match serde_json::to_string_pretty(&clip) {
@@ -1691,6 +1717,27 @@ mod tests {
             marker_source_kind(&opts),
             MarkerSourceKind::LegacyLeaguePoller
         );
+    }
+
+    #[test]
+    fn write_marker_sidecar_keeps_player_summary_without_markers() {
+        let dir = TestDir::new("sidecar-summary");
+        let path = dir.path().join("clip.mp4");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let summary = PlayerSummary {
+            champion_name: "Nautilus".into(),
+            kills: 3,
+            deaths: 4,
+            assists: 23,
+        };
+
+        let count = write_marker_sidecar(&tx, &MarkerLog::new(), &path, 0.0, 10.0, Some(&summary));
+
+        assert_eq!(count, 0);
+        let json = std::fs::read_to_string(path.with_extension("markers.json")).unwrap();
+        let sidecar: clipline_events::ClipMarkers = serde_json::from_str(&json).unwrap();
+        assert!(sidecar.markers.is_empty());
+        assert_eq!(sidecar.player_summary, Some(summary));
     }
 
     #[test]

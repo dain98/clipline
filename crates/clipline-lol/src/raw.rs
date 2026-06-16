@@ -46,6 +46,29 @@ pub struct RawEvent {
     pub result: Option<String>,
 }
 
+/// Response body of `GET /liveclientdata/playerlist`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlayerListEntry {
+    #[serde(rename = "summonerName", default)]
+    pub summoner_name: String,
+    #[serde(rename = "riotId")]
+    pub riot_id: Option<String>,
+    #[serde(rename = "championName", default)]
+    pub champion_name: String,
+    #[serde(rename = "scores", default)]
+    pub scores: PlayerScores,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PlayerScores {
+    #[serde(default)]
+    pub kills: u32,
+    #[serde(default)]
+    pub deaths: u32,
+    #[serde(default)]
+    pub assists: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +118,24 @@ mod tests {
         ] }"#;
         let data: EventData = serde_json::from_str(json).unwrap();
         assert_eq!(data.events[0].event_name, "SomeFutureThing");
+    }
+
+    #[test]
+    fn parses_player_list_entries_for_summary() {
+        let json = r#"[
+          {
+            "summonerName": "dain",
+            "riotId": "Dain#NA1",
+            "championName": "Nautilus",
+            "scores": { "kills": 3, "deaths": 4, "assists": 23 }
+          }
+        ]"#;
+        let players: Vec<PlayerListEntry> = serde_json::from_str(json).unwrap();
+        assert_eq!(players[0].summoner_name, "dain");
+        assert_eq!(players[0].riot_id.as_deref(), Some("Dain#NA1"));
+        assert_eq!(players[0].champion_name, "Nautilus");
+        assert_eq!(players[0].scores.kills, 3);
+        assert_eq!(players[0].scores.deaths, 4);
+        assert_eq!(players[0].scores.assists, 23);
     }
 }

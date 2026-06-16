@@ -20,12 +20,24 @@ pub struct ClipMarker {
     pub event: GameEvent,
 }
 
+/// Per-player match summary shown in library rows when a game adapter can
+/// provide it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerSummary {
+    pub champion_name: String,
+    pub kills: u32,
+    pub deaths: u32,
+    pub assists: u32,
+}
+
 /// The `<clip>.markers.json` sidecar document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipMarkers {
     /// Recording-timeline range the clip covers.
     pub recording_start_s: f64,
     pub duration_s: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_summary: Option<PlayerSummary>,
     pub markers: Vec<ClipMarker>,
 }
 
@@ -66,6 +78,7 @@ impl MarkerLog {
         ClipMarkers {
             recording_start_s: start_s,
             duration_s: end_s - start_s,
+            player_summary: None,
             markers,
         }
     }
@@ -135,10 +148,37 @@ mod tests {
     fn sidecar_serializes_round_trip() {
         let mut log = MarkerLog::new();
         log.push(ev(EventKind::ChampionKill, 65.0));
-        let clip = log.clip_markers(60.0, 120.0);
+        let mut clip = log.clip_markers(60.0, 120.0);
+        clip.player_summary = Some(PlayerSummary {
+            champion_name: "Nautilus".into(),
+            kills: 3,
+            deaths: 4,
+            assists: 23,
+        });
         let json = serde_json::to_string_pretty(&clip).unwrap();
         let back: ClipMarkers = serde_json::from_str(&json).unwrap();
         assert_eq!(back.markers.len(), 1);
         assert!((back.markers[0].t_s - 5.0).abs() < 1e-9);
+        assert_eq!(
+            back.player_summary.as_ref().map(|summary| (
+                summary.champion_name.as_str(),
+                summary.kills,
+                summary.deaths,
+                summary.assists
+            )),
+            Some(("Nautilus", 3, 4, 23))
+        );
+    }
+
+    #[test]
+    fn sidecar_without_player_summary_still_round_trips() {
+        let json = r#"{
+          "recording_start_s": 0.0,
+          "duration_s": 1.0,
+          "markers": []
+        }"#;
+        let back: ClipMarkers = serde_json::from_str(json).unwrap();
+        assert!(back.player_summary.is_none());
+        assert!(back.markers.is_empty());
     }
 }

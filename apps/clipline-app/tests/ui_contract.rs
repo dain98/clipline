@@ -206,6 +206,9 @@ fn review_player_owns_all_controls() {
             && main_js().contains("update_channel")
             && main_js().contains("check_for_updates")
             && main_js().contains("install_update")
+            && main_js().contains("function updateUpToDateStatus(update)")
+            && main_js().contains("update.current_version")
+            && main_js().contains("update.status || updateUpToDateStatus(update)")
             && main_js().contains("checkForUpdates({ manual: false })")
             && app_rs().contains("tauri_plugin_updater::Builder::new().build()")
             && main_js().contains("minimize_main_window"),

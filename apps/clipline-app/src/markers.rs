@@ -7,7 +7,7 @@
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use clipline_events::GameEvent;
+use clipline_events::{GameEvent, PlayerSummary};
 use clipline_lol::{poll_once, EventTracker, LiveClient};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -18,6 +18,7 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// connecting/losing it *is* the boundary signal).
 pub enum PollerMsg {
     Event(GameEvent),
+    PlayerSummary(PlayerSummary),
     MatchStarted,
     MatchEnded,
 }
@@ -54,6 +55,11 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<Poller
                     if tx.send(PollerMsg::MatchStarted).is_err() {
                         return; // service gone
                     }
+                    if let Ok(Some(summary)) = client.player_summary(&local_player).await {
+                        if tx.send(PollerMsg::PlayerSummary(summary)).is_err() {
+                            return;
+                        }
+                    }
                     let mut tracker = EventTracker::default();
                     loop {
                         match poll_once(&client, &mut tracker, &local_player, recording_t0, 0.0)
@@ -67,6 +73,11 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<Poller
                                 }
                             }
                             Err(_) => break, // game ended — back to waiting
+                        }
+                        if let Ok(Some(summary)) = client.player_summary(&local_player).await {
+                            if tx.send(PollerMsg::PlayerSummary(summary)).is_err() {
+                                return;
+                            }
                         }
                         tokio::time::sleep(POLL_INTERVAL).await;
                     }
