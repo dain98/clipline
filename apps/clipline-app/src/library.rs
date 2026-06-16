@@ -258,7 +258,10 @@ pub fn storage_status(settings: tauri::State<StorageSettings>) -> Result<Storage
     })
 }
 
-fn validate_clip_path(settings: &StorageSettings, path: &str) -> Result<PathBuf, String> {
+pub(crate) fn validate_clip_path(
+    settings: &StorageSettings,
+    path: &str,
+) -> Result<PathBuf, String> {
     let dir = settings
         .clips_dir()?
         .canonicalize()

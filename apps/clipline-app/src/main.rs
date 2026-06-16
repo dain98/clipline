@@ -13,6 +13,8 @@ fn main() {
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod cloud;
+#[cfg(windows)]
 mod game_icon;
 #[cfg(windows)]
 mod game_plugins;

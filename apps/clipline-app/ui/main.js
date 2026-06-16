@@ -162,12 +162,15 @@ function fillSettings(s) {
   const audio = { ...defaultAudioSettings(), ...(s.audio || {}) };
   const replayStorage = { ...defaultReplayStorageSettings(), ...(s.replay_storage || {}) };
   const games = { ...defaultGameSettings(), ...(s.games || {}) };
+  const cloud = { ...defaultCloudSettings(), ...(s.cloud || {}) };
+  cloud.uploads = { ...(cloud.uploads || {}) };
   gamePluginSettings = normalizeGamePluginSettingsMap(games.plugins || {});
   customGames = (games.custom_games || []).map(normalizeCustomGame);
   currentSettings = {
     ...s,
     audio,
     replay_storage: replayStorage,
+    cloud,
     games: {
       ...games,
       plugins: { ...gamePluginSettings },
@@ -204,6 +207,7 @@ function fillSettings(s) {
   $("set-minimize-to-tray").checked = !!s.minimize_to_tray;
   $("set-capture-preview-enabled").checked = s.capture_preview_enabled !== false;
   $("set-update-channel").value = s.update_channel || "nightly";
+  fillCloudSettings(cloud);
   endHotkeyCapture("Click the field to record a new shortcut.");
   syncCaptureFields();
   renderAudioDeviceSelects();
@@ -271,6 +275,7 @@ function readSettings() {
     minimize_to_tray: $("set-minimize-to-tray").checked,
     capture_preview_enabled: $("set-capture-preview-enabled").checked,
     update_channel: $("set-update-channel").value,
+    cloud: readCloudSettings(),
   };
 }
 
@@ -300,6 +305,49 @@ function defaultGameSettings() {
     auto_detect: true,
     plugins: {},
     custom_games: [],
+  };
+}
+
+function defaultCloudSettings() {
+  return {
+    host_url: "",
+    public_url: null,
+    connected_user_id: null,
+    connected_username: null,
+    credential_target: null,
+    default_visibility: "private",
+    delete_local_after_upload: false,
+    auto_upload_rules: false,
+    uploads: {},
+  };
+}
+
+function fillCloudSettings(cloud) {
+  $("cloud-host-url").value = cloud.host_url || "";
+  $("cloud-username").value = cloud.connected_username || "";
+  $("cloud-password").value = "";
+  $("cloud-default-visibility").value = cloud.default_visibility || "private";
+  $("cloud-delete-local-after-upload").checked = !!cloud.delete_local_after_upload;
+  $("cloud-auto-upload-rules").checked = false;
+  $("cloud-http-confirm").checked = false;
+  const connected = cloud.connected_user_id && cloud.credential_target;
+  $("cloud-connection-status").textContent = connected
+    ? `Connected as ${cloud.connected_username || cloud.connected_user_id}`
+    : "Not connected";
+  $("cloud-disconnect").disabled = !connected;
+  $("cloud-connect-status").textContent = "";
+}
+
+function readCloudSettings() {
+  const existing = currentSettings && currentSettings.cloud
+    ? currentSettings.cloud
+    : defaultCloudSettings();
+  return {
+    ...existing,
+    default_visibility: $("cloud-default-visibility").value || "private",
+    delete_local_after_upload: $("cloud-delete-local-after-upload").checked,
+    auto_upload_rules: false,
+    uploads: { ...(existing.uploads || {}) },
   };
 }
 
@@ -1505,6 +1553,57 @@ async function refreshClips() {
   }
 }
 
+function cloudSettings() {
+  return currentSettings && currentSettings.cloud ? currentSettings.cloud : defaultCloudSettings();
+}
+
+function cloudConnected() {
+  const cloud = cloudSettings();
+  return Boolean(cloud.connected_user_id && cloud.credential_target);
+}
+
+function clipCloudRecord(clip) {
+  const uploads = cloudSettings().uploads || {};
+  return Object.values(uploads).find((record) => record && record.path === clip.path) || null;
+}
+
+function cloudStatusLabel(record) {
+  if (!record) return "not uploaded";
+  switch (record.upload_status) {
+    case "queued": return "queued";
+    case "uploading": return "uploading";
+    case "processing": return "processing";
+    case "uploaded_private": return "private";
+    case "uploaded_public": return "public";
+    case "failed": return "failed";
+    case "retrying": return "retrying";
+    default: return "not uploaded";
+  }
+}
+
+function upsertCloudUploadRecord(record) {
+  if (!record || !record.local_clip_id) return;
+  const cloud = cloudSettings();
+  cloud.uploads = { ...(cloud.uploads || {}), [record.local_clip_id]: record };
+  if (currentSettings) currentSettings.cloud = cloud;
+}
+
+function upsertCloudProgress(progress) {
+  if (!progress || !progress.local_clip_id) return;
+  const current = (cloudSettings().uploads || {})[progress.local_clip_id] || {};
+  upsertCloudUploadRecord({
+    ...current,
+    local_clip_id: progress.local_clip_id,
+    path: progress.path || current.path || "",
+    remote_clip_id: progress.remote_clip_id ?? current.remote_clip_id ?? null,
+    remote_url: progress.remote_url ?? current.remote_url ?? null,
+    visibility: current.visibility || cloudSettings().default_visibility || "private",
+    upload_status: progress.upload_status || current.upload_status || "not_uploaded",
+    error: progress.error ?? current.error ?? null,
+    updated_at_unix: Math.floor(Date.now() / 1000),
+  });
+}
+
 // Leading icon per clip kind. Static markup (no clip data) — innerHTML is safe.
 const CLIP_KIND_ICONS = {
   replay:
@@ -1563,6 +1662,7 @@ function clipRow(c) {
   const el = document.createElement("div");
   el.className = "clip" + (currentClip && currentClip.path === c.path ? " active" : "");
   el.title = c.name;
+  const cloudRecord = clipCloudRecord(c);
 
   const kind = clipKind(c.name);
   const icon = document.createElement("div");
@@ -1606,8 +1706,23 @@ function clipRow(c) {
   info.textContent =
     `${fmtDur(c.duration_s)} · ${c.size_mb.toFixed(1)} MB · ` +
     fmtAgo(Date.now() / 1000, c.modified_unix) +
-    (digest ? ` · ${digest}` : "");
+    (digest ? ` · ${digest}` : "") +
+    (cloudRecord ? ` · cloud: ${cloudStatusLabel(cloudRecord)}` : "");
   meta.append(name, info);
+
+  const cloud = document.createElement("button");
+  cloud.className = "cloud";
+  cloud.title = cloudRecord && cloudRecord.remote_url
+    ? "Copy cloud link"
+    : "Upload to Clipline Cloud";
+  const busy = cloudRecord && ["queued", "uploading", "processing", "retrying"].includes(cloudRecord.upload_status);
+  const uploaded = cloudRecord && cloudRecord.remote_url && cloudRecord.upload_status.startsWith("uploaded_");
+  cloud.classList.toggle("uploaded", !!uploaded);
+  cloud.classList.toggle("busy", !!busy);
+  cloud.disabled = busy || (!uploaded && !cloudConnected());
+  cloud.innerHTML = uploaded
+    ? '<svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.5-3.5a3 3 0 1 1 4.2 4.2l-1.5 1.5-1.4-1.4 1.5-1.5a1 1 0 1 0-1.4-1.4L12 13.4a1 1 0 0 1-1.4 0zm2.8-2.8a1 1 0 0 1 0 1.4l-3.5 3.5a3 3 0 1 1-4.2-4.2l1.5-1.5 1.4 1.4-1.5 1.5a1 1 0 1 0 1.4 1.4L12 10.6a1 1 0 0 1 1.4 0z"/></svg>'
+    : '<svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>';
 
   const del = document.createElement("button");
   del.className = "del";
@@ -1625,8 +1740,13 @@ function clipRow(c) {
     ev.stopPropagation();
     deleteClip(c.path);
   });
+  cloud.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    if (uploaded) copyCloudUrl(cloudRecord);
+    else uploadClipToCloud(c);
+  });
 
-  el.append(lead, meta, del);
+  el.append(lead, meta, cloud, del);
   return el;
 }
 
@@ -2513,6 +2633,84 @@ async function chooseReplayCacheFolder() {
   }
 }
 
+async function reloadSettings() {
+  const settings = await invoke("get_settings");
+  fillSettings(settings);
+  if (clipsCache.length) renderClips();
+}
+
+async function connectCloud() {
+  $("cloud-connect-status").textContent = "connecting...";
+  $("error").textContent = "";
+  try {
+    await invoke("cloud_connect", {
+      request: {
+        host_url: $("cloud-host-url").value.trim(),
+        username: $("cloud-username").value.trim(),
+        password: $("cloud-password").value,
+        device_name: "Clipline Desktop",
+        plain_http_confirmed: $("cloud-http-confirm").checked,
+        default_visibility: $("cloud-default-visibility").value,
+      },
+    });
+    $("cloud-connect-status").textContent = "connected";
+    await reloadSettings();
+  } catch (e) {
+    $("cloud-connect-status").textContent = String(e);
+  }
+}
+
+async function disconnectCloud() {
+  $("cloud-connect-status").textContent = "";
+  $("error").textContent = "";
+  try {
+    await invoke("cloud_disconnect");
+    await reloadSettings();
+  } catch (e) {
+    $("cloud-connect-status").textContent = String(e);
+  }
+}
+
+async function copyCloudUrl(record) {
+  if (!record || !record.remote_url) return;
+  $("deck-status").textContent = "";
+  $("error").textContent = "";
+  try {
+    await navigator.clipboard.writeText(record.remote_url);
+    $("deck-status").textContent = "cloud link copied";
+  } catch (e) {
+    $("error").textContent = String(e);
+  }
+}
+
+async function uploadClipToCloud(clip) {
+  if (!clip || !cloudConnected()) return;
+  $("deck-status").textContent = "uploading to cloud...";
+  $("error").textContent = "";
+  try {
+    const result = await invoke("upload_clip_to_cloud", {
+      path: clip.path,
+      visibility: cloudSettings().default_visibility || "private",
+    });
+    if (result && result.record) {
+      upsertCloudUploadRecord(result.record);
+      if (result.record.remote_url && result.record.upload_status.startsWith("uploaded_")) {
+        $("deck-status").textContent = "cloud upload ready";
+      } else if (result.record.upload_status === "failed") {
+        $("deck-status").textContent = "";
+        $("error").textContent = result.record.error || "cloud upload failed";
+      } else {
+        $("deck-status").textContent = "cloud upload processing";
+      }
+    }
+    await refresh();
+  } catch (e) {
+    $("deck-status").textContent = "";
+    $("error").textContent = String(e);
+    renderClips();
+  }
+}
+
 /* ---- backend events ---- */
 
 listen("status", (e) => {
@@ -2580,6 +2778,23 @@ listen("game-detection", (e) => {
   updateCapturePreview();
 });
 
+listen("cloud-upload-progress", (e) => {
+  const progress = e.payload || {};
+  upsertCloudProgress(progress);
+  if (progress.error) {
+    $("error").textContent = progress.error;
+  } else if (progress.upload_status === "uploading") {
+    const total = Number(progress.file_size_bytes) || 0;
+    const done = Number(progress.received_size_bytes) || 0;
+    $("deck-status").textContent = total > 0
+      ? `cloud upload ${Math.round((done / total) * 100)}%`
+      : "cloud upload in progress";
+  } else if (progress.upload_status === "processing") {
+    $("deck-status").textContent = "cloud upload processing";
+  }
+  renderClips();
+});
+
 /* ---- wiring ---- */
 
 $("save").addEventListener("click", () => invoke("save_replay"));
@@ -2617,6 +2832,13 @@ $("update-cancel").addEventListener("click", () => {
 $("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);
 $("set-replay-disk-quota").addEventListener("input", syncReplayStorageFields);
 $("set-replay-disk-quota").addEventListener("change", syncReplayStorageFields);
+for (const id of ["cloud-default-visibility", "cloud-delete-local-after-upload"]) {
+  $(id).addEventListener("change", () => {
+    $("settings-status").textContent = "cloud settings changed - save to apply";
+  });
+}
+$("cloud-connect").addEventListener("click", connectCloud);
+$("cloud-disconnect").addEventListener("click", disconnectCloud);
 $("set-games-auto-detect").addEventListener("change", updateGameDetectionStatus);
 for (const id of ["set-buffer", "set-replay", "set-encoder", "set-output-resolution", "set-bitrate", "set-fps"]) {
   $(id).addEventListener("input", syncRecordingFields);

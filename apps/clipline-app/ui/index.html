@@ -230,6 +230,7 @@
           <button class="tab" data-tab="recording">Recording</button>
           <button class="tab" data-tab="games">Games</button>
           <button class="tab" data-tab="storage">Storage</button>
+          <button class="tab" data-tab="cloud">Cloud</button>
           <button class="tab" data-tab="hotkeys">Hotkeys</button>
         </nav>
 
@@ -564,6 +565,60 @@
                   <span>I understand this continuously writes to disk and can shorten SSD life.</span>
                 </label>
               </div>
+            </div>
+          </div>
+
+          <div class="settings-section" data-section="cloud" hidden>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Connection</strong>
+                <span id="cloud-connection-status">Not connected</span>
+              </div>
+              <div class="cloud-connect-grid">
+                <input id="cloud-host-url" placeholder="https://clips.example.com" spellcheck="false" />
+                <input id="cloud-username" placeholder="Username" autocomplete="username" spellcheck="false" />
+                <input id="cloud-password" type="password" placeholder="Password" autocomplete="current-password" />
+                <label class="check-line cloud-http-confirm">
+                  <input id="cloud-http-confirm" type="checkbox" />
+                  <span>I understand HTTP sends my password in plaintext on this network.</span>
+                </label>
+                <div class="cloud-actions">
+                  <button id="cloud-connect" type="button" class="primary">Connect</button>
+                  <button id="cloud-disconnect" type="button">Disconnect</button>
+                </div>
+                <span id="cloud-connect-status" class="hint"></span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Default visibility</strong>
+                <span>Applied to manual clip uploads from the library.</span>
+              </div>
+              <select id="cloud-default-visibility">
+                <option value="private">Private</option>
+                <option value="unlisted">Unlisted</option>
+                <option value="public">Public</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Delete local after upload</strong>
+                <span>Remove the local MP4 and marker sidecar after the cloud copy is ready.</span>
+              </div>
+              <label class="check-line">
+                <input id="cloud-delete-local-after-upload" type="checkbox" />
+                <span>Delete local files after successful upload</span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Automatic uploads</strong>
+                <span>Manual uploads are available now; rules will be configured in a later release.</span>
+              </div>
+              <label class="check-line">
+                <input id="cloud-auto-upload-rules" type="checkbox" disabled />
+                <span>Auto-upload rules disabled</span>
+              </label>
             </div>
           </div>
 

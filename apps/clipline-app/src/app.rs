@@ -126,7 +126,7 @@ impl MicTestState {
     }
 }
 
-struct RuntimeState(Mutex<RuntimeInner>);
+pub(crate) struct RuntimeState(Mutex<RuntimeInner>);
 
 struct TrayItems<R: Runtime> {
     save_item: MenuItem<R>,
@@ -245,11 +245,24 @@ impl RuntimeState {
         self.send(Cmd::PausePreview { duration })
     }
 
-    fn settings(&self) -> AppSettings {
+    pub(crate) fn settings(&self) -> AppSettings {
         self.0
             .lock()
             .map(|inner| inner.settings.clone())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn update_cloud<F>(&self, update: F) -> Result<AppSettings, String>
+    where
+        F: FnOnce(&mut crate::settings::CloudSettings),
+    {
+        let mut next = self.settings();
+        update(&mut next.cloud);
+        next.cloud.normalize();
+        next.save()?;
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        inner.settings.cloud = next.cloud.clone();
+        Ok(next)
     }
 
     fn active_shortcut_matches(&self, shortcut: &Shortcut) -> bool {
@@ -996,6 +1009,10 @@ pub fn run() {
             check_for_updates,
             install_update,
             save_settings,
+            crate::cloud::cloud_status,
+            crate::cloud::cloud_connect,
+            crate::cloud::cloud_disconnect,
+            crate::cloud::upload_clip_to_cloud,
             crate::library::list_clips,
             crate::library::delete_clip,
             crate::library::export_clip,
