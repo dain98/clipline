@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use clipline_cloud_api::{
-    sha256_hex, ClipDetailResponse, CloudApiError, CloudClient, CreateMarkerRequest,
+    sha256_hex, types::CreateMarkerRequest, ClipDetailResponse, CloudApiError, CloudClient,
     CreateUploadRequest,
 };
 use clipline_events::{ClipMarkers, GameId};
