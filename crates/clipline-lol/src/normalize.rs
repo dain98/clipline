@@ -1,7 +1,7 @@
 use crate::raw::RawEvent;
 use clipline_events::{EventKind, GameEvent, GameId};
 
-/// Importance added when the local player is killer, victim, or assister.
+/// Importance added when the local player is the event actor.
 const LOCAL_PLAYER_BOOST: u8 = 2;
 
 /// Normalize one raw Live Client event (ddoc §5a). `recording_offset_s` is
@@ -31,10 +31,20 @@ pub fn normalize(raw: &RawEvent, local_player: &str) -> GameEvent {
         .or_else(|| raw.recipient.clone())
         .unwrap_or_default();
 
-    let involves_local_player = !local_player.is_empty()
-        && (actor == local_player
-            || raw.victim_name.as_deref() == Some(local_player)
-            || raw.assisters.iter().any(|a| a == local_player));
+    let local_player_key = player_name_key(local_player);
+    let actor_is_local = player_matches_key(&actor, &local_player_key);
+    let local_player_assisted = raw
+        .assisters
+        .iter()
+        .any(|assister| player_matches_key(assister, &local_player_key));
+    let local_player_was_victim = raw
+        .victim_name
+        .as_deref()
+        .is_some_and(|victim| player_matches_key(victim, &local_player_key));
+    let involves_local_player = match kind {
+        EventKind::ChampionKill => actor_is_local,
+        _ => actor_is_local || local_player_assisted || local_player_was_victim,
+    };
 
     let subtype = match kind {
         EventKind::DragonKill => raw.dragon_type.clone(),
@@ -66,6 +76,19 @@ pub fn normalize(raw: &RawEvent, local_player: &str) -> GameEvent {
         importance,
         involves_local_player,
     }
+}
+
+pub(crate) fn player_matches_key(name: &str, local_player_key: &str) -> bool {
+    !local_player_key.is_empty() && player_name_key(name) == local_player_key
+}
+
+pub(crate) fn player_name_key(name: &str) -> String {
+    let trimmed = name.trim();
+    let without_tagline = trimmed
+        .split_once('#')
+        .map_or(trimmed, |(game_name, _)| game_name)
+        .trim();
+    without_tagline.to_lowercase()
 }
 
 fn base_importance(kind: EventKind) -> u8 {
@@ -109,13 +132,40 @@ mod tests {
     }
 
     #[test]
-    fn local_player_as_victim_or_assister_counts_as_involved() {
+    fn local_player_as_victim_does_not_count_as_champion_kill() {
         let r = raw(
             r#"{ "EventID": 2, "EventName": "ChampionKill", "EventTime": 10.0,
                  "KillerName": "A", "VictimName": "Me", "Assisters": ["B"] }"#,
         );
-        assert!(normalize(&r, "Me").involves_local_player);
-        assert!(normalize(&r, "B").involves_local_player);
+        let ev = normalize(&r, "Me");
+        assert!(
+            !ev.involves_local_player,
+            "deaths are not timeline-worthy champion kills"
+        );
+        assert_eq!(ev.importance, 5);
+    }
+
+    #[test]
+    fn local_player_as_assister_does_not_count_as_champion_kill() {
+        let r = raw(
+            r#"{ "EventID": 2, "EventName": "ChampionKill", "EventTime": 10.0,
+                 "KillerName": "A", "VictimName": "Them", "Assisters": ["B"] }"#,
+        );
+        let ev = normalize(&r, "B");
+        assert!(
+            !ev.involves_local_player,
+            "assists are not timeline-worthy champion kills"
+        );
+        assert_eq!(ev.importance, 5);
+    }
+
+    #[test]
+    fn local_player_matching_ignores_case_whitespace_and_riot_tagline() {
+        let r = raw(
+            r#"{ "EventID": 2, "EventName": "ChampionKill", "EventTime": 10.0,
+                 "KillerName": " dain ", "VictimName": "Them", "Assisters": [] }"#,
+        );
+        assert!(normalize(&r, "Dain#NA1").involves_local_player);
     }
 
     #[test]

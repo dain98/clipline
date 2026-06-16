@@ -1022,6 +1022,33 @@ fn marker_digest_collapses_categories() {
 }
 
 #[test]
+fn player_summary_label_formats_champion_kda() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.playerSummaryLabel({ champion_name: 'Nautilus', kills: 3, deaths: 4, assists: 23 })"
+        ),
+        "Nautilus | 3/4/23"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.playerSummaryLabel({ champion_name: '  Ahri ', kills: '2', deaths: null, assists: -1 })"
+        ),
+        "Ahri | 2/0/0"
+    );
+    assert_eq!(eval(&mut ctx, "PlayerCore.playerSummaryLabel(null)"), "");
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.playerSummaryLabel({ champion_name: '   ', kills: 1, deaths: 2, assists: 3 })"
+        ),
+        ""
+    );
+}
+
+#[test]
 fn session_groups_bucket_and_sort_by_newest() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(

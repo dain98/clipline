@@ -24,12 +24,26 @@ async fn fetches_and_parses_all_three_endpoints() {
             "gameMode": "CLASSIC", "gameTime": 123.5, "mapName": "Map11"
         }));
     });
+    server.mock(|when, then| {
+        when.method(GET).path("/liveclientdata/playerlist");
+        then.status(200).json_body(json!([
+            {
+                "summonerName": "Me",
+                "riotId": "Me#NA1",
+                "championName": "Nautilus",
+                "scores": { "kills": 3, "deaths": 4, "assists": 23 }
+            }
+        ]));
+    });
 
     let client = LiveClient::new(server.base_url()).unwrap();
     let data = client.event_data().await.unwrap();
     assert_eq!(data.events.len(), 1);
     assert_eq!(client.active_player_name().await.unwrap(), "Me#NA1");
     assert!((client.game_time_s().await.unwrap() - 123.5).abs() < 1e-9);
+    let summary = client.player_summary("Me#NA1").await.unwrap().unwrap();
+    assert_eq!(summary.champion_name, "Nautilus");
+    assert_eq!((summary.kills, summary.deaths, summary.assists), (3, 4, 23));
 }
 
 #[tokio::test]

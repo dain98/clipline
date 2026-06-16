@@ -49,6 +49,7 @@ const {
   markerSummary,
   markerStyle,
   markerDigest,
+  playerSummaryLabel,
   rulerMarksRange,
   sessionGroups,
   formatClipTitle,
@@ -1702,7 +1703,9 @@ function clipRow(c) {
     when.getMonth(), when.getDate(), when.getHours(), when.getMinutes());
   const info = document.createElement("div");
   info.className = "info";
-  const digest = markerDigest(c.markers ? c.markers.markers : []);
+  const markers = c.markers ? c.markers.markers : [];
+  const digest = playerSummaryLabel(c.markers ? c.markers.player_summary : null) ||
+    markerDigest(markers);
   info.textContent =
     `${fmtDur(c.duration_s)} · ${c.size_mb.toFixed(1)} MB · ` +
     fmtAgo(Date.now() / 1000, c.modified_unix) +
@@ -2532,6 +2535,11 @@ function setUpdateStatus(message) {
   $("update-status").textContent = message;
 }
 
+function updateUpToDateStatus(update) {
+  const version = update.current_version ? ` ${update.current_version}` : "";
+  return `${update.channel_label}${version} is up to date`;
+}
+
 function updateNotesPreview(notes) {
   const text = String(notes || "").trim();
   if (!text) return "";
@@ -2559,7 +2567,7 @@ async function checkForUpdates({ manual = false } = {}) {
       setUpdateStatus(`${update.channel_label} ${update.version} available`);
       showUpdateDialog(update);
     } else if (manual) {
-      setUpdateStatus(update.status || `${update.channel_label} is up to date`);
+      setUpdateStatus(update.status || updateUpToDateStatus(update));
     }
   } catch (e) {
     if (manual) {

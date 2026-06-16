@@ -426,6 +426,17 @@ const PlayerCore = (() => {
       .join(" · ");
   };
 
+  const playerSummaryLabel = (summary) => {
+    if (!summary) return "";
+    const champion = String(summary.champion_name || "").trim();
+    if (!champion) return "";
+    const stat = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+    };
+    return `${champion} | ${stat(summary.kills)}/${stat(summary.deaths)}/${stat(summary.assists)}`;
+  };
+
   const RULER_STEPS_S = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
 
   // Labeled marks at "nice" intervals across an arbitrary window. Picks the step
@@ -736,6 +747,7 @@ const PlayerCore = (() => {
     markerSummary,
     markerStyle,
     markerDigest,
+    playerSummaryLabel,
     rulerMarks,
     rulerMarksRange,
     sessionGroups,

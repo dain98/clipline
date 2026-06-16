@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::Mutex;
 
-use clipline_events::{ClipMarker, ClipMarkers, GameId};
+use clipline_events::{is_timeline_marker, ClipMarker, ClipMarkers, GameId};
 use clipline_mp4::trim_keyframe_aligned_file;
 use clipline_mp4::walker::movie_duration_s;
 use clipline_storage::storage_status as read_storage_status;
@@ -152,9 +152,7 @@ fn push_clips_from(
         let duration_s = std::fs::read(&path)
             .ok()
             .and_then(|buf| movie_duration_s(&buf));
-        let markers = std::fs::read_to_string(path.with_extension("markers.json"))
-            .ok()
-            .and_then(|json| serde_json::from_str(&json).ok());
+        let markers = read_markers(&path);
         // Prefer the session sidecar; fall back to the game named in markers
         // so clips recorded before session tagging still show an icon.
         let game = session_game
@@ -226,7 +224,7 @@ pub fn export_clip(
 
     if let Some(markers) = read_markers(&source) {
         let cropped = crop_markers(&markers, info.aligned_start_s, info.aligned_end_s);
-        if !cropped.markers.is_empty() {
+        if has_marker_sidecar_content(&cropped) {
             let json = serde_json::to_string_pretty(&cropped).map_err(|e| e.to_string())?;
             std::fs::write(target.with_extension("markers.json"), json)
                 .map_err(|e| e.to_string())?;
@@ -435,6 +433,16 @@ fn read_markers(path: &Path) -> Option<ClipMarkers> {
     std::fs::read_to_string(path.with_extension("markers.json"))
         .ok()
         .and_then(|json| serde_json::from_str(&json).ok())
+        .map(filter_timeline_markers)
+}
+
+fn filter_timeline_markers(mut markers: ClipMarkers) -> ClipMarkers {
+    markers.markers.retain(|m| is_timeline_marker(&m.event));
+    markers
+}
+
+fn has_marker_sidecar_content(markers: &ClipMarkers) -> bool {
+    !markers.markers.is_empty() || markers.player_summary.is_some()
 }
 
 fn crop_markers(markers: &ClipMarkers, start_s: f64, end_s: f64) -> ClipMarkers {
@@ -450,6 +458,7 @@ fn crop_markers(markers: &ClipMarkers, start_s: f64, end_s: f64) -> ClipMarkers 
     ClipMarkers {
         recording_start_s: markers.recording_start_s + start_s,
         duration_s: end_s - start_s,
+        player_summary: markers.player_summary.clone(),
         markers: cropped,
     }
 }
@@ -499,7 +508,7 @@ fn unique_export_path(source: &Path, start_s: f64, end_s: f64) -> Result<PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clipline_events::{EventKind, GameEvent, GameId};
+    use clipline_events::{EventKind, GameEvent, GameId, PlayerSummary};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TestDir(PathBuf);
@@ -530,11 +539,15 @@ mod tests {
     }
 
     fn marker(t_s: f64) -> ClipMarker {
+        marker_with(t_s, EventKind::ChampionKill, true)
+    }
+
+    fn marker_with(t_s: f64, kind: EventKind, involves_local_player: bool) -> ClipMarker {
         ClipMarker {
             t_s,
             event: GameEvent {
                 game_id: GameId::LeagueOfLegends,
-                kind: EventKind::ChampionKill,
+                kind,
                 actor: "Dain".into(),
                 victim: None,
                 assisters: Vec::new(),
@@ -542,7 +555,7 @@ mod tests {
                 game_time_s: 0.0,
                 recording_offset_s: Some(10.0 + t_s),
                 importance: 7,
-                involves_local_player: true,
+                involves_local_player,
             },
         }
     }
@@ -552,6 +565,12 @@ mod tests {
         let markers = ClipMarkers {
             recording_start_s: 10.0,
             duration_s: 5.0,
+            player_summary: Some(PlayerSummary {
+                champion_name: "Nautilus".into(),
+                kills: 3,
+                deaths: 4,
+                assists: 23,
+            }),
             markers: vec![marker(0.5), marker(1.5), marker(2.5)],
         };
 
@@ -561,6 +580,92 @@ mod tests {
         assert!((cropped.markers[0].t_s - 0.5).abs() < 1e-9);
         assert!((cropped.recording_start_s - 11.0).abs() < 1e-9);
         assert!((cropped.duration_s - 1.0).abs() < 1e-9);
+        assert_eq!(
+            cropped.player_summary.as_ref().map(|summary| (
+                summary.champion_name.as_str(),
+                summary.kills,
+                summary.deaths,
+                summary.assists
+            )),
+            Some(("Nautilus", 3, 4, 23))
+        );
+    }
+
+    #[test]
+    fn filter_timeline_markers_drops_non_user_kills_and_noise() {
+        let markers = ClipMarkers {
+            recording_start_s: 10.0,
+            duration_s: 100.0,
+            player_summary: Some(PlayerSummary {
+                champion_name: "Nautilus".into(),
+                kills: 3,
+                deaths: 4,
+                assists: 23,
+            }),
+            markers: vec![
+                marker_with(1.0, EventKind::ChampionKill, true),
+                marker_with(2.0, EventKind::ChampionKill, false),
+                marker_with(3.0, EventKind::TurretKilled, false),
+                marker_with(4.0, EventKind::DragonKill, false),
+                marker_with(5.0, EventKind::BaronKill, false),
+                marker_with(6.0, EventKind::MinionsSpawning, true),
+                marker_with(7.0, EventKind::FirstBlood, true),
+                marker_with(8.0, EventKind::FirstBrick, true),
+                marker_with(9.0, EventKind::Ace, true),
+            ],
+        };
+
+        let filtered = filter_timeline_markers(markers);
+        let kinds: Vec<_> = filtered.markers.iter().map(|m| m.event.kind).collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                EventKind::ChampionKill,
+                EventKind::TurretKilled,
+                EventKind::DragonKill,
+                EventKind::BaronKill,
+            ]
+        );
+        assert!(filtered.markers[0].event.involves_local_player);
+        assert_eq!(
+            filtered.player_summary.as_ref().map(|summary| (
+                summary.champion_name.as_str(),
+                summary.kills,
+                summary.deaths,
+                summary.assists
+            )),
+            Some(("Nautilus", 3, 4, 23))
+        );
+    }
+
+    #[test]
+    fn summary_only_markers_are_export_sidecar_content() {
+        let markers = ClipMarkers {
+            recording_start_s: 10.0,
+            duration_s: 20.0,
+            player_summary: Some(PlayerSummary {
+                champion_name: "Nautilus".into(),
+                kills: 3,
+                deaths: 4,
+                assists: 23,
+            }),
+            markers: Vec::new(),
+        };
+
+        assert!(has_marker_sidecar_content(&markers));
+    }
+
+    #[test]
+    fn empty_markers_are_not_export_sidecar_content() {
+        let markers = ClipMarkers {
+            recording_start_s: 10.0,
+            duration_s: 20.0,
+            player_summary: None,
+            markers: Vec::new(),
+        };
+
+        assert!(!has_marker_sidecar_content(&markers));
     }
 
     #[test]
