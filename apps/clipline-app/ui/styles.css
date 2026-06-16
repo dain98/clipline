@@ -1550,7 +1550,7 @@ label span { white-space: nowrap; }
    stays clean and fully clickable (only the glyph itself is a marker target). */
 .timeline-stack {
   position: relative;
-  padding-top: 20px; /* the band the glyphs ride in, above the track */
+  padding-top: 25px; /* the band the glyphs ride in, above the track */
 }
 #marker-layer {
   position: absolute;
@@ -1561,8 +1561,8 @@ label span { white-space: nowrap; }
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 16px;
-  margin-left: -8px;
+  width: 22px;
+  margin-left: -11px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1574,14 +1574,20 @@ label span { white-space: nowrap; }
 }
 .marker .glyph {
   flex: 0 0 auto;
-  width: 15px;
-  height: 15px;
+  width: 20px;
+  height: 20px;
   color: var(--mc, #aeb6c4);
   pointer-events: auto;
   cursor: pointer;
   transition: transform 0.12s ease;
 }
-.marker .glyph svg { width: 15px; height: 15px; display: block; }
+.marker .glyph svg { width: 20px; height: 20px; display: block; }
+/* PNG art rendered as a silhouette mask so it still tints with --mc */
+.marker .glyph.img {
+  background-color: var(--mc, #aeb6c4);
+  -webkit-mask: var(--marker-img) center / contain no-repeat;
+          mask: var(--marker-img) center / contain no-repeat;
+}
 .marker .hair {
   flex: 1 1 auto;
   width: 1px;
