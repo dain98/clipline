@@ -26,8 +26,8 @@ body:
     id: clipline-version
     attributes:
       label: Clipline version
-      description: Shown in Settings → About (e.g. 0.1.1 nightly).
-      placeholder: "0.1.1 nightly"
+      description: Shown in Settings → About (e.g. 0.1.2 nightly).
+      placeholder: "0.1.2 nightly"
     validations:
       required: true
 
