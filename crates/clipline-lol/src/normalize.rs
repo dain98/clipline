@@ -41,7 +41,18 @@ pub fn normalize(raw: &RawEvent, local_player: &str) -> GameEvent {
         .victim_name
         .as_deref()
         .is_some_and(|victim| player_matches_key(victim, &local_player_key));
+
+    // The Live Client API only emits ChampionKill for any champion death. We
+    // split it: the local player's own death becomes ChampionDeath so it
+    // earns its own timeline marker (ddoc §5: "mark *their* kills/deaths
+    // distinctly"). Otherwise the kill classification is unchanged.
+    let kind = match kind {
+        EventKind::ChampionKill if local_player_was_victim => EventKind::ChampionDeath,
+        k => k,
+    };
+
     let involves_local_player = match kind {
+        EventKind::ChampionDeath => true,
         EventKind::ChampionKill => actor_is_local,
         _ => actor_is_local || local_player_assisted || local_player_was_victim,
     };
@@ -96,7 +107,8 @@ fn base_importance(kind: EventKind) -> u8 {
         EventKind::Ace => 8,
         EventKind::Multikill | EventKind::BaronKill => 7,
         EventKind::DragonKill | EventKind::FirstBlood => 6,
-        EventKind::ChampionKill | EventKind::InhibKilled | EventKind::HeraldKill => 5,
+        EventKind::ChampionKill | EventKind::ChampionDeath | EventKind::InhibKilled
+        | EventKind::HeraldKill => 5,
         EventKind::TurretKilled | EventKind::FirstBrick => 4,
         EventKind::GameEnd => 3,
         EventKind::GameStart | EventKind::MinionsSpawning | EventKind::Other => 1,
@@ -132,17 +144,23 @@ mod tests {
     }
 
     #[test]
-    fn local_player_as_victim_does_not_count_as_champion_kill() {
+    fn local_player_as_victim_becomes_champion_death() {
         let r = raw(
             r#"{ "EventID": 2, "EventName": "ChampionKill", "EventTime": 10.0,
                  "KillerName": "A", "VictimName": "Me", "Assisters": ["B"] }"#,
         );
         let ev = normalize(&r, "Me");
-        assert!(
-            !ev.involves_local_player,
-            "deaths are not timeline-worthy champion kills"
+        assert_eq!(
+            ev.kind, EventKind::ChampionDeath,
+            "the local player's own death is classified distinctly from a kill"
         );
-        assert_eq!(ev.importance, 5);
+        assert!(
+            ev.involves_local_player,
+            "deaths are timeline-worthy for the local player"
+        );
+        assert_eq!(ev.importance, 7); // base 5 + local boost 2
+        assert_eq!(ev.actor, "A");
+        assert_eq!(ev.victim.as_deref(), Some("Me"));
     }
 
     #[test]

@@ -605,6 +605,7 @@ mod tests {
             markers: vec![
                 marker_with(1.0, EventKind::ChampionKill, true),
                 marker_with(2.0, EventKind::ChampionKill, false),
+                marker_with(2.5, EventKind::ChampionDeath, true),
                 marker_with(3.0, EventKind::TurretKilled, false),
                 marker_with(4.0, EventKind::DragonKill, false),
                 marker_with(5.0, EventKind::BaronKill, false),
@@ -622,6 +623,7 @@ mod tests {
             kinds,
             vec![
                 EventKind::ChampionKill,
+                EventKind::ChampionDeath,
                 EventKind::TurretKilled,
                 EventKind::DragonKill,
                 EventKind::BaronKill,

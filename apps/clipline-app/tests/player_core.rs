@@ -588,6 +588,10 @@ fn marker_styles_map_kinds_to_categories() {
         r#"{"glyph":"✕","cls":"kill"}"#
     );
     assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('ChampionDeath')"),
+        r#"{"glyph":"✕","cls":"death"}"#
+    );
+    assert_eq!(
         eval_json(&mut ctx, "PlayerCore.markerStyle('FirstBlood')"),
         r#"{"glyph":"✕","cls":"kill"}"#
     );
@@ -1017,6 +1021,13 @@ fn marker_digest_collapses_categories() {
     assert_eq!(
         eval(&mut ctx, "PlayerCore.markerDigest([{ kind: 'Multikill' }])"),
         "1 spree"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.markerDigest([{ kind: 'ChampionDeath' }, { kind: 'ChampionDeath' }])"
+        ),
+        "2 deaths"
     );
     assert_eq!(eval(&mut ctx, "PlayerCore.markerDigest([])"), "");
 }
