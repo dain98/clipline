@@ -52,7 +52,6 @@ const {
   playerSummaryLabel,
   rulerMarksRange,
   sessionGroups,
-  formatClipTitle,
   clipKind,
   keyIntent,
   hotkeyFromKeyEvent,
@@ -108,6 +107,7 @@ let micAudioCursor = 0;
 let micAudioSources = [];
 let pendingUpdate = null;
 let updateCheckRunning = false;
+let renameTargetClip = null;
 let hotkeyCaptureActive = false;
 let trimStart = 0;
 let trimEnd = 0;
@@ -330,13 +330,31 @@ function fillCloudSettings(cloud) {
   $("cloud-default-visibility").value = cloud.default_visibility || "private";
   $("cloud-delete-local-after-upload").checked = !!cloud.delete_local_after_upload;
   $("cloud-auto-upload-rules").checked = false;
-  $("cloud-http-confirm").checked = false;
-  const connected = cloud.connected_user_id && cloud.credential_target;
+  syncCloudHttpWarning();
+  const connected = Boolean(cloud.connected_user_id && cloud.credential_target);
   $("cloud-connection-status").textContent = connected
     ? `Connected as ${cloud.connected_username || cloud.connected_user_id}`
     : "Not connected";
+  $("cloud-connect-fields").hidden = connected;
+  $("cloud-connect").hidden = connected;
+  $("cloud-connect").disabled = connected;
+  $("cloud-disconnect").hidden = !connected;
   $("cloud-disconnect").disabled = !connected;
   $("cloud-connect-status").textContent = "";
+}
+
+function cloudHostUsesInsecureHttp() {
+  const raw = $("cloud-host-url").value.trim();
+  if (!raw) return false;
+  try {
+    return new URL(raw).protocol === "http:";
+  } catch (_) {
+    return /^http:\/\//i.test(raw);
+  }
+}
+
+function syncCloudHttpWarning() {
+  $("cloud-http-warning").hidden = !cloudHostUsesInsecureHttp();
 }
 
 function readCloudSettings() {
@@ -1568,6 +1586,16 @@ function clipCloudRecord(clip) {
   return Object.values(uploads).find((record) => record && record.path === clip.path) || null;
 }
 
+function clipDisplayTitle(clip) {
+  if (clip && clip.title && clip.title.trim()) return clip.title.trim();
+  return editableClipTitle(clip) || "Clipline clip";
+}
+
+function editableClipTitle(clip) {
+  if (clip && clip.title && clip.title.trim()) return clip.title.trim();
+  return clip && clip.name ? clip.name.replace(/\.mp4$/i, "") : "";
+}
+
 function cloudStatusLabel(record) {
   if (!record) return "not uploaded";
   switch (record.upload_status) {
@@ -1587,6 +1615,52 @@ function upsertCloudUploadRecord(record) {
   const cloud = cloudSettings();
   cloud.uploads = { ...(cloud.uploads || {}), [record.local_clip_id]: record };
   if (currentSettings) currentSettings.cloud = cloud;
+}
+
+function updateCloudUploadRecordPaths(oldPath, newPath) {
+  if (!currentSettings || !currentSettings.cloud || oldPath === newPath) return;
+  const uploads = currentSettings.cloud.uploads || {};
+  let changed = false;
+  const nextUploads = {};
+  for (const [id, record] of Object.entries(uploads)) {
+    if (record && record.path === oldPath) {
+      nextUploads[id] = { ...record, path: newPath };
+      changed = true;
+    } else {
+      nextUploads[id] = record;
+    }
+  }
+  if (changed) currentSettings.cloud.uploads = nextUploads;
+}
+
+function replaceClipAfterRename(oldClip, renamed) {
+  const fresh = {
+    ...oldClip,
+    ...renamed,
+    duration_s: renamed.duration_s ?? oldClip.duration_s,
+    markers: renamed.markers ?? oldClip.markers,
+    game: renamed.game ?? oldClip.game,
+  };
+  let replaced = false;
+  clipsCache = clipsCache.map((clip) => {
+    if (clip.path !== oldClip.path) return clip;
+    replaced = true;
+    return fresh;
+  });
+  if (!replaced) clipsCache = [fresh, ...clipsCache];
+  return fresh;
+}
+
+function restorePlaybackPosition(time, paused) {
+  const restore = () => {
+    if (Number.isFinite(time) && time > 0) {
+      const maxTime = clipDuration();
+      video.currentTime = Math.min(time, maxTime > 0 ? maxTime : time);
+    }
+    if (paused) video.pause();
+  };
+  if (video.readyState >= 1) restore();
+  else video.addEventListener("loadedmetadata", restore, { once: true });
 }
 
 function upsertCloudProgress(progress) {
@@ -1662,10 +1736,10 @@ function clipGameIcon(clip) {
 function clipRow(c) {
   const el = document.createElement("div");
   el.className = "clip" + (currentClip && currentClip.path === c.path ? " active" : "");
-  el.title = c.name;
+  el.title = c.title ? `${c.title} · ${c.name}` : c.name;
   const cloudRecord = clipCloudRecord(c);
 
-  const kind = clipKind(c.name);
+  const kind = c.kind || clipKind(c.name);
   const icon = document.createElement("div");
   icon.className = "clip-kind " + kind;
   icon.title = CLIP_KIND_LABELS[kind];
@@ -1698,9 +1772,7 @@ function clipRow(c) {
   const meta = document.createElement("div");
   const name = document.createElement("div");
   name.className = "name";
-  const when = new Date(c.modified_unix * 1000);
-  name.textContent = formatClipTitle(
-    when.getMonth(), when.getDate(), when.getHours(), when.getMinutes());
+  name.textContent = clipDisplayTitle(c);
   const info = document.createElement("div");
   info.className = "info";
   const markers = c.markers ? c.markers.markers : [];
@@ -1775,12 +1847,13 @@ function renderClips() {
 /* ---- review player ---- */
 
 function openClip(clip) {
+  exitRenameEdit();
   resetCapturePreviewFrame();
   currentClip = clip;
   $("error").textContent = "";
   $("deck-status").textContent = "";
   $("stage-note").textContent = "loading…";
-  $("pname").textContent = clip.name;
+  $("pname").textContent = clipDisplayTitle(clip);
   $("pmeta").textContent = `${clip.size_mb.toFixed(1)} MB · ${clip.path}`;
   settingsOpen = false;
   updateViews();
@@ -1798,6 +1871,7 @@ function openClip(clip) {
 }
 
 function closeReview() {
+  exitRenameEdit();
   cancelAnimationFrame(rafId);
   video.pause();
   video.removeAttribute("src");
@@ -2670,14 +2744,15 @@ async function reloadSettings() {
 async function connectCloud() {
   $("cloud-connect-status").textContent = "connecting...";
   $("error").textContent = "";
+  const hostUrl = $("cloud-host-url").value.trim();
   try {
     await invoke("cloud_connect", {
       request: {
-        host_url: $("cloud-host-url").value.trim(),
+        host_url: hostUrl,
         username: $("cloud-username").value.trim(),
         password: $("cloud-password").value,
         device_name: "Clipline Desktop",
-        plain_http_confirmed: $("cloud-http-confirm").checked,
+        plain_http_confirmed: cloudHostUsesInsecureHttp(),
         default_visibility: $("cloud-default-visibility").value,
       },
     });
@@ -2865,6 +2940,91 @@ for (const id of ["cloud-default-visibility", "cloud-delete-local-after-upload"]
     $("settings-status").textContent = "cloud settings changed - save to apply";
   });
 }
+
+function setRenameStatus(message, isError = false) {
+  const status = $("rename-status");
+  status.textContent = message;
+  status.hidden = !message;
+  status.classList.toggle("error", isError);
+}
+
+function setRenameControlsDisabled(disabled) {
+  $("rename-input").disabled = disabled;
+  $("rename-save").disabled = disabled;
+  $("rename-cancel").disabled = disabled;
+}
+
+function showRenameEdit(titleOverride = null) {
+  if (!currentClip) return;
+  renameTargetClip = currentClip;
+  $("rename-input").value = titleOverride ?? editableClipTitle(currentClip);
+  $("pname").hidden = true;
+  $("rename-input").hidden = false;
+  $("rename-clip").hidden = true;
+  $("rename-save").hidden = false;
+  $("rename-cancel").hidden = false;
+  setRenameStatus("");
+  setRenameControlsDisabled(false);
+  $("rename-input").focus();
+  $("rename-input").select();
+}
+
+function exitRenameEdit() {
+  renameTargetClip = null;
+  $("pname").hidden = false;
+  $("rename-input").hidden = true;
+  $("rename-clip").hidden = false;
+  $("rename-save").hidden = true;
+  $("rename-cancel").hidden = true;
+  setRenameStatus("");
+  setRenameControlsDisabled(false);
+}
+
+async function submitRenameEdit() {
+  if (!renameTargetClip) return;
+  const title = $("rename-input").value.trim();
+  if (!title) {
+    setRenameStatus("Name cannot be empty.", true);
+    return;
+  }
+  const oldClip = renameTargetClip;
+  if (title === editableClipTitle(oldClip).trim()) {
+    exitRenameEdit();
+    return;
+  }
+  const oldTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const wasPaused = video.paused;
+  setRenameControlsDisabled(true);
+  setRenameStatus("renaming...");
+  try {
+    cancelAnimationFrame(rafId);
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    const renamed = await invoke("rename_clip", { path: oldClip.path, title });
+    const fresh = replaceClipAfterRename(oldClip, renamed);
+    updateCloudUploadRecordPaths(oldClip.path, renamed.path);
+    exitRenameEdit();
+    $("notice").textContent = "clip renamed";
+    $("error").textContent = "";
+    openClip(fresh);
+    restorePlaybackPosition(oldTime, wasPaused);
+  } catch (e) {
+    const message = String(e);
+    if (currentClip && currentClip.path === oldClip.path && !video.src) {
+      openClip(oldClip);
+      video.currentTime = oldTime;
+      if (wasPaused) video.pause();
+    }
+    showRenameEdit(title);
+    setRenameStatus(message, true);
+    setRenameControlsDisabled(false);
+  }
+}
+
+function cancelRenameEdit() { exitRenameEdit(); }
+$("cloud-host-url").addEventListener("input", syncCloudHttpWarning);
+$("cloud-host-url").addEventListener("change", syncCloudHttpWarning);
 $("cloud-connect").addEventListener("click", connectCloud);
 $("cloud-disconnect").addEventListener("click", disconnectCloud);
 $("set-games-auto-detect").addEventListener("change", updateGameDetectionStatus);
@@ -2969,6 +3129,7 @@ video.addEventListener("loadedmetadata", () => {
   $("stage-note").textContent = `${video.videoWidth}x${video.videoHeight} · ${fmtDur(video.duration)}`;
   updateStageFrame();
   if (currentClip) {
+    $("pname").textContent = clipDisplayTitle(currentClip);
     $("pmeta").textContent = `${fmtDur(video.duration)} · ${currentClip.size_mb.toFixed(1)} MB · ${currentClip.path}`;
     setTrim(0, video.duration);
     // Duration is now exact: rebuild the whole-clip navigator and re-render.
@@ -3000,6 +3161,20 @@ $("export-clip").addEventListener("click", exportTrim);
 $("delete-clip").addEventListener("click", () => deleteClip());
 $("open-folder").addEventListener("click", openFolder);
 $("copy-clip").addEventListener("click", copyClipToClipboard);
+$("rename-clip").addEventListener("click", () => showRenameEdit());
+$("rename-save").addEventListener("click", submitRenameEdit);
+$("rename-cancel").addEventListener("click", cancelRenameEdit);
+$("rename-input").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    ev.preventDefault();
+    ev.stopPropagation();
+    submitRenameEdit();
+  } else if (ev.key === "Escape") {
+    ev.preventDefault();
+    ev.stopPropagation();
+    cancelRenameEdit();
+  }
+});
 
 $("zoom-in").addEventListener("click", () => zoomAtPlayhead(0.5));
 $("zoom-out").addEventListener("click", () => zoomAtPlayhead(2));
@@ -3085,6 +3260,13 @@ document.addEventListener("keydown", (ev) => {
     return;
   }
   if (settingsOpen) return; // player shortcuts are inert behind the page
+  if (renameTargetClip) {
+    if (ev.code === "Escape") {
+      ev.preventDefault();
+      cancelRenameEdit();
+    }
+    return;
+  }
   const tag = ev.target && ev.target.tagName;
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
   // "?" opens the shortcuts guide from anywhere in the player (clip or not).

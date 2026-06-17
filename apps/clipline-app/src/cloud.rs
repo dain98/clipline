@@ -430,27 +430,11 @@ fn clip_duration_ms(bytes: &[u8], markers: Option<&ClipMarkers>) -> Option<i64> 
 }
 
 fn source_type(path: &Path) -> String {
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if name.contains("session") {
-        "session"
-    } else if name.contains("trim") {
-        "trim"
-    } else {
-        "replay"
-    }
-    .to_string()
+    crate::library::clip_kind_for_path(path)
 }
 
 fn clip_title(path: &Path) -> String {
-    path.file_stem()
-        .or_else(|| path.file_name())
-        .map(|value| value.to_string_lossy().to_string())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "Clipline clip".to_string())
+    crate::library::clip_title_for_path(path)
 }
 
 fn local_clip_id(path: &Path, meta: &std::fs::Metadata, checksum: &str) -> Result<String, String> {

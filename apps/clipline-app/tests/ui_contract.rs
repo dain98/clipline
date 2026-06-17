@@ -71,6 +71,11 @@ fn review_player_owns_all_controls() {
         "id=\"keys-help\"",
         "id=\"keys-dialog\"",
         "id=\"keys-close\"",
+        "id=\"rename-clip\"",
+        "id=\"rename-input\"",
+        "id=\"rename-status\"",
+        "id=\"rename-save\"",
+        "id=\"rename-cancel\"",
         "id=\"delete-clip\"",
         "id=\"ruler\"",
         "id=\"overview\"",
@@ -172,10 +177,11 @@ fn review_player_owns_all_controls() {
         "id=\"set-replay-disk-ack\"",
         "data-tab=\"cloud\"",
         "data-section=\"cloud\"",
+        "id=\"cloud-connect-fields\"",
         "id=\"cloud-host-url\"",
         "id=\"cloud-username\"",
         "id=\"cloud-password\"",
-        "id=\"cloud-http-confirm\"",
+        "id=\"cloud-http-warning\"",
         "id=\"cloud-connect\"",
         "id=\"cloud-disconnect\"",
         "id=\"cloud-connect-status\"",
@@ -317,15 +323,28 @@ fn review_player_owns_all_controls() {
     );
     assert!(
         html.contains(">Cloud<")
-            && html.contains("I understand HTTP sends my password in plaintext")
+            && html.contains("This host uses HTTP. Your password will be sent without TLS.")
+            && !html.contains("id=\"cloud-http-confirm\"")
             && main_js().contains("cloud_connect")
             && main_js().contains("cloud_disconnect")
+            && main_js().contains("function cloudHostUsesInsecureHttp()")
+            && main_js().contains("plain_http_confirmed: cloudHostUsesInsecureHttp()")
+            && main_js().contains(
+                "$(\"cloud-host-url\").addEventListener(\"input\", syncCloudHttpWarning)"
+            )
+            && main_js().contains("$(\"cloud-connect-fields\").hidden = connected")
+            && main_js().contains("$(\"cloud-connect\").hidden = connected")
+            && main_js().contains("$(\"cloud-disconnect\").hidden = !connected")
             && main_js().contains("upload_clip_to_cloud")
             && main_js().contains("listen(\"cloud-upload-progress\"")
             && main_js().contains("navigator.clipboard.writeText(record.remote_url)")
             && app_rs().contains("crate::cloud::cloud_connect")
             && app_rs().contains("crate::cloud::upload_clip_to_cloud")
             && styles_css().contains(".cloud-connect-grid")
+            && styles_css().contains(".cloud-connect-fields")
+            && styles_css().contains(".cloud-connect-fields[hidden] { display: none; }")
+            && styles_css().contains(".cloud-http-warning")
+            && styles_css().contains(".cloud-http-warning[hidden] { display: none; }")
             && styles_css().contains(".clip .cloud"),
         "cloud settings and per-clip upload controls must stay wired"
     );
@@ -396,6 +415,25 @@ fn review_player_owns_all_controls() {
         open_folder < copy_clip && copy_clip < delete_clip,
         "copy clip must sit beside Open Folder before the destructive action"
     );
+    assert!(
+        html.contains("id=\"rename-clip\"")
+            && html.contains("id=\"rename-input\"")
+            && html.contains("id=\"rename-save\"")
+            && html.contains("id=\"rename-cancel\"")
+            && main_js().contains("invoke(\"rename_clip\"")
+            && main_js().contains("showRenameEdit")
+            && main_js().contains("submitRenameEdit")
+            && main_js().contains("replaceClipAfterRename")
+            && main_js().contains("updateCloudUploadRecordPaths")
+            && main_js().contains("restorePlaybackPosition")
+            && main_js().contains("clipDisplayTitle")
+            && main_js().contains("return editableClipTitle(clip) || \"Clipline clip\";")
+            && main_js().contains("const kind = c.kind || clipKind(c.name)")
+            && app_rs().contains("crate::library::rename_clip")
+            && styles_css().contains(".clip-title-input")
+            && styles_css().contains(".title-icon-button"),
+        "clip rename must stay inline and wired without relying only on filenames for display/kind"
+    );
 
     // Conventional ordering: transport glued to the stage, timeline below it.
     let transport = html.find("id=\"play-toggle\"").expect("play toggle");
@@ -434,6 +472,9 @@ fn review_player_owns_all_controls() {
         "id=\"next-marker\"",
         "id=\"mute-toggle\"",
         "id=\"sidebar-toggle\"",
+        "id=\"rename-clip\"",
+        "id=\"rename-save\"",
+        "id=\"rename-cancel\"",
         "id=\"open-folder\"",
         "id=\"copy-clip\"",
         "id=\"rail-save\"",
