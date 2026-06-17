@@ -20,6 +20,7 @@ pub enum EventKind {
     HeraldKill,
     BaronKill,
     ChampionKill,
+    ChampionDeath,
     Multikill,
     Ace,
     // Community-observed, not in Riot's official sample (ddoc §5a) —
@@ -54,6 +55,7 @@ pub struct GameEvent {
 pub fn is_timeline_marker(event: &GameEvent) -> bool {
     match event.kind {
         EventKind::ChampionKill => event.involves_local_player,
+        EventKind::ChampionDeath => true,
         EventKind::TurretKilled | EventKind::DragonKill | EventKind::BaronKill => true,
         _ => false,
     }
@@ -101,6 +103,7 @@ mod tests {
     fn timeline_policy_keeps_only_review_worthy_markers() {
         assert!(is_timeline_marker(&ev(EventKind::ChampionKill, true)));
         assert!(!is_timeline_marker(&ev(EventKind::ChampionKill, false)));
+        assert!(is_timeline_marker(&ev(EventKind::ChampionDeath, false)));
         assert!(is_timeline_marker(&ev(EventKind::TurretKilled, false)));
         assert!(is_timeline_marker(&ev(EventKind::DragonKill, false)));
         assert!(is_timeline_marker(&ev(EventKind::BaronKill, false)));

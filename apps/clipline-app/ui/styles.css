@@ -1639,6 +1639,7 @@ label span { white-space: nowrap; }
 
 /* whisper of category color — light glyph + matching hairline, never loud */
 .marker-kill { --mc: #ff9b9e; --hair-top: rgba(255, 97, 102, 0.6); --hair-bot: rgba(255, 97, 102, 0.12); }
+.marker-death { --mc: #b9a7c4; --hair-top: rgba(157, 138, 178, 0.55); --hair-bot: rgba(157, 138, 178, 0.12); }
 .marker-spree { --mc: #ffc77d; --hair-top: rgba(255, 174, 77, 0.6); --hair-bot: rgba(255, 174, 77, 0.12); }
 .marker-objective { --mc: #cdb2ff; --hair-top: rgba(189, 147, 255, 0.6); --hair-bot: rgba(189, 147, 255, 0.12); }
 .marker-structure { --mc: #f0cd7a; --hair-top: rgba(232, 179, 65, 0.6); --hair-bot: rgba(232, 179, 65, 0.12); }
