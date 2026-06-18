@@ -681,6 +681,12 @@ label span { white-space: nowrap; }
   min-width: 0;
 }
 
+.cloud-connect-fields {
+  display: grid;
+  gap: 8px;
+}
+.cloud-connect-fields[hidden] { display: none; }
+
 .cloud-actions {
   display: flex;
   gap: 8px;
@@ -691,10 +697,12 @@ label span { white-space: nowrap; }
   min-width: 106px;
 }
 
-.cloud-http-confirm {
-  align-items: flex-start;
+.cloud-http-warning {
   color: var(--warn);
+  font-size: 12px;
+  line-height: 1.35;
 }
+.cloud-http-warning[hidden] { display: none; }
 
 .setting-row {
   display: grid;

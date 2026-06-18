@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "clipline-app"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64 0.22.1",
  "boa_engine",
@@ -925,7 +925,9 @@ dependencies = [
  "clipline-lol",
  "clipline-mp4",
  "clipline-storage",
+ "httpmock",
  "png 0.17.16",
+ "reqwest 0.12.28",
  "rfd",
  "rodio",
  "serde",
@@ -956,8 +958,8 @@ dependencies = [
 
 [[package]]
 name = "clipline-cloud-api"
-version = "0.1.0"
-source = "git+https://github.com/dain98/clipline-cloud?rev=8b0b173c966e79b6d25f7ca726584efa4916e292#8b0b173c966e79b6d25f7ca726584efa4916e292"
+version = "1.0.0"
+source = "git+https://github.com/dain98/clipline-cloud?rev=8dd49fcf35e5bb9acbf2681cc35c8d161cbfad5d#8dd49fcf35e5bb9acbf2681cc35c8d161cbfad5d"
 dependencies = [
  "bytes",
  "clipline-cloud-api-types",
@@ -971,8 +973,8 @@ dependencies = [
 
 [[package]]
 name = "clipline-cloud-api-types"
-version = "0.1.0"
-source = "git+https://github.com/dain98/clipline-cloud?rev=8b0b173c966e79b6d25f7ca726584efa4916e292#8b0b173c966e79b6d25f7ca726584efa4916e292"
+version = "1.0.0"
+source = "git+https://github.com/dain98/clipline-cloud?rev=8dd49fcf35e5bb9acbf2681cc35c8d161cbfad5d#8dd49fcf35e5bb9acbf2681cc35c8d161cbfad5d"
 dependencies = [
  "chrono",
  "serde",
@@ -1379,7 +1381,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1646,7 +1648,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2492,7 +2494,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2510,7 +2512,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -3954,7 +3956,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3991,9 +3993,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4301,7 +4303,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4358,7 +4360,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5388,7 +5390,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6344,7 +6346,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

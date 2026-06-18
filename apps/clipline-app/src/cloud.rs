@@ -177,7 +177,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         .clone()
         .ok_or_else(|| "connect to Clipline Cloud first".to_string())?;
     let token = read_credential(&token_target)?;
-    let client = connected_client(&cloud, token)?;
+    let client = connected_client(&cloud, &token)?;
     let visibility = visibility
         .as_deref()
         .map(normalize_cloud_visibility)
@@ -218,8 +218,12 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         markers.as_ref(),
         &local_clip_id,
     )?;
-    let upload_result = client
-        .upload_mp4_bytes_with_progress(&request, &bytes, |progress| {
+    let upload_result = crate::cloud_upload::upload_mp4_bytes_with_progress(
+        &client,
+        &token,
+        &request,
+        &bytes,
+        |progress| {
             let url = cloud_clip_url(&cloud, &progress.clip_id);
             let status = if progress.status == "completed" {
                 "processing"
@@ -237,8 +241,9 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                 error: None,
             };
             let _ = app.emit(CLOUD_UPLOAD_PROGRESS_EVENT, event);
-        })
-        .await;
+        },
+    )
+    .await;
 
     let progress = match upload_result {
         Ok(progress) => progress,
@@ -326,7 +331,7 @@ fn connection_status(cloud: &CloudSettings) -> CloudConnectionStatus {
     }
 }
 
-fn connected_client(cloud: &CloudSettings, token: String) -> Result<CloudClient, String> {
+fn connected_client(cloud: &CloudSettings, token: &str) -> Result<CloudClient, String> {
     if !cloud.connected() {
         return Err("connect to Clipline Cloud first".into());
     }

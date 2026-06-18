@@ -172,10 +172,11 @@ fn review_player_owns_all_controls() {
         "id=\"set-replay-disk-ack\"",
         "data-tab=\"cloud\"",
         "data-section=\"cloud\"",
+        "id=\"cloud-connect-fields\"",
         "id=\"cloud-host-url\"",
         "id=\"cloud-username\"",
         "id=\"cloud-password\"",
-        "id=\"cloud-http-confirm\"",
+        "id=\"cloud-http-warning\"",
         "id=\"cloud-connect\"",
         "id=\"cloud-disconnect\"",
         "id=\"cloud-connect-status\"",
@@ -317,15 +318,34 @@ fn review_player_owns_all_controls() {
     );
     assert!(
         html.contains(">Cloud<")
-            && html.contains("I understand HTTP sends my password in plaintext")
+            && html.contains("This host uses HTTP. Your password will be sent without TLS.")
+            && !html.contains("id=\"cloud-http-confirm\"")
             && main_js().contains("cloud_connect")
             && main_js().contains("cloud_disconnect")
+            && main_js().contains("function cloudHostUsesInsecureHttp()")
+            && main_js().contains("plain_http_confirmed: cloudHostUsesInsecureHttp()")
+            && main_js().contains(
+                "$(\"cloud-host-url\").addEventListener(\"input\", syncCloudHttpWarning)"
+            )
+            && main_js().contains(
+                "$(\"cloud-host-url\").value = connected ? \"\" : cloud.host_url || \"\""
+            )
+            && main_js().contains(
+                "$(\"cloud-username\").value = connected ? \"\" : cloud.connected_username || \"\""
+            )
+            && main_js().contains("$(\"cloud-connect-fields\").hidden = connected")
+            && main_js().contains("$(\"cloud-connect\").hidden = connected")
+            && main_js().contains("$(\"cloud-disconnect\").hidden = !connected")
             && main_js().contains("upload_clip_to_cloud")
             && main_js().contains("listen(\"cloud-upload-progress\"")
             && main_js().contains("navigator.clipboard.writeText(record.remote_url)")
             && app_rs().contains("crate::cloud::cloud_connect")
             && app_rs().contains("crate::cloud::upload_clip_to_cloud")
             && styles_css().contains(".cloud-connect-grid")
+            && styles_css().contains(".cloud-connect-fields")
+            && styles_css().contains(".cloud-connect-fields[hidden] { display: none; }")
+            && styles_css().contains(".cloud-http-warning")
+            && styles_css().contains(".cloud-http-warning[hidden] { display: none; }")
             && styles_css().contains(".clip .cloud"),
         "cloud settings and per-clip upload controls must stay wired"
     );

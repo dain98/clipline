@@ -575,13 +575,14 @@
                 <span id="cloud-connection-status">Not connected</span>
               </div>
               <div class="cloud-connect-grid">
-                <input id="cloud-host-url" placeholder="https://clips.example.com" spellcheck="false" />
-                <input id="cloud-username" placeholder="Username" autocomplete="username" spellcheck="false" />
-                <input id="cloud-password" type="password" placeholder="Password" autocomplete="current-password" />
-                <label class="check-line cloud-http-confirm">
-                  <input id="cloud-http-confirm" type="checkbox" />
-                  <span>I understand HTTP sends my password in plaintext on this network.</span>
-                </label>
+                <div id="cloud-connect-fields" class="cloud-connect-fields">
+                  <input id="cloud-host-url" placeholder="https://clips.example.com" spellcheck="false" />
+                  <input id="cloud-username" placeholder="Username" autocomplete="username" spellcheck="false" />
+                  <input id="cloud-password" type="password" placeholder="Password" autocomplete="current-password" />
+                  <span id="cloud-http-warning" class="cloud-http-warning" hidden>
+                    This host uses HTTP. Your password will be sent without TLS.
+                  </span>
+                </div>
                 <div class="cloud-actions">
                   <button id="cloud-connect" type="button" class="primary">Connect</button>
                   <button id="cloud-disconnect" type="button">Disconnect</button>

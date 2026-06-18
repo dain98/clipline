@@ -324,19 +324,37 @@ function defaultCloudSettings() {
 }
 
 function fillCloudSettings(cloud) {
-  $("cloud-host-url").value = cloud.host_url || "";
-  $("cloud-username").value = cloud.connected_username || "";
+  const connected = Boolean(cloud.connected_user_id && cloud.credential_target);
+  $("cloud-host-url").value = connected ? "" : cloud.host_url || "";
+  $("cloud-username").value = connected ? "" : cloud.connected_username || "";
   $("cloud-password").value = "";
   $("cloud-default-visibility").value = cloud.default_visibility || "private";
   $("cloud-delete-local-after-upload").checked = !!cloud.delete_local_after_upload;
   $("cloud-auto-upload-rules").checked = false;
-  $("cloud-http-confirm").checked = false;
-  const connected = cloud.connected_user_id && cloud.credential_target;
+  syncCloudHttpWarning();
   $("cloud-connection-status").textContent = connected
     ? `Connected as ${cloud.connected_username || cloud.connected_user_id}`
     : "Not connected";
+  $("cloud-connect-fields").hidden = connected;
+  $("cloud-connect").hidden = connected;
+  $("cloud-connect").disabled = connected;
+  $("cloud-disconnect").hidden = !connected;
   $("cloud-disconnect").disabled = !connected;
   $("cloud-connect-status").textContent = "";
+}
+
+function cloudHostUsesInsecureHttp() {
+  const raw = $("cloud-host-url").value.trim();
+  if (!raw) return false;
+  try {
+    return new URL(raw).protocol === "http:";
+  } catch (_) {
+    return /^http:\/\//i.test(raw);
+  }
+}
+
+function syncCloudHttpWarning() {
+  $("cloud-http-warning").hidden = !cloudHostUsesInsecureHttp();
 }
 
 function readCloudSettings() {
@@ -2672,14 +2690,15 @@ async function reloadSettings() {
 async function connectCloud() {
   $("cloud-connect-status").textContent = "connecting...";
   $("error").textContent = "";
+  const hostUrl = $("cloud-host-url").value.trim();
   try {
     await invoke("cloud_connect", {
       request: {
-        host_url: $("cloud-host-url").value.trim(),
+        host_url: hostUrl,
         username: $("cloud-username").value.trim(),
         password: $("cloud-password").value,
         device_name: "Clipline Desktop",
-        plain_http_confirmed: $("cloud-http-confirm").checked,
+        plain_http_confirmed: cloudHostUsesInsecureHttp(),
         default_visibility: $("cloud-default-visibility").value,
       },
     });
@@ -2867,6 +2886,8 @@ for (const id of ["cloud-default-visibility", "cloud-delete-local-after-upload"]
     $("settings-status").textContent = "cloud settings changed - save to apply";
   });
 }
+$("cloud-host-url").addEventListener("input", syncCloudHttpWarning);
+$("cloud-host-url").addEventListener("change", syncCloudHttpWarning);
 $("cloud-connect").addEventListener("click", connectCloud);
 $("cloud-disconnect").addEventListener("click", disconnectCloud);
 $("set-games-auto-detect").addEventListener("change", updateGameDetectionStatus);
