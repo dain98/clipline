@@ -1031,6 +1031,7 @@ pub fn run() {
             crate::cloud::upload_clip_to_cloud,
             crate::library::list_clips,
             crate::library::delete_clip,
+            crate::library::rename_clip,
             crate::library::export_clip,
             crate::library::reveal_clip,
             crate::library::copy_clip_to_clipboard,

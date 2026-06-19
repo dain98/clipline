@@ -147,23 +147,40 @@ fn has_enabled_games(settings: &GameSettings) -> bool {
 }
 
 fn match_score(game: &CustomGameSettings, window: &CapturableWindow) -> Option<u16> {
-    let mut score = 0u16;
-    if let (Some(configured), Some(actual)) = (&game.process_path, &window.exe_path) {
-        if path_key(configured) == path_key(actual) {
-            score = score.max(300);
+    let configured_path = game
+        .process_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty());
+    let configured_exe = (!game.exe_name.trim().is_empty()).then_some(game.exe_name.trim());
+    let title_matches = !game.window_title.trim().is_empty()
+        && contains_case_insensitive(&window.title, &game.window_title);
+
+    if let Some(configured) = configured_path {
+        if window
+            .exe_path
+            .as_deref()
+            .is_some_and(|actual| path_key(configured) == path_key(actual))
+        {
+            return Some(if title_matches { 350 } else { 300 });
         }
+        if window.exe_path.is_none()
+            && configured_exe.is_some_and(|exe| exe.eq_ignore_ascii_case(window.exe_name.trim()))
+        {
+            return Some(if title_matches { 250 } else { 200 });
+        }
+        return None;
     }
-    if !game.exe_name.trim().is_empty()
-        && game.exe_name.eq_ignore_ascii_case(window.exe_name.trim())
-    {
-        score = score.max(200);
+
+    if let Some(exe) = configured_exe {
+        return exe
+            .eq_ignore_ascii_case(window.exe_name.trim())
+            .then_some(if title_matches { 250 } else { 200 });
     }
-    if !game.window_title.trim().is_empty()
-        && contains_case_insensitive(&window.title, &game.window_title)
-    {
-        score = score.max(100);
+
+    if title_matches && !is_browser_process(window) {
+        return Some(100);
     }
-    (score > 0).then_some(score)
+    None
 }
 
 fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
@@ -174,6 +191,21 @@ fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
 
 fn path_key(path: &str) -> String {
     path.trim().replace('/', "\\").to_ascii_lowercase()
+}
+
+fn is_browser_process(window: &CapturableWindow) -> bool {
+    matches!(
+        window.exe_name.trim().to_ascii_lowercase().as_str(),
+        "arc.exe"
+            | "brave.exe"
+            | "chrome.exe"
+            | "firefox.exe"
+            | "librewolf.exe"
+            | "msedge.exe"
+            | "opera.exe"
+            | "vivaldi.exe"
+            | "waterfox.exe"
+    )
 }
 
 #[cfg(test)]
@@ -260,6 +292,60 @@ mod tests {
         .expect("game should match by executable name");
 
         assert_eq!(detected.hwnd, 7);
+    }
+
+    #[test]
+    fn configured_custom_game_does_not_match_browser_tab_title() {
+        let settings = GameSettings {
+            auto_detect: true,
+            custom_games: vec![CustomGameSettings {
+                name: "Slay the Spire 2".into(),
+                window_title: "Slay the Spire 2".into(),
+                exe_name: "slay-the-spire-2.exe".into(),
+                process_path: Some(r"C:\Games\Slay the Spire 2\slay-the-spire-2.exe".into()),
+                ..game()
+            }],
+            ..GameSettings::default()
+        };
+
+        assert!(detect_active_game_from_windows(
+            &settings,
+            vec![window(
+                9,
+                "Slay the Spire 2 - Gameplay Trailer - YouTube",
+                "chrome.exe",
+                Some(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+            )],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn title_only_custom_game_ignores_browser_windows() {
+        let title_only = CustomGameSettings {
+            exe_name: String::new(),
+            process_path: None,
+            window_title: "Slay the Spire 2".into(),
+            ..game()
+        };
+        let settings = GameSettings {
+            auto_detect: true,
+            custom_games: vec![title_only],
+            ..GameSettings::default()
+        };
+
+        assert!(detect_active_game_from_windows(
+            &settings,
+            vec![window(9, "Slay the Spire 2 - YouTube", "msedge.exe", None)],
+        )
+        .is_none());
+
+        let detected = detect_active_game_from_windows(
+            &settings,
+            vec![window(10, "Slay the Spire 2", "unknown-game.exe", None)],
+        )
+        .expect("title-only custom games should still match non-browser windows");
+        assert_eq!(detected.hwnd, 10);
     }
 
     #[test]

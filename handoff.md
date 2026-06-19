@@ -234,6 +234,33 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > shape is a full-size clapper icon on the left, only for videos that are actually user-created
 > clips, likely after finishing a clearer labeling model.
 
+Recent fixes (2026-06-19):
+- Library rows now keep full title/context text visible, then fade the right edge on hover/focus
+  to reveal a borderless trash affordance. League clip metadata intentionally wraps onto its own
+  line, and the death skull marker is mask-scaled to visually match kill markers.
+- Deleting a clip updates the local library cache and storage summary instead of doing a full app
+  refresh, avoiding the visible lag spike after delete.
+- Custom game detection treats saved process path/exe identity as authoritative. Legacy
+  title-only custom rules ignore browser processes, so YouTube tabs with a game title do not start
+  game recording or trigger save-on-return behavior.
+- The native WebView/Chromium context menu is suppressed. Library rows own a small right-click
+  menu with Upload and Delete actions.
+- Library rows and the review header can rename clips. The backend validates Windows-safe MP4
+  names, renames marker sidecars with the source file, and keeps matching cloud upload records
+  pointed at the new local path.
+- Upload buttons now open an in-app dialog for title, description, and visibility before upload.
+  Nonblank descriptions are trimmed and sent on `POST /api/v1/uploads`; blank descriptions are
+  omitted. New cloud uploads no longer include deprecated marker payloads in the create request.
+- Rename/export no longer run heavy filesystem/media work on the UI path. Rename first tries to
+  move the file without unloading the player, only releasing the video handle on a Windows lock
+  retry; export returns enough metadata for the UI to insert the new clip row locally instead of
+  rescanning every clip.
+- Startup avoids the old library/probe burst: `list_clips` and `storage_status` run on the blocking
+  pool, library listing uses marker-sidecar duration instead of reading whole MP4s, and display /
+  audio / encoder probes are deferred until after first paint or Settings opens. Plain clips without
+  a marker sidecar may have unknown duration in the library list; the UI now omits that value rather
+  than showing `?`.
+
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
 instead of the primary monitor, `--lol-url <url>` to point the marker poller at a mock, and

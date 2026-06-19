@@ -10,8 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use clipline_cloud_api::{
-    sha256_hex, types::CreateMarkerRequest, ClipDetailResponse, CloudApiError, CloudClient,
-    CreateUploadRequest,
+    sha256_hex, ClipDetailResponse, CloudApiError, CloudClient, CreateUploadRequest,
 };
 use clipline_events::{ClipMarkers, GameId};
 use serde::{Deserialize, Serialize};
@@ -168,6 +167,8 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     storage: tauri::State<'_, StorageSettings>,
     path: String,
     visibility: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
 ) -> Result<CloudUploadResult, String> {
     let target = validate_clip_path(&storage, &path)?;
     let settings = state.settings();
@@ -182,6 +183,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         .as_deref()
         .map(normalize_cloud_visibility)
         .unwrap_or_else(|| cloud.default_visibility.clone());
+    let description = normalize_upload_description(description.as_deref());
 
     let bytes = tokio::fs::read(&target)
         .await
@@ -209,19 +211,21 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     emit_upload_progress(&app, &record, 0, meta.len(), None);
 
     let markers = read_markers(&target);
-    let request = create_upload_request(
-        &target,
-        &meta,
-        &bytes,
-        &checksum,
-        &visibility,
-        markers.as_ref(),
-        &local_clip_id,
-    )?;
+    let request = create_upload_request(UploadRequestInput {
+        path: &target,
+        meta: &meta,
+        bytes: &bytes,
+        checksum: &checksum,
+        visibility: &visibility,
+        markers: markers.as_ref(),
+        client_clip_id: &local_clip_id,
+        title: title.as_deref(),
+    })?;
     let upload_result = crate::cloud_upload::upload_mp4_bytes_with_progress(
         &client,
         &token,
         &request,
+        description.as_deref(),
         &bytes,
         |progress| {
             let url = cloud_clip_url(&cloud, &progress.clip_id);
@@ -340,70 +344,60 @@ fn connected_client(cloud: &CloudSettings, token: &str) -> Result<CloudClient, S
     Ok(CloudClient::with_device_token(base_url, token))
 }
 
-fn create_upload_request(
-    path: &Path,
-    meta: &std::fs::Metadata,
-    bytes: &[u8],
-    checksum: &str,
-    visibility: &str,
-    markers: Option<&ClipMarkers>,
-    client_clip_id: &str,
-) -> Result<CreateUploadRequest, String> {
-    let game = read_clip_game(path, markers);
+struct UploadRequestInput<'a> {
+    path: &'a Path,
+    meta: &'a std::fs::Metadata,
+    bytes: &'a [u8],
+    checksum: &'a str,
+    visibility: &'a str,
+    markers: Option<&'a ClipMarkers>,
+    client_clip_id: &'a str,
+    title: Option<&'a str>,
+}
+
+fn create_upload_request(input: UploadRequestInput<'_>) -> Result<CreateUploadRequest, String> {
+    let game = read_clip_game(input.path, input.markers);
     Ok(CreateUploadRequest {
-        client_clip_id: Some(client_clip_id.to_string()),
-        title: clip_title(path),
+        client_clip_id: Some(input.client_clip_id.to_string()),
+        title: upload_title(input.title, input.path),
         game_name: game.as_ref().map(|game| game.name.clone()),
         game_id: game.as_ref().map(|game| game.id.clone()),
         game_executable: None,
-        source_type: Some(source_type(path)),
-        recorded_at: meta.modified().ok().map(DateTime::<Utc>::from),
-        duration_ms: clip_duration_ms(bytes, markers),
-        file_size_bytes: meta.len(),
-        checksum_sha256: checksum.to_string(),
+        source_type: Some(source_type(input.path)),
+        recorded_at: input.meta.modified().ok().map(DateTime::<Utc>::from),
+        duration_ms: clip_duration_ms(input.bytes, input.markers),
+        file_size_bytes: input.meta.len(),
+        checksum_sha256: input.checksum.to_string(),
         container: "mp4".to_string(),
         video_codec: None,
         audio_codec: None,
         width: None,
         height: None,
         fps: None,
-        visibility: Some(visibility.to_string()),
-        markers: markers.map(marker_requests),
+        visibility: Some(input.visibility.to_string()),
+        markers: None,
     })
+}
+
+fn upload_title(title: Option<&str>, path: &Path) -> String {
+    title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| clip_title(path))
+}
+
+fn normalize_upload_description(description: Option<&str>) -> Option<String> {
+    description
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn read_markers(path: &Path) -> Option<ClipMarkers> {
     std::fs::read_to_string(path.with_extension("markers.json"))
         .ok()
         .and_then(|json| serde_json::from_str(&json).ok())
-}
-
-fn marker_requests(markers: &ClipMarkers) -> Vec<CreateMarkerRequest> {
-    markers
-        .markers
-        .iter()
-        .filter_map(|marker| {
-            let timestamp_ms = (marker.t_s * 1000.0).round();
-            if !timestamp_ms.is_finite() || timestamp_ms < 0.0 {
-                return None;
-            }
-            Some(CreateMarkerRequest {
-                kind: serde_json_string(&marker.event.kind).unwrap_or_else(|| "Other".to_string()),
-                label: marker.event.subtype.clone(),
-                timestamp_ms: timestamp_ms as i64,
-                metadata: Some(serde_json::json!({
-                    "game_id": serde_json_string(&marker.event.game_id),
-                    "actor": marker.event.actor.clone(),
-                    "victim": marker.event.victim.clone(),
-                    "assisters": marker.event.assisters.clone(),
-                    "subtype": marker.event.subtype.clone(),
-                    "game_time_s": marker.event.game_time_s,
-                    "importance": marker.event.importance,
-                    "involves_local_player": marker.event.involves_local_player,
-                })),
-            })
-        })
-        .collect()
 }
 
 fn read_clip_game(path: &Path, markers: Option<&ClipMarkers>) -> Option<crate::library::ClipGame> {

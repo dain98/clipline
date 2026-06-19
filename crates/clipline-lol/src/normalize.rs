@@ -107,7 +107,9 @@ fn base_importance(kind: EventKind) -> u8 {
         EventKind::Ace => 8,
         EventKind::Multikill | EventKind::BaronKill => 7,
         EventKind::DragonKill | EventKind::FirstBlood => 6,
-        EventKind::ChampionKill | EventKind::ChampionDeath | EventKind::InhibKilled
+        EventKind::ChampionKill
+        | EventKind::ChampionDeath
+        | EventKind::InhibKilled
         | EventKind::HeraldKill => 5,
         EventKind::TurretKilled | EventKind::FirstBrick => 4,
         EventKind::GameEnd => 3,
@@ -151,7 +153,8 @@ mod tests {
         );
         let ev = normalize(&r, "Me");
         assert_eq!(
-            ev.kind, EventKind::ChampionDeath,
+            ev.kind,
+            EventKind::ChampionDeath,
             "the local player's own death is classified distinctly from a kill"
         );
         assert!(

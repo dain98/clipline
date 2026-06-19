@@ -11,7 +11,6 @@ use std::sync::Mutex;
 
 use clipline_events::{is_timeline_marker, ClipMarker, ClipMarkers, GameId};
 use clipline_mp4::trim_keyframe_aligned_file;
-use clipline_mp4::walker::movie_duration_s;
 use clipline_storage::storage_status as read_storage_status;
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
 use windows_sys::Win32::System::DataExchange::{CloseClipboard, OpenClipboard, SetClipboardData};
@@ -96,16 +95,34 @@ pub struct StorageInfo {
 pub struct ExportedClipInfo {
     pub path: String,
     pub name: String,
+    pub size_mb: f64,
+    pub modified_unix: u64,
     pub requested_start_s: f64,
     pub requested_end_s: f64,
     pub aligned_start_s: f64,
     pub aligned_end_s: f64,
     pub duration_s: f64,
+    pub markers: Option<ClipMarkers>,
+}
+
+#[derive(serde::Serialize)]
+pub struct RenamedClipInfo {
+    pub old_path: String,
+    pub path: String,
+    pub name: String,
 }
 
 #[tauri::command]
-pub fn list_clips(settings: tauri::State<StorageSettings>) -> Result<Vec<ClipInfo>, String> {
+pub async fn list_clips(
+    settings: tauri::State<'_, StorageSettings>,
+) -> Result<Vec<ClipInfo>, String> {
     let dir = settings.clips_dir()?;
+    tauri::async_runtime::spawn_blocking(move || list_clips_from_dir(dir))
+        .await
+        .map_err(|e| format!("list clips task: {e}"))?
+}
+
+fn list_clips_from_dir(dir: PathBuf) -> Result<Vec<ClipInfo>, String> {
     let mut clips = Vec::new();
     push_clips_from(&dir, None, &mut clips)?;
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
@@ -147,12 +164,11 @@ fn push_clips_from(
         let size_mb = meta
             .map(|m| m.len() as f64 / (1024.0 * 1024.0))
             .unwrap_or(0.0);
-        // Full read is fine at clip sizes; the moov tail needs the soft-
-        // remuxed file anyway. Revisit if listing ever feels slow.
-        let duration_s = std::fs::read(&path)
-            .ok()
-            .and_then(|buf| movie_duration_s(&buf));
         let markers = read_markers(&path);
+        let duration_s = markers
+            .as_ref()
+            .map(|markers| markers.duration_s)
+            .filter(|duration| duration.is_finite() && *duration >= 0.0);
         // Prefer the session sidecar; fall back to the game named in markers
         // so clips recorded before session tagging still show an icon.
         let game = session_game
@@ -204,13 +220,83 @@ pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Res
 }
 
 #[tauri::command]
-pub fn export_clip(
+pub async fn rename_clip(
+    path: String,
+    name: String,
+    settings: tauri::State<'_, StorageSettings>,
+    state: tauri::State<'_, crate::app::RuntimeState>,
+) -> Result<RenamedClipInfo, String> {
+    let source = validate_clip_path(&settings, &path)?;
+    let target_name = normalized_clip_file_name(&name)?;
+    let old_path = path.clone();
+    let renamed = tauri::async_runtime::spawn_blocking(move || {
+        rename_clip_files(source, old_path, target_name)
+    })
+    .await
+    .map_err(|e| format!("rename clip task: {e}"))??;
+
+    update_cloud_record_paths(&state, &path, &renamed.path);
+    Ok(renamed)
+}
+
+fn rename_clip_files(
+    source: PathBuf,
+    old_path: String,
+    target_name: String,
+) -> Result<RenamedClipInfo, String> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| "clip has no containing folder".to_string())?;
+    let target = parent.join(&target_name);
+
+    let target_is_same_file = target
+        .canonicalize()
+        .is_ok_and(|candidate| candidate == source);
+    if target.exists() && !target_is_same_file {
+        return Err("a clip with that name already exists".into());
+    }
+
+    let source_markers = source.with_extension("markers.json");
+    let target_markers = target.with_extension("markers.json");
+    let target_markers_same_file = target_markers
+        .canonicalize()
+        .is_ok_and(|candidate| candidate == source_markers);
+    if source_markers.exists() && target_markers.exists() && !target_markers_same_file {
+        return Err("a marker sidecar with that name already exists".into());
+    }
+
+    if source != target {
+        std::fs::rename(&source, &target).map_err(|e| format!("rename clip: {e}"))?;
+    }
+    if source_markers.exists() && source_markers != target_markers {
+        if let Err(error) = std::fs::rename(&source_markers, &target_markers) {
+            let _ = std::fs::rename(&target, &source);
+            return Err(format!("rename clip markers: {error}"));
+        }
+    }
+
+    let new_path = display_renamed_clip_path(&old_path, &target_name, parent);
+    Ok(RenamedClipInfo {
+        old_path,
+        path: new_path,
+        name: target_name,
+    })
+}
+
+#[tauri::command]
+pub async fn export_clip(
     path: String,
     start_s: f64,
     end_s: f64,
-    settings: tauri::State<StorageSettings>,
+    settings: tauri::State<'_, StorageSettings>,
 ) -> Result<ExportedClipInfo, String> {
     let source = validate_clip_path(&settings, &path)?;
+    tauri::async_runtime::spawn_blocking(move || export_clip_file(source, start_s, end_s))
+        .await
+        .map_err(|e| format!("export clip task: {e}"))?
+}
+
+fn export_clip_file(source: PathBuf, start_s: f64, end_s: f64) -> Result<ExportedClipInfo, String> {
     let tmp = unique_temp_export_path(&source)?;
     let info = match trim_keyframe_aligned_file(&source, &tmp, start_s, end_s) {
         Ok(info) => info,
@@ -222,32 +308,54 @@ pub fn export_clip(
     let target = unique_export_path(&source, info.aligned_start_s, info.aligned_end_s)?;
     std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
 
+    let mut exported_markers = None;
     if let Some(markers) = read_markers(&source) {
         let cropped = crop_markers(&markers, info.aligned_start_s, info.aligned_end_s);
         if has_marker_sidecar_content(&cropped) {
             let json = serde_json::to_string_pretty(&cropped).map_err(|e| e.to_string())?;
             std::fs::write(target.with_extension("markers.json"), json)
                 .map_err(|e| e.to_string())?;
+            exported_markers = Some(cropped);
         }
     }
+    let meta =
+        std::fs::metadata(&target).map_err(|e| format!("read exported clip metadata: {e}"))?;
+    let modified_unix = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     Ok(ExportedClipInfo {
         path: target.display().to_string(),
         name: target
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
+        size_mb: meta.len() as f64 / (1024.0 * 1024.0),
+        modified_unix,
         requested_start_s: info.requested_start_s,
         requested_end_s: info.requested_end_s,
         aligned_start_s: info.aligned_start_s,
         aligned_end_s: info.aligned_end_s,
         duration_s: info.duration_s,
+        markers: exported_markers,
     })
 }
 
 #[tauri::command]
-pub fn storage_status(settings: tauri::State<StorageSettings>) -> Result<StorageInfo, String> {
-    let status = read_storage_status(&settings.clips_dir()?, settings.quota_bytes())
-        .map_err(|e| e.to_string())?;
+pub async fn storage_status(
+    settings: tauri::State<'_, StorageSettings>,
+) -> Result<StorageInfo, String> {
+    let dir = settings.clips_dir()?;
+    let quota_bytes = settings.quota_bytes();
+    tauri::async_runtime::spawn_blocking(move || storage_status_for_dir(dir, quota_bytes))
+        .await
+        .map_err(|e| format!("storage status task: {e}"))?
+}
+
+fn storage_status_for_dir(dir: PathBuf, quota_bytes: Option<u64>) -> Result<StorageInfo, String> {
+    let status = read_storage_status(&dir, quota_bytes).map_err(|e| e.to_string())?;
     Ok(StorageInfo {
         clip_count: status.clip_count,
         total_bytes: status.total_bytes,
@@ -304,6 +412,79 @@ fn open_folder_path(dir: &Path) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("open explorer: {e}"))?;
     Ok(())
+}
+
+fn normalized_clip_file_name(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("clip name cannot be empty".into());
+    }
+    if trimmed.contains(['/', '\\']) {
+        return Err("clip name cannot contain folders".into());
+    }
+    if trimmed
+        .chars()
+        .any(|ch| ch.is_ascii_control() || matches!(ch, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+    {
+        return Err("clip name contains a character Windows cannot use in filenames".into());
+    }
+
+    let suffix = trimmed
+        .get(trimmed.len().saturating_sub(4)..)
+        .filter(|suffix| suffix.eq_ignore_ascii_case(".mp4"));
+    let stem = if suffix.is_some() {
+        &trimmed[..trimmed.len() - 4]
+    } else {
+        trimmed
+    }
+    .trim();
+    if stem.is_empty() || stem == "." || stem == ".." {
+        return Err("clip name cannot be empty".into());
+    }
+    if stem.ends_with(['.', ' ']) {
+        return Err("clip name cannot end with a dot or space".into());
+    }
+    if is_reserved_windows_file_name(stem) {
+        return Err("clip name is reserved by Windows".into());
+    }
+    Ok(format!("{stem}.mp4"))
+}
+
+fn is_reserved_windows_file_name(stem: &str) -> bool {
+    let base = stem
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (base.len() == 4
+            && (base.starts_with("COM") || base.starts_with("LPT"))
+            && base.as_bytes()[3].is_ascii_digit()
+            && base.as_bytes()[3] != b'0')
+}
+
+fn display_renamed_clip_path(old_path: &str, name: &str, fallback_parent: &Path) -> String {
+    Path::new(old_path)
+        .parent()
+        .map(|parent| parent.join(name))
+        .unwrap_or_else(|| fallback_parent.join(name))
+        .display()
+        .to_string()
+}
+
+fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, new_path: &str) {
+    if old_path == new_path {
+        return;
+    }
+    if let Err(error) = state.update_cloud(|cloud| {
+        for record in cloud.uploads.values_mut() {
+            if record.path == old_path {
+                record.path = new_path.to_string();
+            }
+        }
+    }) {
+        eprintln!("update cloud records after rename: {error}");
+    }
 }
 
 fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
@@ -684,6 +865,67 @@ mod tests {
             path.file_name().unwrap().to_string_lossy(),
             "clip_1_trim_001000_002000_1.mp4"
         );
+    }
+
+    #[test]
+    fn list_clips_uses_marker_duration_without_parsing_mp4() {
+        let dir = TestDir::new("list-marker-duration");
+        let media = dir.path().join("media");
+        let clip = media.join("broken-but-listed.mp4");
+        touch_mp4(&clip);
+        let markers = ClipMarkers {
+            recording_start_s: 0.0,
+            duration_s: 42.5,
+            player_summary: None,
+            markers: vec![marker(1.0)],
+        };
+        std::fs::write(
+            clip.with_extension("markers.json"),
+            serde_json::to_string(&markers).unwrap(),
+        )
+        .unwrap();
+
+        let clips = list_clips_from_dir(media).unwrap();
+
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].duration_s, Some(42.5));
+        assert_eq!(clips[0].markers.as_ref().unwrap().markers.len(), 1);
+    }
+
+    #[test]
+    fn normalized_clip_file_name_adds_mp4_and_preserves_valid_text() {
+        assert_eq!(
+            normalized_clip_file_name("Ranked win").unwrap(),
+            "Ranked win.mp4"
+        );
+        assert_eq!(
+            normalized_clip_file_name("Ranked win.Mp4").unwrap(),
+            "Ranked win.mp4"
+        );
+        assert_eq!(
+            normalized_clip_file_name("solo.queue.vod").unwrap(),
+            "solo.queue.vod.mp4"
+        );
+    }
+
+    #[test]
+    fn normalized_clip_file_name_rejects_paths_reserved_names_and_invalid_chars() {
+        for name in [
+            "",
+            "..",
+            "folder/clip",
+            r"folder\clip",
+            "bad:name",
+            "clip?",
+            "clip.",
+            "CON",
+            "LPT1.mp4",
+        ] {
+            assert!(
+                normalized_clip_file_name(name).is_err(),
+                "{name:?} should be rejected"
+            );
+        }
     }
 
     fn touch_mp4(path: &Path) {

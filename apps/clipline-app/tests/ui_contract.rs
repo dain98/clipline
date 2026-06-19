@@ -146,6 +146,23 @@ fn review_player_owns_all_controls() {
         "id=\"capture-region-menu\"",
         "id=\"region-align-menu\"",
         "id=\"region-display-menu\"",
+        "id=\"clip-context-menu\"",
+        "id=\"clip-menu-upload\"",
+        "id=\"clip-menu-rename\"",
+        "id=\"clip-menu-delete\"",
+        "id=\"clip-title-display\"",
+        "id=\"rename-clip\"",
+        "id=\"clip-title-edit\"",
+        "id=\"rename-input\"",
+        "id=\"rename-save\"",
+        "id=\"rename-cancel\"",
+        "id=\"upload-dialog\"",
+        "id=\"upload-title\"",
+        "id=\"upload-description\"",
+        "id=\"upload-visibility\"",
+        "id=\"upload-confirm\"",
+        "id=\"upload-cancel\"",
+        "id=\"upload-dialog-status\"",
         "id=\"set-buffer\"",
         "id=\"set-encoder\"",
         "id=\"encoder-summary\"",
@@ -337,8 +354,25 @@ fn review_player_owns_all_controls() {
             && main_js().contains("$(\"cloud-connect\").hidden = connected")
             && main_js().contains("$(\"cloud-disconnect\").hidden = !connected")
             && main_js().contains("upload_clip_to_cloud")
+            && main_js().contains("function openUploadDialog(clip)")
+            && main_js().contains("title: request.title || clipUploadDefaultTitle(clip)")
+            && main_js().contains("visibility: request.visibility || cloudSettings().default_visibility || \"private\"")
+            && html.contains("id=\"upload-dialog\"")
+            && html.contains("id=\"upload-title\"")
+            && html.contains("id=\"upload-description\"")
+            && html.contains("maxlength=\"5000\"")
+            && !html.contains("Not supported by Clipline Cloud yet")
+            && !main_js().contains("Descriptions are not supported by Clipline Cloud yet.")
+            && main_js().contains("description: request.description || null")
+            && html.contains("id=\"upload-visibility\"")
             && main_js().contains("listen(\"cloud-upload-progress\"")
             && main_js().contains("navigator.clipboard.writeText(record.remote_url)")
+            && main_js().contains("syncUploadClipButton();")
+            && main_js().contains("Connect Clipline Cloud before uploading.")
+            && main_js().contains("function clipCloudVisibility(record)")
+            && main_js().contains("CLOUD_VISIBILITY_ICONS")
+            && main_js().contains("clip-cloud-visibility")
+            && !main_js().contains(" · cloud:")
             && app_rs().contains("crate::cloud::cloud_connect")
             && app_rs().contains("crate::cloud::upload_clip_to_cloud")
             && styles_css().contains(".cloud-connect-grid")
@@ -346,8 +380,15 @@ fn review_player_owns_all_controls() {
             && styles_css().contains(".cloud-connect-fields[hidden] { display: none; }")
             && styles_css().contains(".cloud-http-warning")
             && styles_css().contains(".cloud-http-warning[hidden] { display: none; }")
-            && styles_css().contains(".clip .cloud"),
-        "cloud settings and per-clip upload controls must stay wired"
+            && styles_css().contains(".clip-cloud-visibility.public")
+            && styles_css().contains(".clip-cloud-visibility.unlisted")
+            && styles_css().contains(".clip-cloud-visibility.private")
+            && styles_css().contains(".clip .clip-title")
+            && styles_css().contains(".review-head .clip-title")
+            && styles_css().contains("#upload-dialog")
+            && html.contains("id=\"upload-clip\"")
+            && styles_css().contains(".review-actions .icon-button.uploaded"),
+        "cloud settings, upload controls, and per-clip visibility icons must stay wired"
     );
     assert!(
         html.contains(">Games<") && html.contains("Add Custom Game"),
@@ -373,6 +414,26 @@ fn review_player_owns_all_controls() {
             && main_js().contains("Takes priority over matching custom games.")
             && styles_css().contains(".game-profile-mode"),
         "supported games must render from backend game plugins, not hardcoded rows"
+    );
+    assert!(
+        main_js().contains("const leagueMeta = playerSummaryLabel")
+            && main_js().contains(
+                "const leagueSessionTitle = isLeagueFullSessionClip(c, kind) && leagueMeta"
+            )
+            && main_js().contains("? leagueMeta")
+            && main_js().contains("function clipLibraryTitle(clip, fallbackTitle)")
+            && main_js().contains("if (isLeagueClip(clip)) return fallbackTitle")
+            && main_js().contains("const clipName = clip && String(clip.name || \"\").trim()")
+            && main_js().contains("return clipName || fallbackTitle")
+            && main_js().contains("detail.className = \"league-meta\"")
+            && main_js().contains("if (leagueMeta && !leagueSessionTitle)")
+            && main_js().contains("const infoParts = []")
+            && main_js().contains(
+                "if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s))"
+            )
+            && main_js().contains("if (!leagueMeta && digest) infoParts.push(digest)")
+            && styles_css().contains(".clip .league-meta"),
+        "League rows must keep their title rules while non-League rows use actual clip names"
     );
     assert!(
         !index_html().contains("game-profile planned"),
@@ -409,9 +470,14 @@ fn review_player_owns_all_controls() {
             "{gone} was removed from the header — do not reintroduce it"
         );
     }
+    let upload_clip = html.find("id=\"upload-clip\"").expect("upload clip button");
     let open_folder = html.find("id=\"open-folder\"").expect("open folder button");
     let copy_clip = html.find("id=\"copy-clip\"").expect("copy clip button");
     let delete_clip = html.find("id=\"delete-clip\"").expect("delete clip button");
+    assert!(
+        upload_clip < open_folder,
+        "upload button must sit immediately left of Open Folder in the review header"
+    );
     assert!(
         open_folder < copy_clip && copy_clip < delete_clip,
         "copy clip must sit beside Open Folder before the destructive action"
@@ -454,6 +520,7 @@ fn review_player_owns_all_controls() {
         "id=\"next-marker\"",
         "id=\"mute-toggle\"",
         "id=\"sidebar-toggle\"",
+        "id=\"upload-clip\"",
         "id=\"open-folder\"",
         "id=\"copy-clip\"",
         "id=\"rail-save\"",
@@ -583,11 +650,17 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         css.contains("#overview-window") && css.contains(".ov-marker") && css.contains(".snapped"),
         "navigator window, marker ticks, and snap feedback must be styled"
     );
+    assert!(
+        css.contains(".marker-death .glyph.img")
+            && css.contains("-webkit-mask: var(--marker-img) center / 190% no-repeat"),
+        "death marker art has extra transparent padding and must be scaled to match kill markers"
+    );
 }
 
 #[test]
 fn no_native_browser_dialogs() {
     let js = main_js();
+    let css = styles_css();
     // window.confirm/alert render browser chrome ("tauri.localhost says") —
     // use the in-app #confirm-dialog instead.
     for banned in ["confirm(", "alert("] {
@@ -596,6 +669,21 @@ fn no_native_browser_dialogs() {
             "main.js must not call native {banned}…) — use the in-app dialog"
         );
     }
+
+    assert!(
+        js.contains("document.addEventListener(\"contextmenu\", (ev) => {")
+            && js.contains("ev.preventDefault();")
+            && js.contains("showClipContextMenu(ev, c)")
+            && js.contains("$(\"clip-menu-upload\").addEventListener(\"click\"")
+            && js.contains("$(\"clip-menu-rename\").addEventListener(\"click\"")
+            && js.contains("$(\"clip-menu-delete\").addEventListener(\"click\"")
+            && js.contains("function beginClipRename")
+            && js.contains("await invoke(\"rename_clip\"")
+            && app_rs().contains("crate::library::rename_clip")
+            && css.contains(".clip-title-edit")
+            && css.contains(".context-menu button.danger-text"),
+        "native context menus must be suppressed and library rows must expose an app-owned clip menu"
+    );
 }
 
 #[test]

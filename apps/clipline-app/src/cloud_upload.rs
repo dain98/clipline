@@ -12,6 +12,7 @@ use clipline_cloud_api::{
 };
 use reqwest::{header, StatusCode};
 use serde::Deserialize;
+use serde_json::Value;
 
 const DIRECT_PUT_MAX_ATTEMPTS: usize = 3;
 
@@ -19,6 +20,7 @@ pub async fn upload_mp4_bytes_with_progress<F>(
     client: &CloudClient,
     device_token: &str,
     request: &CreateUploadRequest,
+    description: Option<&str>,
     bytes: &[u8],
     mut on_progress: F,
 ) -> CloudApiResult<UploadProgressResponse>
@@ -33,7 +35,7 @@ where
         .unwrap_or(false);
     let http = reqwest::Client::new();
 
-    let upload = client.create_upload(request).await?;
+    let upload = create_upload(client, &http, device_token, request, description).await?;
     match upload_existing(
         client,
         &http,
@@ -47,7 +49,7 @@ where
     {
         Ok(progress) => Ok(progress),
         Err(DirectUploadError::Fallback(_reason)) => {
-            let upload = client.create_upload(request).await?;
+            let upload = create_upload(client, &http, device_token, request, description).await?;
             upload_existing(
                 client,
                 &http,
@@ -62,6 +64,59 @@ where
         }
         Err(error) => Err(error.into_cloud_error()),
     }
+}
+
+async fn create_upload(
+    client: &CloudClient,
+    http: &reqwest::Client,
+    device_token: &str,
+    request: &CreateUploadRequest,
+    description: Option<&str>,
+) -> CloudApiResult<CreateUploadResponse> {
+    let body = create_upload_body(request, description)?;
+
+    let url = client.base_url().join("api/v1/uploads")?;
+    let response = http
+        .post(url)
+        .bearer_auth(device_token)
+        .json(&body)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let message = response
+            .json::<ErrorResponse>()
+            .await
+            .map(|body| body.error)
+            .unwrap_or_else(|_| status.to_string());
+        return Err(CloudApiError::Api { status, message });
+    }
+    Ok(response.json::<CreateUploadResponse>().await?)
+}
+
+fn create_upload_body(
+    request: &CreateUploadRequest,
+    description: Option<&str>,
+) -> CloudApiResult<Value> {
+    let mut body = serde_json::to_value(request)
+        .map_err(|e| CloudApiError::InvalidUpload(format!("serialize upload request: {e}")))?;
+    let Value::Object(ref mut map) = body else {
+        return Err(CloudApiError::InvalidUpload(
+            "upload request did not serialize to an object".to_string(),
+        ));
+    };
+    map.remove("markers");
+    if let Some(description) = normalized_description(description) {
+        map.insert(
+            "description".to_string(),
+            Value::String(description.to_string()),
+        );
+    }
+    Ok(body)
+}
+
+fn normalized_description(description: Option<&str>) -> Option<&str> {
+    description.map(str::trim).filter(|value| !value.is_empty())
 }
 
 async fn upload_existing<F>(
@@ -535,6 +590,32 @@ mod tests {
 
     const TOKEN: &str = "device-token";
 
+    #[test]
+    fn create_upload_body_includes_description_and_omits_markers() {
+        let bytes = b"abc";
+        let mut request = upload_request(bytes);
+        request.markers = Some(vec![clipline_cloud_api::types::CreateMarkerRequest {
+            kind: "ChampionKill".to_string(),
+            label: Some("kill".to_string()),
+            timestamp_ms: 1200,
+            metadata: Some(json!({ "deprecated": true })),
+        }]);
+
+        let body = create_upload_body(&request, Some("  Useful context  ")).unwrap();
+
+        assert_eq!(body["description"], "Useful context");
+        assert_eq!(body["checksum_sha256"], sha256_hex(bytes));
+        assert!(body.get("markers").is_none());
+    }
+
+    #[test]
+    fn create_upload_body_omits_blank_description() {
+        let body = create_upload_body(&upload_request(b"abc"), Some(" \t\n ")).unwrap();
+
+        assert!(body.get("description").is_none());
+        assert!(body.get("markers").is_none());
+    }
+
     #[tokio::test]
     async fn discovery_without_direct_s3_uses_proxy_chunked_path() {
         let bytes = b"abcdef";
@@ -560,10 +641,16 @@ mod tests {
         let complete = mount_complete(&cloud, "u1", "c1", bytes.len() as u64);
 
         let client = test_client(&cloud);
-        let progress =
-            upload_mp4_bytes_with_progress(&client, TOKEN, &upload_request(bytes), bytes, |_| {})
-                .await
-                .expect("upload");
+        let progress = upload_mp4_bytes_with_progress(
+            &client,
+            TOKEN,
+            &upload_request(bytes),
+            None,
+            bytes,
+            |_| {},
+        )
+        .await
+        .expect("upload");
 
         assert_eq!(progress.status, "completed");
         part1.assert();
@@ -604,10 +691,16 @@ mod tests {
         });
 
         let client = test_client(&cloud);
-        let progress =
-            upload_mp4_bytes_with_progress(&client, TOKEN, &upload_request(bytes), bytes, |_| {})
-                .await
-                .expect("upload");
+        let progress = upload_mp4_bytes_with_progress(
+            &client,
+            TOKEN,
+            &upload_request(bytes),
+            None,
+            bytes,
+            |_| {},
+        )
+        .await
+        .expect("upload");
 
         assert_eq!(progress.status, "completed");
         single_put.assert();
@@ -643,10 +736,16 @@ mod tests {
         let complete = mount_complete(&cloud, "u1", "c1", bytes.len() as u64);
 
         let client = test_client(&cloud);
-        let progress =
-            upload_mp4_bytes_with_progress(&client, TOKEN, &upload_request(bytes), bytes, |_| {})
-                .await
-                .expect("upload");
+        let progress = upload_mp4_bytes_with_progress(
+            &client,
+            TOKEN,
+            &upload_request(bytes),
+            None,
+            bytes,
+            |_| {},
+        )
+        .await
+        .expect("upload");
 
         assert_eq!(progress.status, "completed");
         for mock in [presign1, presign2, put1, put2, ack1, ack2, complete] {
@@ -672,10 +771,16 @@ mod tests {
         let expired_put = mount_s3_put(&s3, "/expired-part-1", "abc", "\"expired\"", 403);
 
         let client = test_client(&cloud);
-        let error =
-            upload_mp4_bytes_with_progress(&client, TOKEN, &upload_request(bytes), bytes, |_| {})
-                .await
-                .expect_err("expired presign");
+        let error = upload_mp4_bytes_with_progress(
+            &client,
+            TOKEN,
+            &upload_request(bytes),
+            None,
+            bytes,
+            |_| {},
+        )
+        .await
+        .expect_err("expired presign");
 
         assert!(
             error
@@ -708,10 +813,16 @@ mod tests {
         });
 
         let client = test_client(&cloud);
-        let error =
-            upload_mp4_bytes_with_progress(&client, TOKEN, &upload_request(bytes), bytes, |_| {})
-                .await
-                .expect_err("etag missing");
+        let error = upload_mp4_bytes_with_progress(
+            &client,
+            TOKEN,
+            &upload_request(bytes),
+            None,
+            bytes,
+            |_| {},
+        )
+        .await
+        .expect_err("etag missing");
 
         assert!(
             error
@@ -740,10 +851,16 @@ mod tests {
         mount_ack(&cloud, "u1", 1, "\"etag-1\"", "abc", 409);
 
         let client = test_client(&cloud);
-        let error =
-            upload_mp4_bytes_with_progress(&client, TOKEN, &upload_request(bytes), bytes, |_| {})
-                .await
-                .expect_err("ack conflict");
+        let error = upload_mp4_bytes_with_progress(
+            &client,
+            TOKEN,
+            &upload_request(bytes),
+            None,
+            bytes,
+            |_| {},
+        )
+        .await
+        .expect_err("ack conflict");
 
         assert!(error.to_string().contains("Retry the upload"), "{error}");
     }
@@ -767,10 +884,16 @@ mod tests {
         mount_complete(&cloud, "u1", "c1", bytes.len() as u64);
 
         let client = test_client(&cloud);
-        let progress =
-            upload_mp4_bytes_with_progress(&client, TOKEN, &upload_request(bytes), bytes, |_| {})
-                .await
-                .expect("upload");
+        let progress = upload_mp4_bytes_with_progress(
+            &client,
+            TOKEN,
+            &upload_request(bytes),
+            None,
+            bytes,
+            |_| {},
+        )
+        .await
+        .expect("upload");
 
         assert_eq!(progress.status, "completed");
         part1.assert();
@@ -783,13 +906,21 @@ mod tests {
         let cloud = MockServer::start();
         let s3 = MockServer::start();
         mount_discovery(&cloud, true);
-        mount_chunked_create(
-            &cloud,
-            "u1",
-            "c1",
-            Some("/api/v1/uploads/u1/parts/{part_number}/direct-presign"),
-            Some("/api/v1/uploads/u1/parts/{part_number}/direct-ack"),
-        );
+        let create = cloud.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/uploads")
+                .json_body_partial(r#"{"description":"Retry context"}"#);
+            then.status(200).json_body(json!({
+                "clip_id": "c1",
+                "upload_id": "u1",
+                "mode": "chunked",
+                "part_size_bytes": 3,
+                "single_put_url": null,
+                "parts_url_template": "/api/v1/uploads/u1/parts/{part_number}",
+                "direct_part_presign_url_template": "/api/v1/uploads/u1/parts/{part_number}/direct-presign",
+                "direct_part_ack_url_template": "/api/v1/uploads/u1/parts/{part_number}/direct-ack"
+            }));
+        });
         mount_progress(
             &cloud,
             "u1",
@@ -805,12 +936,19 @@ mod tests {
         let complete = mount_complete(&cloud, "u1", "c1", bytes.len() as u64);
 
         let client = test_client(&cloud);
-        let progress =
-            upload_mp4_bytes_with_progress(&client, TOKEN, &upload_request(bytes), bytes, |_| {})
-                .await
-                .expect("fallback upload");
+        let progress = upload_mp4_bytes_with_progress(
+            &client,
+            TOKEN,
+            &upload_request(bytes),
+            Some("  Retry context  "),
+            bytes,
+            |_| {},
+        )
+        .await
+        .expect("fallback upload");
 
         assert_eq!(progress.clip_id, "c1");
+        create.assert_hits(2);
         failed_put.assert();
         proxy_part1.assert();
         proxy_part2.assert();

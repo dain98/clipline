@@ -5,6 +5,9 @@ const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 const appWindow = window.__TAURI__.window.getCurrentWindow();
 const $ = (id) => document.getElementById(id);
+const afterNextPaint = () => new Promise((resolve) => {
+  requestAnimationFrame(() => requestAnimationFrame(resolve));
+});
 
 // Custom window chrome — the native title bar is disabled (decorations: false).
 $("win-min").addEventListener("click", async () => {
@@ -86,8 +89,14 @@ let previewWindowMovePaused = false;
 let previewWindowMoveTimer = 0;
 let previewWindowMoveStart = null;
 let displays = [];
+let displaysLoaded = false;
+let displaysLoadPromise = null;
 let audioDevices = { outputs: [], inputs: [] };
+let audioDevicesLoaded = false;
+let audioDevicesLoadPromise = null;
 let videoEncoders = [];
+let videoEncodersLoaded = false;
+let videoEncodersLoadPromise = null;
 let gamePlugins = [];
 let gamePluginSettings = {};
 let customGames = [];
@@ -102,6 +111,9 @@ let regionState = { display_id: null, x: 0, y: 0, width: 1920, height: 1080 };
 let regionLayout = null;
 let regionDrag = null;
 let regionMenuDisplayId = null;
+let clipContextTarget = null;
+let uploadDialogClip = null;
+let renamePending = false;
 let micTestRunning = false;
 let micAudioContext = null;
 let micAudioCursor = 0;
@@ -220,6 +232,8 @@ function fillSettings(s) {
   renderCustomGames();
   updateGameDetectionStatus();
   updateCaptureStatus();
+  syncUploadClipButton();
+  if (clipsCache.length) renderClips();
 }
 
 function readSettings() {
@@ -1129,6 +1143,7 @@ function setRegion(next) {
 async function loadDisplays() {
   try {
     displays = await invoke("list_displays");
+    displaysLoaded = true;
     if (!regionState.display_id && displays.length) {
       regionState = regionForDisplay(primaryDisplay());
     }
@@ -1140,13 +1155,34 @@ async function loadDisplays() {
   }
 }
 
+async function ensureDisplaysLoaded() {
+  if (displaysLoaded) return;
+  if (!displaysLoadPromise) {
+    displaysLoadPromise = loadDisplays().finally(() => {
+      displaysLoadPromise = null;
+    });
+  }
+  await displaysLoadPromise;
+}
+
 async function loadAudioDevices() {
   try {
     audioDevices = await invoke("list_audio_devices");
+    audioDevicesLoaded = true;
     renderAudioDeviceSelects();
   } catch (e) {
     $("error").textContent = e;
   }
+}
+
+async function ensureAudioDevicesLoaded() {
+  if (audioDevicesLoaded) return;
+  if (!audioDevicesLoadPromise) {
+    audioDevicesLoadPromise = loadAudioDevices().finally(() => {
+      audioDevicesLoadPromise = null;
+    });
+  }
+  await audioDevicesLoadPromise;
 }
 
 // Probe which codecs this WebView2 can actually decode and report them so
@@ -1170,12 +1206,23 @@ async function loadVideoEncoders() {
   }
   try {
     videoEncoders = await invoke("probe_encoders");
+    videoEncodersLoaded = true;
   } catch (e) {
     videoEncoders = [];
     $("error").textContent = e;
   }
   renderVideoEncoderSelect();
   if (currentSettings) syncRecordingFields();
+}
+
+async function ensureVideoEncodersLoaded() {
+  if (videoEncodersLoaded) return;
+  if (!videoEncodersLoadPromise) {
+    videoEncodersLoadPromise = loadVideoEncoders().finally(() => {
+      videoEncodersLoadPromise = null;
+    });
+  }
+  await videoEncodersLoadPromise;
 }
 
 async function loadGamePlugins() {
@@ -1518,17 +1565,28 @@ function endRegionDrag() {
 function showRegionMenu(ev, displayId = null) {
   ev.preventDefault();
   ev.stopPropagation();
+  hideClipContextMenu();
   regionMenuDisplayId = displayId || (activeDisplay() && activeDisplay().id);
   renderDisplayMenu();
   const menu = $("capture-region-menu");
   menu.hidden = false;
-  menu.style.left = `${ev.clientX}px`;
-  menu.style.top = `${ev.clientY}px`;
+  positionContextMenu(menu, ev.clientX, ev.clientY);
 }
 
 function hideRegionMenu() {
   $("capture-region-menu").hidden = true;
   regionMenuDisplayId = null;
+}
+
+function positionContextMenu(menu, x, y) {
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+  const width = menu.offsetWidth || 160;
+  const height = menu.offsetHeight || 80;
+  const left = Math.min(Math.max(6, x), Math.max(6, window.innerWidth - width - 6));
+  const top = Math.min(Math.max(6, y), Math.max(6, window.innerHeight - height - 6));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
 }
 
 async function refresh() {
@@ -1562,14 +1620,19 @@ async function refreshMemoryUsage() {
   }
 }
 
-async function refreshClips() {
+async function refreshClips(preferredCurrentPath = null) {
   clipsCache = await invoke("list_clips");
-  renderClips();
   if (currentClip) {
-    const fresh = clipsCache.find((clip) => clip.path === currentClip.path);
-    if (fresh) currentClip = fresh;
-    else closeReview();
+    const currentPath = preferredCurrentPath || currentClip.path;
+    const fresh = clipsCache.find((clip) => clip.path === currentPath);
+    if (fresh) {
+      currentClip = fresh;
+      $("pname").textContent = fresh.name;
+    } else {
+      closeReview();
+    }
   }
+  renderClips();
 }
 
 function cloudSettings() {
@@ -1586,24 +1649,43 @@ function clipCloudRecord(clip) {
   return Object.values(uploads).find((record) => record && record.path === clip.path) || null;
 }
 
-function cloudStatusLabel(record) {
-  if (!record) return "not uploaded";
-  switch (record.upload_status) {
-    case "queued": return "queued";
-    case "uploading": return "uploading";
-    case "processing": return "processing";
-    case "uploaded_private": return "private";
-    case "uploaded_public": return "public";
-    case "failed": return "failed";
-    case "retrying": return "retrying";
-    default: return "not uploaded";
-  }
+function clipCloudVisibility(record) {
+  if (!record || !String(record.upload_status || "").startsWith("uploaded_")) return null;
+  const visibility = String(record.visibility || "").toLowerCase();
+  if (["public", "unlisted", "private"].includes(visibility)) return visibility;
+  return record.upload_status === "uploaded_private" ? "private" : "public";
+}
+
+function clipNameStem(name) {
+  return String(name || "").replace(/\.mp4$/i, "").trim();
+}
+
+function clipUploadDefaultTitle(clip) {
+  return clipNameStem(clip && clip.name) || "Untitled clip";
 }
 
 function upsertCloudUploadRecord(record) {
   if (!record || !record.local_clip_id) return;
   const cloud = cloudSettings();
   cloud.uploads = { ...(cloud.uploads || {}), [record.local_clip_id]: record };
+  if (currentSettings) currentSettings.cloud = cloud;
+}
+
+function replaceCloudRecordPath(oldPath, newPath) {
+  const cloud = cloudSettings();
+  const uploads = cloud.uploads || {};
+  let changed = false;
+  const nextUploads = {};
+  for (const [key, record] of Object.entries(uploads)) {
+    if (record && record.path === oldPath) {
+      nextUploads[key] = { ...record, path: newPath };
+      changed = true;
+    } else {
+      nextUploads[key] = record;
+    }
+  }
+  if (!changed) return;
+  cloud.uploads = nextUploads;
   if (currentSettings) currentSettings.cloud = cloud;
 }
 
@@ -1636,6 +1718,20 @@ const CLIP_KIND_LABELS = {
   replay: "Buffered replay",
   session: "Full session",
   trim: "Trimmed export",
+};
+const LEAGUE_OF_LEGENDS_ID = "league_of_legends";
+const CLOUD_VISIBILITY_ICONS = {
+  public:
+    '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3z"/></svg>',
+  unlisted:
+    '<svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.1.5l2.4-2.4a5 5 0 0 0-7.1-7.1L11 5.4"/><path d="M14 11a5 5 0 0 0-7.1-.5L4.5 12.9a5 5 0 0 0 7.1 7.1L13 18.6"/></svg>',
+  private:
+    '<svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>',
+};
+const CLOUD_VISIBILITY_LABELS = {
+  public: "Public cloud clip",
+  unlisted: "Unlisted cloud clip",
+  private: "Private cloud clip",
 };
 
 // Neutral fallback when a game has no extractable/bundled icon. Static markup.
@@ -1676,6 +1772,31 @@ function clipGameIcon(clip) {
   return null;
 }
 
+function isLeagueFullSessionClip(clip, kind) {
+  return kind === "session" && isLeagueClip(clip);
+}
+
+function isLeagueClip(clip) {
+  return clip && clip.game && clip.game.id === LEAGUE_OF_LEGENDS_ID;
+}
+
+function clipLibraryTitle(clip, fallbackTitle) {
+  if (isLeagueClip(clip)) return fallbackTitle;
+  const clipName = clip && String(clip.name || "").trim();
+  return clipName || fallbackTitle;
+}
+
+function cloudVisibilityEl(record) {
+  const visibility = clipCloudVisibility(record);
+  if (!visibility) return null;
+  const el = document.createElement("span");
+  el.className = `clip-cloud-visibility ${visibility}`;
+  el.title = CLOUD_VISIBILITY_LABELS[visibility];
+  el.setAttribute("aria-label", CLOUD_VISIBILITY_LABELS[visibility]);
+  el.innerHTML = CLOUD_VISIBILITY_ICONS[visibility]; // static markup, safe
+  return el;
+}
+
 // Clip names come from disk; build rows with textContent, never innerHTML.
 function clipRow(c) {
   const el = document.createElement("div");
@@ -1714,36 +1835,39 @@ function clipRow(c) {
   lead.appendChild(icon);
 
   const meta = document.createElement("div");
+  meta.className = "clip-text";
+  const title = document.createElement("div");
+  title.className = "clip-title";
   const name = document.createElement("div");
   name.className = "name";
   const when = new Date(c.modified_unix * 1000);
-  name.textContent = formatClipTitle(
+  const markers = c.markers ? c.markers.markers : [];
+  const leagueMeta = playerSummaryLabel(c.markers ? c.markers.player_summary : null);
+  const leagueSessionTitle = isLeagueFullSessionClip(c, kind) && leagueMeta;
+  const fallbackTitle = formatClipTitle(
     when.getMonth(), when.getDate(), when.getHours(), when.getMinutes());
+  name.textContent = leagueSessionTitle
+    ? leagueMeta
+    : clipLibraryTitle(c, fallbackTitle);
+  title.appendChild(name);
+  const cloudVisibility = cloudVisibilityEl(cloudRecord);
+  if (cloudVisibility) title.appendChild(cloudVisibility);
   const info = document.createElement("div");
   info.className = "info";
-  const markers = c.markers ? c.markers.markers : [];
-  const digest = playerSummaryLabel(c.markers ? c.markers.player_summary : null) ||
-    markerDigest(markers);
-  info.textContent =
-    `${fmtDur(c.duration_s)} · ${c.size_mb.toFixed(1)} MB · ` +
-    fmtAgo(Date.now() / 1000, c.modified_unix) +
-    (digest ? ` · ${digest}` : "") +
-    (cloudRecord ? ` · cloud: ${cloudStatusLabel(cloudRecord)}` : "");
-  meta.append(name, info);
-
-  const cloud = document.createElement("button");
-  cloud.className = "cloud";
-  cloud.title = cloudRecord && cloudRecord.remote_url
-    ? "Copy cloud link"
-    : "Upload to Clipline Cloud";
-  const busy = cloudRecord && ["queued", "uploading", "processing", "retrying"].includes(cloudRecord.upload_status);
-  const uploaded = cloudRecord && cloudRecord.remote_url && cloudRecord.upload_status.startsWith("uploaded_");
-  cloud.classList.toggle("uploaded", !!uploaded);
-  cloud.classList.toggle("busy", !!busy);
-  cloud.disabled = busy || (!uploaded && !cloudConnected());
-  cloud.innerHTML = uploaded
-    ? '<svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.5-3.5a3 3 0 1 1 4.2 4.2l-1.5 1.5-1.4-1.4 1.5-1.5a1 1 0 1 0-1.4-1.4L12 13.4a1 1 0 0 1-1.4 0zm2.8-2.8a1 1 0 0 1 0 1.4l-3.5 3.5a3 3 0 1 1-4.2-4.2l1.5-1.5 1.4 1.4-1.5 1.5a1 1 0 1 0 1.4 1.4L12 10.6a1 1 0 0 1 1.4 0z"/></svg>'
-    : '<svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>';
+  const digest = markerDigest(markers);
+  const infoParts = [];
+  if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s));
+  infoParts.push(`${c.size_mb.toFixed(1)} MB`);
+  infoParts.push(fmtAgo(Date.now() / 1000, c.modified_unix));
+  if (!leagueMeta && digest) infoParts.push(digest);
+  info.textContent = infoParts.join(" · ");
+  meta.append(title, info);
+  if (leagueMeta && !leagueSessionTitle) {
+    const detail = document.createElement("div");
+    detail.className = "league-meta";
+    detail.textContent = leagueMeta;
+    meta.appendChild(detail);
+  }
 
   const del = document.createElement("button");
   del.className = "del";
@@ -1757,21 +1881,18 @@ function clipRow(c) {
     if (currentClip && currentClip.path === c.path) closeReview();
     else openClip(c);
   });
+  el.addEventListener("contextmenu", (ev) => showClipContextMenu(ev, c));
   del.addEventListener("click", (ev) => {
     ev.stopPropagation();
     deleteClip(c.path);
   });
-  cloud.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    if (uploaded) copyCloudUrl(cloudRecord);
-    else uploadClipToCloud(c);
-  });
 
-  el.append(lead, meta, cloud, del);
+  el.append(lead, meta, del);
   return el;
 }
 
 function renderClips() {
+  syncUploadClipButton();
   const root = $("clips");
   root.replaceChildren();
   if (!clipsCache.length) {
@@ -1790,7 +1911,166 @@ function renderClips() {
   }
 }
 
+function showClipContextMenu(ev, clip) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  hideRegionMenu();
+  clipContextTarget = clip;
+  const record = clipCloudRecord(clip);
+  const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
+  const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
+  const upload = $("clip-menu-upload");
+  upload.textContent = uploaded ? "Copy cloud link" : "Upload";
+  upload.disabled = busy || (!uploaded && !cloudConnected());
+  const menu = $("clip-context-menu");
+  menu.hidden = false;
+  positionContextMenu(menu, ev.clientX, ev.clientY);
+}
+
+function hideClipContextMenu() {
+  const menu = $("clip-context-menu");
+  if (menu) menu.hidden = true;
+  clipContextTarget = null;
+}
+
+function clipContextRecord() {
+  return clipContextTarget ? clipCloudRecord(clipContextTarget) : null;
+}
+
 /* ---- review player ---- */
+
+// Sync the review-header upload button to the current clip's cloud state:
+// disabled when no clip is open or cloud is disconnected (and not yet uploaded),
+// a link icon once uploaded. Mirrors the per-row cloud button in clipRow().
+function syncUploadClipButton() {
+  const btn = $("upload-clip");
+  if (!btn) return;
+  const clip = currentClip;
+  const record = clip ? clipCloudRecord(clip) : null;
+  const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
+  const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
+  btn.title = uploaded ? "Copy cloud link" : "Upload to Clipline Cloud";
+  btn.classList.toggle("uploaded", !!uploaded);
+  btn.classList.toggle("busy", !!busy);
+  btn.disabled = !clip || busy || (!uploaded && !cloudConnected());
+  btn.innerHTML = uploaded
+    ? '<svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.5-3.5a3 3 0 1 1 4.2 4.2l-1.5 1.5-1.4-1.4 1.5-1.5a1 1 0 1 0-1.4-1.4L12 13.4a1 1 0 0 1-1.4 0zm2.8-2.8a1 1 0 0 1 0 1.4l-3.5 3.5a3 3 0 1 1-4.2-4.2l1.5-1.5 1.4 1.4-1.5 1.5a1 1 0 1 0 1.4 1.4L12 10.6a1 1 0 0 1 1.4 0z"/></svg>'
+    : '<svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>';
+}
+
+function setClipRenameControlsDisabled(disabled) {
+  $("rename-input").disabled = disabled;
+  $("rename-save").disabled = disabled;
+  $("rename-cancel").disabled = disabled;
+}
+
+function setClipTitleEditing(editing) {
+  $("clip-title-display").hidden = editing;
+  $("clip-title-edit").hidden = !editing;
+  if (!editing) {
+    $("rename-input").value = "";
+    setClipRenameControlsDisabled(false);
+  }
+}
+
+function beginClipRename(clip = currentClip) {
+  if (!clip) return;
+  if (!currentClip || currentClip.path !== clip.path) openClip(clip);
+  setClipTitleEditing(true);
+  $("rename-input").value = (currentClip && currentClip.path === clip.path ? currentClip.name : clip.name) || "";
+  $("rename-input").focus();
+  $("rename-input").select();
+}
+
+function cancelClipRename() {
+  if (renamePending) return;
+  setClipTitleEditing(false);
+}
+
+function restoreVideoAfterRename(path, time, shouldResume, rate) {
+  const restore = () => {
+    if (Number.isFinite(time)) {
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : time;
+      video.currentTime = Math.min(time, duration);
+    }
+    if (shouldResume) video.play().catch(() => syncPlayState());
+  };
+  video.addEventListener("loadedmetadata", restore, { once: true });
+  video.src = convertFileSrc(path);
+  video.playbackRate = rate;
+}
+
+async function releaseVideoFileHandle() {
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  await afterNextPaint();
+}
+
+function isRenameFileLockError(error) {
+  const text = String(error).toLowerCase();
+  return text.includes("access is denied")
+    || text.includes("os error 5")
+    || text.includes("used by another process");
+}
+
+async function saveClipRename(ev) {
+  ev.preventDefault();
+  if (!currentClip || renamePending) return;
+  const oldClip = currentClip;
+  const oldPath = oldClip.path;
+  const nextName = $("rename-input").value.trim();
+  if (!nextName) {
+    $("error").textContent = "Clip name cannot be empty.";
+    $("rename-input").focus();
+    return;
+  }
+
+  const resumeTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const shouldResume = !video.paused && !video.ended;
+  const rate = video.playbackRate;
+  renamePending = true;
+  setClipRenameControlsDisabled(true);
+  $("error").textContent = "";
+  $("deck-status").textContent = "renaming clip...";
+  await afterNextPaint();
+
+  let mediaReleased = false;
+  try {
+    let result;
+    try {
+      result = await invoke("rename_clip", { path: oldPath, name: nextName });
+    } catch (error) {
+      if (!isRenameFileLockError(error)) throw error;
+      mediaReleased = true;
+      await releaseVideoFileHandle();
+      result = await invoke("rename_clip", { path: oldPath, name: nextName });
+    }
+    const renamed = {
+      ...oldClip,
+      path: result.path || oldPath,
+      name: result.name || nextName,
+    };
+    clipsCache = clipsCache.map((clip) => (clip.path === oldPath ? renamed : clip));
+    replaceCloudRecordPath(result.old_path || oldPath, renamed.path);
+    currentClip = renamed;
+    $("pname").textContent = renamed.name;
+    const shownDuration = clipDuration();
+    $("pmeta").textContent =
+      `${shownDuration > 0 ? `${fmtDur(shownDuration)} · ` : ""}${renamed.size_mb.toFixed(1)} MB · ${renamed.path}`;
+    setClipTitleEditing(false);
+    renderClips();
+    $("deck-status").textContent = "clip renamed";
+    $("notice").textContent = "clip renamed";
+    if (mediaReleased) restoreVideoAfterRename(renamed.path, resumeTime, shouldResume, rate);
+  } catch (e) {
+    $("error").textContent = String(e);
+    if (mediaReleased) restoreVideoAfterRename(oldPath, resumeTime, shouldResume, rate);
+  } finally {
+    renamePending = false;
+    setClipRenameControlsDisabled(false);
+  }
+}
 
 function openClip(clip) {
   resetCapturePreviewFrame();
@@ -1798,6 +2078,7 @@ function openClip(clip) {
   $("error").textContent = "";
   $("deck-status").textContent = "";
   $("stage-note").textContent = "loading…";
+  setClipTitleEditing(false);
   $("pname").textContent = clip.name;
   $("pmeta").textContent = `${clip.size_mb.toFixed(1)} MB · ${clip.path}`;
   settingsOpen = false;
@@ -1816,6 +2097,7 @@ function openClip(clip) {
 }
 
 function closeReview() {
+  setClipTitleEditing(false);
   cancelAnimationFrame(rafId);
   video.pause();
   video.removeAttribute("src");
@@ -1857,8 +2139,9 @@ function toggleSettings(open = !settingsOpen) {
   // The clip survives the round-trip; just don't play behind the page.
   if (settingsOpen && !video.paused) video.pause();
   if (settingsOpen && !wasOpen) {
-    loadAudioDevices();
-    loadVideoEncoders();
+    ensureDisplaysLoaded().then(renderVisibleSettingsSection).catch((e) => $("error").textContent = e);
+    ensureAudioDevicesLoaded().catch((e) => $("error").textContent = e);
+    ensureVideoEncodersLoaded().catch((e) => $("error").textContent = e);
   }
   // Closing discards unsaved edits by repainting from last-saved settings.
   if (wasOpen && !settingsOpen && currentSettings) fillSettings(currentSettings);
@@ -2489,19 +2772,33 @@ function onOverviewWheel(ev) {
 /* ---- clip actions ---- */
 
 async function exportTrim() {
-  if (!currentClip) return;
+  const sourceClip = currentClip;
+  if (!sourceClip) return;
   $("error").textContent = "";
   $("export-clip").disabled = true;
   $("deck-status").textContent = "exporting…";
+  await afterNextPaint();
   try {
     const exported = await invoke("export_clip", {
-      path: currentClip.path,
+      path: sourceClip.path,
       startS: trimStart,
       endS: trimEnd,
     });
     $("deck-status").textContent =
       `exported ${exported.name} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`;
-    await refresh();
+    const exportedClip = {
+      path: exported.path,
+      name: exported.name,
+      session: sourceClip.session || null,
+      size_mb: Number(exported.size_mb) || 0,
+      modified_unix: exported.modified_unix || Math.floor(Date.now() / 1000),
+      duration_s: exported.duration_s,
+      markers: exported.markers || null,
+      game: sourceClip.game || null,
+    };
+    clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
+    renderClips();
+    await refreshStorage();
   } catch (e) {
     $("deck-status").textContent = "";
     $("error").textContent = e;
@@ -2621,8 +2918,11 @@ async function deleteClip(path = currentClip && currentClip.path) {
     await invoke("delete_clip", { path });
     $("notice").textContent = "clip deleted";
     $("error").textContent = "";
-    if (currentClip && currentClip.path === path) closeReview();
-    await refresh();
+    const wasCurrent = currentClip && currentClip.path === path;
+    clipsCache = clipsCache.filter((clip) => clip.path !== path);
+    if (wasCurrent) closeReview();
+    else renderClips();
+    await refreshStorage();
   } catch (e) {
     $("error").textContent = e;
   }
@@ -2732,14 +3032,75 @@ async function copyCloudUrl(record) {
   }
 }
 
-async function uploadClipToCloud(clip) {
-  if (!clip || !cloudConnected()) return;
+function openUploadDialog(clip) {
+  if (!clip) return;
+  if (!cloudConnected()) {
+    $("deck-status").textContent = "";
+    $("error").textContent = "Connect Clipline Cloud before uploading.";
+    syncUploadClipButton();
+    return;
+  }
+  uploadDialogClip = clip;
+  $("upload-title").value = clipUploadDefaultTitle(clip);
+  $("upload-description").value = "";
+  $("upload-visibility").value = cloudSettings().default_visibility || "private";
+  $("upload-dialog-status").textContent = "";
+  $("upload-confirm").disabled = false;
+  $("upload-cancel").disabled = false;
+  const dialog = $("upload-dialog");
+  if (!dialog.open) dialog.showModal();
+  $("upload-title").focus();
+  $("upload-title").select();
+}
+
+function closeUploadDialog() {
+  const dialog = $("upload-dialog");
+  uploadDialogClip = null;
+  $("upload-dialog-status").textContent = "";
+  $("upload-confirm").disabled = false;
+  $("upload-cancel").disabled = false;
+  if (dialog.open) dialog.close();
+}
+
+function uploadDialogRequest() {
+  const title = $("upload-title").value.trim();
+  if (!title) {
+    $("upload-dialog-status").textContent = "Title is required.";
+    $("upload-title").focus();
+    return null;
+  }
+  const description = $("upload-description").value.trim();
+  return {
+    title,
+    description,
+    visibility: $("upload-visibility").value,
+  };
+}
+
+function submitUploadDialog() {
+  const clip = uploadDialogClip;
+  const request = uploadDialogRequest();
+  if (!clip || !request) return;
+  closeUploadDialog();
+  uploadClipToCloud(clip, request);
+}
+
+async function uploadClipToCloud(clip, request = {}) {
+  if (!clip) return;
+  if (!cloudConnected()) {
+    $("deck-status").textContent = "";
+    $("error").textContent = "Connect Clipline Cloud before uploading.";
+    syncUploadClipButton();
+    return;
+  }
   $("deck-status").textContent = "uploading to cloud...";
   $("error").textContent = "";
   try {
     const result = await invoke("upload_clip_to_cloud", {
       path: clip.path,
-      visibility: cloudSettings().default_visibility || "private",
+      visibility: request.visibility || cloudSettings().default_visibility || "private",
+      title: request.title || clipUploadDefaultTitle(clip),
+      description: request.description || null,
     });
     if (result && result.record) {
       upsertCloudUploadRecord(result.record);
@@ -2923,10 +3284,38 @@ document.querySelectorAll("#region-align-menu button").forEach((button) => {
 });
 document.addEventListener("click", (ev) => {
   if (!$("capture-region-menu").contains(ev.target)) hideRegionMenu();
+  if (!$("clip-context-menu").contains(ev.target)) hideClipContextMenu();
+});
+document.addEventListener("contextmenu", (ev) => {
+  ev.preventDefault();
+  hideRegionMenu();
+  hideClipContextMenu();
+});
+$("clip-context-menu").addEventListener("contextmenu", (ev) => ev.preventDefault());
+$("clip-menu-upload").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  const record = clipContextRecord();
+  hideClipContextMenu();
+  if (!clip) return;
+  const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
+  if (uploaded) copyCloudUrl(record);
+  else openUploadDialog(clip);
+});
+$("clip-menu-rename").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  hideClipContextMenu();
+  if (clip) beginClipRename(clip);
+});
+$("clip-menu-delete").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  hideClipContextMenu();
+  if (clip) deleteClip(clip.path);
 });
 window.addEventListener("resize", () => {
   renderRegionEditor();
   updateStageFrame();
+  hideRegionMenu();
+  hideClipContextMenu();
 });
 document.querySelector(".titlebar").addEventListener("pointerdown", (ev) => {
   if (ev.button !== 0 || ev.target.closest(".titlebar-btn")) return;
@@ -3023,6 +3412,31 @@ $("export-clip").addEventListener("click", exportTrim);
 $("delete-clip").addEventListener("click", () => deleteClip());
 $("open-folder").addEventListener("click", openFolder);
 $("copy-clip").addEventListener("click", copyClipToClipboard);
+$("rename-clip").addEventListener("click", () => beginClipRename());
+$("clip-title-edit").addEventListener("submit", saveClipRename);
+$("rename-cancel").addEventListener("click", cancelClipRename);
+$("rename-input").addEventListener("keydown", (ev) => {
+  if (ev.key !== "Escape") return;
+  ev.preventDefault();
+  cancelClipRename();
+});
+$("upload-clip").addEventListener("click", () => {
+  if (!currentClip) return;
+  const record = clipCloudRecord(currentClip);
+  const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
+  if (uploaded) copyCloudUrl(record);
+  else openUploadDialog(currentClip);
+});
+$("upload-confirm").addEventListener("click", submitUploadDialog);
+$("upload-cancel").addEventListener("click", closeUploadDialog);
+$("upload-title").addEventListener("keydown", (ev) => {
+  if (ev.key !== "Enter") return;
+  ev.preventDefault();
+  submitUploadDialog();
+});
+$("upload-dialog").addEventListener("click", (ev) => {
+  if (ev.target === $("upload-dialog")) closeUploadDialog();
+});
 
 $("zoom-in").addEventListener("click", () => zoomAtPlayhead(0.5));
 $("zoom-out").addEventListener("click", () => zoomAtPlayhead(2));
@@ -3101,7 +3515,13 @@ $("timeline").addEventListener("pointercancel", endDrag);
 $("timeline").addEventListener("lostpointercapture", endDrag);
 
 document.addEventListener("keydown", (ev) => {
-  if ($("confirm-dialog").open || $("quit-dialog").open || $("update-dialog").open || $("keys-dialog").open) return; // a dialog owns the keyboard
+  if (
+    $("confirm-dialog").open ||
+    $("quit-dialog").open ||
+    $("update-dialog").open ||
+    $("upload-dialog").open ||
+    $("keys-dialog").open
+  ) return; // a dialog owns the keyboard
   if (ev.code === "Escape" && settingsOpen) {
     ev.preventDefault();
     toggleSettings(false);
@@ -3164,9 +3584,13 @@ async function loadInitialSettings() {
   if (clipsCache.length) renderClips();
 }
 loadInitialSettings().catch((e) => $("error").textContent = e);
-loadDisplays();
-loadAudioDevices();
-loadVideoEncoders();
-refresh();
-refreshMemoryUsage();
+afterNextPaint().then(() => {
+  refresh().catch((e) => $("error").textContent = e);
+  refreshMemoryUsage();
+  ensureDisplaysLoaded().catch((e) => $("error").textContent = e);
+  window.setTimeout(() => {
+    ensureAudioDevicesLoaded().catch((e) => $("error").textContent = e);
+    ensureVideoEncodersLoaded().catch((e) => $("error").textContent = e);
+  }, 750);
+});
 setInterval(refreshMemoryUsage, 2000);

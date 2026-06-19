@@ -102,10 +102,27 @@
       <div id="review-viewer" class="review-viewer">
         <header class="review-head">
           <div class="clip-title">
-            <strong id="pname"></strong>
+            <div id="clip-title-display" class="clip-title-display">
+              <strong id="pname"></strong>
+              <button id="rename-clip" class="inline-icon-button" title="Rename clip" type="button">
+                <svg class="icon-stroke" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="m16.5 3.5 4 4L7 21l-4 1 1-4L16.5 3.5z"/></svg>
+              </button>
+            </div>
+            <form id="clip-title-edit" class="clip-title-edit" hidden>
+              <input id="rename-input" type="text" spellcheck="false" autocomplete="off" />
+              <button id="rename-save" class="inline-icon-button" title="Save rename" type="submit">
+                <svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg>
+              </button>
+              <button id="rename-cancel" class="inline-icon-button" title="Discard rename" type="button">
+                <svg viewBox="0 0 24 24"><path d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6 6.4 5z"/></svg>
+              </button>
+            </form>
             <span id="pmeta"></span>
           </div>
           <div class="review-actions">
+            <button id="upload-clip" class="icon-button" title="Upload to Clipline Cloud" disabled>
+              <svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>
+            </button>
             <button id="open-folder" class="icon-button" title="Show this clip in Explorer">
               <svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
             </button>
@@ -682,6 +699,27 @@
     </div>
   </dialog>
 
+  <dialog id="upload-dialog">
+    <div class="confirm-body upload-body">
+      <strong>Upload clip</strong>
+      <label for="upload-title">Title</label>
+      <input id="upload-title" type="text" maxlength="140" autocomplete="off" spellcheck="false" />
+      <label for="upload-description">Description</label>
+      <textarea id="upload-description" rows="3" maxlength="5000" placeholder="Add context for this clip"></textarea>
+      <label for="upload-visibility">Visibility</label>
+      <select id="upload-visibility">
+        <option value="private">Private</option>
+        <option value="unlisted">Unlisted</option>
+        <option value="public">Public</option>
+      </select>
+      <span id="upload-dialog-status" class="hint"></span>
+    </div>
+    <div class="confirm-actions">
+      <button id="upload-confirm" class="primary" type="button">Upload</button>
+      <button id="upload-cancel" type="button">Cancel</button>
+    </div>
+  </dialog>
+
   <dialog id="keys-dialog" class="keys-dialog">
     <header class="keys-head">
       <strong>Keyboard shortcuts</strong>
@@ -730,6 +768,12 @@
       </section>
     </div>
   </dialog>
+
+  <div id="clip-context-menu" class="context-menu" hidden>
+    <button id="clip-menu-upload" type="button">Upload</button>
+    <button id="clip-menu-rename" type="button">Rename</button>
+    <button id="clip-menu-delete" type="button" class="danger-text">Delete</button>
+  </div>
 
   <script src="player-core.js"></script>
   <script src="main.js"></script>
