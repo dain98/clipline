@@ -974,6 +974,7 @@ pub fn run() {
         .media_dir_path()
         .unwrap_or_else(|_| service::default_clips_dir());
     let scope_dir = media_dir.clone();
+    let audio_preview_scope_dir = crate::settings::audio_preview_cache_dir();
     let (cmd_tx, event_rx) = service::spawn(
         settings
             .to_service_options(lol_url.clone())
@@ -1033,6 +1034,7 @@ pub fn run() {
             crate::library::delete_clip,
             crate::library::rename_clip,
             crate::library::export_clip,
+            crate::library::preview_clip_audio_tracks,
             crate::library::reveal_clip,
             crate::library::copy_clip_to_clipboard,
             crate::library::open_media_folder,
@@ -1053,6 +1055,18 @@ pub fn run() {
             // narrow (the default Videos/Clipline location).
             if let Err(e) = app.asset_protocol_scope().allow_directory(&scope_dir, true) {
                 eprintln!("could not scope media folder {scope_dir:?} for playback: {e}");
+            }
+            if let Err(e) = std::fs::create_dir_all(&audio_preview_scope_dir) {
+                eprintln!(
+                    "could not create audio preview cache {audio_preview_scope_dir:?}: {e}"
+                );
+            } else if let Err(e) = app
+                .asset_protocol_scope()
+                .allow_directory(&audio_preview_scope_dir, true)
+            {
+                eprintln!(
+                    "could not scope audio preview cache {audio_preview_scope_dir:?} for playback: {e}"
+                );
             }
 
             // Keep the Windows Run registry entry in sync with the user's setting.

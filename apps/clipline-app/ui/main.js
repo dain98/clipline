@@ -113,6 +113,10 @@ let regionDrag = null;
 let regionMenuDisplayId = null;
 let clipContextTarget = null;
 let uploadDialogClip = null;
+let selectedAudioTrackIds = new Set();
+let uploadSelectedAudioTrackIds = new Set();
+let audioPreviewSeq = 0;
+let currentReviewMediaPath = null;
 let renamePending = false;
 let micTestRunning = false;
 let micAudioContext = null;
@@ -147,6 +151,104 @@ function clipDuration() {
 
 function clipMarkers() {
   return currentClip && currentClip.markers ? currentClip.markers.markers : [];
+}
+
+function clipAudioTracks(clip = currentClip) {
+  return clip && clip.markers && Array.isArray(clip.markers.audio_tracks)
+    ? clip.markers.audio_tracks
+    : [];
+}
+
+function defaultAudioTrackIds(clip = currentClip) {
+  return clipAudioTracks(clip).map((track) => track.id).filter(Boolean);
+}
+
+function resetSelectedAudioTracks(clip = currentClip) {
+  selectedAudioTrackIds = new Set(defaultAudioTrackIds(clip));
+}
+
+function pruneSelectedAudioTracks(clip = currentClip) {
+  const available = new Set(defaultAudioTrackIds(clip));
+  selectedAudioTrackIds = new Set([...selectedAudioTrackIds].filter((id) => available.has(id)));
+}
+
+function selectedAudioTrackIdsForClip(clip = currentClip, selected = selectedAudioTrackIds) {
+  return clipAudioTracks(clip)
+    .filter((track) => selected.has(track.id))
+    .map((track) => track.id);
+}
+
+function audioTrackLabel(track) {
+  const label = track && track.label ? String(track.label).trim() : "";
+  if (label) return label;
+  const index = Number.isFinite(Number(track && track.track_index)) ? Number(track.track_index) + 1 : 1;
+  return `Audio ${index}`;
+}
+
+function renderAudioTrackRows(container, clip, selected, onChange) {
+  container.replaceChildren();
+  for (const track of clipAudioTracks(clip)) {
+    const row = document.createElement("label");
+    row.className = "audio-track-row";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = selected.has(track.id);
+    input.dataset.trackId = track.id || "";
+    input.addEventListener("change", () => onChange(track, input.checked));
+    const label = document.createElement("span");
+    label.className = "audio-track-label";
+    label.textContent = audioTrackLabel(track);
+    label.title = label.textContent;
+    row.append(input, label);
+    container.appendChild(row);
+  }
+}
+
+function renderAudioTrackPanel() {
+  const panel = $("audio-track-panel");
+  const list = $("audio-track-list");
+  const summary = $("audio-track-summary");
+  const tracks = clipAudioTracks();
+  panel.hidden = tracks.length === 0;
+  if (!tracks.length) {
+    list.replaceChildren();
+    summary.textContent = "";
+    return;
+  }
+  summary.textContent = `${selectedAudioTrackIdsForClip().length}/${tracks.length} selected`;
+  renderAudioTrackRows(list, currentClip, selectedAudioTrackIds, (track, checked) => {
+    if (!track.id) return;
+    if (checked) selectedAudioTrackIds.add(track.id);
+    else selectedAudioTrackIds.delete(track.id);
+    renderAudioTrackPanel();
+    applySelectedAudioTracksToPlayback();
+  });
+}
+
+function renderUploadAudioTracks(clip = uploadDialogClip) {
+  const section = $("upload-audio-section");
+  const list = $("upload-audio-list");
+  const tracks = clipAudioTracks(clip);
+  section.hidden = tracks.length === 0;
+  if (!tracks.length) {
+    list.replaceChildren();
+    return;
+  }
+  renderAudioTrackRows(list, clip, uploadSelectedAudioTrackIds, (track, checked) => {
+    if (!track.id) return;
+    if (checked) uploadSelectedAudioTrackIds.add(track.id);
+    else uploadSelectedAudioTrackIds.delete(track.id);
+    renderUploadAudioTracks(clip);
+  });
+}
+
+function audioSelectionLabel(clip = currentClip) {
+  const tracks = clipAudioTracks(clip);
+  if (!tracks.length) return "";
+  const selected = selectedAudioTrackIdsForClip(clip).length;
+  if (selected === tracks.length) return "audio: all tracks";
+  if (selected === 0) return "audio: muted";
+  return `audio: ${selected}/${tracks.length} tracks`;
 }
 
 function videoAspect() {
@@ -195,6 +297,7 @@ function fillSettings(s) {
   renderCaptureTargetSelect();
   $("set-games-auto-detect").checked = !!games.auto_detect;
   $("set-output-enabled").checked = !!audio.output_enabled;
+  $("set-audio-split-output").checked = audio.split_output_by_process === true;
   $("set-output-volume").value = String(Number.isFinite(audio.output_volume) ? audio.output_volume : 1);
   $("set-mic-enabled").checked = !!audio.mic_enabled;
   $("set-mic-volume").value = String(Number.isFinite(audio.mic_volume) ? audio.mic_volume : 1);
@@ -259,6 +362,7 @@ function readSettings() {
       output_enabled: $("set-output-enabled").checked,
       output_device_id: selectedDeviceId("set-output-device"),
       output_volume: Number($("set-output-volume").value),
+      split_output_by_process: $("set-audio-split-output").checked,
       mic_enabled: $("set-mic-enabled").checked,
       mic_device_id: selectedDeviceId("set-mic-device"),
       mic_volume: Number($("set-mic-volume").value),
@@ -299,6 +403,7 @@ function defaultAudioSettings() {
     output_enabled: true,
     output_device_id: null,
     output_volume: 1,
+    split_output_by_process: false,
     mic_enabled: false,
     mic_device_id: null,
     mic_volume: 1,
@@ -788,6 +893,7 @@ function syncAudioFields() {
   const outputEnabled = $("set-output-enabled").checked;
   $("set-output-device").disabled = !outputEnabled;
   $("set-output-volume").disabled = !outputEnabled;
+  $("set-audio-split-output").disabled = !outputEnabled;
   $("set-mic-device").disabled = micTestRunning;
   $("set-mic-volume").disabled = micTestRunning;
   $("set-mic-mono").disabled = micTestRunning;
@@ -1627,7 +1733,9 @@ async function refreshClips(preferredCurrentPath = null) {
     const fresh = clipsCache.find((clip) => clip.path === currentPath);
     if (fresh) {
       currentClip = fresh;
+      pruneSelectedAudioTracks(fresh);
       $("pname").textContent = fresh.name;
+      renderAudioTrackPanel();
     } else {
       closeReview();
     }
@@ -1996,8 +2104,66 @@ function restoreVideoAfterRename(path, time, shouldResume, rate) {
     if (shouldResume) video.play().catch(() => syncPlayState());
   };
   video.addEventListener("loadedmetadata", restore, { once: true });
+  currentReviewMediaPath = path;
   video.src = convertFileSrc(path);
   video.playbackRate = rate;
+}
+
+function setReviewVideoSource(path, options = {}) {
+  const {
+    resumeTime = 0,
+    shouldResume = false,
+    rate = video.playbackRate,
+    trimRange = null,
+  } = options;
+  const restore = () => {
+    if (trimRange) setTrim(trimRange.start, trimRange.end);
+    if (Number.isFinite(resumeTime)) {
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : resumeTime;
+      video.currentTime = Math.max(0, Math.min(resumeTime, duration));
+    }
+    if (shouldResume) video.play().catch(() => syncPlayState());
+    else syncPlayState();
+  };
+  video.addEventListener("loadedmetadata", restore, { once: true });
+  currentReviewMediaPath = path;
+  video.src = convertFileSrc(path);
+  video.playbackRate = rate;
+}
+
+async function applySelectedAudioTracksToPlayback() {
+  const clip = currentClip;
+  const tracks = clipAudioTracks(clip);
+  if (!clip || !tracks.length) return;
+
+  const selected = selectedAudioTrackIdsForClip(clip);
+  if (tracks.length <= 1 && selected.length === tracks.length && currentReviewMediaPath === clip.path) {
+    $("deck-status").textContent = audioSelectionLabel(clip);
+    return;
+  }
+
+  const seq = ++audioPreviewSeq;
+  const resumeTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const shouldResume = !video.paused && !video.ended;
+  const rate = video.playbackRate;
+  const trimRange = { start: trimStart, end: trimEnd };
+  $("deck-status").textContent = "switching audio tracks...";
+  $("error").textContent = "";
+  try {
+    const path = await invoke("preview_clip_audio_tracks", {
+      request: {
+        path: clip.path,
+        audioTrackIds: selected,
+      },
+    });
+    if (seq !== audioPreviewSeq || !currentClip || currentClip.path !== clip.path) return;
+    setReviewVideoSource(path, { resumeTime, shouldResume, rate, trimRange });
+    $("deck-status").textContent = audioSelectionLabel(clip);
+  } catch (e) {
+    if (seq !== audioPreviewSeq) return;
+    $("deck-status").textContent = "";
+    $("error").textContent = String(e);
+  }
 }
 
 async function releaseVideoFileHandle() {
@@ -2074,7 +2240,10 @@ async function saveClipRename(ev) {
 
 function openClip(clip) {
   resetCapturePreviewFrame();
+  audioPreviewSeq += 1;
   currentClip = clip;
+  currentReviewMediaPath = clip.path;
+  resetSelectedAudioTracks(clip);
   $("error").textContent = "";
   $("deck-status").textContent = "";
   $("stage-note").textContent = "loading…";
@@ -2090,24 +2259,34 @@ function openClip(clip) {
   setTrim(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
   renderOverviewMarkers();
   applyView({ start: 0, span: 0 });
+  renderAudioTrackPanel();
   renderClips();
   noteActivity();
   requestAnimationFrame(updateStageFrame);
   video.play().catch(() => syncPlayState());
+  if (clipAudioTracks(clip).length > 1) {
+    window.setTimeout(() => {
+      if (currentClip && currentClip.path === clip.path) applySelectedAudioTracksToPlayback();
+    }, 0);
+  }
 }
 
 function closeReview() {
   setClipTitleEditing(false);
+  audioPreviewSeq += 1;
   cancelAnimationFrame(rafId);
   video.pause();
   video.removeAttribute("src");
   video.load();
   currentClip = null;
+  currentReviewMediaPath = null;
+  selectedAudioTrackIds = new Set();
   resetZoom();
   updateViews();
   $("deck-status").textContent = "";
   $("stage-note").textContent = "";
   $("marker-layer").replaceChildren();
+  renderAudioTrackPanel();
   renderClips();
 }
 
@@ -3041,12 +3220,18 @@ function openUploadDialog(clip) {
     return;
   }
   uploadDialogClip = clip;
+  if (currentClip && currentClip.path === clip.path) {
+    uploadSelectedAudioTrackIds = new Set(selectedAudioTrackIdsForClip(clip));
+  } else {
+    uploadSelectedAudioTrackIds = new Set(defaultAudioTrackIds(clip));
+  }
   $("upload-title").value = clipUploadDefaultTitle(clip);
   $("upload-description").value = "";
   $("upload-visibility").value = cloudSettings().default_visibility || "private";
   $("upload-dialog-status").textContent = "";
   $("upload-confirm").disabled = false;
   $("upload-cancel").disabled = false;
+  renderUploadAudioTracks(clip);
   const dialog = $("upload-dialog");
   if (!dialog.open) dialog.showModal();
   $("upload-title").focus();
@@ -3056,6 +3241,9 @@ function openUploadDialog(clip) {
 function closeUploadDialog() {
   const dialog = $("upload-dialog");
   uploadDialogClip = null;
+  uploadSelectedAudioTrackIds = new Set();
+  $("upload-audio-section").hidden = true;
+  $("upload-audio-list").replaceChildren();
   $("upload-dialog-status").textContent = "";
   $("upload-confirm").disabled = false;
   $("upload-cancel").disabled = false;
@@ -3074,6 +3262,9 @@ function uploadDialogRequest() {
     title,
     description,
     visibility: $("upload-visibility").value,
+    audioTrackIds: clipAudioTracks(uploadDialogClip).length
+      ? selectedAudioTrackIdsForClip(uploadDialogClip, uploadSelectedAudioTrackIds)
+      : null,
   };
 }
 
@@ -3097,10 +3288,13 @@ async function uploadClipToCloud(clip, request = {}) {
   $("error").textContent = "";
   try {
     const result = await invoke("upload_clip_to_cloud", {
-      path: clip.path,
-      visibility: request.visibility || cloudSettings().default_visibility || "private",
-      title: request.title || clipUploadDefaultTitle(clip),
-      description: request.description || null,
+      request: {
+        path: clip.path,
+        visibility: request.visibility || cloudSettings().default_visibility || "private",
+        title: request.title || clipUploadDefaultTitle(clip),
+        description: request.description || null,
+        audioTrackIds: request.audioTrackIds || null,
+      },
     });
     if (result && result.record) {
       upsertCloudUploadRecord(result.record);
@@ -3214,7 +3408,7 @@ $("set-capture").addEventListener("change", () => {
   captureTargetDirty = true;
   syncCaptureFields();
 });
-for (const id of ["set-output-enabled", "set-mic-enabled"]) {
+for (const id of ["set-output-enabled", "set-audio-split-output", "set-mic-enabled"]) {
   $(id).addEventListener("change", syncAudioFields);
 }
 for (const id of ["set-output-volume", "set-mic-volume"]) {

@@ -11,9 +11,9 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-14): a working tray recorder with a first-party review player
+## Current state (2026-06-19): a working tray recorder with a first-party review player
 
-Twenty-eight milestones executed (plans in `docs/superpowers/plans/*.md` — thirty-two plan docs, all
+Thirty milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -228,6 +228,24 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) via `tauri-plugin-autostart`,
      passing `--autostart` so launches from the registry start minimized to the tray instead
      of opening the main window.
+30. **Audio track splitting v1** — Output audio is split by current Windows render-session
+     process using process-loopback capture, so game/Discord/Spotify/browser audio can land in
+     separate Opus tracks. Microphone capture remains its own track when enabled, and Clipline
+     falls back to the old mixed Output Audio track if process loopback is unavailable or the
+     experimental "app audio tracks" Capture setting is turned off; that setting defaults off.
+     Electron-style apps that emit
+     multiple child-process audio sessions are grouped by same-executable root process before
+     process-loopback capture, so Discord should appear once instead of as renderer/audio-service
+     duplicates. The
+     process-loopback activation path uses an agile completion handler and an owned `VT_BLOB`
+     activation payload; the dev machine reproduced heap corruption when that blob pointed at
+     stack memory. Saved
+     replays and full-session recordings write `audio_tracks` metadata into marker sidecars, the
+     review deck exposes an expandable track checklist, and the upload dialog lets users choose
+     which tracks to include. Upload selection is stream-copy remuxed through
+     `clipline-mp4::remux_with_selected_audio_tracks` without mutating the source clip; selecting
+     every track keeps the original bytes. New audio sessions that appear after recording starts
+     are not discovered dynamically yet.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -260,6 +278,17 @@ Recent fixes (2026-06-19):
   audio / encoder probes are deferred until after first paint or Settings opens. Plain clips without
   a marker sidecar may have unknown duration in the library list; the UI now omits that value rather
   than showing `?`.
+- Audio splitting v1 records output audio as per-process MP4 audio tracks when Windows process
+  loopback is available, keeps microphone as a separate track, carries track labels in sidecars,
+  shows review/upload checklists, and remuxes only selected tracks for cloud upload. It falls back
+  to a mixed Output Audio track if no process tracks start or the experimental Capture setting is
+  turned off; the setting defaults off. Duplicate child sessions from apps like Discord are grouped
+  by same-executable root process before capture. The Windows process-loopback path was fixed after reproducing
+  `STATUS_HEAP_CORRUPTION`: keep the activation payload as an owned
+  `VT_BLOB`, keep it alive until `GetActivateResult`, and make the completion handler agile.
+- Review audio-track checkboxes now affect playback as well as upload: WebView-native track toggles
+  are used when available, otherwise Clipline stream-copies a temporary selected-audio preview MP4
+  under `%APPDATA%\Clipline\audio-previews` and reloads the player at the same timestamp.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
@@ -277,7 +306,7 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 | `clipline-buffer` | Replay ring of GOP segments (video + N audio tracks), byte eviction, `save_window` smart mode | unit tests |
 | `clipline-storage` | Saved-clip inventory, sidecar-aware size accounting, oldest-first quota GC with protected fresh saves | unit tests |
 | `clipline-mp4` | Hybrid MP4 muxer (frag→finalized in place), **codec-aware** (H.264/HEVC/AV1: avc1/hvc1/av01 + avcC/hvcC/av1C), Rec.709 limited `colr` metadata, multi-track + Opus, box walker, `movie_duration_s`, codec-agnostic keyframe-aligned stream-copy trim | ffprobe + unit tests |
-| `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`, `window`) + the **FFmpeg subprocess encoder** (`ffmpeg`, `ffmpeg_encoder`, `framing`) + explicit SDR Rec.709 limited-range conversion/encoder metadata + neutral `annexb`/`hevc`/`av1`/`opus`/`pcm`/`clock`/`avsync`/`probe`; WASAPI covers selectable output loopback, mic capture, mic level testing, PCM decode, and resampling to 48 kHz; window helpers enumerate visible HWND/process metadata for custom game detection | mocks on CI; CI-skipped device + ffmpeg tests run real on the dev machine |
+| `clipline-capture` | Traits + mocks + `Recorder` (steppable, save-while-recording) + **all real Windows engines** under `src/windows/` (`wgc`, `mft`, `nv12`, `wasapi`, `mft_probe`, `d3d11`, `window`) + the **FFmpeg subprocess encoder** (`ffmpeg`, `ffmpeg_encoder`, `framing`) + explicit SDR Rec.709 limited-range conversion/encoder metadata + neutral `annexb`/`hevc`/`av1`/`opus`/`pcm`/`clock`/`avsync`/`probe`; WASAPI covers selectable mixed output loopback, per-process output loopback, mic capture, mic level testing, PCM decode, and resampling to 48 kHz; window helpers enumerate visible HWND/process metadata for custom game detection | mocks on CI; CI-skipped device + ffmpeg tests run real on the dev machine |
 | `apps/clipline-app` | Tauri 2 shell: service thread, configurable hotkey, tray, status/library/settings plus the first-party review player; Settings > Games persists custom game rules and auto-switches capture to detected game windows | live e2e (screenshots in the session logs) + `player_core` (Boa) + `ui_contract` |
 
 ## Machine setup (already done on this machine; for a fresh clone elsewhere)
@@ -419,7 +448,7 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
    Smaller follow-ups from milestone 23: wire the Microsoft software H.264 MFT (the only
    software H.264 under LGPL), bundle the lgpl-shared ffmpeg into the installer, and revisit
    NVENC/QSV arg tuning (only AMF + SVT-AV1 were verified live on this RDNA2 box).
-4. **Per-process audio loopback** (ddoc §10): system output + mic capture are in; per-game/process audio remains next.
+4. **Dynamic audio-session tracking** (ddoc §10): process audio is split at recorder start; new app sessions that appear mid-recording and multi-process grouping remain next.
 5. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
    guidance (§8), WebView2-destroyed-when-minimized RAM trick (§4), installer/signing (§4).
 

@@ -1,6 +1,7 @@
 //! Clipline Cloud desktop integration: connection state, OS credential storage,
 //! and per-clip uploads through the first-party API client.
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
@@ -40,6 +41,19 @@ pub struct CloudConnectRequest {
     pub plain_http_confirmed: bool,
     #[serde(default)]
     pub default_visibility: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UploadClipCommandRequest {
+    pub path: String,
+    #[serde(default)]
+    pub visibility: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default, rename = "audioTrackIds")]
+    pub audio_track_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,12 +179,9 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, RuntimeState>,
     storage: tauri::State<'_, StorageSettings>,
-    path: String,
-    visibility: Option<String>,
-    title: Option<String>,
-    description: Option<String>,
+    request: UploadClipCommandRequest,
 ) -> Result<CloudUploadResult, String> {
-    let target = validate_clip_path(&storage, &path)?;
+    let target = validate_clip_path(&storage, &request.path)?;
     let settings = state.settings();
     let cloud = settings.cloud.clone();
     let token_target = cloud
@@ -179,19 +190,26 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         .ok_or_else(|| "connect to Clipline Cloud first".to_string())?;
     let token = read_credential(&token_target)?;
     let client = connected_client(&cloud, &token)?;
-    let visibility = visibility
+    let visibility = request
+        .visibility
         .as_deref()
         .map(normalize_cloud_visibility)
         .unwrap_or_else(|| cloud.default_visibility.clone());
-    let description = normalize_upload_description(description.as_deref());
+    let description = normalize_upload_description(request.description.as_deref());
 
-    let bytes = tokio::fs::read(&target)
+    let source_bytes = tokio::fs::read(&target)
         .await
         .map_err(|e| format!("read clip: {e}"))?;
     let meta = std::fs::metadata(&target).map_err(|e| format!("read clip metadata: {e}"))?;
-    if bytes.is_empty() {
+    if source_bytes.is_empty() {
         return Err("clip file is empty".into());
     }
+    let markers = read_markers(&target);
+    let bytes = upload_bytes_for_audio_selection(
+        source_bytes,
+        markers.as_ref(),
+        request.audio_track_ids.as_deref(),
+    )?;
     let checksum = sha256_hex(&bytes);
     let local_clip_id = local_clip_id(&target, &meta, &checksum)?;
     let mut record = CloudUploadRecord {
@@ -199,7 +217,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         // Store the path exactly as `list_clips` emits it (non-canonical), so the
         // UI can pair this record to its clip row by string equality. `target` is
         // the canonicalized form (`\\?\D:\…` on Windows) and is used only for I/O.
-        path: path.clone(),
+        path: request.path.clone(),
         remote_clip_id: None,
         remote_url: None,
         visibility: visibility.clone(),
@@ -208,10 +226,9 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         updated_at_unix: unix_now(),
     };
     persist_record(&state, &record)?;
-    emit_upload_progress(&app, &record, 0, meta.len(), None);
+    emit_upload_progress(&app, &record, 0, bytes.len() as u64, None);
 
-    let markers = read_markers(&target);
-    let request = create_upload_request(UploadRequestInput {
+    let upload_request = create_upload_request(UploadRequestInput {
         path: &target,
         meta: &meta,
         bytes: &bytes,
@@ -219,12 +236,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         visibility: &visibility,
         markers: markers.as_ref(),
         client_clip_id: &local_clip_id,
-        title: title.as_deref(),
+        title: request.title.as_deref(),
     })?;
+    let progress_path = request.path.clone();
     let upload_result = crate::cloud_upload::upload_mp4_bytes_with_progress(
         &client,
         &token,
-        &request,
+        &upload_request,
         description.as_deref(),
         &bytes,
         |progress| {
@@ -236,7 +254,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
             };
             let event = CloudUploadProgressEvent {
                 local_clip_id: local_clip_id.clone(),
-                path: path.clone(),
+                path: progress_path.clone(),
                 upload_status: status.to_string(),
                 received_size_bytes: progress.received_size_bytes,
                 file_size_bytes: progress.file_size_bytes,
@@ -256,7 +274,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
             record.error = Some(cloud_error(error));
             record.updated_at_unix = unix_now();
             persist_record(&state, &record)?;
-            emit_upload_progress(&app, &record, 0, meta.len(), record.error.clone());
+            emit_upload_progress(&app, &record, 0, bytes.len() as u64, record.error.clone());
             return Ok(CloudUploadResult { record, clip: None });
         }
     };
@@ -366,7 +384,7 @@ fn create_upload_request(input: UploadRequestInput<'_>) -> Result<CreateUploadRe
         source_type: Some(source_type(input.path)),
         recorded_at: input.meta.modified().ok().map(DateTime::<Utc>::from),
         duration_ms: clip_duration_ms(input.bytes, input.markers),
-        file_size_bytes: input.meta.len(),
+        file_size_bytes: input.bytes.len() as u64,
         checksum_sha256: input.checksum.to_string(),
         container: "mp4".to_string(),
         video_codec: None,
@@ -392,6 +410,51 @@ fn normalize_upload_description(description: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn upload_bytes_for_audio_selection(
+    source_bytes: Vec<u8>,
+    markers: Option<&ClipMarkers>,
+    selected_audio_track_ids: Option<&[String]>,
+) -> Result<Vec<u8>, String> {
+    let Some(selected_audio_track_ids) = selected_audio_track_ids else {
+        return Ok(source_bytes);
+    };
+    let selected_ids: BTreeSet<&str> = selected_audio_track_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    if selected_ids.len() != selected_audio_track_ids.len() {
+        return Err("audio track selection contains duplicates".into());
+    }
+
+    let tracks = markers.map(|m| m.audio_tracks.as_slice()).unwrap_or(&[]);
+    if tracks.is_empty() {
+        if selected_ids.is_empty() {
+            return clipline_mp4::remux_with_selected_audio_tracks(&source_bytes, &[])
+                .map_err(|e| e.to_string());
+        }
+        return Err("this clip has no selectable audio track metadata".into());
+    }
+
+    let available: BTreeSet<&str> = tracks.iter().map(|track| track.id.as_str()).collect();
+    if let Some(unknown) = selected_ids
+        .iter()
+        .find(|selected| !available.contains(**selected))
+    {
+        return Err(format!("unknown audio track {unknown:?}"));
+    }
+    if selected_ids.len() == tracks.len() {
+        return Ok(source_bytes);
+    }
+
+    let selected_indices: Vec<u32> = tracks
+        .iter()
+        .filter(|track| selected_ids.contains(track.id.as_str()))
+        .map(|track| track.track_index)
+        .collect();
+    clipline_mp4::remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
+        .map_err(|e| e.to_string())
 }
 
 fn read_markers(path: &Path) -> Option<ClipMarkers> {
@@ -636,6 +699,11 @@ fn last_os_error(action: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clipline_events::ClipAudioTrack;
+    use clipline_mp4::{
+        AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
+    };
+    use std::io::Cursor;
 
     #[test]
     fn credential_target_includes_server_and_user() {
@@ -650,5 +718,112 @@ mod tests {
         assert_eq!(source_type(Path::new("clipline-2026-06-16.mp4")), "replay");
         assert_eq!(source_type(Path::new("full-session.mp4")), "session");
         assert_eq!(source_type(Path::new("ranked-trim.mp4")), "trim");
+    }
+
+    #[test]
+    fn upload_audio_selection_keeps_original_when_all_tracks_selected() {
+        let source = two_audio_mp4();
+        let markers = audio_markers();
+        let selected = vec!["output".to_string(), "microphone".to_string()];
+
+        let out = upload_bytes_for_audio_selection(source.clone(), Some(&markers), Some(&selected))
+            .unwrap();
+
+        assert_eq!(out, source);
+    }
+
+    #[test]
+    fn upload_audio_selection_remuxes_only_selected_track() {
+        let source = two_audio_mp4();
+        let markers = audio_markers();
+        let selected = vec!["microphone".to_string()];
+
+        let out =
+            upload_bytes_for_audio_selection(source, Some(&markers), Some(&selected)).unwrap();
+
+        assert!(out.windows(6).any(|w| w == b"V00000"));
+        assert!(!out.windows(6).any(|w| w == b"A00000"));
+        assert!(out.windows(6).any(|w| w == b"B00000"));
+    }
+
+    #[test]
+    fn upload_audio_selection_rejects_unknown_track_id() {
+        let source = two_audio_mp4();
+        let markers = audio_markers();
+        let selected = vec!["discord".to_string()];
+
+        let err = upload_bytes_for_audio_selection(source, Some(&markers), Some(&selected))
+            .expect_err("unknown track");
+
+        assert!(err.contains("unknown audio track"), "{err}");
+    }
+
+    fn audio_markers() -> ClipMarkers {
+        ClipMarkers {
+            recording_start_s: 0.0,
+            duration_s: 1.0,
+            player_summary: None,
+            audio_tracks: vec![
+                ClipAudioTrack {
+                    id: "output".into(),
+                    track_index: 0,
+                    label: "Output Audio".into(),
+                    kind: Some("output".into()),
+                },
+                ClipAudioTrack {
+                    id: "microphone".into(),
+                    track_index: 1,
+                    label: "Microphone".into(),
+                    kind: Some("microphone".into()),
+                },
+            ],
+            markers: Vec::new(),
+        }
+    }
+
+    fn two_audio_mp4() -> Vec<u8> {
+        let tracks = vec![
+            TrackConfig::Video(VideoTrackConfig::h264(
+                128,
+                72,
+                90_000,
+                vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+                vec![0x68, 0xEE, 0x38, 0x80],
+            )),
+            TrackConfig::Audio(AudioTrackConfig {
+                channels: 2,
+                sample_rate: 48_000,
+                pre_skip: 312,
+            }),
+            TrackConfig::Audio(AudioTrackConfig {
+                channels: 2,
+                sample_rate: 48_000,
+                pre_skip: 312,
+            }),
+        ];
+        let mut writer = HybridMp4Writer::new_multi(Cursor::new(Vec::new()), tracks).unwrap();
+        let video: Vec<_> = (0..10)
+            .map(|i| FragSample {
+                data: format!("V{i:05}").into_bytes(),
+                duration: 9_000,
+                is_sync: i == 0,
+            })
+            .collect();
+        let output = audio_samples("A");
+        let mic = audio_samples("B");
+        writer
+            .write_fragment_multi(&[&video, &output, &mic])
+            .unwrap();
+        writer.finalize().unwrap().into_inner()
+    }
+
+    fn audio_samples(prefix: &str) -> Vec<FragSample> {
+        (0..50)
+            .map(|i| FragSample {
+                data: format!("{prefix}{i:05}").into_bytes(),
+                duration: 960,
+                is_sync: true,
+            })
+            .collect()
     }
 }

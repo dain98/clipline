@@ -1,5 +1,6 @@
 //! Keyframe-aligned stream-copy trim for finalized Clipline MP4s.
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{Cursor, Seek, Write};
 use std::path::Path;
@@ -136,6 +137,65 @@ pub fn trim_keyframe_aligned_file(
     writer.write_fragment_multi_from_source(&mut source_file, &refs)?;
     let _ = writer.finalize()?;
     Ok(selection.info(start_s, end_s))
+}
+
+pub fn remux_with_selected_audio_tracks(
+    input: &[u8],
+    selected_audio_track_indices: &[u32],
+) -> Result<Vec<u8>, TrimError> {
+    let movie = parse_movie(input)?;
+    let selected: BTreeSet<usize> = selected_audio_track_indices
+        .iter()
+        .map(|&idx| idx as usize)
+        .collect();
+    if selected.len() != selected_audio_track_indices.len() {
+        return Err(TrimError::InvalidRange(
+            "audio track selection contains duplicates".into(),
+        ));
+    }
+
+    let audio_count = movie
+        .tracks
+        .iter()
+        .filter(|track| matches!(track.cfg, TrackConfig::Audio(_)))
+        .count();
+    if let Some(invalid) = selected.iter().find(|&&idx| idx >= audio_count) {
+        return Err(TrimError::InvalidRange(format!(
+            "audio track index {invalid} is outside the clip's {audio_count} audio tracks"
+        )));
+    }
+
+    let mut tracks = Vec::new();
+    let mut selected_samples: Vec<Vec<FragSample>> = Vec::new();
+    let mut audio_idx = 0usize;
+    for track in &movie.tracks {
+        let keep = match track.cfg {
+            TrackConfig::Video(_) => true,
+            TrackConfig::Audio(_) => {
+                let keep = selected.contains(&audio_idx);
+                audio_idx += 1;
+                keep
+            }
+        };
+        if !keep {
+            continue;
+        }
+        tracks.push(track.cfg.clone());
+        selected_samples.push(
+            track
+                .samples
+                .iter()
+                .map(|sample| sample.to_frag_sample(input))
+                .collect::<Result<_, _>>()?,
+        );
+    }
+
+    let mut out = Cursor::new(Vec::new());
+    let mut writer = HybridMp4Writer::new_multi(&mut out, tracks)?;
+    let refs: Vec<&[FragSample]> = selected_samples.iter().map(Vec::as_slice).collect();
+    writer.write_fragment_multi(&refs)?;
+    let _ = writer.finalize()?;
+    Ok(out.into_inner())
 }
 
 fn reject_same_file(source: &Path, target: &Path) -> Result<(), TrimError> {
@@ -936,9 +996,13 @@ mod tests {
     }
 
     fn audio_packets(start: u32) -> Vec<FragSample> {
+        audio_packets_with("A", start)
+    }
+
+    fn audio_packets_with(prefix: &str, start: u32) -> Vec<FragSample> {
         (0..50)
             .map(|i| FragSample {
-                data: format!("A{:05}", start + i).into_bytes(),
+                data: format!("{prefix}{:05}", start + i).into_bytes(),
                 duration: 960,
                 is_sync: true,
             })
@@ -951,6 +1015,28 @@ mod tests {
             let v = video_gop(second * 10);
             let a = audio_packets(second * 50);
             w.write_fragment_multi(&[&v, &a]).unwrap();
+        }
+        w.finalize().unwrap().into_inner()
+    }
+
+    fn tracks_two_audio() -> Vec<TrackConfig> {
+        let mut tracks = tracks();
+        tracks.push(TrackConfig::Audio(AudioTrackConfig {
+            channels: 2,
+            sample_rate: 48_000,
+            pre_skip: 312,
+        }));
+        tracks
+    }
+
+    fn clipline_two_audio_fixture() -> Vec<u8> {
+        let mut w =
+            HybridMp4Writer::new_multi(Cursor::new(Vec::new()), tracks_two_audio()).unwrap();
+        for second in 0..2 {
+            let v = video_gop(second * 10);
+            let output = audio_packets_with("A", second * 50);
+            let mic = audio_packets_with("B", second * 50);
+            w.write_fragment_multi(&[&v, &output, &mic]).unwrap();
         }
         w.finalize().unwrap().into_inner()
     }
@@ -1116,5 +1202,47 @@ mod tests {
             TrimError::Io(ref e) if e.kind() == std::io::ErrorKind::InvalidInput
         ));
         assert_eq!(after, input);
+    }
+
+    #[test]
+    fn remux_with_selected_audio_tracks_keeps_only_requested_audio() {
+        let input = clipline_two_audio_fixture();
+
+        let out = remux_with_selected_audio_tracks(&input, &[1]).unwrap();
+        let movie = parse_movie(&out).unwrap();
+
+        assert_eq!(movie.tracks.len(), 2, "video plus selected microphone");
+        assert!(matches!(movie.tracks[0].cfg, TrackConfig::Video(_)));
+        assert!(matches!(movie.tracks[1].cfg, TrackConfig::Audio(_)));
+        assert!(out.windows(6).any(|w| w == b"V00000"));
+        assert!(!out.windows(6).any(|w| w == b"A00000"));
+        assert!(out.windows(6).any(|w| w == b"B00000"));
+    }
+
+    #[test]
+    fn remux_with_selected_audio_tracks_can_emit_video_only() {
+        let input = clipline_two_audio_fixture();
+
+        let out = remux_with_selected_audio_tracks(&input, &[]).unwrap();
+        let movie = parse_movie(&out).unwrap();
+
+        assert_eq!(movie.tracks.len(), 1);
+        assert!(matches!(movie.tracks[0].cfg, TrackConfig::Video(_)));
+        assert!(out.windows(6).any(|w| w == b"V00000"));
+        assert!(!out.windows(6).any(|w| w == b"A00000"));
+        assert!(!out.windows(6).any(|w| w == b"B00000"));
+    }
+
+    #[test]
+    fn remux_with_selected_audio_tracks_rejects_invalid_selection() {
+        let input = clipline_two_audio_fixture();
+
+        let err = remux_with_selected_audio_tracks(&input, &[2]).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("outside the clip's 2 audio tracks"),
+            "{err}"
+        );
     }
 }

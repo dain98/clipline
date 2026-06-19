@@ -18,7 +18,9 @@ use clipline_capture::traits::{
     AudioSource, CaptureEngine, CaptureError, Encoder, Frame, FrameData,
 };
 use clipline_capture::windows::nv12::CropRect;
-use clipline_capture::windows::wasapi::{WasapiChannelMode, WasapiMixedLoopback};
+use clipline_capture::windows::wasapi::{
+    enumerate_output_processes, process_loopback_available, WasapiChannelMode,
+};
 use clipline_capture::windows::{
     d3d11, find_window_by_title, mft_probe, window_from_raw_handle, ID3D11Device, MftConfig,
     MftH264Encoder, WasapiLoopback, WgcCapture,
@@ -26,7 +28,7 @@ use clipline_capture::windows::{
 use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
 };
-use clipline_events::{is_timeline_marker, EventKind, MarkerLog, PlayerSummary};
+use clipline_events::{is_timeline_marker, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
 use clipline_storage::sessions::{session_label, SessionTracker};
 use clipline_storage::{enforce_quota, recover_recording_files, storage_status, StorageStatus};
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
@@ -296,6 +298,7 @@ pub struct AudioOptions {
     pub output_enabled: bool,
     pub output_device_id: Option<String>,
     pub output_volume: f64,
+    pub split_output_by_process: bool,
     pub mic_enabled: bool,
     pub mic_device_id: Option<String>,
     pub mic_volume: f64,
@@ -308,6 +311,7 @@ impl Default for AudioOptions {
             output_enabled: true,
             output_device_id: None,
             output_volume: 1.0,
+            split_output_by_process: false,
             mic_enabled: false,
             mic_device_id: None,
             mic_volume: 1.0,
@@ -697,7 +701,12 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let cap = CadencedCapture::new(cap, opts.fps, &first);
     let mut rec = Recorder::new_with_replay_storage(cap, encoder, replay_storage)
         .map_err(|e| format!("replay cache: {e}"))?;
-    if let Some(audio) = audio_source_from_options(clock, &opts.audio, events) {
+    let audio_tracks = audio_sources_from_options(clock, &opts.audio, events);
+    let audio_track_metadata: Vec<ClipAudioTrack> = audio_tracks
+        .iter()
+        .map(|(_, track)| track.clone())
+        .collect();
+    for (audio, _) in audio_tracks {
         rec = rec.with_audio(audio);
     }
     let (clips_dir, fell_back) = clips_dir_resolved(&opts.media_dir, default_clips_dir)?;
@@ -747,11 +756,14 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                 let _ = shutdown_recorder(
                     &mut rec,
                     &mut full_session,
-                    &marker_log,
-                    player_summary.full_session_summary(),
-                    &clips_dir,
-                    &opts,
-                    events,
+                    RecorderFinishContext {
+                        marker_log: &marker_log,
+                        player_summary: player_summary.full_session_summary(),
+                        audio_tracks: &audio_track_metadata,
+                        clips_dir: &clips_dir,
+                        opts: &opts,
+                        events,
+                    },
                 );
                 return Err(format!("recording: {e}"));
             }
@@ -813,6 +825,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                                 end - seconds,
                                 end,
                                 player_summary.active_replay_summary(),
+                                &audio_track_metadata,
                             );
                             emit_saved_clip(
                                 events, &clips_dir, &path, seconds, markers, false, &opts,
@@ -828,11 +841,14 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     let _ = shutdown_recorder(
                         &mut rec,
                         &mut full_session,
-                        &marker_log,
-                        player_summary.full_session_summary(),
-                        &clips_dir,
-                        &opts,
-                        events,
+                        RecorderFinishContext {
+                            marker_log: &marker_log,
+                            player_summary: player_summary.full_session_summary(),
+                            audio_tracks: &audio_track_metadata,
+                            clips_dir: &clips_dir,
+                            opts: &opts,
+                            events,
+                        },
                     );
                     if announce {
                         send_stopped(events);
@@ -862,11 +878,14 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     let _ = shutdown_recorder(
                         &mut rec,
                         &mut full_session,
-                        &marker_log,
-                        player_summary.full_session_summary(),
-                        &clips_dir,
-                        &opts,
-                        events,
+                        RecorderFinishContext {
+                            marker_log: &marker_log,
+                            player_summary: player_summary.full_session_summary(),
+                            audio_tracks: &audio_track_metadata,
+                            clips_dir: &clips_dir,
+                            opts: &opts,
+                            events,
+                        },
                     );
                     send_stopped(events);
                     return Ok(());
@@ -878,11 +897,14 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     if let Some(err) = shutdown_recorder(
         &mut rec,
         &mut full_session,
-        &marker_log,
-        player_summary.full_session_summary(),
-        &clips_dir,
-        &opts,
-        events,
+        RecorderFinishContext {
+            marker_log: &marker_log,
+            player_summary: player_summary.full_session_summary(),
+            audio_tracks: &audio_track_metadata,
+            clips_dir: &clips_dir,
+            opts: &opts,
+            events,
+        },
     ) {
         return Err(err);
     }
@@ -890,75 +912,101 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     Ok(())
 }
 
-fn audio_source_from_options(
+fn audio_sources_from_options(
     clock: RelativeClock,
     options: &AudioOptions,
     events: &Sender<Event>,
-) -> Option<Box<dyn AudioSource>> {
+) -> Vec<(Box<dyn AudioSource>, ClipAudioTrack)> {
     let mic_channels = match options.mic_channels {
         AudioChannelMode::Mono => WasapiChannelMode::Mono,
         AudioChannelMode::Stereo => WasapiChannelMode::Stereo,
     };
-    match (options.output_enabled, options.mic_enabled) {
-        (true, true) => match WasapiMixedLoopback::start(
-            clock,
-            Some((options.output_device_id.as_deref(), options.output_volume)),
-            Some((
-                options.mic_device_id.as_deref(),
-                options.mic_volume,
-                mic_channels,
-            )),
-        ) {
-            Ok(audio) => Some(Box::new(audio)),
-            Err(e) => {
-                warn_user(
-                    events,
-                    format!("mixed audio unavailable; trying single-source fallback: {e}"),
-                );
-                audio_source_from_options(
-                    clock,
-                    &AudioOptions {
-                        mic_enabled: false,
-                        ..options.clone()
-                    },
-                    events,
-                )
-                .or_else(|| {
-                    audio_source_from_options(
-                        clock,
-                        &AudioOptions {
-                            output_enabled: false,
-                            ..options.clone()
-                        },
-                        events,
-                    )
-                })
-            }
-        },
-        (true, false) => match WasapiLoopback::start_output(
-            clock,
-            options.output_device_id.as_deref(),
-            options.output_volume,
-        ) {
-            Ok(audio) => Some(Box::new(audio)),
-            Err(e) => {
-                warn_user(events, format!("output audio unavailable; continuing: {e}"));
-                None
-            }
-        },
-        (false, true) => match WasapiLoopback::start_microphone(
+
+    let mut sources = Vec::<(Box<dyn AudioSource>, ClipAudioTrack)>::new();
+    if options.output_enabled {
+        add_output_audio_sources(clock, options, events, &mut sources);
+    }
+    if options.mic_enabled {
+        match WasapiLoopback::start_microphone(
             clock,
             options.mic_device_id.as_deref(),
             options.mic_volume,
             mic_channels,
         ) {
-            Ok(audio) => Some(Box::new(audio)),
+            Ok(audio) => {
+                let index = sources.len() as u32;
+                sources.push((
+                    Box::new(audio),
+                    audio_track("microphone", index, "Microphone", "microphone"),
+                ));
+            }
             Err(e) => {
                 warn_user(events, format!("microphone unavailable; continuing: {e}"));
-                None
             }
-        },
-        (false, false) => None,
+        }
+    }
+    sources
+}
+
+fn add_output_audio_sources(
+    clock: RelativeClock,
+    options: &AudioOptions,
+    events: &Sender<Event>,
+    sources: &mut Vec<(Box<dyn AudioSource>, ClipAudioTrack)>,
+) {
+    let mut process_tracks = Vec::new();
+    if options.split_output_by_process && process_loopback_available() {
+        if let Ok(processes) = enumerate_output_processes(options.output_device_id.as_deref()) {
+            for process in processes {
+                match WasapiLoopback::start_process_output(
+                    clock,
+                    process.pid,
+                    options.output_volume,
+                ) {
+                    Ok(audio) => process_tracks.push((process, audio)),
+                    Err(e) if e.to_string().contains("timed out") => break,
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+
+    if !process_tracks.is_empty() {
+        for (process, audio) in process_tracks {
+            let index = sources.len() as u32;
+            let id = format!("process:{}", process.pid);
+            sources.push((
+                Box::new(audio),
+                audio_track(&id, index, &process.label, "process_output"),
+            ));
+        }
+        return;
+    }
+
+    match WasapiLoopback::start_output(
+        clock,
+        options.output_device_id.as_deref(),
+        options.output_volume,
+    ) {
+        Ok(audio) => {
+            let index = sources.len() as u32;
+            sources.push((
+                Box::new(audio),
+                audio_track("output", index, "Output Audio", "output"),
+            ));
+        }
+        Err(e) => {
+            warn_user(events, format!("output audio unavailable; continuing: {e}"));
+        }
+    }
+}
+
+fn audio_track(id: &str, track_index: u32, label: &str, kind: &str) -> ClipAudioTrack {
+    ClipAudioTrack {
+        id: id.to_string(),
+        track_index,
+        label: label.to_string(),
+        kind: Some(kind.to_string()),
     }
 }
 
@@ -1246,35 +1294,32 @@ fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Event>) {
     }
 }
 
+struct RecorderFinishContext<'a> {
+    marker_log: &'a MarkerLog,
+    player_summary: Option<&'a PlayerSummary>,
+    audio_tracks: &'a [ClipAudioTrack],
+    clips_dir: &'a Path,
+    opts: &'a ServiceOptions,
+    events: &'a Sender<Event>,
+}
+
 fn shutdown_recorder(
     rec: &mut LiveRecorder,
     full_session: &mut Option<FullSessionRecording>,
-    marker_log: &MarkerLog,
-    player_summary: Option<&PlayerSummary>,
-    clips_dir: &Path,
-    opts: &ServiceOptions,
-    events: &Sender<Event>,
+    ctx: RecorderFinishContext<'_>,
 ) -> Option<String> {
     match rec.finish_stream() {
         Ok(()) => {
-            finish_full_session_recording(
-                rec,
-                full_session,
-                marker_log,
-                player_summary,
-                clips_dir,
-                opts,
-                events,
-            );
+            finish_full_session_recording(rec, full_session, &ctx);
             None
         }
         Err(e) => {
             let message = format!("finish: {e}");
-            warn_user(events, message.clone());
+            warn_user(ctx.events, message.clone());
             discard_full_session_recording(
                 rec,
                 full_session,
-                events,
+                ctx.events,
                 "full session discarded because recording could not finish cleanly",
             );
             Some(message)
@@ -1349,11 +1394,7 @@ fn begin_full_session_recording(
 fn finish_full_session_recording(
     rec: &mut LiveRecorder,
     recording: &mut Option<FullSessionRecording>,
-    marker_log: &MarkerLog,
-    player_summary: Option<&PlayerSummary>,
-    clips_dir: &Path,
-    opts: &ServiceOptions,
-    events: &Sender<Event>,
+    ctx: &RecorderFinishContext<'_>,
 ) {
     let Some(recording) = recording.take() else {
         return;
@@ -1361,7 +1402,7 @@ fn finish_full_session_recording(
     match rec.finish_full_session() {
         Ok(Some(summary)) if summary.duration_s.is_finite() && summary.duration_s <= 0.0 => {
             warn_user(
-                events,
+                ctx.events,
                 "full session ended before any footage was written".into(),
             );
             let _ = std::fs::remove_file(&recording.temp_path);
@@ -1371,42 +1412,43 @@ fn finish_full_session_recording(
                 summary.duration_s
             } else {
                 warn_user(
-                    events,
+                    ctx.events,
                     "full session duration was invalid; keeping the recording with an unknown duration"
                         .into(),
                 );
                 0.0
             };
-            if !rename_finalized_session(&recording, events) {
+            if !rename_finalized_session(&recording, ctx.events) {
                 return;
             }
             let markers = write_marker_sidecar(
-                events,
-                marker_log,
+                ctx.events,
+                ctx.marker_log,
                 &recording.final_path,
                 summary.start_s,
                 summary.end_s,
-                player_summary,
+                ctx.player_summary,
+                ctx.audio_tracks,
             );
             emit_saved_clip(
-                events,
-                clips_dir,
+                ctx.events,
+                ctx.clips_dir,
                 &recording.final_path,
                 seconds,
                 markers,
                 true,
-                opts,
+                ctx.opts,
             );
         }
         Ok(None) => {
             warn_user(
-                events,
+                ctx.events,
                 "full session ended before any footage was written".into(),
             );
             let _ = std::fs::remove_file(&recording.temp_path);
         }
         Err(e) => {
-            warn_user(events, format!("finish full session: {e}"));
+            warn_user(ctx.events, format!("finish full session: {e}"));
             let _ = std::fs::remove_file(&recording.temp_path);
         }
     }
@@ -1483,12 +1525,14 @@ fn write_marker_sidecar(
     start_s: f64,
     end_s: f64,
     player_summary: Option<&PlayerSummary>,
+    audio_tracks: &[ClipAudioTrack],
 ) -> usize {
     let mut clip = marker_log.clip_markers(start_s, end_s);
     clip.markers.retain(|m| is_timeline_marker(&m.event));
     clip.player_summary = player_summary.cloned();
+    clip.audio_tracks = audio_tracks.to_vec();
     let markers = clip.markers.len();
-    if markers == 0 && clip.player_summary.is_none() {
+    if markers == 0 && clip.player_summary.is_none() && clip.audio_tracks.is_empty() {
         return 0;
     }
     match serde_json::to_string_pretty(&clip) {
@@ -1805,13 +1849,37 @@ mod tests {
             assists: 23,
         };
 
-        let count = write_marker_sidecar(&tx, &MarkerLog::new(), &path, 0.0, 10.0, Some(&summary));
+        let count = write_marker_sidecar(
+            &tx,
+            &MarkerLog::new(),
+            &path,
+            0.0,
+            10.0,
+            Some(&summary),
+            &[],
+        );
 
         assert_eq!(count, 0);
         let json = std::fs::read_to_string(path.with_extension("markers.json")).unwrap();
         let sidecar: clipline_events::ClipMarkers = serde_json::from_str(&json).unwrap();
         assert!(sidecar.markers.is_empty());
         assert_eq!(sidecar.player_summary, Some(summary));
+    }
+
+    #[test]
+    fn write_marker_sidecar_keeps_audio_tracks_without_markers() {
+        let dir = TestDir::new("sidecar-audio-tracks");
+        let path = dir.path().join("clip.mp4");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let tracks = vec![audio_track("output", 0, "Output Audio", "output")];
+
+        let count = write_marker_sidecar(&tx, &MarkerLog::new(), &path, 0.0, 10.0, None, &tracks);
+
+        assert_eq!(count, 0);
+        let json = std::fs::read_to_string(path.with_extension("markers.json")).unwrap();
+        let sidecar: clipline_events::ClipMarkers = serde_json::from_str(&json).unwrap();
+        assert!(sidecar.markers.is_empty());
+        assert_eq!(sidecar.audio_tracks, tracks);
     }
 
     #[test]

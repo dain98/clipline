@@ -120,6 +120,8 @@ pub struct AudioSettings {
     #[serde(default = "default_volume")]
     pub output_volume: f64,
     #[serde(default)]
+    pub split_output_by_process: bool,
+    #[serde(default)]
     pub mic_enabled: bool,
     #[serde(default)]
     pub mic_device_id: Option<String>,
@@ -315,6 +317,7 @@ impl Default for AudioSettings {
             output_enabled: true,
             output_device_id: None,
             output_volume: 1.0,
+            split_output_by_process: false,
             mic_enabled: false,
             mic_device_id: None,
             mic_volume: 1.0,
@@ -337,6 +340,8 @@ impl AudioSettings {
             output_volume: f64_field(object, "output_volume")
                 .map(|value| value.clamp(MIN_AUDIO_VOLUME, MAX_AUDIO_VOLUME))
                 .unwrap_or(defaults.output_volume),
+            split_output_by_process: bool_field(object, "split_output_by_process")
+                .unwrap_or(defaults.split_output_by_process),
             mic_enabled: bool_field(object, "mic_enabled").unwrap_or(defaults.mic_enabled),
             mic_device_id: optional_string_field(object, "mic_device_id")
                 .unwrap_or(defaults.mic_device_id),
@@ -356,6 +361,7 @@ impl AudioSettings {
                 .clone()
                 .filter(|id| !id.trim().is_empty()),
             output_volume: self.output_volume,
+            split_output_by_process: self.split_output_by_process,
             mic_enabled: self.mic_enabled,
             mic_device_id: self
                 .mic_device_id
@@ -1026,6 +1032,10 @@ pub fn icon_cache_dir() -> PathBuf {
     config_base().join("icons")
 }
 
+pub fn audio_preview_cache_dir() -> PathBuf {
+    config_base().join("audio-previews")
+}
+
 pub fn default_media_dir() -> String {
     default_clips_dir().display().to_string()
 }
@@ -1266,6 +1276,9 @@ mod tests {
         assert!(settings.audio.output_enabled);
         assert_eq!(settings.audio.output_device_id, None);
         assert_eq!(settings.audio.output_volume, 1.0);
+        assert!(!settings.audio.split_output_by_process);
+        let serialized = serde_json::to_value(&settings).unwrap();
+        assert_eq!(serialized["audio"]["split_output_by_process"], false);
         assert!(!settings.audio.mic_enabled);
         assert_eq!(settings.audio.mic_device_id, None);
         assert_eq!(settings.audio.mic_volume, 1.0);
@@ -1751,6 +1764,7 @@ mod tests {
                 output_enabled: true,
                 output_device_id: Some("output-id".into()),
                 output_volume: 0.75,
+                split_output_by_process: false,
                 mic_enabled: true,
                 mic_device_id: Some("mic-id".into()),
                 mic_volume: 1.5,
@@ -1764,10 +1778,28 @@ mod tests {
         assert!(opts.audio.output_enabled);
         assert_eq!(opts.audio.output_device_id.as_deref(), Some("output-id"));
         assert_eq!(opts.audio.output_volume, 0.75);
+        assert!(!opts.audio.split_output_by_process);
         assert!(opts.audio.mic_enabled);
         assert_eq!(opts.audio.mic_device_id.as_deref(), Some("mic-id"));
         assert_eq!(opts.audio.mic_volume, 1.5);
         assert_eq!(opts.audio.mic_channels, AudioChannelMode::Stereo);
+    }
+
+    #[test]
+    fn load_audio_split_toggle_from_json() {
+        let json = r#"{
+            "audio": {
+                "split_output_by_process": false
+            }
+        }"#;
+        let settings = AppSettings::load_from_object(
+            serde_json::from_str::<Value>(json)
+                .unwrap()
+                .as_object()
+                .unwrap(),
+        );
+
+        assert!(!settings.audio.split_output_by_process);
     }
 
     #[test]

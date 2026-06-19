@@ -2,23 +2,44 @@
 //! (ddoc §10), QPC-stamped against the shared capture clock, assembled
 //! into 20 ms frames and Opus-encoded behind `AudioSource`.
 
+use std::mem::{size_of, ManuallyDrop};
+use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::{implement, Interface, Ref, Result as WindowsResult, HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, RPC_E_CHANGED_MODE};
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eRender, EDataFlow, IAudioCaptureClient, IAudioClient, IMMDevice,
-    IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_LOOPBACK, DEVICE_STATE_ACTIVE, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
-    WAVE_FORMAT_PCM,
+    eCapture, eConsole, eRender, ActivateAudioInterfaceAsync, AudioSessionStateExpired, EDataFlow,
+    IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+    IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
+    IAudioSessionControl2, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
+    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+    DEVICE_STATE_ACTIVE, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVE_FORMAT_PCM,
 };
 use windows::Win32::Media::KernelStreaming::{KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE};
 use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
-use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToString};
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
+use windows::Win32::System::Com::StructuredStorage::{
+    PropVariantClear, PropVariantToString, PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0,
+    PROPVARIANT_0_0_0,
 };
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoTaskMemAlloc, CoTaskMemFree, IAgileObject,
+    IAgileObject_Impl, BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
+};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+use windows::Win32::System::Threading::{
+    CreateEventW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::System::Variant::VT_BLOB;
 
 use clipline_mp4::AudioTrackConfig;
 
@@ -43,6 +64,20 @@ pub struct AudioDeviceInfo {
 pub struct AudioDeviceList {
     pub outputs: Vec<AudioDeviceInfo>,
     pub inputs: Vec<AudioDeviceInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioProcessInfo {
+    pub pid: u32,
+    pub label: String,
+    pub process_name: Option<String>,
+    pub process_path: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessSnapshotEntry {
+    parent_pid: u32,
+    process_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -121,6 +156,7 @@ impl AudioLevelAccumulator {
 struct WasapiPcmCapture {
     client: IAudioClient,
     capture: IAudioCaptureClient,
+    event_handle: Option<HANDLE>,
     clock: RelativeClock,
     channels: u16,
     sample_format: SampleFormat,
@@ -165,6 +201,26 @@ impl WasapiPcmCapture {
         )
     }
 
+    fn start_process_output(
+        clock: RelativeClock,
+        pid: u32,
+        volume: f64,
+    ) -> Result<Self, CaptureError> {
+        init_com()?;
+        let client = activate_process_loopback_client(pid)?;
+        Self::start_client(
+            clock,
+            client,
+            AUDCLNT_STREAMFLAGS_LOOPBACK
+                | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+                | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+            volume,
+            EndpointMode::OutputLoopback,
+            0,
+            Some(process_loopback_format()),
+        )
+    }
+
     fn start_microphone(
         clock: RelativeClock,
         device_id: Option<&str>,
@@ -197,7 +253,28 @@ impl WasapiPcmCapture {
             let device = endpoint_device(&enumerator, dataflow, device_id).map_err(init)?;
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(init)?;
 
-            let format_ptr = client.GetMixFormat().map_err(init)?;
+            Self::start_client(clock, client, streamflags, volume, mode, 10_000_000, None)
+        }
+    }
+
+    fn start_client(
+        clock: RelativeClock,
+        client: IAudioClient,
+        streamflags: u32,
+        volume: f64,
+        mode: EndpointMode,
+        buffer_duration_100ns: i64,
+        fixed_mix_format: Option<WAVEFORMATEX>,
+    ) -> Result<Self, CaptureError> {
+        // SAFETY: IAudioClient initialization follows the WASAPI contract and
+        // releases the mix-format allocation after Initialize consumes it.
+        unsafe {
+            let mut fixed_mix_format = fixed_mix_format;
+            let (format_ptr, should_free_format) = if let Some(format) = fixed_mix_format.as_mut() {
+                (format as *mut WAVEFORMATEX, false)
+            } else {
+                (client.GetMixFormat().map_err(init)?, true)
+            };
             let format = &*format_ptr;
             // Copy packed fields to locals (references into packed structs are UB).
             let tag = format.wFormatTag;
@@ -216,16 +293,36 @@ impl WasapiPcmCapture {
             let r = client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 streamflags,
-                10_000_000,
+                buffer_duration_100ns,
                 0,
                 format_ptr,
                 None,
             );
-            CoTaskMemFree(Some(format_ptr as *const _));
-            r.map_err(init)?;
+            if should_free_format {
+                CoTaskMemFree(Some(format_ptr as *const _));
+            }
+            r.map_err(|e| CaptureError::Init(format!("WASAPI Initialize: {e}")))?;
 
-            let capture: IAudioCaptureClient = client.GetService().map_err(init)?;
-            client.Start().map_err(init)?;
+            let event_handle = if streamflags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK != 0 {
+                let handle = CreateEventW(None, false, false, PCWSTR::null())
+                    .map_err(|e| CaptureError::Init(format!("WASAPI CreateEventW: {e}")))?;
+                if let Err(error) = client.SetEventHandle(handle) {
+                    let _ = CloseHandle(handle);
+                    return Err(CaptureError::Init(format!(
+                        "WASAPI SetEventHandle: {error}"
+                    )));
+                }
+                Some(handle)
+            } else {
+                None
+            };
+
+            let capture: IAudioCaptureClient = client
+                .GetService()
+                .map_err(|e| CaptureError::Init(format!("WASAPI GetService: {e}")))?;
+            client
+                .Start()
+                .map_err(|e| CaptureError::Init(format!("WASAPI Start: {e}")))?;
 
             // Anchor the audio timeline at the clock origin (recording
             // start): the gap fill turns any lead-in before the first
@@ -237,6 +334,7 @@ impl WasapiPcmCapture {
             Ok(Self {
                 client,
                 capture,
+                event_handle,
                 clock,
                 channels: mix.channels,
                 sample_format: mix.sample_format,
@@ -356,6 +454,9 @@ impl Drop for WasapiPcmCapture {
     fn drop(&mut self) {
         // SAFETY: Stop on a started client is always valid.
         let _ = unsafe { self.client.Stop() };
+        if let Some(handle) = self.event_handle.take() {
+            let _ = unsafe { CloseHandle(handle) };
+        }
     }
 }
 
@@ -373,6 +474,14 @@ impl WasapiLoopback {
         volume: f64,
     ) -> Result<Self, CaptureError> {
         Self::from_pcm(WasapiPcmCapture::start_output(clock, device_id, volume)?)
+    }
+
+    pub fn start_process_output(
+        clock: RelativeClock,
+        pid: u32,
+        volume: f64,
+    ) -> Result<Self, CaptureError> {
+        Self::from_pcm(WasapiPcmCapture::start_process_output(clock, pid, volume)?)
     }
 
     pub fn start_microphone(
@@ -490,6 +599,89 @@ pub fn enumerate_audio_devices() -> Result<AudioDeviceList, CaptureError> {
     }
 }
 
+pub fn enumerate_output_processes(
+    device_id: Option<&str>,
+) -> Result<Vec<AudioProcessInfo>, CaptureError> {
+    init_com()?;
+    // SAFETY: standard endpoint activation/session enumeration; COM results
+    // are checked and any allocated strings are freed.
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(init)?;
+        let device = endpoint_device(&enumerator, eRender, device_id).map_err(init)?;
+        let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None).map_err(init)?;
+        let session_enum = manager.GetSessionEnumerator().map_err(init)?;
+        let process_snapshot = process_snapshot();
+        let mut processes = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for index in 0..session_enum.GetCount().map_err(init)? {
+            let Ok(session) = session_enum.GetSession(index) else {
+                continue;
+            };
+            if session.GetState().ok() == Some(AudioSessionStateExpired) {
+                continue;
+            }
+            let Ok(session2) = session.cast::<IAudioSessionControl2>() else {
+                continue;
+            };
+            let pid = session2.GetProcessId().unwrap_or_default();
+            if pid == 0 {
+                continue;
+            }
+            let display_name = session
+                .GetDisplayName()
+                .ok()
+                .and_then(|raw| pwstr_to_optional_string_and_free(raw).ok().flatten());
+            let session_process_path = process_image_path(pid).or_else(|| {
+                process_snapshot
+                    .get(&pid)
+                    .and_then(|entry| entry.process_path.clone())
+            });
+            let capture_pid =
+                process_group_root(pid, session_process_path.as_deref(), &process_snapshot);
+            if !seen.insert(capture_pid) {
+                continue;
+            }
+            let process_path = process_image_path(capture_pid)
+                .or_else(|| {
+                    (capture_pid == pid)
+                        .then(|| session_process_path.clone())
+                        .flatten()
+                })
+                .or_else(|| {
+                    process_snapshot
+                        .get(&capture_pid)
+                        .and_then(|entry| entry.process_path.clone())
+                });
+            let process_name = process_path
+                .as_deref()
+                .and_then(process_name_from_path)
+                .or_else(|| display_name.clone());
+            let label = display_name
+                .filter(|name| !name.trim().is_empty())
+                .or_else(|| process_name.clone())
+                .unwrap_or_else(|| format!("Process {capture_pid}"));
+            processes.push(AudioProcessInfo {
+                pid: capture_pid,
+                label,
+                process_name,
+                process_path,
+            });
+        }
+        processes.sort_by(|a, b| {
+            a.label
+                .to_lowercase()
+                .cmp(&b.label.to_lowercase())
+                .then_with(|| a.pid.cmp(&b.pid))
+        });
+        Ok(processes)
+    }
+}
+
+pub fn process_loopback_available() -> bool {
+    true
+}
+
 pub fn test_microphone_level(
     device_id: Option<&str>,
     volume: f64,
@@ -577,11 +769,301 @@ fn friendly_name(device: &IMMDevice) -> Option<String> {
     }
 }
 
+#[derive(Default)]
+struct ProcessLoopbackActivationState {
+    completed: Mutex<bool>,
+    ready: Condvar,
+}
+
+#[implement(IActivateAudioInterfaceCompletionHandler, IAgileObject)]
+struct ProcessLoopbackActivation {
+    state: Arc<ProcessLoopbackActivationState>,
+}
+
+impl IAgileObject_Impl for ProcessLoopbackActivation_Impl {}
+
+#[allow(non_snake_case)]
+impl IActivateAudioInterfaceCompletionHandler_Impl for ProcessLoopbackActivation_Impl {
+    fn ActivateCompleted(
+        &self,
+        _activateoperation: Ref<IActivateAudioInterfaceAsyncOperation>,
+    ) -> WindowsResult<()> {
+        let mut guard = self.state.completed.lock().expect("activation mutex");
+        *guard = true;
+        self.state.ready.notify_one();
+        Ok(())
+    }
+}
+
+fn activate_process_loopback_client(pid: u32) -> Result<IAudioClient, CaptureError> {
+    let state = Arc::new(ProcessLoopbackActivationState::default());
+    let handler: IActivateAudioInterfaceCompletionHandler = ProcessLoopbackActivation {
+        state: Arc::clone(&state),
+    }
+    .into();
+
+    let params = AUDIOCLIENT_ACTIVATION_PARAMS {
+        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                TargetProcessId: pid,
+                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+            },
+        },
+    };
+    let params_size = std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>();
+    // SAFETY: CoTaskMemAlloc returns an allocation suitable for PROPVARIANT
+    // VT_BLOB ownership. The bytes copied are exactly AUDIOCLIENT_ACTIVATION_PARAMS.
+    let params_blob = unsafe { CoTaskMemAlloc(params_size) };
+    if params_blob.is_null() {
+        return Err(CaptureError::Init(
+            "WASAPI process loopback activation params allocation failed".into(),
+        ));
+    }
+    // SAFETY: params_blob is a valid params_size allocation and params is live.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (&params as *const AUDIOCLIENT_ACTIVATION_PARAMS).cast::<u8>(),
+            params_blob.cast::<u8>(),
+            params_size,
+        );
+    }
+    let mut variant = PROPVARIANT {
+        Anonymous: PROPVARIANT_0 {
+            Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
+                vt: VT_BLOB,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: PROPVARIANT_0_0_0 {
+                    blob: BLOB {
+                        cbSize: params_size as u32,
+                        pBlobData: params_blob.cast::<u8>(),
+                    },
+                },
+            }),
+        },
+    };
+
+    // SAFETY: the activation parameter PROPVARIANT owns its blob payload and is
+    // valid for the duration of ActivateAudioInterfaceAsync.
+    let operation = unsafe {
+        ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            &IAudioClient::IID,
+            Some(&variant),
+            &handler,
+        )
+    };
+    let operation = match operation {
+        Ok(operation) => operation,
+        Err(error) => {
+            // SAFETY: clears the owned blob allocated by InitPropVariantFromBuffer.
+            let _ = unsafe { PropVariantClear(&mut variant) };
+            return Err(init(error));
+        }
+    };
+
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    let mut guard = state.completed.lock().expect("activation mutex");
+    loop {
+        if *guard {
+            drop(guard);
+            let mut activate_result = HRESULT(0);
+            let mut activated_interface = None;
+            // SAFETY: the operation has signaled completion. The HRESULT and
+            // returned interface are checked before use.
+            if let Err(error) = unsafe {
+                operation.GetActivateResult(&mut activate_result, &mut activated_interface)
+            } {
+                // SAFETY: clears the owned activation blob before returning.
+                let _ = unsafe { PropVariantClear(&mut variant) };
+                return Err(CaptureError::Init(format!(
+                    "WASAPI GetActivateResult: {error}"
+                )));
+            }
+            if let Err(error) = activate_result.ok() {
+                // SAFETY: clears the owned activation blob before returning.
+                let _ = unsafe { PropVariantClear(&mut variant) };
+                return Err(CaptureError::Init(format!(
+                    "WASAPI activation result: {error}"
+                )));
+            }
+            let client = match activated_interface
+                .ok_or_else(|| CaptureError::Init("WASAPI: activation returned no client".into()))
+                .and_then(|unknown| {
+                    unknown
+                        .cast::<IAudioClient>()
+                        .map_err(|e| CaptureError::Init(format!("WASAPI activation cast: {e}")))
+                }) {
+                Ok(client) => client,
+                Err(error) => {
+                    // SAFETY: clears the owned activation blob before returning.
+                    let _ = unsafe { PropVariantClear(&mut variant) };
+                    return Err(error);
+                }
+            };
+            // SAFETY: activation is complete, so the owned activation blob can be released.
+            let _ = unsafe { PropVariantClear(&mut variant) };
+            return Ok(client);
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            // SAFETY: clears the owned blob allocated by InitPropVariantFromBuffer.
+            let _ = unsafe { PropVariantClear(&mut variant) };
+            return Err(CaptureError::Init(format!(
+                "WASAPI process loopback activation timed out for pid {pid}"
+            )));
+        };
+        let (next_guard, timeout) = state
+            .ready
+            .wait_timeout(guard, remaining)
+            .expect("activation result condvar");
+        guard = next_guard;
+        if timeout.timed_out() && !*guard {
+            // SAFETY: clears the owned blob allocated by InitPropVariantFromBuffer.
+            let _ = unsafe { PropVariantClear(&mut variant) };
+            return Err(CaptureError::Init(format!(
+                "WASAPI process loopback activation timed out for pid {pid}"
+            )));
+        }
+    }
+}
+
+fn process_image_path(pid: u32) -> Option<String> {
+    // SAFETY: the process handle is closed before return, and the query buffer
+    // is valid for the duration of the call.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = vec![0u16; 32_768];
+        let mut len = buf.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        );
+        let _ = CloseHandle(handle);
+        result.ok()?;
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        (!path.trim().is_empty()).then_some(path)
+    }
+}
+
+fn process_snapshot() -> std::collections::HashMap<u32, ProcessSnapshotEntry> {
+    let mut processes = std::collections::HashMap::new();
+    // SAFETY: snapshot handle is closed before return; PROCESSENTRY32W is
+    // initialized with the required size before ToolHelp reads into it.
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return processes;
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..PROCESSENTRY32W::default()
+        };
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let pid = entry.th32ProcessID;
+                if pid != 0 {
+                    let fallback_name = utf16z_from_buf(&entry.szExeFile);
+                    processes.insert(
+                        pid,
+                        ProcessSnapshotEntry {
+                            parent_pid: entry.th32ParentProcessID,
+                            process_path: (!fallback_name.trim().is_empty())
+                                .then_some(fallback_name),
+                        },
+                    );
+                }
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    processes
+}
+
+fn process_group_root(
+    pid: u32,
+    process_path: Option<&str>,
+    snapshot: &std::collections::HashMap<u32, ProcessSnapshotEntry>,
+) -> u32 {
+    let mut current_pid = pid;
+    let mut current_path = process_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            snapshot
+                .get(&pid)
+                .and_then(|entry| entry.process_path.clone())
+        });
+    let mut visited = std::collections::HashSet::from([pid]);
+
+    while let (Some(path), Some(current)) = (current_path.as_deref(), snapshot.get(&current_pid)) {
+        let parent_pid = current.parent_pid;
+        if parent_pid == 0 || !visited.insert(parent_pid) {
+            break;
+        }
+        let Some(parent) = snapshot.get(&parent_pid) else {
+            break;
+        };
+        let Some(parent_path) = parent.process_path.as_deref() else {
+            break;
+        };
+        if !same_process_image(path, parent_path) {
+            break;
+        }
+        current_pid = parent_pid;
+        current_path = Some(parent_path.to_string());
+    }
+
+    current_pid
+}
+
+fn same_process_image(a: &str, b: &str) -> bool {
+    let a = a.trim();
+    let b = b.trim();
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    match (process_name_from_path(a), process_name_from_path(b)) {
+        (Some(a_name), Some(b_name)) => a_name.eq_ignore_ascii_case(&b_name),
+        _ => false,
+    }
+}
+
+fn process_name_from_path(path: &str) -> Option<String> {
+    let file_name = Path::new(path)
+        .file_stem()
+        .or_else(|| Path::new(path).file_name())?
+        .to_string_lossy();
+    let trimmed = file_name.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 fn pwstr_to_string_and_free(raw: PWSTR) -> Result<String, std::string::FromUtf16Error> {
     // SAFETY: callers pass PWSTRs returned by Windows APIs and release them with CoTaskMemFree.
     let value = unsafe { raw.to_string() };
     unsafe { CoTaskMemFree(Some(raw.0 as *const _)) };
     value
+}
+
+fn pwstr_to_optional_string_and_free(
+    raw: PWSTR,
+) -> Result<Option<String>, std::string::FromUtf16Error> {
+    if raw.0.is_null() {
+        return Ok(None);
+    }
+    pwstr_to_string_and_free(raw).map(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
 }
 
 fn utf16z_from_buf(buf: &[u16]) -> String {
@@ -658,6 +1140,22 @@ fn pcm_sample_format(bits: u16) -> Option<SampleFormat> {
     }
 }
 
+fn process_loopback_format() -> WAVEFORMATEX {
+    const CHANNELS: u16 = 2;
+    const BITS_PER_SAMPLE: u16 = 16;
+    const SAMPLE_RATE: u32 = 44_100;
+    let block_align = CHANNELS * (BITS_PER_SAMPLE / 8);
+    WAVEFORMATEX {
+        wFormatTag: WAVE_FORMAT_PCM as u16,
+        nChannels: CHANNELS,
+        nSamplesPerSec: SAMPLE_RATE,
+        nAvgBytesPerSec: SAMPLE_RATE * block_align as u32,
+        nBlockAlign: block_align,
+        wBitsPerSample: BITS_PER_SAMPLE,
+        cbSize: 0,
+    }
+}
+
 /// Best-effort COM init (MTA); an STA thread is fine too.
 fn init_com() -> Result<(), CaptureError> {
     // SAFETY: CoInitializeEx is safe to call repeatedly per thread.
@@ -674,6 +1172,99 @@ mod tests {
     use super::*;
     use crate::clock::RelativeClock;
     use crate::traits::AudioSource;
+
+    #[test]
+    fn process_name_from_path_uses_executable_stem() {
+        assert_eq!(
+            process_name_from_path(r"C:\Program Files\Discord\Discord.exe").as_deref(),
+            Some("Discord")
+        );
+        assert_eq!(process_name_from_path("").as_deref(), None);
+    }
+
+    #[test]
+    fn process_group_root_collapses_same_executable_children() {
+        let snapshot = std::collections::HashMap::from([
+            (
+                10724,
+                ProcessSnapshotEntry {
+                    parent_pid: 1000,
+                    process_path: Some(r"C:\Users\dain\AppData\Local\Discord\Discord.exe".into()),
+                },
+            ),
+            (
+                18736,
+                ProcessSnapshotEntry {
+                    parent_pid: 10724,
+                    process_path: Some(r"C:\Users\dain\AppData\Local\Discord\Discord.exe".into()),
+                },
+            ),
+            (
+                20732,
+                ProcessSnapshotEntry {
+                    parent_pid: 10724,
+                    process_path: Some(r"C:\Users\dain\AppData\Local\Discord\Discord.exe".into()),
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            process_group_root(
+                18736,
+                Some(r"C:\Users\dain\AppData\Local\Discord\Discord.exe"),
+                &snapshot
+            ),
+            10724
+        );
+        assert_eq!(
+            process_group_root(
+                20732,
+                Some(r"C:\Users\dain\AppData\Local\Discord\Discord.exe"),
+                &snapshot
+            ),
+            10724
+        );
+    }
+
+    #[test]
+    fn process_group_root_stops_at_different_executable_parent() {
+        let snapshot = std::collections::HashMap::from([
+            (
+                10,
+                ProcessSnapshotEntry {
+                    parent_pid: 1,
+                    process_path: Some(r"C:\Launchers\Launcher.exe".into()),
+                },
+            ),
+            (
+                20,
+                ProcessSnapshotEntry {
+                    parent_pid: 10,
+                    process_path: Some(r"C:\Games\Game.exe".into()),
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            process_group_root(20, Some(r"C:\Games\Game.exe"), &snapshot),
+            20
+        );
+    }
+
+    #[test]
+    fn process_loopback_format_matches_windows_sample_pcm16() {
+        let format = process_loopback_format();
+        let tag = format.wFormatTag;
+        let channels = format.nChannels;
+        let sample_rate = format.nSamplesPerSec;
+        let bits = format.wBitsPerSample;
+        let block_align = format.nBlockAlign;
+        assert_eq!(tag as u32, WAVE_FORMAT_PCM);
+        assert_eq!(channels, 2);
+        assert_eq!(sample_rate, 44_100);
+        assert_eq!(bits, 16);
+        assert_eq!(block_align, 4);
+    }
 
     /// Real loopback against the default render endpoint. CI-skipped (no
     /// audio endpoint on runners); lenient about an idle/silent desktop —
