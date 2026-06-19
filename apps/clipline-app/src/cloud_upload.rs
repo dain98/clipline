@@ -1179,6 +1179,10 @@ mod tests {
         missing_parts: Vec<u16>,
     ) -> serde_json::Value {
         let missing_part_count = missing_parts.len() as u16;
+        let progress_basis_points = received_size
+            .saturating_mul(10000)
+            .checked_div(file_size)
+            .unwrap_or(0) as u16;
         json!({
             "upload_id": upload_id,
             "clip_id": clip_id,
@@ -1191,11 +1195,7 @@ mod tests {
             "received_part_count": 2_u16.saturating_sub(missing_part_count),
             "missing_part_count": missing_part_count,
             "next_part_number": missing_parts.first().copied(),
-            "progress_basis_points": if file_size == 0 {
-                0
-            } else {
-                ((received_size.saturating_mul(10000)) / file_size) as u16
-            },
+            "progress_basis_points": progress_basis_points,
             "failure_reason": null,
             "recovery_action": null,
             "expires_at": "2030-01-01T00:00:00Z",
