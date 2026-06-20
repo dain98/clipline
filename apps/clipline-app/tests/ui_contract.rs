@@ -575,6 +575,23 @@ fn review_player_owns_all_controls() {
 }
 
 #[test]
+fn audio_preview_generation_is_not_eager_on_clip_open() {
+    let js = main_js();
+    let open_clip_start = js.find("function openClip(clip)").unwrap();
+    let close_review_start = js.find("function closeReview()").unwrap();
+    let open_clip = &js[open_clip_start..close_review_start];
+
+    assert!(
+        !open_clip.contains("applySelectedAudioTracksToPlayback()"),
+        "opening a clip must not eagerly remux or mix a full-session audio preview"
+    );
+    assert!(
+        js.contains("selected.length === tracks.length && currentReviewMediaPath === clip.path"),
+        "all-track playback should keep the original source until the user changes selection"
+    );
+}
+
+#[test]
 fn initial_settings_tab_state_matches_visible_section() {
     let html = index_html();
     let tabs_start = html.find("id=\"settings-tabs\"").expect("settings tabs");

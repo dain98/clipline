@@ -955,23 +955,40 @@ fn add_output_audio_sources(
     sources: &mut Vec<(Box<dyn AudioSource>, ClipAudioTrack)>,
 ) {
     let mut process_tracks = Vec::new();
+    let mut process_loopback_failed = false;
+    let mut process_loopback_error = None::<String>;
     if options.split_output_by_process && process_loopback_available() {
-        if let Ok(processes) = enumerate_output_processes(options.output_device_id.as_deref()) {
-            for process in processes {
-                match WasapiLoopback::start_process_output(
-                    clock,
-                    process.pid,
-                    options.output_volume,
-                ) {
-                    Ok(audio) => process_tracks.push((process, audio)),
-                    Err(e) if e.to_string().contains("timed out") => break,
-                    Err(_) => {}
+        match enumerate_output_processes(options.output_device_id.as_deref()) {
+            Ok(processes) => {
+                for process in processes {
+                    match WasapiLoopback::start_process_output(
+                        clock,
+                        process.pid,
+                        options.output_volume,
+                    ) {
+                        Ok(audio) => process_tracks.push((process, audio)),
+                        Err(e) if e.to_string().contains("timed out") => {
+                            process_loopback_failed = true;
+                            process_loopback_error.get_or_insert_with(|| e.to_string());
+                            break;
+                        }
+                        Err(e) => {
+                            process_loopback_failed = true;
+                            process_loopback_error
+                                .get_or_insert_with(|| format!("{}: {e}", process.label));
+                        }
+                    }
                 }
+            }
+            Err(e) => {
+                process_loopback_failed = true;
+                process_loopback_error = Some(e.to_string());
             }
         }
     }
 
-    if !process_tracks.is_empty() {
+    let process_track_count = process_tracks.len();
+    if process_track_count > 0 {
         for (process, audio) in process_tracks {
             let index = sources.len() as u32;
             let id = format!("process:{}", process.pid);
@@ -980,7 +997,19 @@ fn add_output_audio_sources(
                 audio_track(&id, index, &process.label, "process_output"),
             ));
         }
-        return;
+        if !should_add_mixed_output_fallback(process_track_count, process_loopback_failed) {
+            return;
+        }
+    }
+
+    if process_loopback_failed {
+        let detail = process_loopback_error
+            .map(|error| format!(": {error}"))
+            .unwrap_or_default();
+        warn_user(
+            events,
+            format!("some app audio tracks unavailable; adding mixed output fallback{detail}"),
+        );
     }
 
     match WasapiLoopback::start_output(
@@ -999,6 +1028,13 @@ fn add_output_audio_sources(
             warn_user(events, format!("output audio unavailable; continuing: {e}"));
         }
     }
+}
+
+fn should_add_mixed_output_fallback(
+    process_track_count: usize,
+    process_loopback_failed: bool,
+) -> bool {
+    process_track_count == 0 || process_loopback_failed
 }
 
 fn audio_track(id: &str, track_index: u32, label: &str, kind: &str) -> ClipAudioTrack {
@@ -1880,6 +1916,13 @@ mod tests {
         let sidecar: clipline_events::ClipMarkers = serde_json::from_str(&json).unwrap();
         assert!(sidecar.markers.is_empty());
         assert_eq!(sidecar.audio_tracks, tracks);
+    }
+
+    #[test]
+    fn mixed_output_fallback_is_added_after_partial_process_loopback_failure() {
+        assert!(!should_add_mixed_output_fallback(2, false));
+        assert!(should_add_mixed_output_fallback(2, true));
+        assert!(should_add_mixed_output_fallback(0, false));
     }
 
     #[test]

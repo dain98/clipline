@@ -2137,7 +2137,7 @@ async function applySelectedAudioTracksToPlayback() {
   if (!clip || !tracks.length) return;
 
   const selected = selectedAudioTrackIdsForClip(clip);
-  if (tracks.length <= 1 && selected.length === tracks.length && currentReviewMediaPath === clip.path) {
+  if (selected.length === tracks.length && currentReviewMediaPath === clip.path) {
     $("deck-status").textContent = audioSelectionLabel(clip);
     return;
   }
@@ -2264,11 +2264,6 @@ function openClip(clip) {
   noteActivity();
   requestAnimationFrame(updateStageFrame);
   video.play().catch(() => syncPlayState());
-  if (clipAudioTracks(clip).length > 1) {
-    window.setTimeout(() => {
-      if (currentClip && currentClip.path === clip.path) applySelectedAudioTracksToPlayback();
-    }, 0);
-  }
 }
 
 function closeReview() {

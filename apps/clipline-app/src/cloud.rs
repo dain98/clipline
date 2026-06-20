@@ -221,7 +221,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         remote_clip_id: None,
         remote_url: None,
         visibility: visibility.clone(),
-        upload_status: existing_retry_status(&cloud, &local_clip_id),
+        upload_status: existing_retry_status(&cloud, &local_clip_id, &request.path),
         error: None,
         updated_at_unix: unix_now(),
     };
@@ -535,23 +535,31 @@ fn local_clip_id(path: &Path, meta: &std::fs::Metadata, checksum: &str) -> Resul
     Ok(format!("clipline-local-{}", sha256_hex(payload.as_bytes())))
 }
 
-fn existing_retry_status(cloud: &CloudSettings, local_clip_id: &str) -> String {
-    match cloud
-        .uploads
-        .get(local_clip_id)
-        .map(|record| record.upload_status.as_str())
-    {
+fn existing_retry_status(cloud: &CloudSettings, local_clip_id: &str, path: &str) -> String {
+    let existing = cloud.uploads.get(local_clip_id).or_else(|| {
+        cloud
+            .uploads
+            .values()
+            .filter(|record| record.path == path)
+            .max_by_key(|record| record.updated_at_unix)
+    });
+    match existing.map(|record| record.upload_status.as_str()) {
         Some("failed") => "retrying".to_string(),
         Some("uploading") | Some("queued") | Some("processing") => "retrying".to_string(),
         _ => "queued".to_string(),
     }
 }
 
+fn replace_upload_record(cloud: &mut CloudSettings, record: CloudUploadRecord) {
+    cloud
+        .uploads
+        .retain(|key, existing| key == &record.local_clip_id || existing.path != record.path);
+    cloud.uploads.insert(record.local_clip_id.clone(), record);
+}
+
 fn persist_record(state: &RuntimeState, record: &CloudUploadRecord) -> Result<(), String> {
     state.update_cloud(|cloud| {
-        cloud
-            .uploads
-            .insert(record.local_clip_id.clone(), record.clone());
+        replace_upload_record(cloud, record.clone());
     })?;
     Ok(())
 }
@@ -758,6 +766,50 @@ mod tests {
         assert!(err.contains("unknown audio track"), "{err}");
     }
 
+    #[test]
+    fn upload_record_supersedes_older_record_for_same_path() {
+        let mut cloud = CloudSettings::default();
+        cloud.uploads.insert(
+            "old".into(),
+            upload_record("old", "D:\\Videos\\clip.mp4", "failed", 10),
+        );
+        cloud.uploads.insert(
+            "other".into(),
+            upload_record("other", "D:\\Videos\\other.mp4", "uploaded_public", 11),
+        );
+
+        let newer = upload_record("new", "D:\\Videos\\clip.mp4", "queued", 12);
+        replace_upload_record(&mut cloud, newer.clone());
+
+        assert!(!cloud.uploads.contains_key("old"));
+        assert_eq!(cloud.uploads.get("new"), Some(&newer));
+        assert_eq!(
+            cloud
+                .uploads
+                .get("other")
+                .map(|record| record.path.as_str()),
+            Some("D:\\Videos\\other.mp4")
+        );
+    }
+
+    #[test]
+    fn existing_retry_status_uses_same_path_when_audio_selection_changed() {
+        let mut cloud = CloudSettings::default();
+        cloud.uploads.insert(
+            "old".into(),
+            upload_record("old", "D:\\Videos\\clip.mp4", "failed", 10),
+        );
+
+        assert_eq!(
+            existing_retry_status(&cloud, "new", "D:\\Videos\\clip.mp4"),
+            "retrying"
+        );
+        assert_eq!(
+            existing_retry_status(&cloud, "new", "D:\\Videos\\other.mp4"),
+            "queued"
+        );
+    }
+
     fn audio_markers() -> ClipMarkers {
         ClipMarkers {
             recording_start_s: 0.0,
@@ -825,5 +877,23 @@ mod tests {
                 is_sync: true,
             })
             .collect()
+    }
+
+    fn upload_record(
+        local_clip_id: &str,
+        path: &str,
+        upload_status: &str,
+        updated_at_unix: u64,
+    ) -> CloudUploadRecord {
+        CloudUploadRecord {
+            local_clip_id: local_clip_id.into(),
+            path: path.into(),
+            remote_clip_id: None,
+            remote_url: None,
+            visibility: "private".into(),
+            upload_status: upload_status.into(),
+            error: None,
+            updated_at_unix,
+        }
     }
 }

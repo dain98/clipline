@@ -289,6 +289,14 @@ Recent fixes (2026-06-19):
 - Review audio-track checkboxes now affect playback as well as upload: WebView-native track toggles
   are used when available, otherwise Clipline stream-copies a temporary selected-audio preview MP4
   under `%APPDATA%\Clipline\audio-previews` and reloads the player at the same timestamp.
+- PR review follow-ups: opening a multi-track clip no longer eagerly creates a full-length audio
+  preview; preview generation starts only after the user changes track selection. Multi-track
+  preview mixing now surfaces FFmpeg failures instead of falling through to an unmixed MP4, and
+  the preview cache key was bumped to avoid reusing old fallback artifacts. If some process-loopback
+  tracks start but others fail, Clipline appends the mixed Output Audio fallback so game/system
+  audio is still preserved. Cloud upload records now supersede older records for the same clip
+  path, so retrying with a different audio-track selection does not leave stale failed state in
+  the library.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window

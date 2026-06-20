@@ -323,6 +323,22 @@ fn preview_clip_audio_tracks_file(
     display_path: String,
     selected_audio_track_ids: Vec<String>,
 ) -> Result<String, String> {
+    preview_clip_audio_tracks_file_with_mixer(
+        source,
+        display_path,
+        selected_audio_track_ids,
+        crate::settings::audio_preview_cache_dir(),
+        mix_audio_preview_with_ffmpeg,
+    )
+}
+
+fn preview_clip_audio_tracks_file_with_mixer(
+    source: PathBuf,
+    display_path: String,
+    selected_audio_track_ids: Vec<String>,
+    preview_dir: PathBuf,
+    mix_audio_preview: impl FnOnce(&Path, &Path, &[u32]) -> Result<(), String>,
+) -> Result<String, String> {
     let Some(markers) = read_markers(&source) else {
         return Ok(display_path);
     };
@@ -332,7 +348,6 @@ fn preview_clip_audio_tracks_file(
     }
 
     let meta = std::fs::metadata(&source).map_err(|e| format!("read clip metadata: {e}"))?;
-    let preview_dir = crate::settings::audio_preview_cache_dir();
     std::fs::create_dir_all(&preview_dir)
         .map_err(|e| format!("create audio preview cache: {e}"))?;
     prune_old_audio_previews(&preview_dir);
@@ -341,9 +356,8 @@ fn preview_clip_audio_tracks_file(
         return Ok(preview.display().to_string());
     }
 
-    if selected_indices.len() > 1
-        && mix_audio_preview_with_ffmpeg(&source, &preview, &selected_indices).is_ok()
-    {
+    if selected_indices.len() > 1 {
+        mix_audio_preview(&source, &preview, &selected_indices)?;
         return Ok(preview.display().to_string());
     }
 
@@ -519,7 +533,7 @@ fn audio_preview_path(
     selected_audio_track_ids: &[String],
 ) -> PathBuf {
     let mut hasher = DefaultHasher::new();
-    "audio-preview-mix-v3".hash(&mut hasher);
+    "audio-preview-mix-v4".hash(&mut hasher);
     source.display().to_string().hash(&mut hasher);
     meta.len().hash(&mut hasher);
     meta.modified().ok().hash(&mut hasher);
@@ -1106,6 +1120,49 @@ mod tests {
         let err = ffmpeg_audio_mix_filter(&[]).expect_err("empty selection is invalid");
 
         assert!(err.contains("at least one"), "{err}");
+    }
+
+    #[test]
+    fn multi_track_preview_returns_mix_failure_instead_of_unmixed_mp4() {
+        let dir = TestDir::new("audio-preview-mix-failure");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, b"not an mp4").unwrap();
+        let markers = ClipMarkers {
+            recording_start_s: 0.0,
+            duration_s: 10.0,
+            player_summary: None,
+            audio_tracks: vec![
+                ClipAudioTrack {
+                    id: "output".into(),
+                    track_index: 0,
+                    label: "Output Audio".into(),
+                    kind: Some("output".into()),
+                },
+                ClipAudioTrack {
+                    id: "microphone".into(),
+                    track_index: 1,
+                    label: "Microphone".into(),
+                    kind: Some("microphone".into()),
+                },
+            ],
+            markers: Vec::new(),
+        };
+        std::fs::write(
+            source.with_extension("markers.json"),
+            serde_json::to_string(&markers).unwrap(),
+        )
+        .unwrap();
+
+        let err = preview_clip_audio_tracks_file_with_mixer(
+            source.clone(),
+            source.display().to_string(),
+            vec!["output".into(), "microphone".into()],
+            dir.path().join("previews"),
+            |_, _, _| Err("forced mix failure".into()),
+        )
+        .expect_err("multi-track preview must require a mixed preview");
+
+        assert!(err.contains("forced mix failure"), "{err}");
     }
 
     #[test]
