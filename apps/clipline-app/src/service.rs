@@ -40,15 +40,9 @@ use crate::markers::PollerMsg;
 pub use clipline_capture::probe::Codec;
 
 const LOW_REPLAY_CACHE_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const PREVIEW_MAX_WIDTH: u32 = 640;
-const PREVIEW_MAX_HEIGHT: u32 = 360;
-const PREVIEW_INTERVAL: Duration = Duration::from_millis(2000);
-
 pub enum Cmd {
     Save,
     Stop { announce: bool },
-    SetPreview { active: bool },
-    PausePreview { duration: Duration },
 }
 
 trait TimedFrameSource {
@@ -394,11 +388,6 @@ pub enum Event {
     Error {
         message: String,
     },
-    PreviewFrame {
-        width: u32,
-        height: u32,
-        data_url: String,
-    },
 }
 
 /// The game a recording run is attributed to (plugin or custom), recorded
@@ -548,94 +537,6 @@ fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver
     }
 }
 
-#[derive(Default)]
-struct PreviewState {
-    active: bool,
-    paused_until: Option<Instant>,
-    last_attempt: Option<Instant>,
-    readback_failed: bool,
-    readback: Option<d3d11::PreviewReadback>,
-}
-
-fn maybe_send_preview(
-    device: &ID3D11Device,
-    frame: &clipline_capture::traits::Frame,
-    preview: &mut PreviewState,
-    events: &Sender<Event>,
-) {
-    if !preview.active {
-        return;
-    }
-    if let Some(paused_until) = preview.paused_until {
-        if paused_until > Instant::now() {
-            if let Some(readback) = &mut preview.readback {
-                readback.reset();
-            }
-            return;
-        }
-        preview.paused_until = None;
-    }
-    if preview
-        .last_attempt
-        .is_some_and(|last| last.elapsed() < PREVIEW_INTERVAL)
-    {
-        return;
-    }
-    let FrameData::Gpu(texture) = &frame.data else {
-        return;
-    };
-    preview.last_attempt = Some(Instant::now());
-
-    if preview.readback.is_none() {
-        match d3d11::PreviewReadback::new(device, PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT) {
-            Ok(readback) => preview.readback = Some(readback),
-            Err(e) if !preview.readback_failed => {
-                preview.readback_failed = true;
-                warn_user(
-                    events,
-                    format!("capture preview unavailable; init readback: {e}"),
-                );
-                return;
-            }
-            Err(_) => return,
-        }
-    }
-
-    match preview
-        .readback
-        .as_mut()
-        .expect("preview readback initialized above")
-        .try_read(texture)
-    {
-        Ok(Some(image)) => {
-            let Some(png) =
-                crate::game_icon::encode_rgba_png(image.width, image.height, &image.pixels)
-            else {
-                if !preview.readback_failed {
-                    preview.readback_failed = true;
-                    warn_user(events, "capture preview unavailable; encode failed".into());
-                }
-                return;
-            };
-            let _ = events.send(Event::PreviewFrame {
-                width: image.width,
-                height: image.height,
-                data_url: crate::game_icon::png_data_url(&png),
-            });
-            preview.readback_failed = false;
-        }
-        Ok(None) => {}
-        Err(e) if !preview.readback_failed => {
-            preview.readback_failed = true;
-            warn_user(
-                events,
-                format!("capture preview unavailable; readback: {e}"),
-            );
-        }
-        Err(_) => {}
-    }
-}
-
 fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> Result<(), String> {
     let init = |e: &dyn std::fmt::Display| format!("init: {e}");
     let (device, _ctx) = d3d11::create_device().map_err(|e| init(&e))?;
@@ -734,7 +635,6 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     // folder per detected match. Folders are created lazily at save time.
     let mut session = SessionTracker::new(local_session_label(false));
     let mut last_status = Instant::now();
-    let mut preview = PreviewState::default();
     let mut full_session = begin_full_session_recording(
         &mut rec,
         &clips_dir,
@@ -746,8 +646,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     send_recording_status(events, &rec, &full_session, &encoder_status);
 
     loop {
-        match rec.step_with_frame(|frame| maybe_send_preview(&device, frame, &mut preview, events))
-        {
+        match rec.step_with_frame(|_frame| {}) {
             Ok(true) => {}
             Ok(false) => break,
             // Idle screen: WGC delivers nothing — keep serving commands.
@@ -854,25 +753,6 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         send_stopped(events);
                     }
                     return Ok(());
-                }
-                Ok(Cmd::SetPreview { active }) => {
-                    preview.active = active;
-                    if !active {
-                        preview.last_attempt = None;
-                        preview.paused_until = None;
-                        if let Some(readback) = &mut preview.readback {
-                            readback.reset();
-                        }
-                    }
-                }
-                Ok(Cmd::PausePreview { duration }) => {
-                    if preview.active {
-                        preview.paused_until = Some(Instant::now() + duration);
-                        preview.last_attempt = None;
-                        if let Some(readback) = &mut preview.readback {
-                            readback.reset();
-                        }
-                    }
                 }
                 Err(TryRecvError::Disconnected) => {
                     let _ = shutdown_recorder(

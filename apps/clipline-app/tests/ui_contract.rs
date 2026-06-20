@@ -46,12 +46,6 @@ fn review_player_owns_all_controls() {
     );
 
     for required in [
-        "id=\"review-empty\"",
-        "id=\"capture-preview-image\"",
-        "id=\"capture-preview-overlay\"",
-        "id=\"capture-preview-title\"",
-        "id=\"capture-preview-status\"",
-        "id=\"capture-preview-meta\"",
         "id=\"play-toggle\"",
         "id=\"seek-back\"",
         "id=\"seek-forward\"",
@@ -68,7 +62,6 @@ fn review_player_owns_all_controls() {
         "id=\"volume-slider\"",
         "id=\"export-clip\"",
         "id=\"trim-summary\"",
-        "id=\"keys-help\"",
         "id=\"keys-dialog\"",
         "id=\"keys-close\"",
         "id=\"delete-clip\"",
@@ -91,10 +84,7 @@ fn review_player_owns_all_controls() {
         "id=\"stage-frame\"",
         "id=\"copy-clip\"",
         "id=\"stage-overlay\"",
-        "id=\"sidebar-toggle\"",
         "id=\"memory-usage\"",
-        "id=\"capture-status\"",
-        "id=\"capture-status-label\"",
         "id=\"rail-dot\"",
         "id=\"rail-status-text\"",
         "id=\"rail-status\"",
@@ -116,11 +106,9 @@ fn review_player_owns_all_controls() {
         "id=\"update-dialog-body\"",
         "id=\"settings-page\"",
         "id=\"settings-tabs\"",
-        "id=\"open-settings\"",
         "id=\"set-open-on-startup\"",
         "id=\"set-close-to-tray\"",
         "id=\"set-minimize-to-tray\"",
-        "id=\"set-capture-preview-enabled\"",
         "id=\"set-update-channel\"",
         "id=\"check-updates\"",
         "id=\"update-status\"",
@@ -241,12 +229,10 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains("Close to Tray")
             && html.contains("Minimize to Tray")
-            && html.contains("Display Preview")
             && html.contains("Updates")
             && html.contains("value=\"stable\" disabled")
             && main_js().contains("close_to_tray")
             && main_js().contains("minimize_to_tray")
-            && main_js().contains("capture_preview_enabled")
             && main_js().contains("update_channel")
             && main_js().contains("check_for_updates")
             && main_js().contains("install_update")
@@ -525,21 +511,6 @@ fn review_player_owns_all_controls() {
             && main_js().contains("updateStageFrame"),
         "the review stage must size an aspect-locked frame around the video"
     );
-    assert!(
-        main_js().contains("set_preview_active")
-            && main_js().contains("listen(\"preview-frame\"")
-            && main_js().contains("Focus Clipline to show preview")
-            && main_js().contains("Display preview is off")
-            && main_js().contains("activation?.focused === false")
-            && main_js().contains("activation?.enabled === false")
-            && main_js().contains("pausePreviewForWindowMove")
-            && app_rs().contains("is_focused()")
-            && app_rs().contains("capture_preview_enabled")
-            && app_rs().contains("preview_active_for_settings(active, focused, preview_enabled)")
-            && styles_css().contains(".capture-preview-frame"),
-        "the empty review pane must render a native-focus-gated capture preview"
-    );
-
     // Icon buttons carry SVG icons; text labels are a regression.
     for id in [
         "id=\"play-toggle\"",
@@ -548,7 +519,6 @@ fn review_player_owns_all_controls() {
         "id=\"prev-marker\"",
         "id=\"next-marker\"",
         "id=\"mute-toggle\"",
-        "id=\"sidebar-toggle\"",
         "id=\"upload-clip\"",
         "id=\"open-folder\"",
         "id=\"copy-clip\"",
@@ -556,7 +526,6 @@ fn review_player_owns_all_controls() {
         "id=\"rail-settings\"",
         "id=\"delete-clip\"",
         "id=\"export-clip\"",
-        "id=\"open-settings\"",
         "id=\"zoom-out\"",
         "id=\"zoom-fit\"",
         "id=\"zoom-in\"",

@@ -71,7 +71,6 @@ const {
   smoothnessIndexForFps,
   outputResolutionOption,
   captureSourceLabel,
-  captureStatusLabel,
 } = PlayerCore;
 
 const video = $("video");
@@ -79,15 +78,15 @@ const stage = document.querySelector(".stage");
 const stageFrame = $("stage-frame");
 let currentClip = null;
 let clipsCache = [];
+// Gallery (library home) view state.
+let galleryFilter = "all";
+let gallerySort = "new";
+let galleryGroup = "smart";
+let gallerySearch = "";
+const posterCache = new Map();
 let currentSettings = null;
 let recordingActive = false;
 let fullSessionRecordingActive = false;
-let windowFocused = document.hasFocus();
-let previewRequested = false;
-let previewHasFrame = false;
-let previewWindowMovePaused = false;
-let previewWindowMoveTimer = 0;
-let previewWindowMoveStart = null;
 let displays = [];
 let displaysLoaded = false;
 let displaysLoadPromise = null;
@@ -317,11 +316,9 @@ function fillSettings(s) {
   $("set-replay-disk-quota").value = replayStorage.disk_quota_gb ?? 2;
   $("set-replay-disk-ack").checked = !!replayStorage.disk_acknowledged;
   $("set-hotkey").value = s.hotkey;
-  $("save-hotkey").textContent = s.hotkey;
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
   $("set-minimize-to-tray").checked = !!s.minimize_to_tray;
-  $("set-capture-preview-enabled").checked = s.capture_preview_enabled !== false;
   $("set-update-channel").value = s.update_channel || "nightly";
   fillCloudSettings(cloud);
   endHotkeyCapture("Click the field to record a new shortcut.");
@@ -392,7 +389,6 @@ function readSettings() {
     open_on_startup: $("set-open-on-startup").checked,
     close_to_tray: $("set-close-to-tray").checked,
     minimize_to_tray: $("set-minimize-to-tray").checked,
-    capture_preview_enabled: $("set-capture-preview-enabled").checked,
     update_channel: $("set-update-channel").value,
     cloud: readCloudSettings(),
   };
@@ -1014,21 +1010,12 @@ function updateCaptureStatus() {
     activeDetectedGame && activeDetectedGame.active
       ? `Game: ${activeDetectedGame.name}`
       : fallbackCaptureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
-  $("capture-status-label").textContent = captureStatusLabel(
-    source,
-    recordingActive,
-    fullSessionRecordingActive
-  );
-  $("capture-status").classList.toggle("stopped", !recordingActive);
-  $("capture-status").setAttribute("aria-pressed", String(recordingActive));
-  $("capture-status").title = recordingActive ? "Stop recording" : `Start ${source} recording`;
   $("rail-status").classList.toggle("stopped", !recordingActive);
   $("rail-status").setAttribute("aria-pressed", String(recordingActive));
-  $("rail-status").title = $("capture-status").title;
+  $("rail-status").title = recordingActive ? "Stop recording" : `Start ${source} recording`;
   $("rail-status-text").textContent = recordingActive ? "Rec" : "Off";
-  $("save").disabled = !recordingActive;
   $("rail-save").disabled = !recordingActive;
-  updateCapturePreview();
+  renderRailGame();
 }
 
 function fallbackCaptureSourceLabel(settings) {
@@ -1039,133 +1026,9 @@ function fallbackCaptureSourceLabel(settings) {
   return captureSourceLabel(settings);
 }
 
-function emptyPreviewVisible() {
-  return !settingsOpen && !currentClip;
-}
-
-function previewShouldRun() {
-  return (
-    emptyPreviewVisible()
-    && recordingActive
-    && currentSettings?.capture_preview_enabled !== false
-    && windowFocused
-    && !previewWindowMovePaused
-  );
-}
-
-function setPreviewOverlay(title, message, ready = false) {
-  $("capture-preview-title").textContent = title;
-  $("capture-preview-status").textContent = message;
-  $("capture-preview-overlay").classList.toggle("ready", ready);
-}
-
-function resetCapturePreviewFrame() {
-  previewHasFrame = false;
-  const image = $("capture-preview-image");
-  image.hidden = true;
-  image.removeAttribute("src");
-}
-
-function updateCapturePreview() {
-  const visible = emptyPreviewVisible();
-  const shouldRun = previewShouldRun();
-  const metaSource =
-    activeDetectedGame && activeDetectedGame.active
-      ? `Game: ${activeDetectedGame.name}`
-      : fallbackCaptureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
-
-  if (!shouldRun && previewHasFrame) resetCapturePreviewFrame();
-
-  if (visible && currentSettings?.capture_preview_enabled === false) {
-    setPreviewOverlay("Capture preview", "Display preview is off");
-    $("capture-preview-meta").textContent = metaSource;
-  } else if (!recordingActive) {
-    setPreviewOverlay("Capture preview", "Recording is off");
-    $("capture-preview-meta").textContent = "Start recording to show the active target";
-  } else if (previewWindowMovePaused && visible) {
-    setPreviewOverlay("Preview paused", "Moving window...");
-    $("capture-preview-meta").textContent = metaSource;
-  } else if (!windowFocused && visible) {
-    setPreviewOverlay("Preview paused", "Focus Clipline to show preview");
-    $("capture-preview-meta").textContent = metaSource;
-  } else if (visible && previewHasFrame) {
-    setPreviewOverlay("Capture preview", "", true);
-    $("capture-preview-meta").textContent = metaSource;
-  } else if (visible) {
-    setPreviewOverlay("Capture preview", "Waiting for capture…");
-    $("capture-preview-meta").textContent = metaSource;
-  } else {
-    setPreviewOverlay("Capture preview", "");
-  }
-
-  if (shouldRun === previewRequested) return;
-  previewRequested = shouldRun;
-  invoke("set_preview_active", { active: shouldRun }).then((activation) => {
-    if (shouldRun && activation?.focused === false) {
-      windowFocused = false;
-      previewRequested = false;
-      resetCapturePreviewFrame();
-      updateCapturePreview();
-      return;
-    }
-    if (shouldRun && activation?.enabled === false) {
-      previewRequested = false;
-      resetCapturePreviewFrame();
-      updateCapturePreview();
-      return;
-    }
-    if (shouldRun && !activation?.active) {
-      previewRequested = false;
-      setPreviewOverlay("Capture preview", "Preview unavailable");
-    }
-  }).catch((e) => {
-    previewRequested = false;
-    if (shouldRun) setPreviewOverlay("Capture preview", String(e));
-  });
-}
-
-function setPreviewWindowMovePaused(paused) {
-  if (previewWindowMovePaused === paused) return;
-  previewWindowMovePaused = paused;
-  if (!paused) previewRequested = false;
-  updateCapturePreview();
-}
-
-function pausePreviewForWindowMove() {
-  if (!emptyPreviewVisible()) return;
-  clearTimeout(previewWindowMoveTimer);
-  setPreviewWindowMovePaused(true);
-  // Native window dragging can delay pointerup/timers until the move ends.
-  // This fallback keeps preview from staying paused if the release event is
-  // swallowed by the system drag.
-  previewWindowMoveTimer = setTimeout(() => setPreviewWindowMovePaused(false), 900);
-}
-
-function resumePreviewAfterWindowMove() {
-  previewWindowMoveStart = null;
-  clearTimeout(previewWindowMoveTimer);
-  previewWindowMoveTimer = setTimeout(() => setPreviewWindowMovePaused(false), 120);
-}
-
-function armPreviewWindowMovePause(ev) {
-  clearTimeout(previewWindowMoveTimer);
-  previewWindowMoveStart = { pointerId: ev.pointerId, x: ev.clientX, y: ev.clientY };
-  previewWindowMoveTimer = setTimeout(() => { previewWindowMoveStart = null; }, 700);
-}
-
-function maybePausePreviewForWindowMove(ev) {
-  if (!previewWindowMoveStart || ev.pointerId !== previewWindowMoveStart.pointerId) return;
-  const dx = ev.clientX - previewWindowMoveStart.x;
-  const dy = ev.clientY - previewWindowMoveStart.y;
-  if ((dx * dx + dy * dy) < 16) return;
-  previewWindowMoveStart = null;
-  clearTimeout(previewWindowMoveTimer);
-  pausePreviewForWindowMove();
-}
 
 async function toggleRecording() {
   const next = !recordingActive;
-  $("capture-status").disabled = true;
   $("rail-status").disabled = true;
   try {
     recordingActive = await invoke("set_recording", { recording: next });
@@ -1173,7 +1036,6 @@ async function toggleRecording() {
   } catch (e) {
     $("error").textContent = e;
   } finally {
-    $("capture-status").disabled = false;
     $("rail-status").disabled = false;
   }
 }
@@ -1701,10 +1563,6 @@ async function refresh() {
 
 async function refreshStorage() {
   const s = await invoke("storage_status");
-  $("storage-used").textContent = fmtBytes(s.total_bytes);
-  $("storage-used").className = s.over_quota ? "warn" : "";
-  $("storage-quota").textContent = s.quota_bytes == null ? "no limit" : fmtBytes(s.quota_bytes);
-  $("storage-clips").textContent = s.clip_count;
   $("rail-clips-count").textContent = compactCount(s.clip_count);
   $("rail-library-status").title = `${plural(s.clip_count, "clip")} in library`;
 }
@@ -1720,9 +1578,59 @@ function plural(count, singular) {
 async function refreshMemoryUsage() {
   try {
     const s = await invoke("memory_status");
-    $("memory-usage").textContent = `Using ${fmtBytes(s.private_working_set_bytes)} RAM`;
+    // Compact for the 64px rail; the "RAM" caption is a CSS ::before label.
+    $("memory-usage").textContent = fmtBytes(s.private_working_set_bytes);
   } catch (_) {
-    $("memory-usage").textContent = "Using -- RAM";
+    $("memory-usage").textContent = "-- MB";
+  }
+}
+
+// Resolve the icon for the game currently being captured. The detected-game
+// payload carries no plugin id, so match a custom game by exe/window/name, then
+// fall back to a plugin by name; { url: null } means "known game, no icon".
+function activeGameIcon() {
+  const g = activeDetectedGame;
+  if (!g || !g.active) return null;
+  const exe = (g.exe_name || "").toLowerCase();
+  const custom = customGames.find((c) =>
+    (c.exe_name && exe && c.exe_name.toLowerCase() === exe) ||
+    (c.window_title && g.window_title && c.window_title === g.window_title) ||
+    (c.name && g.name && c.name === g.name));
+  if (custom && custom.icon) return { url: custom.icon, label: custom.name || g.name };
+  const plugin = gamePlugins.find((p) => p.name === g.name);
+  if (plugin && plugin.icon) return { url: plugin.icon, label: plugin.name };
+  return { url: null, label: g.name };
+}
+
+function railGamePlaceholder() {
+  const ph = document.createElement("div");
+  ph.className = "placeholder";
+  ph.innerHTML = GENERIC_GAME_ICON; // static markup, safe
+  return ph;
+}
+
+// Show the captured game's icon in the rail; hidden when no game is active
+// (e.g. capturing a display/region).
+function renderRailGame() {
+  const host = $("rail-game");
+  if (!host) return;
+  const icon = activeGameIcon();
+  host.replaceChildren();
+  if (!icon) {
+    host.hidden = true;
+    host.removeAttribute("title");
+    return;
+  }
+  host.hidden = false;
+  host.title = icon.label;
+  if (icon.url) {
+    const img = document.createElement("img");
+    img.src = icon.url;
+    img.alt = "";
+    img.addEventListener("error", () => img.replaceWith(railGamePlaceholder()));
+    host.appendChild(img);
+  } else {
+    host.appendChild(railGamePlaceholder());
   }
 }
 
@@ -1906,62 +1814,147 @@ function cloudVisibilityEl(record) {
 }
 
 // Clip names come from disk; build rows with textContent, never innerHTML.
-function clipRow(c) {
-  const el = document.createElement("div");
-  el.className = "clip" + (currentClip && currentClip.path === c.path ? " active" : "");
+const CARD_KIND_LABELS = { replay: "Replay", session: "Session", trim: "Trim" };
+// Marker categories → tint var, matching the timeline glyph colors.
+const MARKER_TICK_VARS = {
+  ChampionKill: "--mc-kill", FirstBlood: "--mc-kill",
+  ChampionDeath: "--mc-death",
+  Multikill: "--mc-spree", Ace: "--mc-spree",
+  DragonKill: "--mc-objective", HeraldKill: "--mc-objective", BaronKill: "--mc-objective",
+  TurretKilled: "--mc-structure", InhibKilled: "--mc-structure", FirstBrick: "--mc-structure",
+};
+
+// Stable gradient placeholder per clip, shown until the poster loads (and the
+// fallback if poster extraction fails).
+function thumbGradient(c) {
+  const key = (c.name || "") + (c.session || "");
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) % 360;
+  return `--g1:hsl(${h} 30% 18%); --g2:hsl(${(h + 38) % 360} 34% 8%);`;
+}
+
+function makePosterImg(url) {
+  const img = document.createElement("img");
+  img.className = "card-thumb-img";
+  img.src = url;
+  img.alt = "";
+  img.addEventListener("error", () => img.remove());
+  return img;
+}
+
+// Lazily fetch + cache a clip's poster, then drop it into its card thumbnail.
+// The backend caches the JPEG, so repeat calls are cheap after the first.
+function loadCardPoster(path, thumb) {
+  invoke("clip_poster", { path })
+    .then((posterPath) => {
+      if (!posterPath) return;
+      const url = convertFileSrc(posterPath);
+      posterCache.set(path, url);
+      if (thumb.isConnected && !thumb.querySelector(".card-thumb-img")) {
+        thumb.appendChild(makePosterImg(url));
+      }
+    })
+    .catch(() => {});
+}
+
+function clipCard(c) {
+  const el = document.createElement("article");
+  el.className = "card" + (currentClip && currentClip.path === c.path ? " active" : "");
   el.title = c.name;
   const cloudRecord = clipCloudRecord(c);
 
   const kind = clipKind(c.name);
-  const icon = document.createElement("div");
-  icon.className = "clip-kind " + kind;
-  icon.title = CLIP_KIND_LABELS[kind];
-  // Static per-kind markup, no clip data — innerHTML is safe here.
-  icon.innerHTML = CLIP_KIND_ICONS[kind];
-
-  // Leading cluster: the game icon (when known) sits beside the kind marker.
-  const lead = document.createElement("div");
-  lead.className = "clip-lead";
-  const game = clipGameIcon(c);
-  if (game) {
-    const gi = document.createElement("img");
-    gi.className = "clip-game-icon";
-    gi.src = game.url;
-    gi.alt = "";
-    gi.title = game.label;
-    // Fall back to a neutral glyph if the icon can't load (e.g. a plugin icon
-    // asset that isn't present yet), so the badge stays visible.
-    gi.addEventListener("error", () => {
-      const ph = document.createElement("div");
-      ph.className = "clip-game-icon placeholder";
-      ph.title = game.label;
-      ph.innerHTML = GENERIC_GAME_ICON; // static markup, safe
-      gi.replaceWith(ph);
-    });
-    lead.appendChild(gi);
-  }
-  lead.appendChild(icon);
-
-  const meta = document.createElement("div");
-  meta.className = "clip-text";
-  const title = document.createElement("div");
-  title.className = "clip-title";
-  const name = document.createElement("div");
-  name.className = "name";
   const when = new Date(c.modified_unix * 1000);
   const markers = c.markers ? c.markers.markers : [];
+  const duration = Number.isFinite(c.duration_s)
+    ? c.duration_s
+    : (c.markers ? c.markers.duration_s : NaN);
   const leagueMeta = playerSummaryLabel(c.markers ? c.markers.player_summary : null);
   const leagueSessionTitle = isLeagueFullSessionClip(c, kind) && leagueMeta;
   const fallbackTitle = formatClipTitle(
     when.getMonth(), when.getDate(), when.getHours(), when.getMinutes());
-  name.textContent = leagueSessionTitle
-    ? leagueMeta
-    : clipLibraryTitle(c, fallbackTitle);
-  title.appendChild(name);
+  const cardTitle = leagueSessionTitle ? leagueMeta : clipLibraryTitle(c, fallbackTitle);
+
+  // Thumbnail: gradient placeholder + lazily-loaded poster, with the kind chip,
+  // a hover delete, a play glyph, the duration, and marker ticks layered on.
+  const thumb = document.createElement("div");
+  thumb.className = "card-thumb";
+  thumb.style.cssText = thumbGradient(c);
+  const cachedPoster = posterCache.get(c.path);
+  if (cachedPoster) thumb.appendChild(makePosterImg(cachedPoster));
+  else loadCardPoster(c.path, thumb);
+
+  const play = document.createElement("div");
+  play.className = "card-play";
+  play.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'; // static markup, safe
+
+  const kindChip = document.createElement("span");
+  kindChip.className = "card-kind " + kind;
+  kindChip.title = CLIP_KIND_LABELS[kind];
+  kindChip.innerHTML = CLIP_KIND_ICONS[kind]; // static markup, safe
+  const kindLabel = document.createElement("span");
+  kindLabel.textContent = CARD_KIND_LABELS[kind];
+  kindChip.appendChild(kindLabel);
+
+  const del = document.createElement("button");
+  del.className = "card-del";
+  del.title = "Delete clip";
+  // Static markup, no clip data — innerHTML is safe here.
+  del.innerHTML =
+    '<svg viewBox="0 0 24 24"><path d="M9 3v1H4v2h16V4h-5V3H9zM6 8v11a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8H6zm3 2h2v9H9v-9zm4 0h2v9h-2v-9z"/></svg>';
+
+  thumb.append(play, kindChip, del);
+
+  if (Number.isFinite(duration)) {
+    const dur = document.createElement("span");
+    dur.className = "card-dur";
+    dur.textContent = fmtDur(duration);
+    thumb.appendChild(dur);
+  }
+
+  if (Number.isFinite(duration) && duration > 0 && markers.length) {
+    const strip = document.createElement("div");
+    strip.className = "card-markers";
+    for (const m of markers) {
+      const tick = document.createElement("i");
+      tick.style.left = Math.max(0, Math.min(100, (m.t_s / duration) * 100)) + "%";
+      const tint = MARKER_TICK_VARS[m.kind];
+      if (tint) tick.style.setProperty("--mc", `var(${tint})`);
+      strip.appendChild(tick);
+    }
+    thumb.appendChild(strip);
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  const nameRow = document.createElement("div");
+  nameRow.className = "card-name";
+  const game = clipGameIcon(c);
+  if (game) {
+    const gi = document.createElement("img");
+    gi.className = "card-game-ico";
+    gi.src = game.url;
+    gi.alt = "";
+    gi.title = game.label;
+    // Fall back to a neutral glyph if the icon can't load.
+    gi.addEventListener("error", () => {
+      const ph = document.createElement("div");
+      ph.className = "card-game-ico placeholder";
+      ph.title = game.label;
+      ph.innerHTML = GENERIC_GAME_ICON; // static markup, safe
+      gi.replaceWith(ph);
+    });
+    nameRow.appendChild(gi);
+  }
+  const name = document.createElement("span");
+  name.className = "t";
+  name.textContent = cardTitle;
+  nameRow.appendChild(name);
   const cloudVisibility = cloudVisibilityEl(cloudRecord);
-  if (cloudVisibility) title.appendChild(cloudVisibility);
+  if (cloudVisibility) nameRow.appendChild(cloudVisibility);
+
   const info = document.createElement("div");
-  info.className = "info";
+  info.className = "card-sub";
   const digest = markerDigest(markers);
   const infoParts = [];
   if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s));
@@ -1969,7 +1962,8 @@ function clipRow(c) {
   infoParts.push(fmtAgo(Date.now() / 1000, c.modified_unix));
   if (!leagueMeta && digest) infoParts.push(digest);
   info.textContent = infoParts.join(" · ");
-  meta.append(title, info);
+
+  meta.append(nameRow, info);
   if (leagueMeta && !leagueSessionTitle) {
     const detail = document.createElement("div");
     detail.className = "league-meta";
@@ -1977,14 +1971,9 @@ function clipRow(c) {
     meta.appendChild(detail);
   }
 
-  const del = document.createElement("button");
-  del.className = "del";
-  del.title = "Delete clip";
-  // Static markup, no clip data — innerHTML is safe here.
-  del.innerHTML =
-    '<svg viewBox="0 0 24 24"><path d="M9 3v1H4v2h16V4h-5V3H9zM6 8v11a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8H6zm3 2h2v9H9v-9zm4 0h2v9h-2v-9z"/></svg>';
+  el.append(thumb, meta);
 
-  // Clicking the open clip's row again closes it (there is no Close button).
+  // Clicking the open clip's card again closes it (back to the gallery).
   el.addEventListener("click", () => {
     if (currentClip && currentClip.path === c.path) closeReview();
     else openClip(c);
@@ -1995,27 +1984,135 @@ function clipRow(c) {
     deleteClip(c.path);
   });
 
-  el.append(lead, meta, del);
   return el;
+}
+
+/* ---- gallery: filter / sort / group ---- */
+
+function filterGalleryClips(clips) {
+  return clips.filter((c) => {
+    const kind = clipKind(c.name);
+    if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
+      && kind !== galleryFilter) return false;
+    if (galleryFilter === "marked"
+      && !(c.markers && c.markers.markers && c.markers.markers.length)) return false;
+    if (gallerySearch) {
+      const champ = c.markers && c.markers.player_summary ? c.markers.player_summary.champion_name : "";
+      const hay = `${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""}`.toLowerCase();
+      if (!hay.includes(gallerySearch)) return false;
+    }
+    return true;
+  });
+}
+
+function sortGalleryClips(clips) {
+  const out = clips.slice();
+  const markerCount = (c) => (c.markers && c.markers.markers ? c.markers.markers.length : 0);
+  if (gallerySort === "old") out.sort((a, b) => a.modified_unix - b.modified_unix);
+  else if (gallerySort === "big") out.sort((a, b) => b.size_mb - a.size_mb);
+  else if (gallerySort === "marks") out.sort((a, b) => markerCount(b) - markerCount(a));
+  else out.sort((a, b) => b.modified_unix - a.modified_unix);
+  return out;
+}
+
+const GALLERY_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const GALLERY_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Bucket clips by an arbitrary key; groups (and clips within) sort newest-first.
+function bucketGroups(clips, keyFor, labelFor) {
+  const order = [];
+  const by = {};
+  for (const c of clips) {
+    const key = keyFor(c);
+    if (!by[key]) { by[key] = { label: labelFor(c), t: 0, clips: [] }; order.push(key); }
+    by[key].clips.push(c);
+    by[key].t = Math.max(by[key].t, c.modified_unix);
+  }
+  const groups = order.map((k) => by[k]);
+  for (const g of groups) g.clips.sort((a, b) => b.modified_unix - a.modified_unix);
+  groups.sort((a, b) => b.t - a.t);
+  return groups;
+}
+
+function galleryDayGroups(clips) {
+  return bucketGroups(
+    clips,
+    (c) => { const d = new Date(c.modified_unix * 1000); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; },
+    (c) => { const d = new Date(c.modified_unix * 1000); return `${GALLERY_DAYS[d.getDay()]}, ${GALLERY_MONTHS[d.getMonth()]} ${d.getDate()}`; },
+  );
+}
+
+function galleryGameGroups(clips) {
+  const label = (c) => (c.game && c.game.name ? c.game.name : "No game detected");
+  return bucketGroups(clips, label, label);
+}
+
+// Relative-date buckets (Photos-style); only non-empty buckets are returned.
+function gallerySmartGroups(clips) {
+  const sod = new Date();
+  sod.setHours(0, 0, 0, 0);
+  const todayStart = sod.getTime() / 1000;
+  const defs = [
+    { label: "Today", test: (t) => t >= todayStart },
+    { label: "Yesterday", test: (t) => t >= todayStart - 86400 && t < todayStart },
+    { label: "Earlier this week", test: (t) => t >= todayStart - 7 * 86400 && t < todayStart - 86400 },
+    { label: "Earlier", test: () => true },
+  ];
+  const out = defs.map((d) => ({ label: d.label, test: d.test, clips: [] }));
+  for (const c of clips) out.find((o) => o.test(c.modified_unix)).clips.push(c);
+  for (const g of out) g.clips.sort((a, b) => b.modified_unix - a.modified_unix);
+  return out.filter((g) => g.clips.length).map(({ label, clips }) => ({ label, clips }));
+}
+
+function galleryGroups(clips) {
+  switch (galleryGroup) {
+    case "session": return sessionGroups(clips);
+    case "day": return galleryDayGroups(clips);
+    case "game": return galleryGameGroups(clips);
+    case "none": return [{ label: null, clips: clips.slice() }];
+    default: return gallerySmartGroups(clips);
+  }
 }
 
 function renderClips() {
   syncUploadClipButton();
-  const root = $("clips");
+  // Keep the home in sync: empty library shows the capture preview, otherwise
+  // the gallery. (Editor/settings arbitration lives in updateViews.)
+  updateViews();
+  const root = $("gallery-grid");
+  if (!root) return;
   root.replaceChildren();
+  const filtered = filterGalleryClips(clipsCache);
+  $("gallery-count").textContent = clipsCache.length
+    ? `${filtered.length} of ${clipsCache.length}`
+    : "";
   if (!clipsCache.length) {
-    const hint = document.createElement("div");
-    hint.className = "hint";
-    hint.textContent = "no clips yet — press Alt+F10 while something plays";
-    root.appendChild(hint);
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = "No clips yet — press Alt+F10 while something plays.";
+    root.appendChild(empty);
     return;
   }
-  for (const group of sessionGroups(clipsCache)) {
-    const head = document.createElement("div");
-    head.className = "session-head";
-    head.textContent = group.label;
-    root.appendChild(head);
-    for (const c of group.clips) root.appendChild(clipRow(c));
+  if (!filtered.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = "No clips match those filters.";
+    root.appendChild(empty);
+    return;
+  }
+  for (const group of galleryGroups(sortGalleryClips(filtered))) {
+    if (group.label !== null) {
+      const head = document.createElement("div");
+      head.className = "gallery-group-head";
+      const label = document.createElement("span");
+      label.textContent = group.label;
+      const count = document.createElement("span");
+      count.className = "gcount";
+      count.textContent = group.clips.length;
+      head.append(label, count);
+      root.appendChild(head);
+    }
+    for (const c of group.clips) root.appendChild(clipCard(c));
   }
 }
 
@@ -2239,7 +2336,6 @@ async function saveClipRename(ev) {
 }
 
 function openClip(clip) {
-  resetCapturePreviewFrame();
   audioPreviewSeq += 1;
   currentClip = clip;
   currentReviewMediaPath = clip.path;
@@ -2292,8 +2388,8 @@ let settingsOpen = false;
 function updateViews() {
   $("settings-page").hidden = !settingsOpen;
   $("review-viewer").hidden = settingsOpen || !currentClip;
-  $("review-empty").hidden = settingsOpen || !!currentClip;
-  updateCapturePreview();
+  // The gallery is the home whenever neither the editor nor settings is open.
+  $("gallery-view").hidden = settingsOpen || !!currentClip;
 }
 
 function renderVisibleSettingsSection() {
@@ -2624,11 +2720,6 @@ function renderRuler() {
     lab.textContent = mark.label;
     root.appendChild(lab);
   });
-}
-
-function toggleRail() {
-  document.querySelector(".app").classList.toggle("rail");
-  requestAnimationFrame(updateStageFrame);
 }
 
 // Rapid seeks (scrubbing) must not pile up: WebView2 stops painting frames
@@ -3314,11 +3405,8 @@ async function uploadClipToCloud(clip, request = {}) {
 
 listen("status", (e) => {
   const s = e.payload;
-  const wasRecording = recordingActive;
   recordingActive = s.recording;
   fullSessionRecordingActive = Boolean(s.full_session);
-  if (wasRecording !== recordingActive) resetCapturePreviewFrame();
-  $("dot").className = "dot" + (s.recording ? " on" : "");
   $("rail-dot").className = "dot" + (s.recording ? " on" : "");
   updateCaptureStatus();
 });
@@ -3359,22 +3447,10 @@ listen("mic-test-stopped", () => {
   if (micTestRunning) stopMicTestUi("stopped");
 });
 
-listen("preview-frame", (e) => {
-  if (!previewShouldRun()) return;
-  const frame = e.payload || {};
-  if (!frame.data_url) return;
-  $("capture-preview-image").src = frame.data_url;
-  $("capture-preview-image").hidden = false;
-  previewHasFrame = true;
-  updateCapturePreview();
-});
-
 listen("game-detection", (e) => {
   activeDetectedGame = e.payload || null;
-  resetCapturePreviewFrame();
   updateCaptureStatus();
   updateGameDetectionStatus();
-  updateCapturePreview();
 });
 
 listen("cloud-upload-progress", (e) => {
@@ -3396,8 +3472,22 @@ listen("cloud-upload-progress", (e) => {
 
 /* ---- wiring ---- */
 
-$("save").addEventListener("click", () => invoke("save_replay"));
-$("capture-status").addEventListener("click", toggleRecording);
+$("review-back").addEventListener("click", () => closeReview());
+
+// Gallery (library home) controls.
+$("gallery-search").addEventListener("input", (ev) => {
+  gallerySearch = ev.target.value.trim().toLowerCase();
+  renderClips();
+});
+$("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });
+$("gallery-group").addEventListener("change", (ev) => { galleryGroup = ev.target.value; renderClips(); });
+$("gallery-filter").addEventListener("click", (ev) => {
+  const chip = ev.target.closest(".g-chip");
+  if (!chip) return;
+  galleryFilter = chip.dataset.filter;
+  for (const c of $("gallery-filter").querySelectorAll(".g-chip")) c.classList.toggle("on", c === chip);
+  renderClips();
+});
 $("rail-status").addEventListener("click", toggleRecording);
 $("set-capture").addEventListener("change", () => {
   captureTargetDirty = true;
@@ -3506,46 +3596,12 @@ window.addEventListener("resize", () => {
   hideRegionMenu();
   hideClipContextMenu();
 });
-document.querySelector(".titlebar").addEventListener("pointerdown", (ev) => {
-  if (ev.button !== 0 || ev.target.closest(".titlebar-btn")) return;
-  armPreviewWindowMovePause(ev);
-});
-window.addEventListener("pointermove", maybePausePreviewForWindowMove);
-window.addEventListener("pointerup", resumePreviewAfterWindowMove);
-window.addEventListener("pointercancel", resumePreviewAfterWindowMove);
-window.addEventListener("focus", () => {
-  windowFocused = true;
-  previewWindowMovePaused = false;
-  clearTimeout(previewWindowMoveTimer);
-  previewRequested = false;
-  updateCapturePreview();
-});
-window.addEventListener("blur", () => {
-  windowFocused = false;
-  clearTimeout(previewWindowMoveTimer);
-  previewWindowMovePaused = false;
-  resetCapturePreviewFrame();
-  updateCapturePreview();
-});
-document.addEventListener("visibilitychange", () => {
-  windowFocused = !document.hidden && document.hasFocus();
-  if (windowFocused) {
-    previewWindowMovePaused = false;
-    clearTimeout(previewWindowMoveTimer);
-    previewRequested = false;
-  } else {
-    resetCapturePreviewFrame();
-  }
-  updateCapturePreview();
-});
 $("settings-save").addEventListener("click", async () => {
   $("settings-status").textContent = "";
   $("error").textContent = "";
   try {
     const saved = await invoke("save_settings", { settings: readSettings() });
-    resetCapturePreviewFrame();
     fillSettings(saved);
-    updateCapturePreview();
     $("settings-status").textContent = "saved";
     await refresh();
   } catch (e) {
@@ -3636,16 +3692,13 @@ $("snap-toggle").addEventListener("click", toggleSnap);
 
 // Keyboard shortcuts guide — the corner "K" keycap opens it; click the X or the
 // backdrop (or press Esc, which the modal dialog handles) to close.
-$("keys-help").addEventListener("click", () => $("keys-dialog").showModal());
 $("keys-close").addEventListener("click", () => $("keys-dialog").close());
 $("keys-dialog").addEventListener("click", (ev) => {
   if (ev.target === $("keys-dialog")) $("keys-dialog").close();
 });
 
-$("sidebar-toggle").addEventListener("click", toggleRail);
 $("rail-save").addEventListener("click", () => invoke("save_replay"));
 $("rail-settings").addEventListener("click", () => toggleSettings());
-$("open-settings").addEventListener("click", () => toggleSettings());
 $("settings-close").addEventListener("click", () => toggleSettings(false));
 $("set-hotkey").addEventListener("focus", beginHotkeyCapture);
 $("set-hotkey").addEventListener("click", beginHotkeyCapture);
@@ -3746,7 +3799,6 @@ document.addEventListener("keydown", (ev) => {
     case "zoom-fit": zoomFit(); break;
     case "zoom-selection": zoomToSelection(); break;
     case "toggle-snap": toggleSnap(); break;
-    case "toggle-focus": toggleRail(); break;
     case "close": closeReview(); break;
   }
 });

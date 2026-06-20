@@ -31,6 +31,8 @@ mod markers;
 #[cfg(windows)]
 mod memory;
 #[cfg(windows)]
+mod poster;
+#[cfg(windows)]
 mod service;
 #[cfg(windows)]
 mod settings;

@@ -19,7 +19,11 @@
       </button>
     </div>
   </div>
-  <div class="app">
+  <div class="app rail">
+    <div id="app-status" class="app-status">
+      <div id="notice"></div>
+      <div id="error"></div>
+    </div>
     <aside class="sidebar">
       <div class="sidebar-top">
         <h1 class="brand">
@@ -28,37 +32,8 @@
           </svg>
           <span>Clipline</span>
         </h1>
-        <button id="sidebar-toggle" title="Toggle sidebar (F)">
-          <svg viewBox="0 0 24 24"><path d="M3 6h18v2H3zM3 11h18v2H3zM3 16h18v2H3z"/></svg>
-        </button>
         <div id="memory-usage" class="memory-usage">Using -- RAM</div>
-      </div>
-
-      <div class="sidebar-full">
-      <header class="sidebar-head">
-        <button id="capture-status" class="capture-status" type="button" aria-pressed="true">
-          <span id="dot" class="dot"></span>
-          <span id="capture-status-label">Starting…</span>
-        </button>
-        <div class="status-row stat">Storage <b id="storage-used">0.0 MB</b> / <b id="storage-quota">10.0 GB</b> · <b id="storage-clips">0</b> clips</div>
-        <div class="save-row">
-          <button id="save" class="primary">Save Replay</button>
-          <span id="save-hotkey" class="hint">Alt+F10</span>
-          <button id="keys-help" class="keycap" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
-        </div>
-        <div id="notice"></div>
-        <div id="error"></div>
-      </header>
-
-      <section class="library">
-        <h2>Library</h2>
-        <div id="clips"></div>
-      </section>
-
-      <button id="open-settings" class="sidebar-settings" title="Settings">
-        <svg viewBox="0 0 24 24"><path d="M19.4 13c.04-.33.07-.66.07-1s-.03-.67-.07-1l2.1-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.48 1a7.6 7.6 0 0 0-1.73-1l-.37-2.63A.5.5 0 0 0 13.93 2h-4a.5.5 0 0 0-.5.43l-.37 2.63c-.62.26-1.2.6-1.73 1l-2.48-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .11.64L4.53 11c-.04.33-.07.66-.07 1s.03.67.07 1l-2.1 1.65a.5.5 0 0 0-.12.64l2 3.46c.13.22.39.31.61.22l2.48-1c.53.4 1.1.74 1.73 1l.37 2.63c.04.25.25.43.5.43h4c.25 0 .46-.18.5-.43l.37-2.63a7.6 7.6 0 0 0 1.73-1l2.48 1c.22.09.48 0 .6-.22l2-3.46a.5.5 0 0 0-.11-.64L19.4 13zM11.93 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>
-        <span>Settings</span>
-      </button>
+        <div id="rail-game" class="rail-game" hidden></div>
       </div>
 
       <div class="sidebar-rail">
@@ -83,24 +58,46 @@
     </aside>
 
     <main class="review">
-      <div id="review-empty" class="review-empty">
-        <div class="capture-preview">
-          <div class="capture-preview-frame">
-            <img id="capture-preview-image" alt="" decoding="async" hidden />
-            <div id="capture-preview-overlay" class="capture-preview-overlay">
-              <strong id="capture-preview-title">Capture preview</strong>
-              <span id="capture-preview-status">Waiting for capture…</span>
-            </div>
-          </div>
-          <div class="capture-preview-foot">
-            <strong>Nothing open</strong>
-            <span id="capture-preview-meta">Live view of the active recorder target</span>
-          </div>
+      <section id="gallery-view" class="gallery-view" hidden>
+        <header class="gallery-head">
+          <h1>Library</h1>
+          <span id="gallery-count" class="gallery-count"></span>
+          <span class="gallery-spacer"></span>
+          <label class="gallery-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            <input id="gallery-search" type="text" placeholder="Search clips, champions…" spellcheck="false" />
+          </label>
+          <select id="gallery-group" class="gallery-select" title="Group clips by">
+            <option value="smart">Group: Recent</option>
+            <option value="day">Group: Day</option>
+            <option value="game">Group: Game</option>
+            <option value="session">Group: Session</option>
+            <option value="none">No grouping</option>
+          </select>
+          <select id="gallery-sort" class="gallery-select" title="Sort clips">
+            <option value="new">Newest</option>
+            <option value="old">Oldest</option>
+            <option value="big">Largest</option>
+            <option value="marks">Most markers</option>
+          </select>
+        </header>
+        <div id="gallery-filter" class="gallery-filter">
+          <button class="g-chip on" data-filter="all" type="button">All</button>
+          <button class="g-chip" data-filter="replay" type="button"><span class="g-dot" style="background:var(--ok)"></span>Replays</button>
+          <button class="g-chip" data-filter="session" type="button"><span class="g-dot" style="background:var(--session)"></span>Sessions</button>
+          <button class="g-chip" data-filter="trim" type="button"><span class="g-dot" style="background:var(--marker)"></span>Trims</button>
+          <span class="g-sep"></span>
+          <button class="g-chip" data-filter="marked" type="button">Has markers</button>
         </div>
-      </div>
+        <div id="gallery-grid" class="gallery-grid"></div>
+      </section>
 
       <div id="review-viewer" class="review-viewer">
         <header class="review-head">
+          <button id="review-back" class="review-back" type="button" title="Back to library (Esc)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+            <span>Library</span>
+          </button>
           <div class="clip-title">
             <div id="clip-title-display" class="clip-title-display">
               <strong id="pname"></strong>
@@ -289,16 +286,6 @@
               <label class="check-line">
                 <input id="set-minimize-to-tray" type="checkbox" />
                 <span>Send Minimize to the system tray</span>
-              </label>
-            </div>
-            <div class="setting-row">
-              <div class="setting-info">
-                <strong>Display Preview</strong>
-                <span>Show the live capture preview in the empty review pane.</span>
-              </div>
-              <label class="check-line">
-                <input id="set-capture-preview-enabled" type="checkbox" />
-                <span>Show display preview</span>
               </label>
             </div>
             <div class="setting-row">
@@ -778,7 +765,6 @@
       <section>
         <h4>General</h4>
         <dl>
-          <div><dt><kbd>F</kbd></dt><dd>Toggle sidebar</dd></div>
           <div><dt><kbd>Esc</kbd></dt><dd>Close clip</dd></div>
         </dl>
       </section>
