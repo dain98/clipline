@@ -1857,6 +1857,38 @@ function loadCardPoster(path, thumb) {
     .catch(() => {});
 }
 
+// Extracting a poster is an ffmpeg spawn, so we only request one once its card
+// scrolls near the viewport — otherwise a library of hundreds of clips would
+// queue an extraction for every clip on the first render and peg CPU/disk.
+const posterQueue = new WeakMap();
+const posterObserver =
+  typeof IntersectionObserver === "function"
+    ? new IntersectionObserver(
+        (entries, obs) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            const thumb = entry.target;
+            obs.unobserve(thumb);
+            const path = posterQueue.get(thumb);
+            posterQueue.delete(thumb);
+            if (path) loadCardPoster(path, thumb);
+          }
+        },
+        { rootMargin: "400px 0px" },
+      )
+    : null;
+
+// Request a clip's poster when its thumbnail nears the viewport — or right away
+// when IntersectionObserver is unavailable.
+function observePoster(path, thumb) {
+  if (!posterObserver) {
+    loadCardPoster(path, thumb);
+    return;
+  }
+  posterQueue.set(thumb, path);
+  posterObserver.observe(thumb);
+}
+
 function clipCard(c) {
   const el = document.createElement("article");
   el.className = "card" + (currentClip && currentClip.path === c.path ? " active" : "");
@@ -1882,7 +1914,7 @@ function clipCard(c) {
   thumb.style.cssText = thumbGradient(c);
   const cachedPoster = posterCache.get(c.path);
   if (cachedPoster) thumb.appendChild(makePosterImg(cachedPoster));
-  else loadCardPoster(c.path, thumb);
+  else observePoster(c.path, thumb);
 
   const play = document.createElement("div");
   play.className = "card-play";
@@ -2018,10 +2050,14 @@ function sortGalleryClips(clips) {
 const GALLERY_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const GALLERY_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-// Bucket clips by an arbitrary key; groups (and clips within) sort newest-first.
+// Bucket clips by an arbitrary key. Clips keep the caller's incoming order
+// (already sorted by the chosen gallery sort), so Largest / Most markers
+// survives inside each group; only the group order is by recency. A
+// null-prototype map keeps game names like "constructor" or "__proto__" from
+// colliding with inherited Object properties and skipping bucket creation.
 function bucketGroups(clips, keyFor, labelFor) {
   const order = [];
-  const by = {};
+  const by = Object.create(null);
   for (const c of clips) {
     const key = keyFor(c);
     if (!by[key]) { by[key] = { label: labelFor(c), t: 0, clips: [] }; order.push(key); }
@@ -2029,7 +2065,6 @@ function bucketGroups(clips, keyFor, labelFor) {
     by[key].t = Math.max(by[key].t, c.modified_unix);
   }
   const groups = order.map((k) => by[k]);
-  for (const g of groups) g.clips.sort((a, b) => b.modified_unix - a.modified_unix);
   groups.sort((a, b) => b.t - a.t);
   return groups;
 }
@@ -2059,8 +2094,9 @@ function gallerySmartGroups(clips) {
     { label: "Earlier", test: () => true },
   ];
   const out = defs.map((d) => ({ label: d.label, test: d.test, clips: [] }));
+  // Clips keep the incoming gallery-sort order; only the buckets themselves
+  // carry a fixed Today → Earlier reading order.
   for (const c of clips) out.find((o) => o.test(c.modified_unix)).clips.push(c);
-  for (const g of out) g.clips.sort((a, b) => b.modified_unix - a.modified_unix);
   return out.filter((g) => g.clips.length).map(({ label, clips }) => ({ label, clips }));
 }
 
@@ -2081,6 +2117,9 @@ function renderClips() {
   updateViews();
   const root = $("gallery-grid");
   if (!root) return;
+  // Drop the previous render's pending poster observations before rebuilding;
+  // the detached cards would otherwise linger in the observer.
+  if (posterObserver) posterObserver.disconnect();
   root.replaceChildren();
   const filtered = filterGalleryClips(clipsCache);
   $("gallery-count").textContent = clipsCache.length

@@ -118,7 +118,7 @@ pub fn enforce_quota(
 
         let clip_bytes = clip.total_bytes();
         remove_file_if_exists(&clip.path)?;
-        if let Some(sidecar) = &clip.sidecar {
+        for sidecar in &clip.sidecars {
             remove_file_if_exists(sidecar)?;
         }
         // Session folders disappear with their last clip; remove_dir refuses
@@ -143,7 +143,10 @@ pub fn enforce_quota(
 #[derive(Debug, Clone)]
 struct ClipFile {
     path: PathBuf,
-    sidecar: Option<PathBuf>,
+    /// Files that live and die with the clip: the markers JSON and the cached
+    /// poster frame. Each is removed alongside the clip during quota GC so a
+    /// leftover never keeps an emptied session folder alive.
+    sidecars: Vec<PathBuf>,
     mp4_bytes: u64,
     sidecar_bytes: u64,
     modified: SystemTime,
@@ -179,15 +182,14 @@ fn collect_clips(dir: &Path, clips: &mut Vec<ClipFile>) -> io::Result<()> {
         if !meta.is_file() {
             continue;
         }
-        let sidecar = sidecar_path(&path);
-        let sidecar_bytes = if recording {
-            0
+        let (sidecars, sidecar_bytes) = if recording {
+            (Vec::new(), 0)
         } else {
-            optional_file_len(&sidecar)?
+            clip_sidecars(&path)?
         };
         clips.push(ClipFile {
             path,
-            sidecar: (sidecar_bytes > 0 || sidecar.exists()).then_some(sidecar),
+            sidecars,
             mp4_bytes: meta.len(),
             sidecar_bytes,
             modified: meta.modified().unwrap_or(UNIX_EPOCH),
@@ -254,6 +256,26 @@ fn unique_recovered_path(candidate: &Path) -> PathBuf {
 
 fn sidecar_path(path: &Path) -> PathBuf {
     path.with_extension("markers.json")
+}
+
+fn poster_path(path: &Path) -> PathBuf {
+    path.with_extension("poster.jpg")
+}
+
+/// The sidecar files present beside a clip (markers JSON + cached poster) and
+/// their combined size. A zero-byte sidecar that exists is still tracked so it
+/// gets cleaned up with the clip.
+fn clip_sidecars(clip: &Path) -> io::Result<(Vec<PathBuf>, u64)> {
+    let mut sidecars = Vec::new();
+    let mut bytes = 0u64;
+    for candidate in [sidecar_path(clip), poster_path(clip)] {
+        let len = optional_file_len(&candidate)?;
+        if len > 0 || candidate.exists() {
+            bytes += len;
+            sidecars.push(candidate);
+        }
+    }
+    Ok((sidecars, bytes))
 }
 
 fn optional_file_len(path: &Path) -> io::Result<u64> {
@@ -414,6 +436,26 @@ mod tests {
     }
 
     #[test]
+    fn enforce_quota_deletes_poster_sidecar_with_clip() {
+        let dir = TestDir::new("poster-delete");
+        let old = dir.write("old.mp4", 10);
+        let markers = dir.write("old.markers.json", 2);
+        let poster = dir.write("old.poster.jpg", 4);
+        tick_mtime();
+        let keep = dir.write("keep.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(10), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert_eq!(report.freed_bytes, 16);
+        assert!(!old.exists());
+        assert!(!markers.exists());
+        assert!(!poster.exists());
+        assert!(keep.exists());
+        assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
     fn enforce_quota_leaves_library_when_protected_clip_alone_exceeds_budget() {
         let dir = TestDir::new("protect-fresh");
         let old = dir.write("old.mp4", 10);
@@ -488,6 +530,7 @@ mod tests {
         let dir = TestDir::new("session-gc");
         let old = dir.write("2026-06-11 09-00/old.mp4", 10);
         let old_sidecar = dir.write("2026-06-11 09-00/old.markers.json", 2);
+        let old_poster = dir.write("2026-06-11 09-00/old.poster.jpg", 4);
         tick_mtime();
         let legacy = dir.write("legacy.mp4", 10);
         tick_mtime();
@@ -496,12 +539,13 @@ mod tests {
         let report = enforce_quota(dir.path(), Some(20), None).unwrap();
 
         assert_eq!(report.deleted_clips, 1);
-        assert_eq!(report.freed_bytes, 12);
+        assert_eq!(report.freed_bytes, 16);
         assert!(!old.exists());
         assert!(!old_sidecar.exists());
+        assert!(!old_poster.exists());
         assert!(
             !old.parent().unwrap().exists(),
-            "emptied session folder must be removed"
+            "emptied session folder must be removed even with a poster sidecar"
         );
         assert!(legacy.exists());
         assert!(fresh.exists());
