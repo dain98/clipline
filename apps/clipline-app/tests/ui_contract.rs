@@ -84,6 +84,9 @@ fn review_player_owns_all_controls() {
         "id=\"zoom-fit\"",
         "id=\"zoom-in\"",
         "id=\"snap-toggle\"",
+        "id=\"audio-track-panel\"",
+        "id=\"audio-track-summary\"",
+        "id=\"audio-track-list\"",
         "id=\"open-folder\"",
         "id=\"stage-frame\"",
         "id=\"copy-clip\"",
@@ -123,6 +126,7 @@ fn review_player_owns_all_controls() {
         "id=\"update-status\"",
         "id=\"set-capture\"",
         "id=\"set-output-enabled\"",
+        "id=\"set-audio-split-output\"",
         "id=\"set-output-device\"",
         "id=\"set-output-volume\"",
         "id=\"output-volume-summary\"",
@@ -160,6 +164,8 @@ fn review_player_owns_all_controls() {
         "id=\"upload-title\"",
         "id=\"upload-description\"",
         "id=\"upload-visibility\"",
+        "id=\"upload-audio-section\"",
+        "id=\"upload-audio-list\"",
         "id=\"upload-confirm\"",
         "id=\"upload-cancel\"",
         "id=\"upload-dialog-status\"",
@@ -224,6 +230,13 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains("value=\"display_region\""),
         "capture target must expose the display_region mode"
+    );
+    assert!(
+        html.contains("Experimental")
+            && html.contains("set-audio-split-output")
+            && main_js().contains("split_output_by_process")
+            && main_js().contains("split_output_by_process: false"),
+        "capture settings must expose and persist the experimental audio-splitting toggle"
     );
     assert!(
         html.contains("Close to Tray")
@@ -365,6 +378,21 @@ fn review_player_owns_all_controls() {
             && !main_js().contains("Descriptions are not supported by Clipline Cloud yet.")
             && main_js().contains("description: request.description || null")
             && html.contains("id=\"upload-visibility\"")
+            && html.contains("id=\"upload-audio-section\"")
+            && html.contains("id=\"upload-audio-list\"")
+            && main_js().contains("function clipAudioTracks(clip = currentClip)")
+            && main_js().contains("function renderAudioTrackPanel()")
+            && main_js().contains("function applySelectedAudioTracksToPlayback()")
+            && main_js().contains("preview_clip_audio_tracks")
+            && main_js().contains("function renderUploadAudioTracks(clip = uploadDialogClip)")
+            && main_js().contains("audioTrackIds: request.audioTrackIds || null")
+            && !main_js().contains("video.audioTracks")
+            && !main_js().contains("applyNativeAudioTrackSelection")
+            && main_js().contains("audio-track-label")
+            && styles_css().contains(".audio-track-panel")
+            && styles_css().contains(".audio-track-row")
+            && styles_css().contains(".audio-track-label")
+            && styles_css().contains(".upload-audio-section[hidden] { display: none; }")
             && main_js().contains("listen(\"cloud-upload-progress\"")
             && main_js().contains("navigator.clipboard.writeText(record.remote_url)")
             && main_js().contains("syncUploadClipButton();")
@@ -375,6 +403,7 @@ fn review_player_owns_all_controls() {
             && !main_js().contains(" · cloud:")
             && app_rs().contains("crate::cloud::cloud_connect")
             && app_rs().contains("crate::cloud::upload_clip_to_cloud")
+            && app_rs().contains("crate::library::preview_clip_audio_tracks")
             && styles_css().contains(".cloud-connect-grid")
             && styles_css().contains(".cloud-connect-fields")
             && styles_css().contains(".cloud-connect-fields[hidden] { display: none; }")
@@ -543,6 +572,23 @@ fn review_player_owns_all_controls() {
             "{id} must render an SVG icon, not a text label"
         );
     }
+}
+
+#[test]
+fn audio_preview_generation_is_not_eager_on_clip_open() {
+    let js = main_js();
+    let open_clip_start = js.find("function openClip(clip)").unwrap();
+    let close_review_start = js.find("function closeReview()").unwrap();
+    let open_clip = &js[open_clip_start..close_review_start];
+
+    assert!(
+        !open_clip.contains("applySelectedAudioTracksToPlayback()"),
+        "opening a clip must not eagerly remux or mix a full-session audio preview"
+    );
+    assert!(
+        js.contains("selected.length === tracks.length && currentReviewMediaPath === clip.path"),
+        "all-track playback should keep the original source until the user changes selection"
+    );
 }
 
 #[test]

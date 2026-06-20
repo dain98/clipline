@@ -30,6 +30,19 @@ pub struct PlayerSummary {
     pub assists: u32,
 }
 
+/// One user-facing audio stream inside a saved clip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipAudioTrack {
+    /// Stable id for UI/upload selection, e.g. "output" or "microphone".
+    pub id: String,
+    /// Zero-based audio-track index in the MP4, excluding the video track.
+    pub track_index: u32,
+    pub label: String,
+    /// Machine-readable source kind for future process/game audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
 /// The `<clip>.markers.json` sidecar document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipMarkers {
@@ -38,6 +51,8 @@ pub struct ClipMarkers {
     pub duration_s: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub player_summary: Option<PlayerSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_tracks: Vec<ClipAudioTrack>,
     pub markers: Vec<ClipMarker>,
 }
 
@@ -79,6 +94,7 @@ impl MarkerLog {
             recording_start_s: start_s,
             duration_s: end_s - start_s,
             player_summary: None,
+            audio_tracks: Vec::new(),
             markers,
         }
     }
@@ -155,9 +171,16 @@ mod tests {
             deaths: 4,
             assists: 23,
         });
+        clip.audio_tracks = vec![ClipAudioTrack {
+            id: "output".into(),
+            track_index: 0,
+            label: "Output Audio".into(),
+            kind: Some("output".into()),
+        }];
         let json = serde_json::to_string_pretty(&clip).unwrap();
         let back: ClipMarkers = serde_json::from_str(&json).unwrap();
         assert_eq!(back.markers.len(), 1);
+        assert_eq!(back.audio_tracks, clip.audio_tracks);
         assert!((back.markers[0].t_s - 5.0).abs() < 1e-9);
         assert_eq!(
             back.player_summary.as_ref().map(|summary| (
@@ -179,6 +202,7 @@ mod tests {
         }"#;
         let back: ClipMarkers = serde_json::from_str(json).unwrap();
         assert!(back.player_summary.is_none());
+        assert!(back.audio_tracks.is_empty());
         assert!(back.markers.is_empty());
     }
 }
