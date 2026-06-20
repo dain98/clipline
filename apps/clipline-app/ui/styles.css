@@ -80,9 +80,8 @@ h1.brand { display: flex; align-items: center; gap: var(--brand-gap, 9px); }
   height: var(--brand-logo-size, 26px);
   flex: none;
   display: block;
-  color: var(--accent);
+  object-fit: contain;
 }
-.logo-mark path { fill: currentColor; }
 h2 {
   margin: 0 0 8px;
   font-size: 12px;
