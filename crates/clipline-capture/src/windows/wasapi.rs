@@ -679,7 +679,28 @@ pub fn enumerate_output_processes(
 }
 
 pub fn process_loopback_available() -> bool {
-    true
+    // Per-process application loopback (ActivateAudioInterfaceAsync with
+    // AUDIOCLIENT_PROCESS_LOOPBACK) is only available on Windows 10 version 2004
+    // (build 19041) and later. On older builds the activation fails — or worse,
+    // its completion callback never fires and each one stalls the recorder for
+    // ~1.5s — so gate the feature out entirely there.
+    const MIN_PROCESS_LOOPBACK_BUILD: u32 = 19_041;
+    windows_build_number().is_some_and(|build| build >= MIN_PROCESS_LOOPBACK_BUILD)
+}
+
+/// The OS build number via `RtlGetVersion` (the manifest-independent source of
+/// truth). `None` if the query somehow fails.
+fn windows_build_number() -> Option<u32> {
+    use windows::Wdk::System::SystemServices::RtlGetVersion;
+    use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: RtlGetVersion fills the OSVERSIONINFOW we own; its size is set and
+    // the call returns STATUS_SUCCESS on all supported systems.
+    let status = unsafe { RtlGetVersion(&mut info) };
+    status.is_ok().then_some(info.dwBuildNumber)
 }
 
 pub fn test_microphone_level(
