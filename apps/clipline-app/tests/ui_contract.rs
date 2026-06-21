@@ -24,11 +24,29 @@ fn app_rs() -> String {
     fs::read_to_string(path).expect("read src/app.rs")
 }
 
+fn library_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library.rs");
+    fs::read_to_string(path).expect("read src/library.rs")
+}
+
 fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let prefix = format!("{name}=\"");
     let start = tag.find(&prefix)? + prefix.len();
     let end = tag[start..].find('"')? + start;
     Some(&tag[start..end])
+}
+
+#[test]
+fn audio_preview_command_scopes_generated_preview_files() {
+    let library = library_rs();
+
+    assert!(
+        library.contains("AppHandle")
+            && library.contains("allow_audio_preview_asset")
+            && library.contains("asset_protocol_scope")
+            && library.contains("allow_file(preview"),
+        "selected-audio preview MP4s are generated under AppData and must be exact-scoped before the player loads them"
+    );
 }
 
 #[test]
