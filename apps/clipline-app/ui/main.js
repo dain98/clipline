@@ -117,6 +117,10 @@ let uploadSelectedAudioTrackIds = new Set();
 let audioPreviewSeq = 0;
 let currentReviewMediaPath = null;
 let renamePending = false;
+const DECK_STATUS_TOAST_MS = 3200;
+let deckStatusToastTimer = 0;
+const NOTICE_TOAST_MS = 2600;
+let noticeToastTimer = 0;
 let micTestRunning = false;
 let micAudioContext = null;
 let micAudioCursor = 0;
@@ -138,6 +142,34 @@ let overviewDrag = null;
 let snapEnabled = true;
 const MIC_MONITOR_START_DELAY_S = 0.02;
 const MIC_MONITOR_MAX_LATENCY_S = 0.25;
+
+function setDeckStatus(message, { transient = false } = {}) {
+  window.clearTimeout(deckStatusToastTimer);
+  deckStatusToastTimer = 0;
+  $("deck-status").textContent = message;
+  if (!transient || !message) return;
+
+  deckStatusToastTimer = window.setTimeout(() => {
+    if ($("deck-status").textContent === message) {
+      $("deck-status").textContent = "";
+    }
+    deckStatusToastTimer = 0;
+  }, DECK_STATUS_TOAST_MS);
+}
+
+function setNotice(message, { transient = false } = {}) {
+  window.clearTimeout(noticeToastTimer);
+  noticeToastTimer = 0;
+  $("notice").textContent = message;
+  if (!transient || !message) return;
+
+  noticeToastTimer = window.setTimeout(() => {
+    if ($("notice").textContent === message) {
+      $("notice").textContent = "";
+    }
+    noticeToastTimer = 0;
+  }, NOTICE_TOAST_MS);
+}
 
 function clipDuration() {
   if (Number.isFinite(video.duration) && video.duration > 0) return video.duration;
@@ -2274,7 +2306,7 @@ async function applySelectedAudioTracksToPlayback() {
 
   const selected = selectedAudioTrackIdsForClip(clip);
   if (selected.length === tracks.length && currentReviewMediaPath === clip.path) {
-    $("deck-status").textContent = audioSelectionLabel(clip);
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
     return;
   }
 
@@ -2283,7 +2315,7 @@ async function applySelectedAudioTracksToPlayback() {
   const shouldResume = !video.paused && !video.ended;
   const rate = video.playbackRate;
   const trimRange = { start: trimStart, end: trimEnd };
-  $("deck-status").textContent = "switching audio tracks...";
+  setDeckStatus("switching audio tracks...");
   $("error").textContent = "";
   try {
     const path = await invoke("preview_clip_audio_tracks", {
@@ -2294,10 +2326,10 @@ async function applySelectedAudioTracksToPlayback() {
     });
     if (seq !== audioPreviewSeq || !currentClip || currentClip.path !== clip.path) return;
     setReviewVideoSource(path, { resumeTime, shouldResume, rate, trimRange });
-    $("deck-status").textContent = audioSelectionLabel(clip);
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
   } catch (e) {
     if (seq !== audioPreviewSeq) return;
-    $("deck-status").textContent = "";
+    setDeckStatus("");
     $("error").textContent = String(e);
   }
 }
@@ -2334,7 +2366,7 @@ async function saveClipRename(ev) {
   renamePending = true;
   setClipRenameControlsDisabled(true);
   $("error").textContent = "";
-  $("deck-status").textContent = "renaming clip...";
+  setDeckStatus("renaming clip...");
   await afterNextPaint();
 
   let mediaReleased = false;
@@ -2362,8 +2394,8 @@ async function saveClipRename(ev) {
       `${shownDuration > 0 ? `${fmtDur(shownDuration)} · ` : ""}${renamed.size_mb.toFixed(1)} MB · ${renamed.path}`;
     setClipTitleEditing(false);
     renderClips();
-    $("deck-status").textContent = "clip renamed";
-    $("notice").textContent = "clip renamed";
+    setDeckStatus("clip renamed", { transient: true });
+    setNotice("clip renamed", { transient: true });
     if (mediaReleased) restoreVideoAfterRename(renamed.path, resumeTime, shouldResume, rate);
   } catch (e) {
     $("error").textContent = String(e);
@@ -2380,7 +2412,7 @@ function openClip(clip) {
   currentReviewMediaPath = clip.path;
   resetSelectedAudioTracks(clip);
   $("error").textContent = "";
-  $("deck-status").textContent = "";
+  setDeckStatus("");
   $("stage-note").textContent = "loading…";
   setClipTitleEditing(false);
   $("pname").textContent = clip.name;
@@ -2413,7 +2445,7 @@ function closeReview() {
   selectedAudioTrackIds = new Set();
   resetZoom();
   updateViews();
-  $("deck-status").textContent = "";
+  setDeckStatus("");
   $("stage-note").textContent = "";
   $("marker-layer").replaceChildren();
   renderAudioTrackPanel();
@@ -3080,7 +3112,7 @@ async function exportTrim() {
   if (!sourceClip) return;
   $("error").textContent = "";
   $("export-clip").disabled = true;
-  $("deck-status").textContent = "exporting…";
+  setDeckStatus("exporting…");
   await afterNextPaint();
   try {
     const exported = await invoke("export_clip", {
@@ -3088,8 +3120,7 @@ async function exportTrim() {
       startS: trimStart,
       endS: trimEnd,
     });
-    $("deck-status").textContent =
-      `exported ${exported.name} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`;
+    setDeckStatus(`exported ${exported.name} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true });
     const exportedClip = {
       path: exported.path,
       name: exported.name,
@@ -3104,7 +3135,7 @@ async function exportTrim() {
     renderClips();
     await refreshStorage();
   } catch (e) {
-    $("deck-status").textContent = "";
+    setDeckStatus("");
     $("error").textContent = e;
   } finally {
     $("export-clip").disabled = false;
@@ -3220,7 +3251,7 @@ async function deleteClip(path = currentClip && currentClip.path) {
   if (!(await confirmDelete(name))) return;
   try {
     await invoke("delete_clip", { path });
-    $("notice").textContent = "clip deleted";
+    setNotice("clip deleted", { transient: true });
     $("error").textContent = "";
     const wasCurrent = currentClip && currentClip.path === path;
     clipsCache = clipsCache.filter((clip) => clip.path !== path);
@@ -3245,12 +3276,12 @@ async function copyClipToClipboard() {
   if (!currentClip) return;
   $("copy-clip").disabled = true;
   $("error").textContent = "";
-  $("deck-status").textContent = "";
+  setDeckStatus("");
   try {
     await invoke("copy_clip_to_clipboard", { path: currentClip.path });
-    $("deck-status").textContent = "clip copied to clipboard";
+    setDeckStatus("clip copied to clipboard", { transient: true });
   } catch (e) {
-    $("deck-status").textContent = "";
+    setDeckStatus("");
     $("error").textContent = e;
   } finally {
     $("copy-clip").disabled = false;
@@ -3326,11 +3357,11 @@ async function disconnectCloud() {
 
 async function copyCloudUrl(record) {
   if (!record || !record.remote_url) return;
-  $("deck-status").textContent = "";
+  setDeckStatus("");
   $("error").textContent = "";
   try {
     await navigator.clipboard.writeText(record.remote_url);
-    $("deck-status").textContent = "cloud link copied";
+    setDeckStatus("cloud link copied", { transient: true });
   } catch (e) {
     $("error").textContent = String(e);
   }
@@ -3339,7 +3370,7 @@ async function copyCloudUrl(record) {
 function openUploadDialog(clip) {
   if (!clip) return;
   if (!cloudConnected()) {
-    $("deck-status").textContent = "";
+    setDeckStatus("");
     $("error").textContent = "Connect Clipline Cloud before uploading.";
     syncUploadClipButton();
     return;
@@ -3404,12 +3435,12 @@ function submitUploadDialog() {
 async function uploadClipToCloud(clip, request = {}) {
   if (!clip) return;
   if (!cloudConnected()) {
-    $("deck-status").textContent = "";
+    setDeckStatus("");
     $("error").textContent = "Connect Clipline Cloud before uploading.";
     syncUploadClipButton();
     return;
   }
-  $("deck-status").textContent = "uploading to cloud...";
+  setDeckStatus("uploading to cloud...");
   $("error").textContent = "";
   try {
     const result = await invoke("upload_clip_to_cloud", {
@@ -3424,17 +3455,17 @@ async function uploadClipToCloud(clip, request = {}) {
     if (result && result.record) {
       upsertCloudUploadRecord(result.record);
       if (result.record.remote_url && result.record.upload_status.startsWith("uploaded_")) {
-        $("deck-status").textContent = "cloud upload ready";
+        setDeckStatus("cloud upload ready", { transient: true });
       } else if (result.record.upload_status === "failed") {
-        $("deck-status").textContent = "";
+        setDeckStatus("");
         $("error").textContent = result.record.error || "cloud upload failed";
       } else {
-        $("deck-status").textContent = "cloud upload processing";
+        setDeckStatus("cloud upload processing");
       }
     }
     await refresh();
   } catch (e) {
-    $("deck-status").textContent = "";
+    setDeckStatus("");
     $("error").textContent = String(e);
     renderClips();
   }
@@ -3454,9 +3485,9 @@ listen("saved", (e) => {
   $("error").textContent = "";
   const s = e.payload;
   const savedKind = s.full_session ? "session" : "replay";
-  $("notice").textContent = s.gc_deleted
+  setNotice(s.gc_deleted
     ? `cleaned up ${s.gc_deleted} old clip${s.gc_deleted > 1 ? "s" : ""} (${fmtBytes(s.gc_freed_bytes)})`
-    : `saved ${fmtDur(s.seconds)} ${savedKind}`;
+    : `saved ${fmtDur(s.seconds)} ${savedKind}`, { transient: true });
   refresh();
 });
 
@@ -3500,11 +3531,11 @@ listen("cloud-upload-progress", (e) => {
   } else if (progress.upload_status === "uploading") {
     const total = Number(progress.file_size_bytes) || 0;
     const done = Number(progress.received_size_bytes) || 0;
-    $("deck-status").textContent = total > 0
+    setDeckStatus(total > 0
       ? `cloud upload ${Math.round((done / total) * 100)}%`
-      : "cloud upload in progress";
+      : "cloud upload in progress");
   } else if (progress.upload_status === "processing") {
-    $("deck-status").textContent = "cloud upload processing";
+    setDeckStatus("cloud upload processing");
   }
   renderClips();
 });
