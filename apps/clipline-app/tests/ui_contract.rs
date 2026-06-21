@@ -768,6 +768,79 @@ fn games_ui_wires_detection_commands() {
 }
 
 #[test]
+fn deck_status_success_toasts_auto_clear() {
+    let js = main_js();
+
+    assert!(
+        js.contains("const DECK_STATUS_TOAST_MS")
+            && js.contains("let deckStatusToastTimer")
+            && js.contains("function setDeckStatus(message, { transient = false } = {})"),
+        "deck status messages should flow through a helper that can schedule transient toasts"
+    );
+    assert!(
+        js.contains("window.setTimeout(() => {")
+            && js.contains("if ($(\"deck-status\").textContent === message)"),
+        "transient deck status toasts should clear themselves without erasing newer messages"
+    );
+
+    for required in [
+        "setDeckStatus(audioSelectionLabel(clip), { transient: true })",
+        "setDeckStatus(\"clip renamed\", { transient: true })",
+        "setDeckStatus(`exported ${exported.name} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true })",
+        "setDeckStatus(\"clip copied to clipboard\", { transient: true })",
+        "setDeckStatus(\"cloud link copied\", { transient: true })",
+        "setDeckStatus(\"cloud upload ready\", { transient: true })",
+    ] {
+        assert!(
+            js.contains(required),
+            "success toast should auto-clear via `{required}`"
+        );
+    }
+
+    for required in [
+        "setDeckStatus(\"switching audio tracks...\")",
+        "setDeckStatus(\"renaming clip...\")",
+        "setDeckStatus(\"exporting…\")",
+        "setDeckStatus(\"uploading to cloud...\")",
+        "setDeckStatus(\"cloud upload processing\")",
+    ] {
+        assert!(
+            js.contains(required),
+            "progress status should stay explicit via `{required}`"
+        );
+    }
+}
+
+#[test]
+fn app_notice_toasts_auto_clear() {
+    let js = main_js();
+
+    assert!(
+        js.contains("const NOTICE_TOAST_MS")
+            && js.contains("let noticeToastTimer")
+            && js.contains("function setNotice(message, { transient = false } = {})"),
+        "app-wide notices should flow through a helper that can schedule transient toasts"
+    );
+    assert!(
+        js.contains("window.setTimeout(() => {")
+            && js.contains("if ($(\"notice\").textContent === message)"),
+        "transient app-wide notices should clear themselves without erasing newer messages"
+    );
+
+    for required in [
+        "setNotice(\"clip renamed\", { transient: true })",
+        "setNotice(\"clip deleted\", { transient: true })",
+        "setNotice(s.gc_deleted",
+        ": `saved ${fmtDur(s.seconds)} ${savedKind}`, { transient: true });",
+    ] {
+        assert!(
+            js.contains(required),
+            "app-wide success notice should auto-clear via `{required}`"
+        );
+    }
+}
+
+#[test]
 fn ui_is_split_into_markup_styles_and_logic() {
     let html = index_html();
 
