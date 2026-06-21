@@ -629,8 +629,6 @@ pub struct AppSettings {
     pub close_to_tray: bool,
     #[serde(default)]
     pub minimize_to_tray: bool,
-    #[serde(default = "default_enabled")]
-    pub capture_preview_enabled: bool,
     #[serde(default)]
     pub update_channel: UpdateChannel,
     #[serde(default)]
@@ -659,7 +657,6 @@ impl Default for AppSettings {
             open_on_startup: false,
             close_to_tray: true,
             minimize_to_tray: false,
-            capture_preview_enabled: true,
             update_channel: UpdateChannel::Nightly,
             cloud: CloudSettings::default(),
         }
@@ -836,8 +833,6 @@ impl AppSettings {
             close_to_tray: bool_field(object, "close_to_tray").unwrap_or(defaults.close_to_tray),
             minimize_to_tray: bool_field(object, "minimize_to_tray")
                 .unwrap_or(defaults.minimize_to_tray),
-            capture_preview_enabled: bool_field(object, "capture_preview_enabled")
-                .unwrap_or(defaults.capture_preview_enabled),
             update_channel: deserialize_field(object, "update_channel")
                 .map(normalize_channel)
                 .unwrap_or(defaults.update_channel),
@@ -1297,7 +1292,6 @@ mod tests {
         assert!(!settings.open_on_startup);
         assert!(settings.close_to_tray);
         assert!(!settings.minimize_to_tray);
-        assert!(settings.capture_preview_enabled);
         assert_eq!(settings.update_channel, UpdateChannel::Nightly);
     }
 
@@ -1346,7 +1340,6 @@ mod tests {
         assert_eq!(settings.output_resolution, OutputResolution::Source);
         assert!(settings.close_to_tray);
         assert!(!settings.minimize_to_tray);
-        assert!(settings.capture_preview_enabled);
         assert_eq!(settings.update_channel, UpdateChannel::Nightly);
         assert!(settings.validate().is_ok());
     }
@@ -1867,7 +1860,6 @@ mod tests {
             hotkey: "Ctrl+Alt+F9".into(),
             close_to_tray: false,
             minimize_to_tray: true,
-            capture_preview_enabled: false,
             update_channel: UpdateChannel::Nightly,
             games: GameSettings {
                 auto_detect: true,

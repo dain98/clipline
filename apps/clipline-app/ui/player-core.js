@@ -46,9 +46,14 @@ const PlayerCore = (() => {
 
   const fmtAgo = (nowUnixS, thenUnixS) => {
     const d = Math.max(0, nowUnixS - thenUnixS);
-    if (d < 90) return `${Math.round(d)}s ago`;
-    if (d < 5400) return `${Math.round(d / 60)}m ago`;
-    return `${Math.round(d / 3600)}h ago`;
+    const ago = (n, unit) => `${n} ${unit}${n === 1 ? "" : "s"} ago`;
+    if (d < 60) return "just now";
+    if (d < 3600) return ago(Math.floor(d / 60), "minute");
+    if (d < 86400) return ago(Math.floor(d / 3600), "hour");
+    if (d < 7 * 86400) return ago(Math.floor(d / 86400), "day");
+    if (d < 30 * 86400) return ago(Math.floor(d / (7 * 86400)), "week");
+    if (d < 365 * 86400) return ago(Math.floor(d / (30 * 86400)), "month");
+    return ago(Math.floor(d / (365 * 86400)), "year");
   };
 
   const settingDurationLabel = (seconds) => {
@@ -140,11 +145,6 @@ const PlayerCore = (() => {
       default:
         return "Desktop";
     }
-  };
-
-  const captureStatusLabel = (source, recording, fullSession) => {
-    if (!recording) return "Recording stopped";
-    return `${fullSession ? "Recording" : "Capturing"} ${source}`;
   };
 
   const clampTime = (value, duration) => {
@@ -725,7 +725,6 @@ const PlayerCore = (() => {
     smoothnessIndexForFps,
     outputResolutionOption,
     captureSourceLabel,
-    captureStatusLabel,
     clampTime,
     percentFor,
     timelineTime,

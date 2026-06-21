@@ -15,6 +15,13 @@
   --warn: #f0883e;
   --ok: #7ab8ff;
   --titlebar-h: 32px;
+  /* Marker category tints, shared by the timeline glyphs and the gallery ticks. */
+  --mc-kill: #ff9b9e;
+  --mc-death: #b9a7c4;
+  --mc-spree: #ffc77d;
+  --mc-objective: #cdb2ff;
+  --mc-structure: #f0cd7a;
+  --mc-info: #aab2c0;
 }
 
 * {
@@ -73,9 +80,8 @@ h1.brand { display: flex; align-items: center; gap: var(--brand-gap, 9px); }
   height: var(--brand-logo-size, 26px);
   flex: none;
   display: block;
-  color: var(--accent);
+  object-fit: contain;
 }
-.logo-mark path { fill: currentColor; }
 h2 {
   margin: 0 0 8px;
   font-size: 12px;
@@ -272,17 +278,95 @@ label span { white-space: nowrap; }
   overflow: hidden;
 }
 
-/* Rail mode: the sidebar narrows to an icon column; review keeps the rest. */
+/* Rail mode (the only mode now): a permanent 64px icon column — brand mark,
+   RAM, and the captured game's icon up top; review/gallery keeps the rest.
+   The expand toggle and full sidebar were retired. */
 .app.rail { grid-template-columns: 64px minmax(0, 1fr); }
-.app.rail .sidebar-full { display: none; }
 .app.rail .sidebar-rail { display: flex; }
-.app.rail .sidebar-top h1 { display: none; }
-.app.rail .memory-usage { display: none; }
+.app.rail .brand span { display: none; } /* logo mark only, no wordmark, in 64px */
 .app.rail .sidebar-top {
   display: flex;
-  justify-content: center;
-  padding: 10px 0 6px;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0 4px;
 }
+.app.rail .sidebar-top h1.brand { gap: 0; }
+.app.rail .memory-usage {
+  grid-column: auto;
+  grid-row: auto;
+  padding-left: 0;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.15;
+  white-space: normal;
+}
+.app.rail .memory-usage::before {
+  content: "RAM";
+  display: block;
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+.rail-game {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  /* A little extra breathing room above the captured-game icon, on top of the
+     rail's 10px rhythm, to set it apart from the RAM readout. */
+  margin-top: 8px;
+  border-radius: 7px;
+  background: #0c1017;
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.rail-game[hidden] { display: none; }
+.rail-game img { width: 100%; height: 100%; object-fit: contain; }
+.rail-game .placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: var(--muted);
+}
+.rail-game .placeholder svg { width: 20px; height: 20px; fill: currentColor; }
+
+/* App-wide notices/errors as a bottom-center toast (relocated out of the
+   retired expanded sidebar). Hidden when empty. */
+.app-status {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  max-width: min(80vw, 560px);
+  text-align: center;
+  pointer-events: none;
+}
+.app-status #notice,
+.app-status #error {
+  margin: 0;
+  padding: 7px 14px;
+  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  min-height: 0;
+}
+.app-status #notice:empty,
+.app-status #error:empty { display: none; }
 
 /* ---- sidebar ---- */
 .sidebar {
@@ -323,46 +407,14 @@ label span { white-space: nowrap; }
   white-space: nowrap;
 }
 
-/* The shortcuts key sits at the far right of the Save Replay row — the bottom
-   of the sidebar header chrome. (It lives in .sidebar-full, which the collapsed
-   rail already hides, so no separate rail rule is needed.) */
-.save-row #keys-help { margin-left: auto; }
-
-#sidebar-toggle {
-  width: 34px;
-  height: 34px;
-  min-width: 0;
-  padding: 7px;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-}
-
-#sidebar-toggle {
-  justify-self: end;
-}
-
-#sidebar-toggle:hover,
 .sidebar-rail button:hover { background: var(--panel-2); color: var(--text); }
-#sidebar-toggle svg {
-  display: block;
-  width: 100%;
-  height: 100%;
-  fill: currentColor;
-}
-
-.sidebar-full {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  min-height: 0;
-}
 
 .sidebar-rail {
   display: none;
   flex-direction: column;
   align-items: center;
   gap: 10px;
-  padding: 12px 0;
+  padding: 6px 0 12px;
   min-height: 0;
 }
 
@@ -445,50 +497,11 @@ label span { white-space: nowrap; }
 
 .rail-spacer { flex: 1 1 0; }
 
-.sidebar-head {
-  padding: 8px 16px 12px;
-  border-bottom: 1px solid var(--line);
-}
-
-.sub { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
-
-.capture-status {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 9px;
-  width: 100%;
-  height: 34px;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  font-size: 12.5px;
-  text-align: left;
-}
-.capture-status:hover { background: transparent; color: var(--text); }
-.capture-status:active { transform: none; }
-.capture-status.stopped { color: var(--muted); }
-
-.status-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 22px;
-  font-size: 12px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-.status-row b { color: var(--text); font-weight: 600; }
-
 .dot { width: 10px; height: 10px; border-radius: 50%; background: #4a5160; flex: none; }
 .dot.on {
   background: var(--rec);
   box-shadow: 0 0 0 2px rgba(229, 72, 77, 0.18);
 }
-
-.save-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
 
 #notice { color: var(--ok); font-size: 12px; min-height: 17px; margin-top: 6px; }
 #error { color: var(--warn); font-size: 12px; min-height: 17px; }
@@ -669,25 +682,6 @@ label span { white-space: nowrap; }
   fill: currentColor;
 }
 
-.sidebar-settings {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
-  height: 44px;
-  min-width: 0;
-  padding: 0 16px;
-  border: 0;
-  border-top: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-}
-.sidebar-settings:hover { background: var(--panel-2); color: var(--text); }
-.sidebar-settings svg { width: 16px; height: 16px; flex: none; fill: currentColor; }
 
 /* ---- settings page (full-bleed, tabbed) ---- */
 .settings-page {
@@ -1380,92 +1374,138 @@ label span { white-space: nowrap; }
   background: var(--bg);
 }
 
-.review-empty {
+/* ---- gallery (library home) ---- */
+.gallery-view {
   grid-area: 1 / 1;
   display: grid;
-  place-items: center;
+  grid-template-rows: auto auto minmax(0, 1fr);
   min-height: 0;
-  overflow: auto;
-  padding: 34px;
-  text-align: center;
-  color: var(--muted);
+  min-width: 0;
+  background: var(--bg);
 }
+.gallery-view[hidden] { display: none; }
 
-.capture-preview {
-  width: min(100%, 1120px);
+.gallery-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 22px 12px;
+}
+.gallery-head h1 { font-size: 18px; }
+.gallery-count { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.gallery-spacer { flex: 1 1 auto; }
+
+.gallery-search { position: relative; width: min(300px, 32vw); }
+.gallery-search input { height: 32px; padding-left: 32px; }
+.gallery-search svg {
+  position: absolute; left: 9px; top: 8px; width: 16px; height: 16px;
+  fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round;
+}
+.gallery-select { width: auto; height: 32px; }
+
+.gallery-filter {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 0 22px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.g-chip {
+  height: 28px; min-width: 0; padding: 0 12px;
+  border-radius: 999px; background: var(--panel-2); color: var(--muted); font-size: 12.5px;
+}
+.g-chip:hover { color: var(--text); border-color: var(--line-strong); }
+.g-chip.on { color: var(--text); border-color: var(--accent); background: rgba(61, 123, 253, 0.14); }
+.g-dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+.g-sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+
+.gallery-grid {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 22px 28px;
   display: grid;
-  gap: 18px;
+  grid-template-columns: repeat(auto-fill, minmax(228px, 1fr));
+  /* Size rows to each card's full height. Without this the cards collapse to
+     the meta text (the 16:9 thumb is all absolutely-positioned children, so
+     aspect-ratio alone doesn't feed the auto row track) and the grid never
+     scrolls — it just squishes everything into view. */
+  grid-auto-rows: max-content;
+  gap: 16px;
+  align-content: start;
 }
+.gallery-group-head {
+  grid-column: 1 / -1;
+  display: flex; align-items: baseline; gap: 10px;
+  margin: 12px 2px 0;
+  font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px;
+}
+.gallery-group-head:first-child { margin-top: 0; }
+.gallery-group-head::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--line); }
+.gallery-group-head .gcount { letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
+.gallery-empty { grid-column: 1 / -1; padding: 50px 20px; text-align: center; color: var(--muted); }
 
-.capture-preview-frame {
+/* ---- clip card ---- */
+.card {
   position: relative;
-  justify-self: center;
-  overflow: hidden;
-  width: min(100%, calc((100vh - var(--titlebar-h) - 170px) * 16 / 9));
-  aspect-ratio: 16 / 9;
-  border: 1px solid var(--line);
-  background: #080a0e;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); overflow: hidden; cursor: pointer;
+  transition: border-color 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
 }
+.card:hover { border-color: var(--line-strong); transform: translateY(-2px); box-shadow: 0 10px 26px rgba(0, 0, 0, 0.4); }
+.card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 
-.capture-preview-frame::before {
-  content: "";
-  position: absolute;
-  inset: 0;
+.card-thumb {
+  position: relative; aspect-ratio: 16 / 9; overflow: hidden;
+  background: radial-gradient(120% 120% at 30% 20%, var(--g1, #1a1f28), var(--g2, #0c1017) 70%);
+}
+.card-thumb::before {
+  content: ""; position: absolute; inset: 0;
   background-image:
-    linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
-  background-size: 36px 36px;
-  opacity: .35;
+    linear-gradient(rgba(255,255,255,.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.03) 1px, transparent 1px);
+  background-size: 30px 30px; opacity: .5;
+}
+.card-thumb-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.card-play { position: absolute; inset: 0; display: grid; place-items: center; color: rgba(255,255,255,.4); transition: color 0.12s ease, transform 0.12s ease; }
+.card-play svg { width: 42px; height: 42px; fill: currentColor; filter: drop-shadow(0 2px 6px rgba(0,0,0,.5)); }
+.card:hover .card-play { color: rgba(255,255,255,.9); transform: scale(1.06); }
+
+.card-kind {
+  position: absolute; top: 8px; left: 8px; z-index: 2;
+  display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px;
+  border-radius: 6px; background: rgba(8,10,14,.66); font-size: 11px; font-weight: 600;
+}
+.card-kind svg { display: block; width: 13px; height: 13px; fill: currentColor; }
+.card-kind.replay { color: var(--ok); }
+.card-kind.session { color: var(--session); }
+.card-kind.trim { color: var(--marker); }
+
+.card-dur {
+  position: absolute; bottom: 8px; right: 8px; z-index: 2;
+  height: 20px; padding: 0 7px; border-radius: 5px; display: inline-flex; align-items: center;
+  background: rgba(8,10,14,.74); color: #f0f2f6; font-size: 11.5px; font-variant-numeric: tabular-nums;
 }
 
-#capture-preview-image {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  background: #05070a;
+.card-del {
+  position: absolute; top: 8px; right: 8px; z-index: 3;
+  width: 28px; height: 28px; min-width: 0; padding: 0;
+  display: grid; place-items: center; border: 0; border-radius: 6px;
+  background: rgba(8,10,14,.7); color: #ffc9c9; opacity: 0; transition: opacity 0.12s ease;
 }
+.card:hover .card-del, .card:focus-within .card-del { opacity: 1; }
+.card-del:hover { background: rgba(229,72,77,.85); color: #fff; }
+.card-del:active { transform: none; }
+.card-del svg { display: block; width: 15px; height: 15px; fill: currentColor; }
 
-#capture-preview-image[hidden] { display: none; }
+.card-markers { position: absolute; left: 0; right: 0; bottom: 0; height: 14px; z-index: 1; pointer-events: none; }
+.card-markers i { position: absolute; bottom: 0; width: 2px; height: 9px; margin-left: -1px; background: var(--mc, var(--mc-info)); opacity: .9; border-radius: 1px; }
 
-.capture-preview-overlay {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-content: center;
-  gap: 6px;
-  padding: 24px;
-  background: rgba(5, 7, 10, .72);
-  color: var(--muted);
-}
-
-.capture-preview-overlay.ready {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.capture-preview-overlay strong,
-.capture-preview-foot strong {
-  display: block;
-  margin-bottom: 6px;
-  color: var(--text);
-  font-size: 16px;
-}
-
-.capture-preview-overlay span,
-.capture-preview-foot span {
-  display: block;
-  max-width: 520px;
-}
-
-.capture-preview-foot {
-  display: grid;
-  justify-items: center;
-  gap: 2px;
-}
-/* display:grid above beats the UA [hidden] rule — restate it. */
-.review-empty[hidden] { display: none; }
+.card-meta { padding: 9px 11px 11px; display: grid; gap: 3px; min-width: 0; }
+.card-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13.5px; font-weight: 600; }
+.card-name .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-game-ico { width: 18px; height: 18px; flex: none; border-radius: 5px; object-fit: contain; }
+.card-game-ico.placeholder { display: flex; align-items: center; justify-content: center; background: #0c1017; color: var(--muted); }
+.card-game-ico.placeholder svg { display: block; width: 12px; height: 12px; fill: currentColor; }
+.card-sub { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-meta .league-meta { font-size: 11.5px; color: var(--text); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .review-viewer {
   grid-area: 1 / 1;
@@ -1477,13 +1517,29 @@ label span { white-space: nowrap; }
 
 .review-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
+
+.review-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  min-width: 0;
+  padding: 0 12px 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+}
+.review-back:hover { border-color: var(--line-strong); background: #222936; }
+.review-back svg { width: 16px; height: 16px; }
 
 .review-head .clip-title { min-width: 0; display: grid; gap: 1px; }
 .clip-title-display {
@@ -2129,38 +2185,6 @@ label span { white-space: nowrap; }
   white-space: nowrap;
   font-size: 12px;
   color: var(--ok);
-}
-/* The corner key opens the shortcuts guide (replaces the old always-on legend).
-   Sculpted as a physical "?" keycap — top highlight, a thick bottom "skirt",
-   and a drop shadow — so it reads as the universal "show shortcuts" key. */
-.keycap {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 26px;
-  padding: 0 0 1px;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1;
-  color: var(--muted);
-  background: linear-gradient(#2c3441, #1b222d);
-  border: 1px solid #3b4555;
-  border-radius: 7px;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.09),
-    0 2px 0 #10141b,
-    0 3px 5px rgba(0, 0, 0, 0.45);
-  cursor: pointer;
-  transition: transform 0.05s ease, box-shadow 0.05s ease, color 0.1s ease, border-color 0.1s ease;
-}
-.keycap:hover { color: var(--text); border-color: var(--accent); }
-.keycap:active {
-  transform: translateY(2px);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 0 0 #10141b,
-    0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
 /* ---- keyboard shortcuts guide ---- */

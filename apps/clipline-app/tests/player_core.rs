@@ -122,32 +122,6 @@ fn setting_duration_labels_are_human_readable() {
 }
 
 #[test]
-fn capture_status_label_distinguishes_replay_capture_from_full_session_recording() {
-    let mut ctx = player_core_context();
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "PlayerCore.captureStatusLabel('Game: SlayTheSpire', true, false)"
-        ),
-        "Capturing Game: SlayTheSpire"
-    );
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "PlayerCore.captureStatusLabel('Game: SlayTheSpire', true, true)"
-        ),
-        "Recording Game: SlayTheSpire"
-    );
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "PlayerCore.captureStatusLabel('Game: SlayTheSpire', false, true)"
-        ),
-        "Recording stopped"
-    );
-}
-
-#[test]
 fn recording_quality_labels_hide_bitrate_jargon() {
     let mut ctx = player_core_context();
     assert_eq!(
@@ -241,11 +215,14 @@ fn capture_source_labels_are_sidebar_friendly() {
 #[test]
 fn fmt_ago_is_pure_in_now() {
     let mut ctx = player_core_context();
-    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000, 958)"), "42s ago");
-    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000, 700)"), "5m ago");
-    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(11800, 1000)"), "3h ago");
+    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000, 958)"), "just now");
+    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000, 940)"), "1 minute ago");
+    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000, 700)"), "5 minutes ago");
+    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(11800, 1000)"), "3 hours ago");
+    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000000, 827200)"), "2 days ago");
+    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(2000000, 185600)"), "3 weeks ago");
     // Clock skew must not produce negative ages.
-    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000, 1005)"), "0s ago");
+    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000, 1005)"), "just now");
 }
 
 #[test]

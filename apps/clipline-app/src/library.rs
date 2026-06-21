@@ -220,11 +220,52 @@ fn game_from_markers(markers: Option<&ClipMarkers>) -> Option<ClipGame> {
     })
 }
 
+/// Return (generating on demand) the cached poster JPEG for a clip, as a path
+/// the webview loads through the asset protocol. Lazy and per-clip so the
+/// library listing never blocks on ffmpeg.
+#[tauri::command]
+pub async fn clip_poster(
+    path: String,
+    settings: tauri::State<'_, StorageSettings>,
+) -> Result<String, String> {
+    let target = validate_clip_path(&settings, &path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let seek_s = poster_seek_seconds(&target);
+        crate::poster::ensure_poster(&target, seek_s).map(|poster| poster.display().to_string())
+    })
+    .await
+    .map_err(|e| format!("clip poster task: {e}"))?
+}
+
+/// The frame to grab a poster from: the first timeline marker (the action
+/// moment that makes the best thumbnail), else a little into the clip to skip
+/// the black opening frame.
+fn poster_seek_seconds(clip: &Path) -> f64 {
+    let Some(markers) = read_markers(clip) else {
+        return 1.0;
+    };
+    let duration_ok = markers.duration_s.is_finite() && markers.duration_s > 0.0;
+    if let Some(first) = markers.markers.first() {
+        let t = first.t_s.max(0.0);
+        return if duration_ok {
+            t.min((markers.duration_s - 0.2).max(0.0))
+        } else {
+            t
+        };
+    }
+    if duration_ok {
+        (markers.duration_s * 0.15).min(5.0)
+    } else {
+        1.0
+    }
+}
+
 #[tauri::command]
 pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let target = validate_clip_path(&settings, &path)?;
     std::fs::remove_file(&target).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(target.with_extension("markers.json"));
+    let _ = std::fs::remove_file(crate::poster::poster_path(&target));
     Ok(())
 }
 
@@ -281,6 +322,18 @@ fn rename_clip_files(
         if let Err(error) = std::fs::rename(&source_markers, &target_markers) {
             let _ = std::fs::rename(&target, &source);
             return Err(format!("rename clip markers: {error}"));
+        }
+    }
+
+    // The poster is a regenerable cache, not user data: move it alongside the
+    // clip when we can, otherwise drop the stale one so it rebuilds on demand.
+    let source_poster = crate::poster::poster_path(&source);
+    if source_poster.exists() {
+        let target_poster = crate::poster::poster_path(&target);
+        if source_poster != target_poster
+            && std::fs::rename(&source_poster, &target_poster).is_err()
+        {
+            let _ = std::fs::remove_file(&source_poster);
         }
     }
 
@@ -440,14 +493,14 @@ fn ffmpeg_audio_mix_filter(selected_audio_track_indices: &[u32]) -> Result<Strin
 }
 
 #[cfg(windows)]
-fn suppress_console(cmd: &mut Command) {
+pub(crate) fn suppress_console(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
-fn suppress_console(_cmd: &mut Command) {}
+pub(crate) fn suppress_console(_cmd: &mut Command) {}
 
 fn export_clip_file(source: PathBuf, start_s: f64, end_s: f64) -> Result<ExportedClipInfo, String> {
     let tmp = unique_temp_export_path(&source)?;

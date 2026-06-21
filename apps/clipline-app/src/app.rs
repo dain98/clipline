@@ -56,13 +56,6 @@ struct GameDetectionEvent {
 }
 
 #[derive(serde::Serialize)]
-struct PreviewActivationResult {
-    active: bool,
-    focused: bool,
-    enabled: bool,
-}
-
-#[derive(serde::Serialize)]
 struct UpdateCheckResult {
     channel: UpdateChannel,
     channel_label: &'static str,
@@ -235,14 +228,6 @@ impl RuntimeState {
             }
         }
         false
-    }
-
-    fn set_preview_active(&self, active: bool) -> bool {
-        self.send(Cmd::SetPreview { active })
-    }
-
-    fn pause_preview_temporarily(&self, duration: Duration) -> bool {
-        self.send(Cmd::PausePreview { duration })
     }
 
     pub(crate) fn settings(&self) -> AppSettings {
@@ -486,7 +471,6 @@ fn minimize_request_action(settings: &AppSettings) -> MinimizeRequestAction {
 
 fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>, destroy: bool) -> Result<(), String> {
     app.state::<MicTestState>().stop();
-    app.state::<RuntimeState>().set_preview_active(false);
     if let Some(window) = app.get_webview_window("main") {
         if destroy {
             window.destroy().map_err(|e| e.to_string())?;
@@ -542,37 +526,6 @@ fn set_recording<R: Runtime>(
     recording: bool,
 ) -> Result<bool, String> {
     state.set_recording(app, recording)
-}
-
-fn main_window_focused<R: Runtime>(app: &AppHandle<R>) -> bool {
-    app.get_webview_window("main")
-        .and_then(|window| window.is_focused().ok())
-        .unwrap_or(false)
-}
-
-fn preview_active_for_settings(
-    requested_active: bool,
-    focused: bool,
-    preview_enabled: bool,
-) -> bool {
-    requested_active && focused && preview_enabled
-}
-
-#[tauri::command]
-fn set_preview_active<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<RuntimeState>,
-    active: bool,
-) -> PreviewActivationResult {
-    let focused = main_window_focused(&app);
-    let preview_enabled = state.settings().capture_preview_enabled;
-    let next_active = preview_active_for_settings(active, focused, preview_enabled);
-    let sent = state.set_preview_active(next_active);
-    PreviewActivationResult {
-        active: sent && next_active,
-        focused,
-        enabled: preview_enabled,
-    }
 }
 
 async fn check_update_for_channel<R: Runtime>(
@@ -648,7 +601,6 @@ async fn install_update<R: Runtime>(
         return Err(status.unwrap_or_else(|| "no update is available".into()));
     };
 
-    state.set_preview_active(false);
     app.state::<MicTestState>().stop();
     state.send(Cmd::Stop { announce: false });
     update
@@ -1007,7 +959,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_replay,
             set_recording,
-            set_preview_active,
             get_settings,
             minimize_main_window,
             choose_media_folder,
@@ -1031,6 +982,7 @@ pub fn run() {
             crate::cloud::cloud_disconnect,
             crate::cloud::upload_clip_to_cloud,
             crate::library::list_clips,
+            crate::library::clip_poster,
             crate::library::delete_clip,
             crate::library::rename_clip,
             crate::library::export_clip,
@@ -1152,21 +1104,6 @@ pub fn run() {
                     CloseRequestAction::Quit => quit_app(app),
                 }
             }
-            tauri::RunEvent::WindowEvent {
-                label,
-                event: WindowEvent::Focused(false),
-                ..
-            } if label == "main" => {
-                app.state::<RuntimeState>().set_preview_active(false);
-            }
-            tauri::RunEvent::WindowEvent {
-                label,
-                event: WindowEvent::Moved(_) | WindowEvent::Resized(_),
-                ..
-            } if label == "main" => {
-                app.state::<RuntimeState>()
-                    .pause_preview_temporarily(Duration::from_millis(750));
-            }
             tauri::RunEvent::ExitRequested {
                 code: None, api, ..
             } => {
@@ -1235,7 +1172,6 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>) {
                 Event::Status { .. } => handle.emit("status", &event),
                 Event::Saved { .. } => handle.emit("saved", &event),
                 Event::Error { message } => handle.emit("error", message.clone()),
-                Event::PreviewFrame { .. } => handle.emit("preview-frame", &event),
             };
             if let Event::Saved {
                 full_session: false,
@@ -1448,14 +1384,6 @@ mod tests {
             MouseButton::Middle,
             MouseButtonState::Up
         ));
-    }
-
-    #[test]
-    fn preview_activation_requires_focus_and_enabled_setting() {
-        assert!(preview_active_for_settings(true, true, true));
-        assert!(!preview_active_for_settings(true, false, true));
-        assert!(!preview_active_for_settings(true, true, false));
-        assert!(!preview_active_for_settings(false, true, true));
     }
 
     #[test]
