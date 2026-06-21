@@ -680,10 +680,15 @@ pub fn enumerate_output_processes(
 
 pub fn process_loopback_available() -> bool {
     // Per-process application loopback (ActivateAudioInterfaceAsync with
-    // AUDIOCLIENT_PROCESS_LOOPBACK) is only available on Windows 10 version 2004
-    // (build 19041) and later. On older builds the activation fails — or worse,
-    // its completion callback never fires and each one stalls the recorder for
-    // ~1.5s — so gate the feature out entirely there.
+    // AUDIOCLIENT_PROCESS_LOOPBACK) is *documented* as Windows 10 build 20348+,
+    // but in practice works on fully updated Windows 10 2004+ (build 19041):
+    // OBS's Application Audio Capture relies on exactly this API there, and we
+    // deliberately target it too (see ddoc.md). Below 2004 the activation fails
+    // or its completion callback never fires — but `activate_process_loopback_client`
+    // caps the wait at 1.5s and `add_output_audio_sources` falls back to
+    // full-system mixed output, so attempting it on an unsupported build costs at
+    // most one bounded stall. This gate only skips that pointless attempt on
+    // pre-2004 builds; do not raise it to 20348 without revisiting that tradeoff.
     const MIN_PROCESS_LOOPBACK_BUILD: u32 = 19_041;
     windows_build_number().is_some_and(|build| build >= MIN_PROCESS_LOOPBACK_BUILD)
 }

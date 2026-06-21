@@ -27,6 +27,9 @@ on:
 
 permissions:
   contents: write # create the draft release
+  actions: read # SignPath's action downloads the uploaded artifact via the API;
+  # a top-level permissions block defaults every other scope to none, so this
+  # must be granted explicitly or the signing request can't fetch its input.
 
 concurrency:
   group: release-${{ github.ref }}
@@ -69,7 +72,6 @@ jobs:
           New-Item -ItemType Directory -Force unsigned | Out-Null
           Copy-Item $installer.FullName "unsigned/$($installer.Name)"
           "name=$($installer.Name)" >> $env:GITHUB_OUTPUT
-          "version=$([IO.Path]::GetFileNameWithoutExtension($installer.Name))" >> $env:GITHUB_OUTPUT
 
       - name: Upload unsigned installer (input for SignPath)
         id: upload-unsigned
@@ -108,11 +110,15 @@ jobs:
           $name = "${{ steps.artifact.outputs.name }}"
           $signed = "signed/$name"
           if (-not (Test-Path $signed)) { throw "signed installer not found at $signed" }
-          # Writes signed/<name>.sig
+          # tauri signer sign writes signed/<name>.sig (and echoes the signature).
           cargo tauri signer sign $signed
           $sig = Get-Content "$signed.sig" -Raw
-          $tag = "${{ github.ref_name }}"
-          $version = "${{ steps.artifact.outputs.version }}"
+          # Publish under the released ref. For a tag push that is the tag; for a
+          # manual run it is the dispatched ref, not the branch the run started on.
+          $tag = "${{ inputs.ref || github.ref_name }}"
+          # latest.json's version must be SemVer (e.g. 0.1.5) to match the version
+          # baked into the app, so read tauri.conf.json rather than the file name.
+          $version = (Get-Content apps/clipline-app/tauri.conf.json -Raw | ConvertFrom-Json).version
           $url = "https://github.com/${{ github.repository }}/releases/download/$tag/$name"
           $latest = [ordered]@{
             version   = $version
@@ -129,6 +135,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true # review the signed installer, then publish manually
+          # Pin to the released ref; on workflow_dispatch the default ref_name is
+          # the run's branch, which would publish to the wrong (or no) tag.
+          tag_name: ${{ inputs.ref || github.ref_name }}
           files: |
             signed/*-setup.exe
             signed/*-setup.exe.sig
