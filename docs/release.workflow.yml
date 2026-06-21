@@ -1,0 +1,144 @@
+# Clipline release pipeline: build the NSIS installer on CI, Authenticode-sign
+# it via SignPath (free for verified open-source), regenerate the Tauri updater
+# signature over the SIGNED installer, and publish a draft GitHub release.
+#
+# Why CI: SignPath's OSS program only signs artifacts produced by a trusted
+# build system (GitHub Actions), not local `cargo tauri build` runs. Moving
+# releases here is what unlocks free signing — which is the real fix for the
+# "won't launch / AV-quarantined" reports (an unsigned binary that captures
+# per-process audio scores as grayware to AV/EDR heuristics).
+#
+# One-time setup before this works: see docs/CODE_SIGNING.md. You must create a
+# SignPath org/project/policy + artifact configuration and add these to the repo:
+#   secrets:  SIGNPATH_API_TOKEN, TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+#   vars:     SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG,
+#             SIGNPATH_SIGNING_POLICY_SLUG, SIGNPATH_ARTIFACT_CONFIG_SLUG
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag/branch to build (defaults to the current ref)"
+        required: false
+
+permissions:
+  contents: write # create the draft release
+  actions: read # SignPath's action downloads the uploaded artifact via the API;
+  # a top-level permissions block defaults every other scope to none, so this
+  # must be granted explicitly or the signing request can't fetch its input.
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-sign-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      # Static frontend (frontendDist: "ui") — no Node/npm step needed.
+      - name: Build NSIS installer + updater artifacts
+        working-directory: apps/clipline-app
+        env:
+          # Minisign key for the Tauri updater (.sig). Same key whose pubkey is
+          # baked into tauri.conf.json. Required because createUpdaterArtifacts
+          # is on.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri build
+
+      - name: Locate the unsigned installer
+        id: artifact
+        shell: pwsh
+        run: |
+          $nsis = "target/release/bundle/nsis"
+          $installer = Get-ChildItem "$nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $installer) { throw "no NSIS installer found in $nsis" }
+          New-Item -ItemType Directory -Force unsigned | Out-Null
+          Copy-Item $installer.FullName "unsigned/$($installer.Name)"
+          "name=$($installer.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload unsigned installer (input for SignPath)
+        id: upload-unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: clipline-installer-unsigned
+          path: unsigned/*-setup.exe
+          if-no-files-found: error
+
+      # SignPath pulls the uploaded artifact by id, signs it per the artifact
+      # configuration (which should sign BOTH the inner app .exe and the outer
+      # NSIS installer — set that up in the SignPath UI), and writes the signed
+      # installer to signed/.
+      - name: Authenticode-sign via SignPath
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIG_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      # Authenticode signing rewrites the PE, so the .sig Tauri produced during
+      # build no longer matches. Regenerate the updater signature over the
+      # SIGNED installer, then build latest.json pointing at the release asset.
+      - name: Regenerate updater signature + latest.json
+        id: updater
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $name = "${{ steps.artifact.outputs.name }}"
+          $signed = "signed/$name"
+          if (-not (Test-Path $signed)) { throw "signed installer not found at $signed" }
+          # tauri signer sign writes signed/<name>.sig (and echoes the signature).
+          cargo tauri signer sign $signed
+          $sig = Get-Content "$signed.sig" -Raw
+          # Publish under the released ref. For a tag push that is the tag; for a
+          # manual run it is the dispatched ref, not the branch the run started on.
+          $tag = "${{ inputs.ref || github.ref_name }}"
+          # latest.json's version must be SemVer (e.g. 0.1.5) to match the version
+          # baked into the app, so read tauri.conf.json rather than the file name.
+          $version = (Get-Content apps/clipline-app/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $url = "https://github.com/${{ github.repository }}/releases/download/$tag/$name"
+          $latest = [ordered]@{
+            version   = $version
+            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = @{ "windows-x86_64" = [ordered]@{ signature = $sig.Trim(); url = $url } }
+          }
+          $latest | ConvertTo-Json -Depth 6 | Set-Content "signed/latest.json" -Encoding utf8
+          # NOTE: the updater endpoint in tauri.conf.json points at the `nightly`
+          # release's latest.json. Confirm whether this signed build should
+          # publish latest.json to `nightly` or to the version tag before
+          # flipping `draft: false` below.
+
+      - name: Publish draft release (signed assets)
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true # review the signed installer, then publish manually
+          # Pin to the released ref; on workflow_dispatch the default ref_name is
+          # the run's branch, which would publish to the wrong (or no) tag.
+          tag_name: ${{ inputs.ref || github.ref_name }}
+          files: |
+            signed/*-setup.exe
+            signed/*-setup.exe.sig
+            signed/latest.json
