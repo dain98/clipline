@@ -230,9 +230,10 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      of opening the main window.
 30. **Audio track splitting v1** — Output audio is split by current Windows render-session
      process using process-loopback capture, so game/Discord/Spotify/browser audio can land in
-     separate Opus tracks. Microphone capture remains its own track when enabled, and Clipline
-     falls back to the old mixed Output Audio track if process loopback is unavailable or the
-     experimental "app audio tracks" Capture setting is turned off; that setting defaults off.
+     separate Opus tracks. Clipline keeps a mixed Output Audio track first as a playback/export
+     safety track, then app/process tracks, then microphone when enabled; when the experimental
+     "app audio tracks" Capture setting is off, only the mixed Output Audio track is recorded.
+     That setting defaults off.
      Electron-style apps that emit
      multiple child-process audio sessions are grouped by same-executable root process before
      process-loopback capture, so Discord should appear once instead of as renderer/audio-service
