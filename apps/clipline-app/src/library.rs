@@ -429,7 +429,7 @@ fn preview_clip_audio_tracks_file_with_mixer(
         return Ok(display_path);
     };
     let selected_indices = selected_audio_track_indices(&markers, &selected_audio_track_ids)?;
-    if selected_indices.len() == markers.audio_tracks.len() && selected_indices.len() <= 1 {
+    if selected_indices.len() == markers.audio_tracks.len() {
         return Ok(display_path);
     }
 
@@ -1209,7 +1209,57 @@ mod tests {
     }
 
     #[test]
-    fn multi_track_preview_returns_mix_failure_instead_of_unmixed_mp4() {
+    fn all_audio_tracks_selected_returns_source_without_preview_mix() {
+        let dir = TestDir::new("audio-preview-all-source");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, b"not an mp4").unwrap();
+        let markers = ClipMarkers {
+            recording_start_s: 0.0,
+            duration_s: 10.0,
+            player_summary: None,
+            audio_tracks: vec![
+                ClipAudioTrack {
+                    id: "output".into(),
+                    track_index: 0,
+                    label: "Output Audio".into(),
+                    kind: Some("output".into()),
+                },
+                ClipAudioTrack {
+                    id: "process:1".into(),
+                    track_index: 1,
+                    label: "Game".into(),
+                    kind: Some("process_output".into()),
+                },
+                ClipAudioTrack {
+                    id: "microphone".into(),
+                    track_index: 2,
+                    label: "Microphone".into(),
+                    kind: Some("microphone".into()),
+                },
+            ],
+            markers: Vec::new(),
+        };
+        std::fs::write(
+            source.with_extension("markers.json"),
+            serde_json::to_string(&markers).unwrap(),
+        )
+        .unwrap();
+
+        let path = preview_clip_audio_tracks_file_with_mixer(
+            source.clone(),
+            source.display().to_string(),
+            vec!["output".into(), "process:1".into(), "microphone".into()],
+            dir.path().join("previews"),
+            |_, _, _| Err("mixer should not run".into()),
+        )
+        .expect("all selected should keep the source");
+
+        assert_eq!(path, source.display().to_string());
+        assert!(!dir.path().join("previews").exists());
+    }
+
+    #[test]
+    fn partial_multi_track_preview_returns_mix_failure_instead_of_unmixed_mp4() {
         let dir = TestDir::new("audio-preview-mix-failure");
         let source = dir.path().join("clip.mp4");
         std::fs::write(&source, b"not an mp4").unwrap();
@@ -1225,8 +1275,14 @@ mod tests {
                     kind: Some("output".into()),
                 },
                 ClipAudioTrack {
-                    id: "microphone".into(),
+                    id: "process:1".into(),
                     track_index: 1,
+                    label: "Game".into(),
+                    kind: Some("process_output".into()),
+                },
+                ClipAudioTrack {
+                    id: "microphone".into(),
+                    track_index: 2,
                     label: "Microphone".into(),
                     kind: Some("microphone".into()),
                 },
@@ -1242,7 +1298,7 @@ mod tests {
         let err = preview_clip_audio_tracks_file_with_mixer(
             source.clone(),
             source.display().to_string(),
-            vec!["output".into(), "microphone".into()],
+            vec!["process:1".into(), "microphone".into()],
             dir.path().join("previews"),
             |_, _, _| Err("forced mix failure".into()),
         )

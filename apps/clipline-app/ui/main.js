@@ -191,7 +191,7 @@ function clipAudioTracks(clip = currentClip) {
 }
 
 function defaultAudioTrackIds(clip = currentClip) {
-  return clipAudioTracks(clip).map((track) => track.id).filter(Boolean);
+  return PlayerCore.defaultAudioTrackIds(clipAudioTracks(clip));
 }
 
 function resetSelectedAudioTracks(clip = currentClip) {
@@ -204,9 +204,7 @@ function pruneSelectedAudioTracks(clip = currentClip) {
 }
 
 function selectedAudioTrackIdsForClip(clip = currentClip, selected = selectedAudioTrackIds) {
-  return clipAudioTracks(clip)
-    .filter((track) => selected.has(track.id))
-    .map((track) => track.id);
+  return PlayerCore.selectedAudioTrackIds(clipAudioTracks(clip), [...selected]);
 }
 
 function audioTrackLabel(track) {
@@ -218,12 +216,16 @@ function audioTrackLabel(track) {
 
 function renderAudioTrackRows(container, clip, selected, onChange) {
   container.replaceChildren();
-  for (const track of clipAudioTracks(clip)) {
+  const tracks = clipAudioTracks(clip);
+  const selectedIds = [...selected];
+  for (const track of tracks) {
     const row = document.createElement("label");
     row.className = "audio-track-row";
     const input = document.createElement("input");
+    const state = PlayerCore.audioTrackRowState(track, tracks, selectedIds);
     input.type = "checkbox";
-    input.checked = selected.has(track.id);
+    input.checked = state.checked;
+    input.indeterminate = state.indeterminate;
     input.dataset.trackId = track.id || "";
     input.addEventListener("change", () => onChange(track, input.checked));
     const label = document.createElement("span");
@@ -246,11 +248,12 @@ function renderAudioTrackPanel() {
     summary.textContent = "";
     return;
   }
-  summary.textContent = `${selectedAudioTrackIdsForClip().length}/${tracks.length} selected`;
+  summary.textContent = `${PlayerCore.audioTrackSelectedRowCount(tracks, [...selectedAudioTrackIds])}/${tracks.length} selected`;
   renderAudioTrackRows(list, currentClip, selectedAudioTrackIds, (track, checked) => {
     if (!track.id) return;
-    if (checked) selectedAudioTrackIds.add(track.id);
-    else selectedAudioTrackIds.delete(track.id);
+    selectedAudioTrackIds = new Set(
+      PlayerCore.applyAudioTrackToggle(tracks, [...selectedAudioTrackIds], track.id, checked),
+    );
     renderAudioTrackPanel();
     applySelectedAudioTracksToPlayback();
   });
@@ -267,8 +270,9 @@ function renderUploadAudioTracks(clip = uploadDialogClip) {
   }
   renderAudioTrackRows(list, clip, uploadSelectedAudioTrackIds, (track, checked) => {
     if (!track.id) return;
-    if (checked) uploadSelectedAudioTrackIds.add(track.id);
-    else uploadSelectedAudioTrackIds.delete(track.id);
+    uploadSelectedAudioTrackIds = new Set(
+      PlayerCore.applyAudioTrackToggle(tracks, [...uploadSelectedAudioTrackIds], track.id, checked),
+    );
     renderUploadAudioTracks(clip);
   });
 }
@@ -276,7 +280,7 @@ function renderUploadAudioTracks(clip = uploadDialogClip) {
 function audioSelectionLabel(clip = currentClip) {
   const tracks = clipAudioTracks(clip);
   if (!tracks.length) return "";
-  const selected = selectedAudioTrackIdsForClip(clip).length;
+  const selected = PlayerCore.audioTrackSelectedRowCount(tracks, [...selectedAudioTrackIds]);
   if (selected === tracks.length) return "audio: all tracks";
   if (selected === 0) return "audio: muted";
   return `audio: ${selected}/${tracks.length} tracks`;

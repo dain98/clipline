@@ -380,6 +380,85 @@ const PlayerCore = (() => {
     return markers.length === 1 ? "1 marker" : `${markers.length} markers`;
   };
 
+  const audioTrackId = (track) => String((track && track.id) || "");
+
+  const audioTrackKind = (track) => String((track && track.kind) || "");
+
+  const normalizedAudioTracks = (tracks) => Array.isArray(tracks) ? tracks : [];
+
+  const isMixedOutputTrack = (track) =>
+    audioTrackId(track) === "output" && audioTrackKind(track) === "output";
+
+  const isProcessOutputTrack = (track) =>
+    audioTrackKind(track) === "process_output" || audioTrackId(track).startsWith("process:");
+
+  const processOutputTracks = (tracks) => normalizedAudioTracks(tracks).filter(isProcessOutputTrack);
+
+  const hasSplitOutputTracks = (tracks) =>
+    normalizedAudioTracks(tracks).some(isMixedOutputTrack) && processOutputTracks(tracks).length > 0;
+
+  const audioIdSet = (selectedIds) =>
+    new Set((Array.isArray(selectedIds) ? selectedIds : []).map((id) => String(id)));
+
+  const selectedAudioTrackIds = (tracks, selectedIds) => {
+    const selected = audioIdSet(selectedIds);
+    const splitOutput = hasSplitOutputTracks(tracks);
+    return normalizedAudioTracks(tracks)
+      .filter((track) => {
+        const id = audioTrackId(track);
+        return id && selected.has(id) && !(splitOutput && isMixedOutputTrack(track));
+      })
+      .map(audioTrackId);
+  };
+
+  const defaultAudioTrackIds = (tracks) => {
+    const splitOutput = hasSplitOutputTracks(tracks);
+    return normalizedAudioTracks(tracks)
+      .filter((track) => audioTrackId(track) && !(splitOutput && isMixedOutputTrack(track)))
+      .map(audioTrackId);
+  };
+
+  const audioTrackRowState = (track, tracks, selectedIds) => {
+    const selected = audioIdSet(selectedIds);
+    if (hasSplitOutputTracks(tracks) && isMixedOutputTrack(track)) {
+      const processIds = processOutputTracks(tracks).map(audioTrackId).filter(Boolean);
+      const checkedCount = processIds.filter((id) => selected.has(id)).length;
+      return {
+        checked: processIds.length > 0 && checkedCount === processIds.length,
+        indeterminate: checkedCount > 0 && checkedCount < processIds.length,
+      };
+    }
+    return { checked: selected.has(audioTrackId(track)), indeterminate: false };
+  };
+
+  const applyAudioTrackToggle = (tracks, selectedIds, trackId, checked) => {
+    const allTracks = normalizedAudioTracks(tracks);
+    const selected = audioIdSet(selectedIds);
+    const track = allTracks.find((candidate) => audioTrackId(candidate) === String(trackId));
+    if (!track) return selectedAudioTrackIds(allTracks, [...selected]);
+
+    if (hasSplitOutputTracks(allTracks) && isMixedOutputTrack(track)) {
+      selected.delete(audioTrackId(track));
+      for (const processTrack of processOutputTracks(allTracks)) {
+        const id = audioTrackId(processTrack);
+        if (!id) continue;
+        if (checked) selected.add(id);
+        else selected.delete(id);
+      }
+    } else if (checked) {
+      selected.add(audioTrackId(track));
+    } else {
+      selected.delete(audioTrackId(track));
+    }
+
+    return selectedAudioTrackIds(allTracks, [...selected]);
+  };
+
+  const audioTrackSelectedRowCount = (tracks, selectedIds) =>
+    normalizedAudioTracks(tracks).filter((track) =>
+      audioTrackRowState(track, tracks, selectedIds).checked
+    ).length;
+
   // EventKind variant name -> visual category. Unknown kinds degrade to info.
   const MARKER_CATEGORIES = {
     ChampionKill: "kill",
@@ -747,6 +826,11 @@ const PlayerCore = (() => {
     nextMarker,
     prevMarker,
     markerSummary,
+    defaultAudioTrackIds,
+    selectedAudioTrackIds,
+    audioTrackRowState,
+    applyAudioTrackToggle,
+    audioTrackSelectedRowCount,
     markerStyle,
     markerDigest,
     playerSummaryLabel,

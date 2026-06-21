@@ -253,6 +253,14 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > shape is a full-size clapper icon on the left, only for videos that are actually user-created
 > clips, likely after finishing a clearer labeling model.
 
+Recent fixes (2026-06-21):
+- Split-audio review/upload semantics: when per-process output tracks exist, the "Output Audio"
+  checklist row is a master toggle for those process output tracks, not an extra mixed track to
+  include alongside them. The mixed Output Audio stream remains in the file as a fallback/safety
+  track, but selected previews omit it while process tracks are active to avoid doubled audio.
+  Exact all-physical-track preview requests return the original clip path instead of generating a
+  mixed preview.
+
 Recent fixes (2026-06-19):
 - Library rows now keep full title/context text visible, then fade the right edge on hover/focus
   to reveal a borderless trash affordance. League clip metadata intentionally wraps onto its own
