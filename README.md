@@ -18,7 +18,7 @@ Clipline is a game recorder built around three commitments: **never inject code 
 
 Under the hood it pairs a native **Rust** capture/encode core with a small **Tauri (WebView2)** UI: capture via **Windows.Graphics.Capture**, hardware encoding on **NVENC / AMF / QuickSync** (plus software **AV1**), and a crash‑safe MP4 writer. The result is a ShadowPlay‑style replay buffer with near‑zero gameplay impact — cross‑GPU, open source, and free.
 
-> **Status:** `v0.1.9`, nightly — testing‑grade, not stable. A working tray recorder with a first‑party review/trim player, 30 development milestones deep. Windows‑only. [Download the installer](#-install) or build from source. The installer binary isn't Authenticode code‑signed yet, so Windows SmartScreen will warn on first run — Authenticode signing is [on the roadmap](#-roadmap). (The auto‑updater *is* signed; the two are different — see [Install](#-install).)
+> **Status:** `v0.1.10`, nightly — testing‑grade, not stable. A working tray recorder with a first‑party review/trim player, 30 development milestones deep. Windows‑only. [Download the installer](#-install) or build from source. The installer binary isn't Authenticode code‑signed yet, so Windows SmartScreen will warn on first run — Authenticode signing is [on the roadmap](#-roadmap). (The auto‑updater *is* signed; the two are different — see [Install](#-install).)
 
 <!--
   SCREENSHOTS — drop a visual-first impression here, above the text/badges.

@@ -254,6 +254,10 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-22):
+- Tray "Open Clipline" now uses the same reveal path as a normal foreground launch:
+  show the hidden WebView window, restore it if it is minimized, then focus it. This fixes
+  tray-only sessions where recording/capture kept running but the interface did not come
+  back from the tray.
 - Startup now treats OS global-hotkey registration as best-effort. If `Alt+F10`
   is already owned by another recorder/overlay, Clipline continues launching,
   keeps the tray/menu path available, and still installs the low-level in-game
