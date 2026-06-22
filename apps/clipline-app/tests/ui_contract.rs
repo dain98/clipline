@@ -131,6 +131,8 @@ fn review_player_owns_all_controls() {
         "id=\"check-updates\"",
         "id=\"update-status\"",
         "id=\"set-capture\"",
+        "id=\"set-backend\"",
+        "id=\"backend-summary\"",
         "id=\"set-output-enabled\"",
         "id=\"set-audio-split-output\"",
         "id=\"set-output-device\"",

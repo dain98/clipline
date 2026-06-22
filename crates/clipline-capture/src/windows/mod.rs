@@ -4,6 +4,7 @@
 
 pub mod d3d11;
 pub mod display;
+pub mod dxgi_dup;
 pub mod mft;
 pub mod mft_probe;
 pub mod nv12;
@@ -11,6 +12,7 @@ pub mod wasapi;
 pub mod wgc;
 pub mod window;
 
+pub use dxgi_dup::DxgiDuplicationCapture;
 pub use mft::{MftConfig, MftH264Encoder};
 pub use wasapi::WasapiLoopback;
 pub use wgc::WgcCapture;

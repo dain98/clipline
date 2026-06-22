@@ -22,8 +22,8 @@ use clipline_capture::windows::wasapi::{
     enumerate_output_processes, process_loopback_available, WasapiChannelMode,
 };
 use clipline_capture::windows::{
-    d3d11, find_window_by_title, mft_probe, window_from_raw_handle, ID3D11Device, MftConfig,
-    MftH264Encoder, WasapiLoopback, WgcCapture,
+    d3d11, find_window_by_title, mft_probe, window_from_raw_handle, DxgiDuplicationCapture,
+    ID3D11Device, MftConfig, MftH264Encoder, WasapiLoopback, WgcCapture,
 };
 use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
@@ -52,6 +52,29 @@ trait TimedFrameSource {
 impl TimedFrameSource for WgcCapture {
     fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
         WgcCapture::next_frame_timeout(self, timeout)
+    }
+}
+
+impl TimedFrameSource for DxgiDuplicationCapture {
+    fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+        DxgiDuplicationCapture::next_frame_timeout(self, timeout)
+    }
+}
+
+/// The live screen-capture engine, chosen at recording start. WGC is the
+/// default and the only per-window option; DXGI Desktop Duplication is the
+/// opt-in borderless display/region backend (issue #42).
+enum LiveBackend {
+    Wgc(WgcCapture),
+    Dxgi(DxgiDuplicationCapture),
+}
+
+impl TimedFrameSource for LiveBackend {
+    fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+        match self {
+            LiveBackend::Wgc(cap) => cap.next_frame_timeout(timeout),
+            LiveBackend::Dxgi(cap) => cap.next_frame_timeout(timeout),
+        }
     }
 }
 
@@ -113,7 +136,7 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
     }
 }
 
-type LiveCapture = CadencedCapture<WgcCapture>;
+type LiveCapture = CadencedCapture<LiveBackend>;
 type LiveRecorder = Recorder<LiveCapture, Box<dyn Encoder>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,6 +154,21 @@ pub enum CaptureSource {
     WindowTitle(String),
     WindowHandle { hwnd: isize, title: String },
     DisplayRegion(CaptureRegion),
+}
+
+/// Which screen-capture backend to use for display/region capture (issue #42).
+/// `Auto` and `Wgc` both use Windows Graphics Capture today; `Wgc` is the
+/// persisted force-WGC escape hatch that survives any future change to `Auto`.
+/// `DesktopDuplication` uses DXGI Desktop Duplication, which has no Windows 10
+/// privacy border but is display/region only (never per-window) and silently
+/// falls back to WGC when it can't initialize (multi-GPU, rotated display, etc).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureBackend {
+    #[default]
+    Auto,
+    Wgc,
+    DesktopDuplication,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -400,6 +438,8 @@ pub struct ActiveGame {
 
 pub struct ServiceOptions {
     pub capture_source: CaptureSource,
+    /// Screen-capture backend preference for display/region capture.
+    pub capture_backend: CaptureBackend,
     /// Built-in game plugin id for the active capture target, if any.
     pub active_game_plugin_id: Option<String>,
     /// Active game (plugin or custom) for clip attribution. Unlike
@@ -435,6 +475,7 @@ impl Default for ServiceOptions {
     fn default() -> Self {
         Self {
             capture_source: CaptureSource::PrimaryMonitor,
+            capture_backend: CaptureBackend::Auto,
             active_game_plugin_id: None,
             active_game: None,
             media_dir: default_clips_dir(),
@@ -537,6 +578,115 @@ fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver
     }
 }
 
+/// First-frame wait: the frame that fixes the capture size. Matches WGC's own
+/// 5 s budget; an idle desktop can legitimately take this long to update.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Build the capture engine and pull its first frame (which fixes the capture
+/// size). DXGI Desktop Duplication is attempted only when the user explicitly
+/// selected it for a display/region source; any DXGI failure — at construction
+/// or on the first frame — is logged to stderr and silently falls back to WGC,
+/// so recording always starts (the user chose silent fallback over a warning).
+fn open_screen_capture(
+    device: &ID3D11Device,
+    clock: RelativeClock,
+    source: &CaptureSource,
+    backend: CaptureBackend,
+) -> Result<(LiveBackend, Frame), String> {
+    if backend == CaptureBackend::DesktopDuplication
+        && matches!(
+            source,
+            CaptureSource::PrimaryMonitor | CaptureSource::DisplayRegion(_)
+        )
+    {
+        match open_dxgi(device, clock, source) {
+            Ok(pair) => return Ok(pair),
+            Err(e) => eprintln!(
+                "clipline: Desktop Duplication unavailable ({e}); using Windows Graphics Capture"
+            ),
+        }
+    }
+
+    let init = |e: &dyn std::fmt::Display| format!("init: {e}");
+    let mut cap = open_wgc(device, clock, source)?;
+    let first = cap
+        .next_frame_timeout(FIRST_FRAME_TIMEOUT)
+        .map_err(|e| init(&e))?
+        .ok_or("capture ended before the first frame")?;
+    Ok((LiveBackend::Wgc(cap), first))
+}
+
+/// DXGI Desktop Duplication for a display/region source (never per-window). The
+/// monitor handle is resolved inside the capture crate / via `display`, both of
+/// which use the `windows`-crate `HMONITOR` the constructors expect.
+fn open_dxgi(
+    device: &ID3D11Device,
+    clock: RelativeClock,
+    source: &CaptureSource,
+) -> Result<(LiveBackend, Frame), String> {
+    let mut cap = match source {
+        CaptureSource::PrimaryMonitor => {
+            DxgiDuplicationCapture::primary_monitor_on(device.clone(), clock)
+                .map_err(|e| e.to_string())?
+        }
+        CaptureSource::DisplayRegion(region) => {
+            let display = clipline_capture::windows::display::display_handle_by_id(
+                region.display_id.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
+            let crop = crop_for_region(region, &display.info)?;
+            DxgiDuplicationCapture::for_monitor_region_on(
+                device.clone(),
+                display.handle,
+                clock,
+                crop,
+            )
+            .map_err(|e| e.to_string())?
+        }
+        // Window sources never reach here (guarded by open_screen_capture).
+        _ => return Err("Desktop Duplication cannot capture a single window".into()),
+    };
+    let first = cap
+        .next_frame_timeout(FIRST_FRAME_TIMEOUT)
+        .map_err(|e| e.to_string())?
+        .ok_or("Desktop Duplication ended before the first frame")?;
+    Ok((LiveBackend::Dxgi(cap), first))
+}
+
+/// Windows Graphics Capture for any source (the default, and the only
+/// per-window option).
+fn open_wgc(
+    device: &ID3D11Device,
+    clock: RelativeClock,
+    source: &CaptureSource,
+) -> Result<WgcCapture, String> {
+    let init = |e: &dyn std::fmt::Display| format!("init: {e}");
+    match source {
+        CaptureSource::WindowTitle(needle) => {
+            let hwnd = find_window_by_title(needle)
+                .ok_or_else(|| format!("no visible window matching {needle:?}"))?;
+            WgcCapture::for_window_client_on(device.clone(), hwnd, clock).map_err(|e| init(&e))
+        }
+        CaptureSource::WindowHandle { hwnd, title } => {
+            let hwnd = window_from_raw_handle(*hwnd)
+                .ok_or_else(|| format!("game window {title:?} is no longer available"))?;
+            WgcCapture::for_window_client_on(device.clone(), hwnd, clock).map_err(|e| init(&e))
+        }
+        CaptureSource::PrimaryMonitor => {
+            WgcCapture::primary_monitor_on(device.clone(), clock).map_err(|e| init(&e))
+        }
+        CaptureSource::DisplayRegion(region) => {
+            let display = clipline_capture::windows::display::display_handle_by_id(
+                region.display_id.as_deref(),
+            )
+            .map_err(|e| init(&e))?;
+            let crop = crop_for_region(region, &display.info)?;
+            WgcCapture::for_monitor_region_on(device.clone(), display.handle, clock, crop)
+                .map_err(|e| init(&e))
+        }
+    }
+}
+
 fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> Result<(), String> {
     let init = |e: &dyn std::fmt::Display| format!("init: {e}");
     let (device, _ctx) = d3d11::create_device().map_err(|e| init(&e))?;
@@ -547,37 +697,13 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let marker_rx = spawn_marker_source(&opts, recording_t0);
     let mut marker_log = MarkerLog::new();
     let mut player_summary = PlayerSummaryState::default();
-    let mut cap = match &opts.capture_source {
-        CaptureSource::WindowTitle(needle) => {
-            let hwnd = find_window_by_title(needle)
-                .ok_or_else(|| format!("no visible window matching {needle:?}"))?;
-            WgcCapture::for_window_client_on(device.clone(), hwnd, clock).map_err(|e| init(&e))?
-        }
-        CaptureSource::WindowHandle { hwnd, title } => {
-            let hwnd = window_from_raw_handle(*hwnd)
-                .ok_or_else(|| format!("game window {title:?} is no longer available"))?;
-            WgcCapture::for_window_client_on(device.clone(), hwnd, clock).map_err(|e| init(&e))?
-        }
-        CaptureSource::PrimaryMonitor => {
-            WgcCapture::primary_monitor_on(device.clone(), clock).map_err(|e| init(&e))?
-        }
-        CaptureSource::DisplayRegion(region) => {
-            let display = clipline_capture::windows::display::display_handle_by_id(
-                region.display_id.as_deref(),
-            )
-            .map_err(|e| init(&e))?;
-            let crop = crop_for_region(region, &display.info)?;
-            WgcCapture::for_monitor_region_on(device.clone(), display.handle, clock, crop)
-                .map_err(|e| init(&e))?
-        }
-    };
-
-    // First frame fixes the capture size; output resolution caps scale down
-    // while preserving the captured aspect ratio.
-    let first = cap
-        .next_frame_timeout(Duration::from_secs(5))
-        .map_err(|e| init(&e))?
-        .ok_or("capture ended before the first frame")?;
+    // Build the capture engine — DXGI Desktop Duplication when the user opted
+    // in for a display/region source, else WGC — and pull the first frame,
+    // which fixes the capture size. A DXGI failure (multi-GPU, rotated display,
+    // secure desktop on the first frame, …) silently falls back to WGC.
+    let (cap, first) =
+        open_screen_capture(&device, clock, &opts.capture_source, opts.capture_backend)?;
+    // Output resolution caps scale down while preserving the captured aspect ratio.
     let FrameData::Gpu(tex) = &first.data else {
         return Err("expected a GPU frame".into());
     };

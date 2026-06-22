@@ -313,6 +313,20 @@
                 <option value="display_region">SET REGION</option>
               </select>
             </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Capture backend</strong>
+                <span>How displays and regions are captured.</span>
+              </div>
+              <div class="recording-control">
+                <select id="set-backend">
+                  <option value="auto">Automatic (recommended)</option>
+                  <option value="wgc">Windows Graphics Capture</option>
+                  <option value="desktop_duplication">Desktop Duplication (no Windows 10 border)</option>
+                </select>
+                <span id="backend-summary" class="setting-summary"></span>
+              </div>
+            </div>
             <div id="capture-region-editor" class="capture-region-editor" hidden>
               <div class="region-head">
                 <div class="setting-info">
