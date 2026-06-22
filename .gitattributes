@@ -1,0 +1,16 @@
+# Normalize all text files to LF in the repo.
+# Git still checks out with platform-native EOL unless core.eol is overridden;
+# `eol=lf` forces LF in the working tree too, which keeps Windows editors honest
+# and stops the recurring "LF will be replaced by CRLF" warnings.
+* text=auto eol=lf
+
+# Binary assets — never touch their bytes.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.icns binary
+*.mp4  binary
+*.webm binary
+*.woff binary
+*.woff2 binary
