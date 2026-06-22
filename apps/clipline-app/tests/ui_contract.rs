@@ -24,11 +24,29 @@ fn app_rs() -> String {
     fs::read_to_string(path).expect("read src/app.rs")
 }
 
+fn library_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library.rs");
+    fs::read_to_string(path).expect("read src/library.rs")
+}
+
 fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let prefix = format!("{name}=\"");
     let start = tag.find(&prefix)? + prefix.len();
     let end = tag[start..].find('"')? + start;
     Some(&tag[start..end])
+}
+
+#[test]
+fn audio_preview_command_scopes_generated_preview_files() {
+    let library = library_rs();
+
+    assert!(
+        library.contains("AppHandle")
+            && library.contains("allow_audio_preview_asset")
+            && library.contains("asset_protocol_scope")
+            && library.contains("allow_file(preview"),
+        "selected-audio preview MP4s are generated under AppData and must be exact-scoped before the player loads them"
+    );
 }
 
 #[test]
@@ -368,7 +386,7 @@ fn review_player_owns_all_controls() {
             && html.contains("id=\"upload-audio-list\"")
             && main_js().contains("function clipAudioTracks(clip = currentClip)")
             && main_js().contains("function renderAudioTrackPanel()")
-            && main_js().contains("function applySelectedAudioTracksToPlayback()")
+            && main_js().contains("function applySelectedAudioTracksToPlayback({ forceResume = false } = {})")
             && main_js().contains("preview_clip_audio_tracks")
             && main_js().contains("function renderUploadAudioTracks(clip = uploadDialogClip)")
             && main_js().contains("audioTrackIds: request.audioTrackIds || null")
@@ -389,7 +407,9 @@ fn review_player_owns_all_controls() {
             && !main_js().contains(" · cloud:")
             && app_rs().contains("crate::cloud::cloud_connect")
             && app_rs().contains("crate::cloud::upload_clip_to_cloud")
+            && app_rs().contains("crate::cloud::sync_cloud_clip_status")
             && app_rs().contains("crate::library::preview_clip_audio_tracks")
+            && main_js().contains("sync_cloud_clip_status")
             && styles_css().contains(".cloud-connect-grid")
             && styles_css().contains(".cloud-connect-fields")
             && styles_css().contains(".cloud-connect-fields[hidden] { display: none; }")
@@ -552,11 +572,86 @@ fn audio_preview_generation_is_not_eager_on_clip_open() {
 
     assert!(
         !open_clip.contains("applySelectedAudioTracksToPlayback()"),
-        "opening a clip must not eagerly remux or mix a full-session audio preview"
+        "opening a clip must not unconditionally remux or mix a full-session audio preview"
+    );
+    assert!(
+        open_clip.contains("applyDefaultAudioSelectionIfNeeded({ shouldResume: true })"),
+        "opening a clip should apply default audio only when source playback would not match it"
+    );
+    assert!(
+        open_clip.contains("syncCloudClipStatus(clip);"),
+        "opening a clip should refresh its cloud record in the background"
+    );
+    let source_play = open_clip
+        .find("video.play().catch(() => syncPlayState());")
+        .expect("openClip should still start direct source playback when no preview is needed");
+    let default_preview = open_clip
+        .find("applyDefaultAudioSelectionIfNeeded({ shouldResume: true })")
+        .expect("openClip should request a resumed default preview when needed");
+    assert!(
+        default_preview < source_play,
+        "preview-needed clips must not audibly play the unmixed source before the preview source is ready"
+    );
+    assert!(
+        js.contains("function applyDefaultAudioSelectionIfNeeded({ shouldResume = false } = {})")
+            && js.contains("PlayerCore.selectionNeedsPreview")
+            && js.contains("applySelectedAudioTracksToPlayback({ forceResume: shouldResume });"),
+        "default audio application must be gated by PlayerCore.selectionNeedsPreview"
     );
     assert!(
         js.contains("selected.length === tracks.length && currentReviewMediaPath === clip.path"),
         "all-track playback should keep the original source until the user changes selection"
+    );
+    assert!(
+        js.contains("function applyCloudClipSyncResult(")
+            && js.contains("removeCloudUploadRecordForPath(result.path)")
+            && js.contains("upsertCloudUploadRecord(result.record)"),
+        "cloud sync results must update or remove the local cloud record cache"
+    );
+    assert!(
+        js.contains("if (forceResume && currentClip && currentClip.path === clip.path) {")
+            && js.contains("video.play().catch(() => syncPlayState());"),
+        "preview generation failure while opening a clip must fall back to source playback"
+    );
+    assert!(
+        js.contains("function cloudUploadRecordForPath(path)")
+            && js.contains("applyCloudClipSyncResult(result, {")
+            && js.contains("expectedRecord, expectedLocalClipId, expectedUpdatedAtUnix"),
+        "cloud open-sync must capture the record identity it started from"
+    );
+    assert!(
+        js.contains("if (expectedRecord && current !== expectedRecord) return false;")
+            && js.contains("current.local_clip_id !== expectedLocalClipId")
+            && js.contains(
+                "Number(current.updated_at_unix || 0) > Number(expectedUpdatedAtUnix || 0)"
+            ),
+        "cloud open-sync must ignore stale results once a newer upload record exists"
+    );
+}
+
+#[test]
+fn open_clip_clears_previous_playback_loop_and_pending_seek() {
+    let js = main_js();
+    let open_clip_start = js.find("function openClip(clip)").unwrap();
+    let close_review_start = js.find("function closeReview()").unwrap();
+    let open_clip = &js[open_clip_start..close_review_start];
+    let cancel = open_clip
+        .find("cancelAnimationFrame(rafId);")
+        .expect("openClip cancels the previous playhead RAF");
+    let clear_seek = open_clip
+        .find("pendingSeek = null;")
+        .expect("openClip clears pending seek from previous clip");
+    let assign_clip = open_clip
+        .find("currentClip = clip;")
+        .expect("openClip assigns current clip");
+
+    assert!(
+        cancel < assign_clip,
+        "RAF must be canceled before switching clips"
+    );
+    assert!(
+        clear_seek < assign_clip,
+        "pending seek must be cleared before switching clips"
     );
 }
 

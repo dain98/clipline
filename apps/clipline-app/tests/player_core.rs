@@ -367,6 +367,100 @@ fn marker_count_pluralizes() {
 }
 
 #[test]
+fn split_output_master_toggles_process_tracks_without_selecting_fallback() {
+    let mut ctx = player_core_context();
+    let model = eval_json(
+        &mut ctx,
+        r#"
+        (() => {
+          const tracks = [
+            { id: 'output', kind: 'output', label: 'Output Audio' },
+            { id: 'process:1', kind: 'process_output', label: 'Game' },
+            { id: 'process:2', kind: 'process_output', label: 'Discord' },
+            { id: 'microphone', kind: 'microphone', label: 'Microphone' },
+          ];
+          const defaults = PlayerCore.defaultAudioTrackIds(tracks);
+          const afterOff = PlayerCore.applyAudioTrackToggle(tracks, defaults, 'output', false);
+          const afterOn = PlayerCore.applyAudioTrackToggle(tracks, afterOff, 'output', true);
+          return {
+            defaults,
+            afterOff,
+            afterOn,
+            outputOn: PlayerCore.audioTrackRowState(tracks[0], tracks, afterOn),
+            outputPartial: PlayerCore.audioTrackRowState(tracks[0], tracks, ['process:1', 'microphone']),
+            effectiveAfterOn: PlayerCore.selectedAudioTrackIds(tracks, afterOn),
+          };
+        })()
+        "#,
+    );
+
+    assert_eq!(
+        model,
+        r#"{"defaults":["process:1","process:2","microphone"],"afterOff":["microphone"],"afterOn":["process:1","process:2","microphone"],"outputOn":{"checked":true,"indeterminate":false},"outputPartial":{"checked":false,"indeterminate":true},"effectiveAfterOn":["process:1","process:2","microphone"]}"#
+    );
+}
+
+#[test]
+fn normal_output_track_remains_directly_selectable() {
+    let mut ctx = player_core_context();
+    let model = eval_json(
+        &mut ctx,
+        r#"
+        (() => {
+          const tracks = [
+            { id: 'output', kind: 'output', label: 'Output Audio' },
+            { id: 'microphone', kind: 'microphone', label: 'Microphone' },
+          ];
+          const defaults = PlayerCore.defaultAudioTrackIds(tracks);
+          const afterOff = PlayerCore.applyAudioTrackToggle(tracks, defaults, 'output', false);
+          return {
+            defaults,
+            afterOff,
+            outputOff: PlayerCore.audioTrackRowState(tracks[0], tracks, afterOff),
+            effectiveAfterOff: PlayerCore.selectedAudioTrackIds(tracks, afterOff),
+          };
+        })()
+        "#,
+    );
+
+    assert_eq!(
+        model,
+        r#"{"defaults":["output","microphone"],"afterOff":["microphone"],"outputOff":{"checked":false,"indeterminate":false},"effectiveAfterOff":["microphone"]}"#
+    );
+}
+
+#[test]
+fn split_output_default_selection_requires_preview() {
+    let mut ctx = player_core_context();
+    let model = eval_json(
+        &mut ctx,
+        r#"
+        (() => {
+          const splitTracks = [
+            { id: 'output', kind: 'output', label: 'Output Audio' },
+            { id: 'process:1', kind: 'process_output', label: 'Game' },
+            { id: 'microphone', kind: 'microphone', label: 'Microphone' },
+          ];
+          const normalTracks = [
+            { id: 'output', kind: 'output', label: 'Output Audio' },
+            { id: 'microphone', kind: 'microphone', label: 'Microphone' },
+          ];
+          return {
+            splitDefault: PlayerCore.selectionNeedsPreview(splitTracks, PlayerCore.defaultAudioTrackIds(splitTracks)),
+            normalDefault: PlayerCore.selectionNeedsPreview(normalTracks, PlayerCore.defaultAudioTrackIds(normalTracks)),
+            normalPartial: PlayerCore.selectionNeedsPreview(normalTracks, ['microphone']),
+          };
+        })()
+        "#,
+    );
+
+    assert_eq!(
+        model,
+        r#"{"splitDefault":true,"normalDefault":false,"normalPartial":true}"#
+    );
+}
+
+#[test]
 fn key_intents_cover_the_documented_shortcuts() {
     let mut ctx = player_core_context();
     for code in ["Space", "KeyK"] {

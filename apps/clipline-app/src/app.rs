@@ -2,7 +2,7 @@
 //! wiring around the recorder service thread.
 
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tauri::image::Image;
@@ -121,6 +121,8 @@ impl MicTestState {
 
 pub(crate) struct RuntimeState(Mutex<RuntimeInner>);
 
+static CLOUD_SETTINGS_SAVE_LOCK: Mutex<()> = Mutex::new(());
+
 struct TrayItems<R: Runtime> {
     save_item: MenuItem<R>,
 }
@@ -142,6 +144,12 @@ struct RuntimeInner {
     /// Codecs WebView2 can decode, reported by the frontend. Drives the
     /// recorder's Automatic selection; H.264 is the always-safe default.
     decodable_codecs: Vec<service::Codec>,
+}
+
+struct PreparedRuntimeRestart {
+    old_tx: Option<Sender<Cmd>>,
+    next_options: Option<ServiceOptions>,
+    cleared_active_game: bool,
 }
 
 impl RuntimeState {
@@ -198,6 +206,60 @@ impl RuntimeState {
         Ok(opts)
     }
 
+    fn prepare_service_restart(
+        inner: &mut RuntimeInner,
+    ) -> Result<(Option<Sender<Cmd>>, Option<ServiceOptions>), String> {
+        if inner.tx.is_none() {
+            return Ok((None, None));
+        }
+        let next_options = Self::options(inner)?;
+        let old_tx = inner.tx.take();
+        inner.last_save_request = None;
+        Ok((old_tx, Some(next_options)))
+    }
+
+    fn prepare_settings_restart(
+        &self,
+        settings: AppSettings,
+    ) -> Result<PreparedRuntimeRestart, String> {
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        let cleared_active_game = inner.active_game.is_some()
+            && !active_game_still_configured(&settings, inner.active_game.as_ref());
+        if cleared_active_game {
+            inner.active_game = None;
+        }
+        inner.settings = settings;
+        let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
+        Ok(PreparedRuntimeRestart {
+            old_tx,
+            next_options,
+            cleared_active_game,
+        })
+    }
+
+    fn finish_prepared_restart<R: Runtime>(
+        &self,
+        app: AppHandle<R>,
+        prepared: PreparedRuntimeRestart,
+    ) -> Result<(), String> {
+        if let Some(tx) = prepared.old_tx {
+            let _ = tx.send(Cmd::Stop { announce: false });
+        }
+        if let Some(options) = prepared.next_options {
+            let (tx, rx) = service::spawn(options);
+            {
+                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+                inner.tx = Some(tx);
+                inner.last_save_request = None;
+            }
+            pump_events(app.clone(), rx);
+        }
+        if prepared.cleared_active_game {
+            let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
+        }
+        Ok(())
+    }
+
     fn request_save(&self) -> bool {
         const DOUBLE_TRIGGER_DEBOUNCE: Duration = Duration::from_millis(150);
 
@@ -241,15 +303,25 @@ impl RuntimeState {
     where
         F: FnOnce(&mut crate::settings::CloudSettings),
     {
-        // Atomic read-modify-write: hold the lock across the mutation and the
-        // persist so concurrent uploads can't each read the same `uploads` map,
-        // insert their own record, and have the later write-back drop the other.
-        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-        update(&mut inner.settings.cloud);
-        inner.settings.cloud.normalize();
-        let next = inner.settings.clone();
+        // Serialize cloud settings saves so concurrent uploads preserve their
+        // read-modify-write order without holding runtime state during disk I/O.
+        let _save_guard = CLOUD_SETTINGS_SAVE_LOCK
+            .lock()
+            .map_err(|_| "cloud settings save lock poisoned")?;
+        let next = {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            update(&mut inner.settings.cloud);
+            inner.settings.cloud.normalize();
+            inner.settings.clone()
+        };
         next.save()?;
         Ok(next)
+    }
+
+    fn lock_cloud_settings_save() -> Result<MutexGuard<'static, ()>, String> {
+        CLOUD_SETTINGS_SAVE_LOCK
+            .lock()
+            .map_err(|_| "cloud settings save lock poisoned".to_string())
     }
 
     fn active_shortcut_matches(&self, shortcut: &Shortcut) -> bool {
@@ -258,42 +330,6 @@ impl RuntimeState {
             .ok()
             .and_then(|inner| parse_hotkey(&inner.settings.hotkey).ok())
             .is_some_and(|active| &active == shortcut)
-    }
-
-    fn restart<R: Runtime>(&self, app: AppHandle<R>, settings: AppSettings) -> Result<(), String> {
-        let (old_tx, next_options, cleared_active_game) = {
-            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            let old_tx = inner.tx.take();
-            inner.last_save_request = None;
-            let cleared_active_game = inner.active_game.is_some()
-                && !active_game_still_configured(&settings, inner.active_game.as_ref());
-            if cleared_active_game {
-                inner.active_game = None;
-            }
-            inner.settings = settings;
-            let next_options = if old_tx.is_some() {
-                Some(Self::options(&inner)?)
-            } else {
-                None
-            };
-            (old_tx, next_options, cleared_active_game)
-        };
-        if let Some(tx) = old_tx {
-            let _ = tx.send(Cmd::Stop { announce: false });
-        }
-        if let Some(options) = next_options {
-            let (tx, rx) = service::spawn(options);
-            {
-                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-                inner.tx = Some(tx);
-                inner.last_save_request = None;
-            }
-            pump_events(app.clone(), rx);
-        }
-        if cleared_active_game {
-            let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
-        }
-        Ok(())
     }
 
     fn set_recording<R: Runtime>(
@@ -347,13 +383,7 @@ impl RuntimeState {
             if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
                 if game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref()) {
                     inner.active_game = detected;
-                    let old_tx = inner.tx.take();
-                    inner.last_save_request = None;
-                    let next_options = if old_tx.is_some() {
-                        Some(Self::options(&inner)?)
-                    } else {
-                        None
-                    };
+                    let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
                     (old_tx, next_options, true)
                 } else if inner.active_game != detected {
                     inner.active_game = detected;
@@ -363,13 +393,7 @@ impl RuntimeState {
                 }
             } else {
                 inner.active_game = detected;
-                let old_tx = inner.tx.take();
-                inner.last_save_request = None;
-                let next_options = if old_tx.is_some() {
-                    Some(Self::options(&inner)?)
-                } else {
-                    None
-                };
+                let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
                 (old_tx, next_options, true)
             }
         };
@@ -390,6 +414,15 @@ impl RuntimeState {
         }
         Ok(())
     }
+}
+
+fn preserve_backend_cloud_fields(settings: &mut AppSettings, backend: &AppSettings) {
+    settings.cloud.host_url = backend.cloud.host_url.clone();
+    settings.cloud.public_url = backend.cloud.public_url.clone();
+    settings.cloud.connected_user_id = backend.cloud.connected_user_id.clone();
+    settings.cloud.connected_username = backend.cloud.connected_username.clone();
+    settings.cloud.credential_target = backend.cloud.credential_target.clone();
+    settings.cloud.uploads = backend.cloud.uploads.clone();
 }
 
 fn same_game_window(current: Option<&DetectedGame>, next: Option<&DetectedGame>) -> bool {
@@ -432,6 +465,9 @@ fn get_autostart_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
 }
 
 fn set_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<bool, String> {
+    if !autostart_should_mutate_for_current_build() {
+        return Ok(enabled);
+    }
     let autostart = app.autolaunch();
     if enabled {
         autostart.enable().map_err(|e| e.to_string())?;
@@ -439,6 +475,30 @@ fn set_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<bool, 
         autostart.disable().map_err(|e| e.to_string())?;
     }
     autostart.is_enabled().map_err(|e| e.to_string())
+}
+
+fn autostart_should_mutate_for_current_build() -> bool {
+    autostart_should_mutate_for_build(cfg!(debug_assertions))
+}
+
+fn autostart_should_mutate_for_build(debug_build: bool) -> bool {
+    !debug_build
+}
+
+fn saved_autostart_preference_for_current_build(requested: bool, previous: bool) -> bool {
+    saved_autostart_preference_for_build(requested, previous, cfg!(debug_assertions))
+}
+
+fn saved_autostart_preference_for_build(
+    requested: bool,
+    previous: bool,
+    debug_build: bool,
+) -> bool {
+    if debug_build {
+        previous
+    } else {
+        requested
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -836,24 +896,19 @@ fn save_settings<R: Runtime>(
 
     let old = state.settings();
 
-    // Cloud connection + upload state is backend-owned (mutated by cloud_connect
-    // and upload_clip_to_cloud via update_cloud). A settings Save carries the
-    // frontend's snapshot of these fields, which can be stale — e.g. a Save
-    // fired during an in-flight upload would clobber freshly written records or
-    // the connection identity. Keep the authoritative backend values; only the
-    // user-editable cloud preferences below come from the payload.
-    settings.cloud.host_url = old.cloud.host_url.clone();
-    settings.cloud.public_url = old.cloud.public_url.clone();
-    settings.cloud.connected_user_id = old.cloud.connected_user_id.clone();
-    settings.cloud.connected_username = old.cloud.connected_username.clone();
-    settings.cloud.credential_target = old.cloud.credential_target.clone();
-    settings.cloud.uploads = old.cloud.uploads.clone();
-    // (default_visibility, delete_local_after_upload, auto_upload_rules stay as sent.)
-
     // Apply the autostart registry change before persisting so settings.json
-    // can never say "enabled" while the Run key update failed.
-    if settings.open_on_startup != old.open_on_startup {
-        set_autostart(&app, settings.open_on_startup)
+    // can never say "enabled" while the Run key update failed. Debug builds
+    // share settings with installed builds, so they preserve this preference
+    // and leave the shared Run key alone.
+    let requested_open_on_startup = settings.open_on_startup;
+    settings.open_on_startup = saved_autostart_preference_for_current_build(
+        requested_open_on_startup,
+        old.open_on_startup,
+    );
+    if settings.open_on_startup != old.open_on_startup
+        && autostart_should_mutate_for_current_build()
+    {
+        settings.open_on_startup = set_autostart(&app, settings.open_on_startup)
             .map_err(|e| format!("update Windows startup registration: {e}"))?;
     }
 
@@ -869,6 +924,16 @@ fn save_settings<R: Runtime>(
         }
     }
 
+    let cloud_save_guard = RuntimeState::lock_cloud_settings_save()?;
+    // Cloud connection + upload state is backend-owned (mutated by cloud_connect
+    // and upload_clip_to_cloud via update_cloud). A settings Save carries the
+    // frontend's snapshot of these fields, which can be stale — e.g. a Save
+    // fired during an in-flight upload would clobber freshly written records or
+    // the connection identity. Keep the authoritative backend values; only the
+    // user-editable cloud preferences below come from the payload.
+    preserve_backend_cloud_fields(&mut settings, &state.settings());
+    // (default_visibility, delete_local_after_upload, auto_upload_rules stay as sent.)
+
     if let Err(e) = settings.save() {
         if settings.hotkey != old.hotkey {
             let _ = app
@@ -880,7 +945,9 @@ fn save_settings<R: Runtime>(
     }
 
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
-    state.restart(app, settings.clone())?;
+    let prepared_restart = state.prepare_settings_restart(settings.clone())?;
+    drop(cloud_save_guard);
+    state.finish_prepared_restart(app, prepared_restart)?;
     tray_items.set_hotkey_label(&settings.hotkey)?;
     crate::hotkeys::set_save_hotkey(&settings.hotkey)?;
     storage_settings.set_quota_bytes(quota_bytes);
@@ -981,6 +1048,7 @@ pub fn run() {
             crate::cloud::cloud_connect,
             crate::cloud::cloud_disconnect,
             crate::cloud::upload_clip_to_cloud,
+            crate::cloud::sync_cloud_clip_status,
             crate::library::list_clips,
             crate::library::clip_poster,
             crate::library::delete_clip,
@@ -1021,13 +1089,17 @@ pub fn run() {
                 );
             }
 
-            // Keep the Windows Run registry entry in sync with the user's setting.
-            let autostart = app.autolaunch();
-            let _ = if settings.open_on_startup {
-                autostart.enable()
-            } else {
-                autostart.disable()
-            };
+            // Keep release builds in sync with the user's setting. Debug builds
+            // share settings and registry state with installed builds, so cargo
+            // runs must not disable or replace the installed autostart entry.
+            if autostart_should_mutate_for_current_build() {
+                let autostart = app.autolaunch();
+                let _ = if settings.open_on_startup {
+                    autostart.enable()
+                } else {
+                    autostart.disable()
+                };
+            }
 
             // When launched by the autostart registry entry, start in the tray
             // instead of flashing the main window.
@@ -1226,7 +1298,9 @@ fn tray_icon() -> Image<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::GameRecordingMode;
+    use crate::settings::{
+        CloudUploadRecord, GameRecordingMode, ReplayStorageMode, ReplayStorageSettings,
+    };
 
     #[test]
     fn quota_parser_converts_gib_to_bytes() {
@@ -1266,6 +1340,118 @@ mod tests {
     }
 
     #[test]
+    fn recording_sender_survives_restart_option_error() {
+        let (tx, _rx) = mpsc::channel();
+        let mut inner = RuntimeInner {
+            tx: Some(tx),
+            settings: invalid_disk_replay_settings(),
+            lol_url: None,
+            active_game: None,
+            last_save_request: Some(Instant::now()),
+            decodable_codecs: vec![service::Codec::H264],
+        };
+
+        let err = match RuntimeState::prepare_service_restart(&mut inner) {
+            Ok(_) => panic!("restart options should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("replay cache folder"), "{err}");
+        assert!(inner.tx.is_some(), "failed options must not drop sender");
+        assert!(
+            inner.last_save_request.is_some(),
+            "failed options must not clear debounce state"
+        );
+    }
+
+    #[test]
+    fn recording_sender_survives_game_restart_option_error() {
+        let (tx, _rx) = mpsc::channel();
+        let mut inner = RuntimeInner {
+            tx: Some(tx),
+            settings: invalid_disk_replay_settings(),
+            lol_url: None,
+            active_game: Some(DetectedGame {
+                id: "custom-game".into(),
+                name: "Game".into(),
+                hwnd: 42,
+                window_title: "Game".into(),
+                process_id: 7,
+                exe_name: "game.exe".into(),
+                recording_mode: GameRecordingMode::FullSession,
+            }),
+            last_save_request: Some(Instant::now()),
+            decodable_codecs: vec![service::Codec::H264],
+        };
+
+        let err = match RuntimeState::prepare_service_restart(&mut inner) {
+            Ok(_) => panic!("restart options should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("replay cache folder"), "{err}");
+        assert!(inner.tx.is_some(), "failed options must not drop sender");
+        assert!(
+            inner.last_save_request.is_some(),
+            "failed options must not clear debounce state"
+        );
+    }
+
+    #[test]
+    fn preserve_backend_cloud_fields_keeps_upload_state_but_allows_preferences() {
+        let mut frontend = AppSettings::default();
+        frontend.cloud.host_url = "https://stale.example.com".into();
+        frontend.cloud.public_url = Some("https://stale-public.example.com".into());
+        frontend.cloud.connected_user_id = Some("stale-user".into());
+        frontend.cloud.connected_username = Some("stale-name".into());
+        frontend.cloud.credential_target = Some("stale-target".into());
+        frontend.cloud.default_visibility = "public".into();
+        frontend.cloud.delete_local_after_upload = true;
+        frontend.cloud.auto_upload_rules = true;
+
+        let mut backend = AppSettings::default();
+        backend.cloud.host_url = "https://cloud.example.com".into();
+        backend.cloud.public_url = Some("https://public.example.com".into());
+        backend.cloud.connected_user_id = Some("user-1".into());
+        backend.cloud.connected_username = Some("dain".into());
+        backend.cloud.credential_target = Some("clipline:user-1".into());
+        backend.cloud.uploads.insert(
+            "local-1".into(),
+            CloudUploadRecord {
+                local_clip_id: "local-1".into(),
+                path: "D:\\Videos\\Clipline\\clip.mp4".into(),
+                remote_clip_id: Some("remote-1".into()),
+                remote_url: Some("https://public.example.com/remote-1".into()),
+                visibility: "private".into(),
+                upload_status: "uploaded_private".into(),
+                error: None,
+                updated_at_unix: 42,
+            },
+        );
+
+        preserve_backend_cloud_fields(&mut frontend, &backend);
+
+        assert_eq!(frontend.cloud.host_url, backend.cloud.host_url);
+        assert_eq!(frontend.cloud.public_url, backend.cloud.public_url);
+        assert_eq!(
+            frontend.cloud.connected_user_id,
+            backend.cloud.connected_user_id
+        );
+        assert_eq!(
+            frontend.cloud.connected_username,
+            backend.cloud.connected_username
+        );
+        assert_eq!(
+            frontend.cloud.credential_target,
+            backend.cloud.credential_target
+        );
+        assert_eq!(frontend.cloud.uploads, backend.cloud.uploads);
+        assert_eq!(frontend.cloud.default_visibility, "public");
+        assert!(frontend.cloud.delete_local_after_upload);
+        assert!(frontend.cloud.auto_upload_rules);
+    }
+
+    #[test]
     fn detected_game_identity_ignores_volatile_window_title() {
         let current = DetectedGame {
             id: "custom-game".into(),
@@ -1287,6 +1473,18 @@ mod tests {
 
         assert!(same_game_window(Some(&current), Some(&updated_title)));
         assert!(!same_game_window(Some(&current), Some(&different_window)));
+    }
+
+    fn invalid_disk_replay_settings() -> AppSettings {
+        AppSettings {
+            replay_storage: ReplayStorageSettings {
+                mode: ReplayStorageMode::Disk,
+                disk_dir: String::new(),
+                disk_quota_gb: 2.0,
+                disk_acknowledged: true,
+            },
+            ..AppSettings::default()
+        }
     }
 
     #[test]
@@ -1364,6 +1562,26 @@ mod tests {
             minimize_request_action(&settings),
             MinimizeRequestAction::Tray
         );
+    }
+
+    #[test]
+    fn debug_build_autostart_policy_skips_registry_mutation() {
+        assert!(!autostart_should_mutate_for_build(true));
+        assert!(autostart_should_mutate_for_build(false));
+    }
+
+    #[test]
+    fn debug_build_preserves_saved_autostart_preference() {
+        assert!(saved_autostart_preference_for_build(false, true, true));
+        assert!(!saved_autostart_preference_for_build(true, false, true));
+        assert!(saved_autostart_preference_for_build(true, false, false));
+        assert!(!saved_autostart_preference_for_build(false, true, false));
+    }
+
+    #[test]
+    fn release_build_autostart_policy_honors_user_choice() {
+        assert!(saved_autostart_preference_for_build(true, false, false));
+        assert!(!saved_autostart_preference_for_build(false, true, false));
     }
 
     #[test]

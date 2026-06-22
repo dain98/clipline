@@ -20,6 +20,8 @@ use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, 
 use windows_sys::Win32::System::Ole::CF_HDROP;
 use windows_sys::Win32::UI::Shell::DROPFILES;
 
+use tauri::{AppHandle, Manager, Runtime};
+
 use crate::service::{clips_dir, default_clips_dir};
 
 pub struct StorageSettings {
@@ -359,16 +361,47 @@ pub async fn export_clip(
 }
 
 #[tauri::command]
-pub async fn preview_clip_audio_tracks(
+pub async fn preview_clip_audio_tracks<R: Runtime>(
+    app: AppHandle<R>,
     request: AudioPreviewRequest,
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<String, String> {
     let source = validate_clip_path(&settings, &request.path)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let path = tauri::async_runtime::spawn_blocking(move || {
         preview_clip_audio_tracks_file(source, request.path, request.audio_track_ids)
     })
     .await
-    .map_err(|e| format!("audio preview task: {e}"))?
+    .map_err(|e| format!("audio preview task: {e}"))??;
+    allow_audio_preview_asset(&app, Path::new(&path))?;
+    Ok(path)
+}
+
+fn allow_audio_preview_asset<R: Runtime>(app: &AppHandle<R>, preview: &Path) -> Result<(), String> {
+    let preview_dir = crate::settings::audio_preview_cache_dir();
+    if !preview.starts_with(&preview_dir) {
+        return Ok(());
+    }
+    let canonical_dir = std::fs::canonicalize(&preview_dir)
+        .map_err(|e| format!("canonicalize audio preview cache {preview_dir:?}: {e}"))?;
+    let canonical_preview = std::fs::canonicalize(preview)
+        .map_err(|e| format!("canonicalize audio preview {preview:?}: {e}"))?;
+    if !canonical_preview.starts_with(&canonical_dir) {
+        return Err(format!(
+            "audio preview {canonical_preview:?} escaped cache {canonical_dir:?}"
+        ));
+    }
+    if !canonical_preview
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+    {
+        return Err(format!("audio preview {canonical_preview:?} is not an MP4"));
+    }
+
+    let preview = canonical_preview.as_path();
+    app.asset_protocol_scope()
+        .allow_file(preview)
+        .map_err(|e| format!("scope audio preview {canonical_preview:?} for playback: {e}"))
 }
 
 fn preview_clip_audio_tracks_file(
@@ -381,7 +414,7 @@ fn preview_clip_audio_tracks_file(
         display_path,
         selected_audio_track_ids,
         crate::settings::audio_preview_cache_dir(),
-        mix_audio_preview_with_ffmpeg,
+        mix_audio_tracks_with_ffmpeg,
     )
 }
 
@@ -432,54 +465,78 @@ fn preview_clip_audio_tracks_file_with_mixer(
     Ok(preview.display().to_string())
 }
 
-fn mix_audio_preview_with_ffmpeg(
+pub(crate) fn mix_audio_tracks_with_ffmpeg(
     source: &Path,
-    preview: &Path,
+    output_path: &Path,
     selected_audio_track_indices: &[u32],
 ) -> Result<(), String> {
     let ffmpeg = clipline_capture::ffmpeg::locate()
-        .ok_or_else(|| "ffmpeg is not available for audio preview mixing".to_string())?;
+        .ok_or_else(|| "ffmpeg is not available for audio track mixing".to_string())?;
     let filter = ffmpeg_audio_mix_filter(selected_audio_track_indices)?;
-    let tmp = preview.with_extension("mp4.tmp");
+    let tmp = output_path.with_extension("mp4.tmp");
     let _ = std::fs::remove_file(&tmp);
 
     let mut cmd = Command::new(ffmpeg);
     suppress_console(&mut cmd);
     let output = cmd
-        .args(["-hide_banner", "-nostdin", "-y", "-i"])
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-fflags",
+            "+bitexact",
+            "-i",
+        ])
         .arg(source)
         .args(["-filter_complex", &filter])
         .args([
-            "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy", "-c:a", "libopus", "-b:a", "160k",
-            "-f", "mp4",
+            "-map",
+            "0:v:0",
+            "-map",
+            "[aout]",
+            "-map_metadata",
+            "-1",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "160k",
+            "-fflags",
+            "+bitexact",
+            "-flags",
+            "+bitexact",
+            "-bitexact",
+            "-f",
+            "mp4",
         ])
         .arg(&tmp)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| format!("spawn ffmpeg audio preview: {e}"))?;
+        .map_err(|e| format!("spawn ffmpeg audio mix: {e}"))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&tmp);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffmpeg audio preview failed: {stderr}"));
+        return Err(format!("ffmpeg audio mix failed: {stderr}"));
     }
-    match std::fs::rename(&tmp, preview) {
+    match std::fs::rename(&tmp, output_path) {
         Ok(()) => Ok(()),
-        Err(_) if preview.exists() => {
+        Err(_) if output_path.exists() => {
             let _ = std::fs::remove_file(&tmp);
             Ok(())
         }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
-            Err(format!("finalize audio preview: {e}"))
+            Err(format!("finalize audio mix: {e}"))
         }
     }
 }
 
 fn ffmpeg_audio_mix_filter(selected_audio_track_indices: &[u32]) -> Result<String, String> {
     if selected_audio_track_indices.is_empty() {
-        return Err("audio preview mix requires at least one audio stream".into());
+        return Err("audio mix requires at least one audio stream".into());
     }
     let mut filter = String::new();
     for index in selected_audio_track_indices {
@@ -1176,7 +1233,88 @@ mod tests {
     }
 
     #[test]
-    fn multi_track_preview_returns_mix_failure_instead_of_unmixed_mp4() {
+    fn audio_mix_ffmpeg_command_requests_deterministic_mp4_output() {
+        let source = include_str!("library.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source before tests");
+
+        assert!(production_source.contains("\"-fflags\""));
+        assert!(production_source.contains("\"+bitexact\""));
+        assert!(production_source.contains("\"-map_metadata\""));
+        assert!(production_source.contains("\"-flags\""));
+        assert!(production_source.contains("\"-bitexact\""));
+    }
+
+    #[test]
+    fn all_audio_tracks_selected_mixes_preview_when_source_has_multiple_tracks() {
+        let dir = TestDir::new("audio-preview-all-mixed");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, b"not an mp4").unwrap();
+        let markers = ClipMarkers {
+            recording_start_s: 0.0,
+            duration_s: 10.0,
+            player_summary: None,
+            audio_tracks: vec![
+                ClipAudioTrack {
+                    id: "output".into(),
+                    track_index: 0,
+                    label: "Output Audio".into(),
+                    kind: Some("output".into()),
+                },
+                ClipAudioTrack {
+                    id: "process:1".into(),
+                    track_index: 1,
+                    label: "Game".into(),
+                    kind: Some("process_output".into()),
+                },
+                ClipAudioTrack {
+                    id: "microphone".into(),
+                    track_index: 2,
+                    label: "Microphone".into(),
+                    kind: Some("microphone".into()),
+                },
+            ],
+            markers: Vec::new(),
+        };
+        std::fs::write(
+            source.with_extension("markers.json"),
+            serde_json::to_string(&markers).unwrap(),
+        )
+        .unwrap();
+
+        let preview_dir = dir.path().join("previews");
+        let mixed_preview = std::cell::RefCell::new(None);
+        let source_for_mixer = source.clone();
+        let path = preview_clip_audio_tracks_file_with_mixer(
+            source.clone(),
+            source.display().to_string(),
+            vec!["output".into(), "process:1".into(), "microphone".into()],
+            preview_dir.clone(),
+            |input, output, selected| {
+                assert_eq!(input, source_for_mixer.as_path());
+                assert_eq!(selected, &[0, 1, 2]);
+                assert_eq!(output.parent(), Some(preview_dir.as_path()));
+                mixed_preview.replace(Some(output.to_path_buf()));
+                Ok(())
+            },
+        )
+        .expect("all selected should get an audible preview mix");
+
+        assert_eq!(
+            path,
+            mixed_preview
+                .borrow()
+                .as_ref()
+                .expect("mixer output path captured")
+                .display()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn partial_multi_track_preview_returns_mix_failure_instead_of_unmixed_mp4() {
         let dir = TestDir::new("audio-preview-mix-failure");
         let source = dir.path().join("clip.mp4");
         std::fs::write(&source, b"not an mp4").unwrap();
@@ -1192,8 +1330,14 @@ mod tests {
                     kind: Some("output".into()),
                 },
                 ClipAudioTrack {
-                    id: "microphone".into(),
+                    id: "process:1".into(),
                     track_index: 1,
+                    label: "Game".into(),
+                    kind: Some("process_output".into()),
+                },
+                ClipAudioTrack {
+                    id: "microphone".into(),
+                    track_index: 2,
                     label: "Microphone".into(),
                     kind: Some("microphone".into()),
                 },
@@ -1209,7 +1353,7 @@ mod tests {
         let err = preview_clip_audio_tracks_file_with_mixer(
             source.clone(),
             source.display().to_string(),
-            vec!["output".into(), "microphone".into()],
+            vec!["process:1".into(), "microphone".into()],
             dir.path().join("previews"),
             |_, _, _| Err("forced mix failure".into()),
         )

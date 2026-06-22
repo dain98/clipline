@@ -230,9 +230,10 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      of opening the main window.
 30. **Audio track splitting v1** — Output audio is split by current Windows render-session
      process using process-loopback capture, so game/Discord/Spotify/browser audio can land in
-     separate Opus tracks. Microphone capture remains its own track when enabled, and Clipline
-     falls back to the old mixed Output Audio track if process loopback is unavailable or the
-     experimental "app audio tracks" Capture setting is turned off; that setting defaults off.
+     separate Opus tracks. Clipline keeps a mixed Output Audio track first as a playback/export
+     safety track, then app/process tracks, then microphone when enabled; when the experimental
+     "app audio tracks" Capture setting is off, only the mixed Output Audio track is recorded.
+     That setting defaults off.
      Electron-style apps that emit
      multiple child-process audio sessions are grouped by same-executable root process before
      process-loopback capture, so Discord should appear once instead of as renderer/audio-service
@@ -251,6 +252,31 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
 > shape is a full-size clapper icon on the left, only for videos that are actually user-created
 > clips, likely after finishing a clearer labeling model.
+
+Recent fixes (2026-06-22):
+- Opening a cloud-uploaded clip now rechecks its remote Clipline Cloud state in the background:
+  visibility/link changes refresh the local upload record, finalized remote deletions clear the
+  local cloud badge/link, and temporary 404s for `uploaded_processing` records keep the local
+  processing record.
+- Cloud uploads now mix multiple selected audio tracks into one Opus stream so cloud playback hears
+  output plus microphone instead of only the first MP4 audio stream. Single-track and muted uploads
+  still use the lightweight remux path.
+- Debug/Cargo builds now keep Windows startup registration disabled and clear stale debug Run-key
+  entries on launch/status checks; installed release builds keep normal startup behavior.
+
+Recent fixes (2026-06-21):
+- Bug-scan app reliability slice: recorder restarts now build replacement service options before
+  dropping the old command sender, settings saves go through a synced sibling temp file and atomic
+  replace, cloud ready-poll timeouts preserve an `uploaded_processing` record with its remote link
+  instead of stuck `processing`, cloud auto-delete removes poster sidecars, disk replay cache/media
+  overlap checks are case-insensitive on Windows, split-output clips apply the default selected-track
+  preview on open, and opening a new clip clears the previous playhead RAF/pending seek.
+- Split-audio review/upload semantics: when per-process output tracks exist, the "Output Audio"
+  checklist row is a master toggle for those process output tracks, not an extra mixed track to
+  include alongside them. The mixed Output Audio stream remains in the file as a fallback/safety
+  track, but selected previews omit it while process tracks are active to avoid doubled audio.
+  Exact all-physical-track preview requests return the original clip path instead of generating a
+  mixed preview.
 
 Recent fixes (2026-06-19):
 - Library rows now keep full title/context text visible, then fade the right edge on hover/focus

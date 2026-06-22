@@ -191,7 +191,7 @@ function clipAudioTracks(clip = currentClip) {
 }
 
 function defaultAudioTrackIds(clip = currentClip) {
-  return clipAudioTracks(clip).map((track) => track.id).filter(Boolean);
+  return PlayerCore.defaultAudioTrackIds(clipAudioTracks(clip));
 }
 
 function resetSelectedAudioTracks(clip = currentClip) {
@@ -204,9 +204,15 @@ function pruneSelectedAudioTracks(clip = currentClip) {
 }
 
 function selectedAudioTrackIdsForClip(clip = currentClip, selected = selectedAudioTrackIds) {
-  return clipAudioTracks(clip)
-    .filter((track) => selected.has(track.id))
-    .map((track) => track.id);
+  return PlayerCore.selectedAudioTrackIds(clipAudioTracks(clip), [...selected]);
+}
+
+function applyDefaultAudioSelectionIfNeeded({ shouldResume = false } = {}) {
+  const tracks = clipAudioTracks();
+  const selected = selectedAudioTrackIdsForClip();
+  if (!PlayerCore.selectionNeedsPreview(tracks, selected)) return false;
+  applySelectedAudioTracksToPlayback({ forceResume: shouldResume });
+  return true;
 }
 
 function audioTrackLabel(track) {
@@ -218,12 +224,16 @@ function audioTrackLabel(track) {
 
 function renderAudioTrackRows(container, clip, selected, onChange) {
   container.replaceChildren();
-  for (const track of clipAudioTracks(clip)) {
+  const tracks = clipAudioTracks(clip);
+  const selectedIds = [...selected];
+  for (const track of tracks) {
     const row = document.createElement("label");
     row.className = "audio-track-row";
     const input = document.createElement("input");
+    const state = PlayerCore.audioTrackRowState(track, tracks, selectedIds);
     input.type = "checkbox";
-    input.checked = selected.has(track.id);
+    input.checked = state.checked;
+    input.indeterminate = state.indeterminate;
     input.dataset.trackId = track.id || "";
     input.addEventListener("change", () => onChange(track, input.checked));
     const label = document.createElement("span");
@@ -246,11 +256,12 @@ function renderAudioTrackPanel() {
     summary.textContent = "";
     return;
   }
-  summary.textContent = `${selectedAudioTrackIdsForClip().length}/${tracks.length} selected`;
+  summary.textContent = `${PlayerCore.audioTrackSelectedRowCount(tracks, [...selectedAudioTrackIds])}/${tracks.length} selected`;
   renderAudioTrackRows(list, currentClip, selectedAudioTrackIds, (track, checked) => {
     if (!track.id) return;
-    if (checked) selectedAudioTrackIds.add(track.id);
-    else selectedAudioTrackIds.delete(track.id);
+    selectedAudioTrackIds = new Set(
+      PlayerCore.applyAudioTrackToggle(tracks, [...selectedAudioTrackIds], track.id, checked),
+    );
     renderAudioTrackPanel();
     applySelectedAudioTracksToPlayback();
   });
@@ -267,8 +278,9 @@ function renderUploadAudioTracks(clip = uploadDialogClip) {
   }
   renderAudioTrackRows(list, clip, uploadSelectedAudioTrackIds, (track, checked) => {
     if (!track.id) return;
-    if (checked) uploadSelectedAudioTrackIds.add(track.id);
-    else uploadSelectedAudioTrackIds.delete(track.id);
+    uploadSelectedAudioTrackIds = new Set(
+      PlayerCore.applyAudioTrackToggle(tracks, [...uploadSelectedAudioTrackIds], track.id, checked),
+    );
     renderUploadAudioTracks(clip);
   });
 }
@@ -276,7 +288,7 @@ function renderUploadAudioTracks(clip = uploadDialogClip) {
 function audioSelectionLabel(clip = currentClip) {
   const tracks = clipAudioTracks(clip);
   if (!tracks.length) return "";
-  const selected = selectedAudioTrackIdsForClip(clip).length;
+  const selected = PlayerCore.audioTrackSelectedRowCount(tracks, [...selectedAudioTrackIds]);
   if (selected === tracks.length) return "audio: all tracks";
   if (selected === 0) return "audio: muted";
   return `audio: ${selected}/${tracks.length} tracks`;
@@ -1692,9 +1704,13 @@ function cloudConnected() {
   return Boolean(cloud.connected_user_id && cloud.credential_target);
 }
 
-function clipCloudRecord(clip) {
+function cloudUploadRecordForPath(path) {
   const uploads = cloudSettings().uploads || {};
-  return Object.values(uploads).find((record) => record && record.path === clip.path) || null;
+  return Object.values(uploads).find((record) => record && record.path === path) || null;
+}
+
+function clipCloudRecord(clip) {
+  return clip ? cloudUploadRecordForPath(clip.path) : null;
 }
 
 function clipCloudVisibility(record) {
@@ -1735,6 +1751,66 @@ function replaceCloudRecordPath(oldPath, newPath) {
   if (!changed) return;
   cloud.uploads = nextUploads;
   if (currentSettings) currentSettings.cloud = cloud;
+}
+
+function removeCloudUploadRecordForPath(path) {
+  const cloud = cloudSettings();
+  const uploads = cloud.uploads || {};
+  const nextUploads = {};
+  let changed = false;
+  for (const [key, record] of Object.entries(uploads)) {
+    if (record && record.path === path) {
+      changed = true;
+      continue;
+    }
+    nextUploads[key] = record;
+  }
+  if (!changed) return false;
+  cloud.uploads = nextUploads;
+  if (currentSettings) currentSettings.cloud = cloud;
+  return true;
+}
+
+function applyCloudClipSyncResult(
+  result,
+  { expectedRecord = null, expectedLocalClipId = "", expectedUpdatedAtUnix = 0 } = {},
+) {
+  if (!result) return false;
+  const current = cloudUploadRecordForPath(result.path);
+  if (expectedRecord && current !== expectedRecord) return false;
+  if (current && expectedLocalClipId && current.local_clip_id !== expectedLocalClipId) return false;
+  if (
+    current
+    && Number(current.updated_at_unix || 0) > Number(expectedUpdatedAtUnix || 0)
+  ) {
+    return false;
+  }
+  let changed = false;
+  if (result.removed) changed = removeCloudUploadRecordForPath(result.path);
+  if (result.record) {
+    upsertCloudUploadRecord(result.record);
+    changed = true;
+  }
+  if (changed) {
+    renderClips();
+    syncUploadClipButton();
+  }
+  return changed;
+}
+
+async function syncCloudClipStatus(clip) {
+  if (!clip || !cloudConnected()) return;
+  const record = clipCloudRecord(clip);
+  if (!record || !record.remote_clip_id) return;
+  const expectedRecord = record;
+  const expectedLocalClipId = record.local_clip_id || "";
+  const expectedUpdatedAtUnix = record.updated_at_unix || 0;
+  try {
+    const result = await invoke("sync_cloud_clip_status", { request: { path: clip.path } });
+    applyCloudClipSyncResult(result, { expectedRecord, expectedLocalClipId, expectedUpdatedAtUnix });
+  } catch (_) {
+    // Keep the last known cloud state if the status check is unavailable.
+  }
 }
 
 function upsertCloudProgress(progress) {
@@ -2299,7 +2375,7 @@ function setReviewVideoSource(path, options = {}) {
   video.playbackRate = rate;
 }
 
-async function applySelectedAudioTracksToPlayback() {
+async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) {
   const clip = currentClip;
   const tracks = clipAudioTracks(clip);
   if (!clip || !tracks.length) return;
@@ -2312,7 +2388,7 @@ async function applySelectedAudioTracksToPlayback() {
 
   const seq = ++audioPreviewSeq;
   const resumeTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
-  const shouldResume = !video.paused && !video.ended;
+  const shouldResume = forceResume || (!video.paused && !video.ended);
   const rate = video.playbackRate;
   const trimRange = { start: trimStart, end: trimEnd };
   setDeckStatus("switching audio tracks...");
@@ -2331,6 +2407,9 @@ async function applySelectedAudioTracksToPlayback() {
     if (seq !== audioPreviewSeq) return;
     setDeckStatus("");
     $("error").textContent = String(e);
+    if (forceResume && currentClip && currentClip.path === clip.path) {
+      video.play().catch(() => syncPlayState());
+    }
   }
 }
 
@@ -2408,6 +2487,9 @@ async function saveClipRename(ev) {
 
 function openClip(clip) {
   audioPreviewSeq += 1;
+  cancelAnimationFrame(rafId);
+  rafId = 0;
+  pendingSeek = null;
   currentClip = clip;
   currentReviewMediaPath = clip.path;
   resetSelectedAudioTracks(clip);
@@ -2430,7 +2512,10 @@ function openClip(clip) {
   renderClips();
   noteActivity();
   requestAnimationFrame(updateStageFrame);
-  video.play().catch(() => syncPlayState());
+  if (!applyDefaultAudioSelectionIfNeeded({ shouldResume: true })) {
+    video.play().catch(() => syncPlayState());
+  }
+  syncCloudClipStatus(clip);
 }
 
 function closeReview() {
@@ -3454,7 +3539,9 @@ async function uploadClipToCloud(clip, request = {}) {
     });
     if (result && result.record) {
       upsertCloudUploadRecord(result.record);
-      if (result.record.remote_url && result.record.upload_status.startsWith("uploaded_")) {
+      if (result.record.remote_url && result.record.upload_status === "uploaded_processing") {
+        setDeckStatus("cloud upload processing; link available", { transient: true });
+      } else if (result.record.remote_url && result.record.upload_status.startsWith("uploaded_")) {
         setDeckStatus("cloud upload ready", { transient: true });
       } else if (result.record.upload_status === "failed") {
         setDeckStatus("");
