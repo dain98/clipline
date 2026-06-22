@@ -1,9 +1,7 @@
 //! Clipline Cloud desktop integration: connection state, OS credential storage,
 //! and per-clip uploads through the first-party API client.
 
-use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
@@ -25,6 +23,7 @@ use windows_sys::Win32::Security::Credentials::{
 use crate::app::RuntimeState;
 use crate::library::{validate_clip_path, StorageSettings};
 use crate::settings::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
+use crate::util::{last_os_error, unix_now, wide_null};
 
 const DEFAULT_DEVICE_NAME: &str = "Clipline Desktop";
 const READY_POLL_ATTEMPTS: usize = 30;
@@ -288,7 +287,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     if meta.len() == 0 {
         return Err("clip file is empty".into());
     }
-    let markers = read_markers(&target);
+    let markers = crate::util::read_markers_raw(&target);
     let bytes = upload_bytes_for_audio_selection_from_path(
         &target,
         markers.as_ref(),
@@ -569,34 +568,16 @@ fn upload_audio_selection_plan(
     let Some(selected_audio_track_ids) = selected_audio_track_ids else {
         return Ok(UploadAudioSelectionPlan::Original);
     };
-    let selected_ids: BTreeSet<&str> = selected_audio_track_ids
-        .iter()
-        .map(String::as_str)
-        .collect();
-    if selected_ids.len() != selected_audio_track_ids.len() {
-        return Err("audio track selection contains duplicates".into());
-    }
-
     let tracks = markers.map(|m| m.audio_tracks.as_slice()).unwrap_or(&[]);
     if tracks.is_empty() {
-        if selected_ids.is_empty() {
+        if selected_audio_track_ids.is_empty() {
             return Ok(UploadAudioSelectionPlan::Remux(Vec::new()));
         }
         return Err("this clip has no selectable audio track metadata".into());
     }
 
-    let available: BTreeSet<&str> = tracks.iter().map(|track| track.id.as_str()).collect();
-    if let Some(unknown) = selected_ids
-        .iter()
-        .find(|selected| !available.contains(**selected))
-    {
-        return Err(format!("unknown audio track {unknown:?}"));
-    }
-    let selected_indices: Vec<u32> = tracks
-        .iter()
-        .filter(|track| selected_ids.contains(track.id.as_str()))
-        .map(|track| track.track_index)
-        .collect();
+    let selected_indices =
+        crate::util::selected_audio_track_indices(markers.unwrap(), selected_audio_track_ids)?;
     if selected_indices.len() > 1 {
         Ok(UploadAudioSelectionPlan::Mix(selected_indices))
     } else {
@@ -635,12 +616,6 @@ fn upload_mix_path_for_parts(nanos: u128, counter: u64, process_id: u32) -> Path
     std::env::temp_dir().join(format!(
         "clipline-upload-audio-mix-{process_id}-{counter}-{nanos}.mp4"
     ))
-}
-
-fn read_markers(path: &Path) -> Option<ClipMarkers> {
-    std::fs::read_to_string(path.with_extension("markers.json"))
-        .ok()
-        .and_then(|json| serde_json::from_str(&json).ok())
 }
 
 fn read_clip_game(path: &Path, markers: Option<&ClipMarkers>) -> Option<crate::library::ClipGame> {
@@ -879,8 +854,8 @@ fn credential_target(host_url: &str, user_id: &str) -> String {
 }
 
 fn write_credential(target: &str, username: &str, token: &str) -> Result<(), String> {
-    let mut target_w = wide_null(target);
-    let mut username_w = wide_null(username);
+    let mut target_w = wide_null(OsStr::new(target));
+    let mut username_w = wide_null(OsStr::new(username));
     let mut blob = token.as_bytes().to_vec();
     let blob_len = u32::try_from(blob.len()).map_err(|_| "cloud token is too large".to_string())?;
     let credential = CREDENTIALW {
@@ -904,7 +879,7 @@ fn write_credential(target: &str, username: &str, token: &str) -> Result<(), Str
 }
 
 fn read_credential(target: &str) -> Result<String, String> {
-    let target_w = wide_null(target);
+    let target_w = wide_null(OsStr::new(target));
     let mut raw: *mut CREDENTIALW = ptr::null_mut();
     if unsafe { CredReadW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0, &mut raw) } == 0 {
         return Err(last_os_error("read cloud token"));
@@ -921,7 +896,7 @@ fn read_credential(target: &str) -> Result<String, String> {
 }
 
 fn delete_credential(target: &str) -> Result<(), String> {
-    let target_w = wide_null(target);
+    let target_w = wide_null(OsStr::new(target));
     if unsafe { CredDeleteW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
         return Err(last_os_error("delete cloud token"));
     }
@@ -940,21 +915,10 @@ impl Drop for CredentialFree {
     }
 }
 
-fn wide_null(value: &str) -> Vec<u16> {
-    OsStr::new(value).encode_wide().chain([0]).collect()
-}
-
 fn serde_json_string<T: Serialize>(value: &T) -> Option<String> {
     serde_json::to_value(value)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default()
 }
 
 fn cloud_error(error: CloudApiError) -> String {
@@ -963,10 +927,6 @@ fn cloud_error(error: CloudApiError) -> String {
 
 fn cloud_error_is_not_found(error: &CloudApiError) -> bool {
     matches!(error, CloudApiError::Api { status, .. } if status.as_u16() == 404)
-}
-
-fn last_os_error(action: &str) -> String {
-    format!("{action}: {}", std::io::Error::last_os_error())
 }
 
 #[cfg(test)]

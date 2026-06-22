@@ -2,7 +2,7 @@
 //! a path-validated delete. The webview never touches the filesystem
 //! directly — playback goes through the asset protocol.
 
-use std::collections::{hash_map::DefaultHasher, BTreeSet};
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
@@ -23,6 +23,8 @@ use windows_sys::Win32::UI::Shell::DROPFILES;
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::service::{clips_dir, default_clips_dir};
+use crate::util;
+use crate::util::last_os_error;
 
 pub struct StorageSettings {
     quota_bytes: Mutex<Option<u64>>,
@@ -175,7 +177,7 @@ fn push_clips_from(
         let size_mb = meta
             .map(|m| m.len() as f64 / (1024.0 * 1024.0))
             .unwrap_or(0.0);
-        let markers = read_markers(&path);
+        let markers = util::read_markers_raw(&path).map(filter_timeline_markers);
         let duration_s = markers
             .as_ref()
             .map(|markers| markers.duration_s)
@@ -243,7 +245,7 @@ pub async fn clip_poster(
 /// moment that makes the best thumbnail), else a little into the clip to skip
 /// the black opening frame.
 fn poster_seek_seconds(clip: &Path) -> f64 {
-    let Some(markers) = read_markers(clip) else {
+    let Some(markers) = util::read_markers_raw(clip) else {
         return 1.0;
     };
     let duration_ok = markers.duration_s.is_finite() && markers.duration_s > 0.0;
@@ -425,10 +427,10 @@ fn preview_clip_audio_tracks_file_with_mixer(
     preview_dir: PathBuf,
     mix_audio_preview: impl FnOnce(&Path, &Path, &[u32]) -> Result<(), String>,
 ) -> Result<String, String> {
-    let Some(markers) = read_markers(&source) else {
+    let Some(markers) = util::read_markers_raw(&source) else {
         return Ok(display_path);
     };
-    let selected_indices = selected_audio_track_indices(&markers, &selected_audio_track_ids)?;
+    let selected_indices = util::selected_audio_track_indices(&markers, &selected_audio_track_ids)?;
     if selected_indices.len() == markers.audio_tracks.len() && selected_indices.len() <= 1 {
         return Ok(display_path);
     }
@@ -549,15 +551,7 @@ fn ffmpeg_audio_mix_filter(selected_audio_track_indices: &[u32]) -> Result<Strin
     Ok(filter)
 }
 
-#[cfg(windows)]
-pub(crate) fn suppress_console(cmd: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-pub(crate) fn suppress_console(_cmd: &mut Command) {}
+pub(crate) use clipline_capture::ffmpeg::suppress_console;
 
 fn export_clip_file(source: PathBuf, start_s: f64, end_s: f64) -> Result<ExportedClipInfo, String> {
     let tmp = unique_temp_export_path(&source)?;
@@ -572,7 +566,7 @@ fn export_clip_file(source: PathBuf, start_s: f64, end_s: f64) -> Result<Exporte
     std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
 
     let mut exported_markers = None;
-    if let Some(markers) = read_markers(&source) {
+    if let Some(markers) = util::read_markers_raw(&source).map(filter_timeline_markers) {
         let cropped = crop_markers(&markers, info.aligned_start_s, info.aligned_end_s);
         if has_marker_sidecar_content(&cropped) {
             let json = serde_json::to_string_pretty(&cropped).map_err(|e| e.to_string())?;
@@ -606,35 +600,7 @@ fn export_clip_file(source: PathBuf, start_s: f64, end_s: f64) -> Result<Exporte
     })
 }
 
-fn selected_audio_track_indices(
-    markers: &ClipMarkers,
-    selected_audio_track_ids: &[String],
-) -> Result<Vec<u32>, String> {
-    let selected_ids: BTreeSet<&str> = selected_audio_track_ids
-        .iter()
-        .map(String::as_str)
-        .collect();
-    if selected_ids.len() != selected_audio_track_ids.len() {
-        return Err("audio track selection contains duplicates".into());
-    }
-    let available: BTreeSet<&str> = markers
-        .audio_tracks
-        .iter()
-        .map(|track| track.id.as_str())
-        .collect();
-    if let Some(unknown) = selected_ids
-        .iter()
-        .find(|selected| !available.contains(**selected))
-    {
-        return Err(format!("unknown audio track {unknown:?}"));
-    }
-    Ok(markers
-        .audio_tracks
-        .iter()
-        .filter(|track| selected_ids.contains(track.id.as_str()))
-        .map(|track| track.track_index)
-        .collect())
-}
+
 
 fn audio_preview_path(
     preview_dir: &Path,
@@ -901,10 +867,6 @@ fn shell_clipboard_path_wide(path: &Path) -> Vec<u16> {
     }
 }
 
-fn last_os_error(action: &str) -> String {
-    format!("{action}: {}", std::io::Error::last_os_error())
-}
-
 struct ClipboardTransfer {
     handle: HGLOBAL,
 }
@@ -943,12 +905,7 @@ impl Drop for ClipboardClose {
     }
 }
 
-fn read_markers(path: &Path) -> Option<ClipMarkers> {
-    std::fs::read_to_string(path.with_extension("markers.json"))
-        .ok()
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .map(filter_timeline_markers)
-}
+
 
 fn filter_timeline_markers(mut markers: ClipMarkers) -> ClipMarkers {
     markers.markers.retain(|m| is_timeline_marker(&m.event));
@@ -1026,34 +983,7 @@ fn unique_export_path(source: &Path, start_s: f64, end_s: f64) -> Result<PathBuf
 mod tests {
     use super::*;
     use clipline_events::{ClipAudioTrack, EventKind, GameEvent, GameId, PlayerSummary};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    struct TestDir(PathBuf);
-
-    impl TestDir {
-        fn new(name: &str) -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let dir = std::env::temp_dir().join(format!(
-                "clipline-library-{name}-{}-{unique}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use clipline_test_utils::TestDir;
 
     fn marker(t_s: f64) -> ClipMarker {
         marker_with(t_s, EventKind::ChampionKill, true)
@@ -1249,7 +1179,7 @@ mod tests {
 
     #[test]
     fn all_audio_tracks_selected_mixes_preview_when_source_has_multiple_tracks() {
-        let dir = TestDir::new("audio-preview-all-mixed");
+        let dir = TestDir::new("clipline-library", "audio-preview-all-mixed");
         let source = dir.path().join("clip.mp4");
         std::fs::write(&source, b"not an mp4").unwrap();
         let markers = ClipMarkers {
@@ -1315,7 +1245,7 @@ mod tests {
 
     #[test]
     fn partial_multi_track_preview_returns_mix_failure_instead_of_unmixed_mp4() {
-        let dir = TestDir::new("audio-preview-mix-failure");
+        let dir = TestDir::new("clipline-library", "audio-preview-mix-failure");
         let source = dir.path().join("clip.mp4");
         std::fs::write(&source, b"not an mp4").unwrap();
         let markers = ClipMarkers {
@@ -1386,22 +1316,22 @@ mod tests {
         };
 
         assert_eq!(
-            selected_audio_track_indices(&markers, &["microphone".into()]).unwrap(),
+            util::selected_audio_track_indices(&markers, &["microphone".into()]).unwrap(),
             vec![1]
         );
         assert_eq!(
-            selected_audio_track_indices(&markers, &["microphone".into(), "output".into()])
+            util::selected_audio_track_indices(&markers, &["microphone".into(), "output".into()])
                 .unwrap(),
             vec![0, 1]
         );
 
-        let err = selected_audio_track_indices(&markers, &["discord".into()]).unwrap_err();
+        let err = util::selected_audio_track_indices(&markers, &["discord".into()]).unwrap_err();
         assert!(err.contains("unknown audio track"), "{err}");
     }
 
     #[test]
     fn unique_export_path_appends_suffix_when_needed() {
-        let dir = TestDir::new("export-name");
+        let dir = TestDir::new("clipline-library", "export-name");
         let source = dir.path().join("clip_1.mp4");
         let first = dir.path().join("clip_1_trim_001000_002000.mp4");
         std::fs::write(&source, b"source").unwrap();
@@ -1417,7 +1347,7 @@ mod tests {
 
     #[test]
     fn list_clips_uses_marker_duration_without_parsing_mp4() {
-        let dir = TestDir::new("list-marker-duration");
+        let dir = TestDir::new("clipline-library", "list-marker-duration");
         let media = dir.path().join("media");
         let clip = media.join("broken-but-listed.mp4");
         touch_mp4(&clip);
@@ -1486,7 +1416,7 @@ mod tests {
 
     #[test]
     fn validate_clip_path_accepts_root_and_session_clips() {
-        let dir = TestDir::new("validate-accept");
+        let dir = TestDir::new("clipline-library", "validate-accept");
         let root = dir.path().join("media");
         let settings = StorageSettings::new(None, root.clone());
 
@@ -1501,7 +1431,7 @@ mod tests {
 
     #[test]
     fn validate_clip_path_rejects_escapes_and_non_mp4() {
-        let dir = TestDir::new("validate-reject");
+        let dir = TestDir::new("clipline-library", "validate-reject");
         let root = dir.path().join("media");
         std::fs::create_dir_all(&root).unwrap();
         let settings = StorageSettings::new(None, root.clone());

@@ -47,3 +47,6 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+clipline-test-utils = { path = "../clipline-test-utils" }

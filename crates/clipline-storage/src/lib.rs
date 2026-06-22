@@ -316,44 +316,8 @@ fn visit_media_dirs(dir: &Path, mut f: impl FnMut(&Path) -> io::Result<()>) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-    struct TestDir(PathBuf);
-
-    impl TestDir {
-        fn new(name: &str) -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let dir = std::env::temp_dir().join(format!(
-                "clipline-storage-{name}-{}-{unique}",
-                std::process::id()
-            ));
-            fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-
-        fn write(&self, name: &str, bytes: usize) -> PathBuf {
-            let path = self.0.join(name);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).unwrap();
-            }
-            fs::write(&path, vec![0u8; bytes]).unwrap();
-            path
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use clipline_test_utils::TestDir;
+    use std::time::Duration;
 
     fn tick_mtime() {
         std::thread::sleep(Duration::from_millis(20));
@@ -361,7 +325,7 @@ mod tests {
 
     #[test]
     fn status_counts_mp4_and_marker_sidecars() {
-        let dir = TestDir::new("status-counts");
+        let dir = TestDir::new("clipline-storage", "status-counts");
         dir.write("a.mp4", 10);
         dir.write("a.markers.json", 3);
         dir.write("b.mp4", 7);
@@ -376,7 +340,7 @@ mod tests {
 
     #[test]
     fn status_counts_recording_bytes_without_counting_a_clip() {
-        let dir = TestDir::new("status-recording");
+        let dir = TestDir::new("clipline-storage", "status-recording");
         dir.write("saved.mp4", 10);
         dir.write("session.mp4.recording", 90);
 
@@ -388,7 +352,7 @@ mod tests {
 
     #[test]
     fn inventory_ignores_non_mp4_files() {
-        let dir = TestDir::new("ignore-non-mp4");
+        let dir = TestDir::new("clipline-storage", "ignore-non-mp4");
         dir.write("notes.txt", 99);
         dir.write("clip.mp4", 4);
 
@@ -400,7 +364,7 @@ mod tests {
 
     #[test]
     fn enforce_quota_deletes_oldest_until_under_budget() {
-        let dir = TestDir::new("oldest-first");
+        let dir = TestDir::new("clipline-storage", "oldest-first");
         let a = dir.write("a.mp4", 10);
         tick_mtime();
         let b = dir.write("b.mp4", 10);
@@ -419,7 +383,7 @@ mod tests {
 
     #[test]
     fn enforce_quota_deletes_marker_sidecar_with_clip() {
-        let dir = TestDir::new("sidecar-delete");
+        let dir = TestDir::new("clipline-storage", "sidecar-delete");
         let old = dir.write("old.mp4", 10);
         let sidecar = dir.write("old.markers.json", 2);
         tick_mtime();
@@ -437,7 +401,7 @@ mod tests {
 
     #[test]
     fn enforce_quota_deletes_poster_sidecar_with_clip() {
-        let dir = TestDir::new("poster-delete");
+        let dir = TestDir::new("clipline-storage", "poster-delete");
         let old = dir.write("old.mp4", 10);
         let markers = dir.write("old.markers.json", 2);
         let poster = dir.write("old.poster.jpg", 4);
@@ -457,7 +421,7 @@ mod tests {
 
     #[test]
     fn enforce_quota_leaves_library_when_protected_clip_alone_exceeds_budget() {
-        let dir = TestDir::new("protect-fresh");
+        let dir = TestDir::new("clipline-storage", "protect-fresh");
         let old = dir.write("old.mp4", 10);
         tick_mtime();
         let fresh = dir.write("fresh.mp4", 20);
@@ -474,7 +438,7 @@ mod tests {
 
     #[test]
     fn enforce_quota_counts_active_recording_but_never_deletes_it() {
-        let dir = TestDir::new("recording-quota");
+        let dir = TestDir::new("clipline-storage", "recording-quota");
         let old = dir.write("old.mp4", 10);
         tick_mtime();
         let recording = dir.write("session.mp4.recording", 12);
@@ -493,7 +457,7 @@ mod tests {
 
     #[test]
     fn recover_recording_files_renames_non_empty_and_deletes_empty() {
-        let dir = TestDir::new("recording-recovery");
+        let dir = TestDir::new("clipline-storage", "recording-recovery");
         let recording = dir.write("2026-06-13 15-04/session_1.mp4.recording", 10);
         let empty = dir.write("empty.mp4.recording", 0);
 
@@ -514,7 +478,7 @@ mod tests {
 
     #[test]
     fn status_counts_clips_inside_session_folders() {
-        let dir = TestDir::new("session-status");
+        let dir = TestDir::new("clipline-storage", "session-status");
         dir.write("legacy.mp4", 10);
         dir.write("2026-06-12 14-30/clip.mp4", 7);
         dir.write("2026-06-12 14-30/clip.markers.json", 3);
@@ -527,7 +491,7 @@ mod tests {
 
     #[test]
     fn enforce_quota_crosses_folders_and_removes_emptied_session_dirs() {
-        let dir = TestDir::new("session-gc");
+        let dir = TestDir::new("clipline-storage", "session-gc");
         let old = dir.write("2026-06-11 09-00/old.mp4", 10);
         let old_sidecar = dir.write("2026-06-11 09-00/old.markers.json", 2);
         let old_poster = dir.write("2026-06-11 09-00/old.poster.jpg", 4);
@@ -553,7 +517,7 @@ mod tests {
 
     #[test]
     fn enforce_quota_keeps_session_dirs_that_still_hold_clips() {
-        let dir = TestDir::new("session-keep");
+        let dir = TestDir::new("clipline-storage", "session-keep");
         let old = dir.write("2026-06-12 14-30/old.mp4", 10);
         tick_mtime();
         let new = dir.write("2026-06-12 14-30/new.mp4", 10);
@@ -568,7 +532,7 @@ mod tests {
 
     #[test]
     fn disabled_quota_does_not_delete() {
-        let dir = TestDir::new("disabled");
+        let dir = TestDir::new("clipline-storage", "disabled");
         let clip = dir.write("clip.mp4", 10);
 
         let report = enforce_quota(dir.path(), None, None).unwrap();

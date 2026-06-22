@@ -1729,7 +1729,7 @@ fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
 mod tests {
     use super::*;
     use clipline_capture::{MockCapture, MockEncoder};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use clipline_test_utils::TestDir;
 
     struct TimeoutSource;
 
@@ -1880,7 +1880,7 @@ mod tests {
 
     #[test]
     fn write_marker_sidecar_keeps_player_summary_without_markers() {
-        let dir = TestDir::new("sidecar-summary");
+        let dir = TestDir::new("clipline-service", "sidecar-summary");
         let path = dir.path().join("clip.mp4");
         let (tx, _rx) = std::sync::mpsc::channel();
         let summary = PlayerSummary {
@@ -1909,7 +1909,7 @@ mod tests {
 
     #[test]
     fn write_marker_sidecar_keeps_audio_tracks_without_markers() {
-        let dir = TestDir::new("sidecar-audio-tracks");
+        let dir = TestDir::new("clipline-service", "sidecar-audio-tracks");
         let path = dir.path().join("clip.mp4");
         let (tx, _rx) = std::sync::mpsc::channel();
         let tracks = vec![audio_track("output", 0, "Output Audio", "output")];
@@ -1948,7 +1948,7 @@ mod tests {
 
     #[test]
     fn manual_replay_save_does_not_shrink_after_previous_save() {
-        let dir = TestDir::new("manual-save-window");
+        let dir = TestDir::new("clipline-service", "manual-save-window");
         let mut rec = Recorder::new(
             MockCapture::new(120, 30),
             MockEncoder::new(30, 30),
@@ -1967,36 +1967,10 @@ mod tests {
         assert!((second_seconds - 2.0).abs() < 1e-6);
     }
 
-    struct TestDir(PathBuf);
-
-    impl TestDir {
-        fn new(name: &str) -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let dir = std::env::temp_dir().join(format!(
-                "clipline-service-{name}-{}-{unique}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     #[test]
     fn clips_dir_uses_configured_root_when_creatable() {
-        let dir = TestDir::new("configured-root");
+        let dir = TestDir::new("clipline-service", "configured-root");
         let configured = dir.path().join("media");
 
         let (resolved, fell_back) =
@@ -2009,7 +1983,7 @@ mod tests {
 
     #[test]
     fn clips_dir_falls_back_when_configured_root_is_unusable() {
-        let dir = TestDir::new("unusable-root");
+        let dir = TestDir::new("clipline-service", "unusable-root");
         // A directory cannot be created under a regular file, so this stands in
         // for an unreachable root (e.g. an unplugged drive).
         let blocker = dir.path().join("not-a-dir");
@@ -2026,7 +2000,7 @@ mod tests {
 
     #[test]
     fn temp_guard_flags_clips_inside_temp_root() {
-        let dir = TestDir::new("temp-guard");
+        let dir = TestDir::new("clipline-service", "temp-guard");
         let temp_root = dir.path().join("temp");
         let inside = temp_root.join("Videos").join("Clipline");
         std::fs::create_dir_all(&inside).unwrap();
@@ -2036,7 +2010,7 @@ mod tests {
 
     #[test]
     fn temp_guard_allows_clips_outside_temp_root() {
-        let dir = TestDir::new("temp-guard-outside");
+        let dir = TestDir::new("clipline-service", "temp-guard-outside");
         let temp_root = dir.path().join("temp");
         let outside = dir.path().join("media").join("Clipline");
         std::fs::create_dir_all(&temp_root).unwrap();
@@ -2047,7 +2021,7 @@ mod tests {
 
     #[test]
     fn finalized_session_rename_accepts_preexisting_final_file() {
-        let dir = TestDir::new("session-rename-recovered");
+        let dir = TestDir::new("clipline-service", "session-rename-recovered");
         let final_path = dir.path().join("session.mp4");
         std::fs::write(&final_path, b"mp4").unwrap();
         let recording = FullSessionRecording {
@@ -2062,7 +2036,7 @@ mod tests {
 
     #[test]
     fn finalized_session_rename_warns_when_temp_and_final_are_missing() {
-        let dir = TestDir::new("session-rename-missing");
+        let dir = TestDir::new("clipline-service", "session-rename-missing");
         let recording = FullSessionRecording {
             final_path: dir.path().join("session.mp4"),
             temp_path: dir.path().join("session.mp4.recording"),

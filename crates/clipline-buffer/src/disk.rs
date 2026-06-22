@@ -201,28 +201,7 @@ impl DiskSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct TestDir(PathBuf);
-
-    impl TestDir {
-        fn new(name: &str) -> Self {
-            let unique = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let dir = std::env::temp_dir().join(format!(
-                "clipline-disk-ring-{name}-{}-{unique}",
-                std::process::id()
-            ));
-            Self(dir)
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use clipline_test_utils::TestDir;
 
     fn seg(pts: f64, dur: f64, bytes: usize, key: bool) -> Segment {
         Segment {
@@ -248,8 +227,8 @@ mod tests {
 
     #[test]
     fn stores_payloads_on_disk_and_loads_segments() {
-        let dir = TestDir::new("load");
-        let mut ring = DiskReplayRing::new(10_000, dir.0.clone()).unwrap();
+        let dir = TestDir::new("clipline-disk-ring", "load");
+        let mut ring = DiskReplayRing::new(10_000, dir.path().to_path_buf()).unwrap();
         ring.push(seg(0.0, 1.0, 100, true)).unwrap();
 
         let stored = ring.segments().next().unwrap();
@@ -261,8 +240,8 @@ mod tests {
 
     #[test]
     fn eviction_deletes_owned_segment_files() {
-        let dir = TestDir::new("evict");
-        let mut ring = DiskReplayRing::new(250, dir.0.clone()).unwrap();
+        let dir = TestDir::new("clipline-disk-ring", "evict");
+        let mut ring = DiskReplayRing::new(250, dir.path().to_path_buf()).unwrap();
         ring.push(seg(0.0, 1.0, 100, true)).unwrap();
         let first = ring.segments().next().unwrap().path().to_path_buf();
         ring.push(seg(1.0, 1.0, 100, true)).unwrap();

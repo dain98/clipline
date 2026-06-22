@@ -40,3 +40,5 @@ mod settings;
 mod sound;
 #[cfg(windows)]
 mod updates;
+#[cfg(windows)]
+mod util;
