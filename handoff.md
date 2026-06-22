@@ -258,6 +258,11 @@ Recent fixes (2026-06-22):
   visibility/link changes refresh the local upload record, finalized remote deletions clear the
   local cloud badge/link, and temporary 404s for `uploaded_processing` records keep the local
   processing record.
+- Cloud uploads now mix multiple selected audio tracks into one Opus stream so cloud playback hears
+  output plus microphone instead of only the first MP4 audio stream. Single-track and muted uploads
+  still use the lightweight remux path.
+- Debug/Cargo builds now keep Windows startup registration disabled and clear stale debug Run-key
+  entries on launch/status checks; installed release builds keep normal startup behavior.
 
 Recent fixes (2026-06-21):
 - Bug-scan app reliability slice: recorder restarts now build replacement service options before

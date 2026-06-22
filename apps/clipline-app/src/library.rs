@@ -414,7 +414,7 @@ fn preview_clip_audio_tracks_file(
         display_path,
         selected_audio_track_ids,
         crate::settings::audio_preview_cache_dir(),
-        mix_audio_preview_with_ffmpeg,
+        mix_audio_tracks_with_ffmpeg,
     )
 }
 
@@ -465,15 +465,15 @@ fn preview_clip_audio_tracks_file_with_mixer(
     Ok(preview.display().to_string())
 }
 
-fn mix_audio_preview_with_ffmpeg(
+pub(crate) fn mix_audio_tracks_with_ffmpeg(
     source: &Path,
-    preview: &Path,
+    output_path: &Path,
     selected_audio_track_indices: &[u32],
 ) -> Result<(), String> {
     let ffmpeg = clipline_capture::ffmpeg::locate()
-        .ok_or_else(|| "ffmpeg is not available for audio preview mixing".to_string())?;
+        .ok_or_else(|| "ffmpeg is not available for audio track mixing".to_string())?;
     let filter = ffmpeg_audio_mix_filter(selected_audio_track_indices)?;
-    let tmp = preview.with_extension("mp4.tmp");
+    let tmp = output_path.with_extension("mp4.tmp");
     let _ = std::fs::remove_file(&tmp);
 
     let mut cmd = Command::new(ffmpeg);
@@ -491,28 +491,28 @@ fn mix_audio_preview_with_ffmpeg(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| format!("spawn ffmpeg audio preview: {e}"))?;
+        .map_err(|e| format!("spawn ffmpeg audio mix: {e}"))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&tmp);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffmpeg audio preview failed: {stderr}"));
+        return Err(format!("ffmpeg audio mix failed: {stderr}"));
     }
-    match std::fs::rename(&tmp, preview) {
+    match std::fs::rename(&tmp, output_path) {
         Ok(()) => Ok(()),
-        Err(_) if preview.exists() => {
+        Err(_) if output_path.exists() => {
             let _ = std::fs::remove_file(&tmp);
             Ok(())
         }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
-            Err(format!("finalize audio preview: {e}"))
+            Err(format!("finalize audio mix: {e}"))
         }
     }
 }
 
 fn ffmpeg_audio_mix_filter(selected_audio_track_indices: &[u32]) -> Result<String, String> {
     if selected_audio_track_indices.is_empty() {
-        return Err("audio preview mix requires at least one audio stream".into());
+        return Err("audio mix requires at least one audio stream".into());
     }
     let mut filter = String::new();
     for index in selected_audio_track_indices {

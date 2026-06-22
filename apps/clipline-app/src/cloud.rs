@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -278,6 +278,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     }
     let markers = read_markers(&target);
     let bytes = upload_bytes_for_audio_selection(
+        &target,
         source_bytes,
         markers.as_ref(),
         request.audio_track_ids.as_deref(),
@@ -485,9 +486,26 @@ fn normalize_upload_description(description: Option<&str>) -> Option<String> {
 }
 
 fn upload_bytes_for_audio_selection(
+    source_path: &Path,
     source_bytes: Vec<u8>,
     markers: Option<&ClipMarkers>,
     selected_audio_track_ids: Option<&[String]>,
+) -> Result<Vec<u8>, String> {
+    upload_bytes_for_audio_selection_with_mixer(
+        source_path,
+        source_bytes,
+        markers,
+        selected_audio_track_ids,
+        mix_upload_audio_tracks_with_ffmpeg,
+    )
+}
+
+fn upload_bytes_for_audio_selection_with_mixer(
+    source_path: &Path,
+    source_bytes: Vec<u8>,
+    markers: Option<&ClipMarkers>,
+    selected_audio_track_ids: Option<&[String]>,
+    mix_selected_audio_tracks: impl FnOnce(&Path, &[u32]) -> Result<Vec<u8>, String>,
 ) -> Result<Vec<u8>, String> {
     let Some(selected_audio_track_ids) = selected_audio_track_ids else {
         return Ok(source_bytes);
@@ -516,17 +534,46 @@ fn upload_bytes_for_audio_selection(
     {
         return Err(format!("unknown audio track {unknown:?}"));
     }
-    if selected_ids.len() == tracks.len() {
-        return Ok(source_bytes);
-    }
-
     let selected_indices: Vec<u32> = tracks
         .iter()
         .filter(|track| selected_ids.contains(track.id.as_str()))
         .map(|track| track.track_index)
         .collect();
+    if selected_indices.len() > 1 {
+        return mix_selected_audio_tracks(source_path, &selected_indices);
+    }
+
     clipline_mp4::remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
         .map_err(|e| e.to_string())
+}
+
+fn mix_upload_audio_tracks_with_ffmpeg(
+    source_path: &Path,
+    selected_audio_track_indices: &[u32],
+) -> Result<Vec<u8>, String> {
+    let mixed = unique_upload_mix_path();
+    let result = (|| {
+        crate::library::mix_audio_tracks_with_ffmpeg(
+            source_path,
+            &mixed,
+            selected_audio_track_indices,
+        )?;
+        std::fs::read(&mixed).map_err(|e| format!("read mixed upload audio: {e}"))
+    })();
+    let _ = std::fs::remove_file(&mixed);
+    let _ = std::fs::remove_file(mixed.with_extension("mp4.tmp"));
+    result
+}
+
+fn unique_upload_mix_path() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "clipline-upload-audio-mix-{}-{nanos}.mp4",
+        std::process::id()
+    ))
 }
 
 fn read_markers(path: &Path) -> Option<ClipMarkers> {
@@ -865,15 +912,25 @@ mod tests {
     }
 
     #[test]
-    fn upload_audio_selection_keeps_original_when_all_tracks_selected() {
+    fn upload_audio_selection_mixes_multiple_selected_tracks_for_cloud_playback() {
         let source = two_audio_mp4();
         let markers = audio_markers();
         let selected = vec!["output".to_string(), "microphone".to_string()];
 
-        let out = upload_bytes_for_audio_selection(source.clone(), Some(&markers), Some(&selected))
-            .unwrap();
+        let out = upload_bytes_for_audio_selection_with_mixer(
+            Path::new("clip.mp4"),
+            source,
+            Some(&markers),
+            Some(&selected),
+            |source, indices| {
+                assert_eq!(source, Path::new("clip.mp4"));
+                assert_eq!(indices, &[0, 1]);
+                Ok(b"mixed upload mp4".to_vec())
+            },
+        )
+        .unwrap();
 
-        assert_eq!(out, source);
+        assert_eq!(out, b"mixed upload mp4");
     }
 
     #[test]
@@ -882,8 +939,13 @@ mod tests {
         let markers = audio_markers();
         let selected = vec!["microphone".to_string()];
 
-        let out =
-            upload_bytes_for_audio_selection(source, Some(&markers), Some(&selected)).unwrap();
+        let out = upload_bytes_for_audio_selection(
+            Path::new("clip.mp4"),
+            source,
+            Some(&markers),
+            Some(&selected),
+        )
+        .unwrap();
 
         assert!(out.windows(6).any(|w| w == b"V00000"));
         assert!(!out.windows(6).any(|w| w == b"A00000"));
@@ -896,8 +958,13 @@ mod tests {
         let markers = audio_markers();
         let selected = vec!["discord".to_string()];
 
-        let err = upload_bytes_for_audio_selection(source, Some(&markers), Some(&selected))
-            .expect_err("unknown track");
+        let err = upload_bytes_for_audio_selection(
+            Path::new("clip.mp4"),
+            source,
+            Some(&markers),
+            Some(&selected),
+        )
+        .expect_err("unknown track");
 
         assert!(err.contains("unknown audio track"), "{err}");
     }

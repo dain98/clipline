@@ -461,17 +461,37 @@ fn save_replay(state: tauri::State<RuntimeState>) {
 
 #[tauri::command]
 fn get_autostart_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
-    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+    let autostart = app.autolaunch();
+    let enabled = autostart.is_enabled().map_err(|e| e.to_string())?;
+    if !autostart_enabled_for_current_build(enabled) {
+        if enabled {
+            autostart.disable().map_err(|e| e.to_string())?;
+        }
+        return Ok(false);
+    }
+    Ok(enabled)
 }
 
 fn set_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<bool, String> {
     let autostart = app.autolaunch();
+    let enabled = autostart_enabled_for_current_build(enabled);
     if enabled {
         autostart.enable().map_err(|e| e.to_string())?;
     } else {
         autostart.disable().map_err(|e| e.to_string())?;
     }
-    autostart.is_enabled().map_err(|e| e.to_string())
+    autostart
+        .is_enabled()
+        .map(autostart_enabled_for_current_build)
+        .map_err(|e| e.to_string())
+}
+
+fn autostart_enabled_for_current_build(requested: bool) -> bool {
+    autostart_enabled_for_build_request(requested, cfg!(debug_assertions))
+}
+
+fn autostart_enabled_for_build_request(requested: bool, debug_build: bool) -> bool {
+    requested && !debug_build
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -871,8 +891,10 @@ fn save_settings<R: Runtime>(
 
     // Apply the autostart registry change before persisting so settings.json
     // can never say "enabled" while the Run key update failed.
-    if settings.open_on_startup != old.open_on_startup {
-        set_autostart(&app, settings.open_on_startup)
+    if settings.open_on_startup != old.open_on_startup
+        || settings.open_on_startup != autostart_enabled_for_current_build(settings.open_on_startup)
+    {
+        settings.open_on_startup = set_autostart(&app, settings.open_on_startup)
             .map_err(|e| format!("update Windows startup registration: {e}"))?;
     }
 
@@ -1055,7 +1077,7 @@ pub fn run() {
 
             // Keep the Windows Run registry entry in sync with the user's setting.
             let autostart = app.autolaunch();
-            let _ = if settings.open_on_startup {
+            let _ = if autostart_enabled_for_current_build(settings.open_on_startup) {
                 autostart.enable()
             } else {
                 autostart.disable()
@@ -1522,6 +1544,18 @@ mod tests {
             minimize_request_action(&settings),
             MinimizeRequestAction::Tray
         );
+    }
+
+    #[test]
+    fn debug_build_autostart_policy_refuses_startup_enable() {
+        assert!(!autostart_enabled_for_build_request(true, true));
+        assert!(!autostart_enabled_for_build_request(false, true));
+    }
+
+    #[test]
+    fn release_build_autostart_policy_honors_user_choice() {
+        assert!(autostart_enabled_for_build_request(true, false));
+        assert!(!autostart_enabled_for_build_request(false, false));
     }
 
     #[test]
