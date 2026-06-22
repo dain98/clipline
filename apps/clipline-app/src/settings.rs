@@ -5,6 +5,7 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -29,6 +30,7 @@ const MIN_AUDIO_VOLUME: f64 = 0.0;
 const MAX_AUDIO_VOLUME: f64 = 2.0;
 const MIN_CAPTURE_REGION_SIDE: u32 = 2;
 const MAX_CAPTURE_REGION_SIDE: u32 = 16_384;
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The replay ring holds the save window plus this margin (for keyframe
 /// alignment and eviction timing). Sizing the ring to the window - rather than
@@ -589,16 +591,29 @@ fn validate_cloud_visibility(value: &str) -> Result<(), String> {
 
 fn normalize_upload_status(value: &str) -> String {
     match value {
-        "queued" | "uploading" | "processing" | "uploaded_private" | "uploaded_public"
-        | "failed" | "retrying" => value.to_string(),
+        "queued"
+        | "uploading"
+        | "processing"
+        | "uploaded_private"
+        | "uploaded_public"
+        | "uploaded_processing"
+        | "failed"
+        | "retrying" => value.to_string(),
         _ => default_upload_status(),
     }
 }
 
 fn validate_upload_status(value: &str) -> Result<(), String> {
     match value {
-        "not_uploaded" | "queued" | "uploading" | "processing" | "uploaded_private"
-        | "uploaded_public" | "failed" | "retrying" => Ok(()),
+        "not_uploaded"
+        | "queued"
+        | "uploading"
+        | "processing"
+        | "uploaded_private"
+        | "uploaded_public"
+        | "uploaded_processing"
+        | "failed"
+        | "retrying" => Ok(()),
         _ => Err("cloud upload status is invalid".into()),
     }
 }
@@ -1026,7 +1041,11 @@ fn config_base() -> PathBuf {
 
 fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = sibling_tmp_path(path)?;
+    let legacy_tmp = legacy_sibling_tmp_path(path)?;
     let _ = std::fs::remove_file(&tmp);
+    if legacy_tmp != tmp {
+        let _ = std::fs::remove_file(&legacy_tmp);
+    }
     {
         let mut file = std::fs::File::create(&tmp)
             .map_err(|e| format!("create temporary settings file: {e}"))?;
@@ -1039,20 +1058,25 @@ fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&tmp);
         return Err(error);
     }
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
     Ok(())
+}
+
+fn legacy_sibling_tmp_path(path: &Path) -> Result<PathBuf, String> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "settings path must include a file name".to_string())?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".tmp");
+    Ok(path.with_file_name(tmp_name))
 }
 
 fn sibling_tmp_path(path: &Path) -> Result<PathBuf, String> {
     let file_name = path
         .file_name()
         .ok_or_else(|| "settings path must include a file name".to_string())?;
+    let suffix = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut tmp_name = file_name.to_os_string();
-    tmp_name.push(".tmp");
+    tmp_name.push(format!(".{}.{}.tmp", std::process::id(), suffix));
     Ok(path.with_file_name(tmp_name))
 }
 
@@ -1269,14 +1293,14 @@ fn estimated_buffer_bytes(buffer_seconds: f64, bitrate_mbps: f64) -> usize {
 }
 
 fn same_or_nested_path(child: &Path, parent: &Path) -> bool {
-    let child = normalize_components(child);
-    let parent = normalize_components(parent);
     if cfg!(windows) {
-        let child = windows_component_keys(&child);
-        let parent = windows_component_keys(&parent);
+        let child = windows_component_keys(child);
+        let parent = windows_component_keys(parent);
         return child == parent
             || (child.len() > parent.len() && child[..parent.len()] == parent[..]);
     }
+    let child = normalize_components(child);
+    let parent = normalize_components(parent);
     child == parent || child.starts_with(&parent)
 }
 
@@ -1290,8 +1314,37 @@ fn normalize_components(path: &Path) -> PathBuf {
 
 fn windows_component_keys(path: &Path) -> Vec<String> {
     path.components()
-        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .filter_map(|component| match component {
+            std::path::Component::Prefix(prefix) => Some(windows_prefix_key(prefix.kind())),
+            std::path::Component::RootDir => Some("\\".to_string()),
+            std::path::Component::CurDir => None,
+            std::path::Component::ParentDir => Some("..".to_string()),
+            std::path::Component::Normal(value) => {
+                Some(value.to_string_lossy().to_ascii_lowercase())
+            }
+        })
         .collect()
+}
+
+fn windows_prefix_key(prefix: std::path::Prefix<'_>) -> String {
+    match prefix {
+        std::path::Prefix::Disk(drive) | std::path::Prefix::VerbatimDisk(drive) => {
+            format!("disk:{}", char::from(drive).to_ascii_lowercase())
+        }
+        std::path::Prefix::UNC(server, share) | std::path::Prefix::VerbatimUNC(server, share) => {
+            format!(
+                "unc:{}\\{}",
+                server.to_string_lossy().to_ascii_lowercase(),
+                share.to_string_lossy().to_ascii_lowercase()
+            )
+        }
+        std::path::Prefix::Verbatim(value) => {
+            format!("verbatim:{}", value.to_string_lossy().to_ascii_lowercase())
+        }
+        std::path::Prefix::DeviceNS(value) => {
+            format!("device:{}", value.to_string_lossy().to_ascii_lowercase())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2078,6 +2131,49 @@ mod tests {
     }
 
     #[test]
+    fn temporary_settings_paths_are_unique_per_save_attempt() {
+        let dir = TestDir::new("atomic-save-unique-temp");
+        let path = dir.path().join("settings.json");
+
+        let first = sibling_tmp_path(&path).unwrap();
+        let second = sibling_tmp_path(&path).unwrap();
+
+        assert_ne!(first, second);
+        for tmp in [first, second] {
+            let name = tmp.file_name().unwrap().to_string_lossy();
+            assert!(name.starts_with("settings.json."));
+            assert!(name.ends_with(".tmp"));
+            assert_eq!(tmp.parent(), path.parent());
+        }
+    }
+
+    #[test]
+    fn uploaded_processing_status_survives_cloud_settings_normalization() {
+        let mut cloud = CloudSettings::default();
+        cloud.uploads.insert(
+            "clip".into(),
+            CloudUploadRecord {
+                local_clip_id: "clip".into(),
+                path: "D:\\Videos\\clip.mp4".into(),
+                remote_clip_id: Some("remote".into()),
+                remote_url: Some("https://clips.example.com/clip/remote".into()),
+                visibility: "unlisted".into(),
+                upload_status: "uploaded_processing".into(),
+                error: Some("processing is still pending".into()),
+                updated_at_unix: 2,
+            },
+        );
+
+        cloud.normalize();
+
+        assert_eq!(
+            cloud.uploads.get("clip").unwrap().upload_status,
+            "uploaded_processing"
+        );
+        assert!(cloud.validate().is_ok());
+    }
+
+    #[test]
     fn disk_replay_requires_acknowledgement_and_folder() {
         let mut settings = AppSettings {
             replay_storage: ReplayStorageSettings {
@@ -2125,6 +2221,25 @@ mod tests {
             .display()
             .to_string()
             .to_ascii_lowercase();
+        let settings = AppSettings {
+            media_dir,
+            replay_storage: ReplayStorageSettings {
+                mode: ReplayStorageMode::Disk,
+                disk_dir: cache_dir,
+                disk_quota_gb: 2.0,
+                disk_acknowledged: true,
+            },
+            ..AppSettings::default()
+        };
+
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn disk_replay_rejects_verbatim_media_folder_overlap() {
+        let media = std::env::temp_dir().join("clipline-media-verbatim");
+        let media_dir = media.display().to_string();
+        let cache_dir = format!(r"\\?\{}", media.join("cache").display());
         let settings = AppSettings {
             media_dir,
             replay_storage: ReplayStorageSettings {

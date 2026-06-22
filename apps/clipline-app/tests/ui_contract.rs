@@ -386,7 +386,7 @@ fn review_player_owns_all_controls() {
             && html.contains("id=\"upload-audio-list\"")
             && main_js().contains("function clipAudioTracks(clip = currentClip)")
             && main_js().contains("function renderAudioTrackPanel()")
-            && main_js().contains("function applySelectedAudioTracksToPlayback()")
+            && main_js().contains("function applySelectedAudioTracksToPlayback({ forceResume = false } = {})")
             && main_js().contains("preview_clip_audio_tracks")
             && main_js().contains("function renderUploadAudioTracks(clip = uploadDialogClip)")
             && main_js().contains("audioTrackIds: request.audioTrackIds || null")
@@ -573,13 +573,23 @@ fn audio_preview_generation_is_not_eager_on_clip_open() {
         "opening a clip must not unconditionally remux or mix a full-session audio preview"
     );
     assert!(
-        open_clip.contains("applyDefaultAudioSelectionIfNeeded();"),
+        open_clip.contains("applyDefaultAudioSelectionIfNeeded({ shouldResume: true })"),
         "opening a clip should apply default audio only when source playback would not match it"
     );
+    let source_play = open_clip
+        .find("video.play().catch(() => syncPlayState());")
+        .expect("openClip should still start direct source playback when no preview is needed");
+    let default_preview = open_clip
+        .find("applyDefaultAudioSelectionIfNeeded({ shouldResume: true })")
+        .expect("openClip should request a resumed default preview when needed");
     assert!(
-        js.contains("function applyDefaultAudioSelectionIfNeeded()")
+        default_preview < source_play,
+        "preview-needed clips must not audibly play the unmixed source before the preview source is ready"
+    );
+    assert!(
+        js.contains("function applyDefaultAudioSelectionIfNeeded({ shouldResume = false } = {})")
             && js.contains("PlayerCore.selectionNeedsPreview")
-            && js.contains("applySelectedAudioTracksToPlayback();"),
+            && js.contains("applySelectedAudioTracksToPlayback({ forceResume: shouldResume });"),
         "default audio application must be gated by PlayerCore.selectionNeedsPreview"
     );
     assert!(

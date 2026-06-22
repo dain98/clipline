@@ -207,11 +207,12 @@ function selectedAudioTrackIdsForClip(clip = currentClip, selected = selectedAud
   return PlayerCore.selectedAudioTrackIds(clipAudioTracks(clip), [...selected]);
 }
 
-function applyDefaultAudioSelectionIfNeeded() {
+function applyDefaultAudioSelectionIfNeeded({ shouldResume = false } = {}) {
   const tracks = clipAudioTracks();
   const selected = selectedAudioTrackIdsForClip();
-  if (!PlayerCore.selectionNeedsPreview(tracks, selected)) return;
-  applySelectedAudioTracksToPlayback();
+  if (!PlayerCore.selectionNeedsPreview(tracks, selected)) return false;
+  applySelectedAudioTracksToPlayback({ forceResume: shouldResume });
+  return true;
 }
 
 function audioTrackLabel(track) {
@@ -2310,7 +2311,7 @@ function setReviewVideoSource(path, options = {}) {
   video.playbackRate = rate;
 }
 
-async function applySelectedAudioTracksToPlayback() {
+async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) {
   const clip = currentClip;
   const tracks = clipAudioTracks(clip);
   if (!clip || !tracks.length) return;
@@ -2323,7 +2324,7 @@ async function applySelectedAudioTracksToPlayback() {
 
   const seq = ++audioPreviewSeq;
   const resumeTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
-  const shouldResume = !video.paused && !video.ended;
+  const shouldResume = forceResume || (!video.paused && !video.ended);
   const rate = video.playbackRate;
   const trimRange = { start: trimStart, end: trimEnd };
   setDeckStatus("switching audio tracks...");
@@ -2444,8 +2445,9 @@ function openClip(clip) {
   renderClips();
   noteActivity();
   requestAnimationFrame(updateStageFrame);
-  video.play().catch(() => syncPlayState());
-  applyDefaultAudioSelectionIfNeeded();
+  if (!applyDefaultAudioSelectionIfNeeded({ shouldResume: true })) {
+    video.play().catch(() => syncPlayState());
+  }
 }
 
 function closeReview() {
@@ -3469,7 +3471,9 @@ async function uploadClipToCloud(clip, request = {}) {
     });
     if (result && result.record) {
       upsertCloudUploadRecord(result.record);
-      if (result.record.remote_url && result.record.upload_status.startsWith("uploaded_")) {
+      if (result.record.remote_url && result.record.upload_status === "uploaded_processing") {
+        setDeckStatus("cloud upload processing; link available", { transient: true });
+      } else if (result.record.remote_url && result.record.upload_status.startsWith("uploaded_")) {
         setDeckStatus("cloud upload ready", { transient: true });
       } else if (result.record.upload_status === "failed") {
         setDeckStatus("");

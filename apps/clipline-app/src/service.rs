@@ -878,9 +878,7 @@ fn add_output_audio_sources(
     }
 
     let process_track_count = process_tracks.len();
-    if should_add_mixed_output_track(process_track_count, process_loopback_failed) {
-        add_mixed_output_audio_source(clock, options, events, sources);
-    }
+    add_mixed_output_audio_source(clock, options, events, sources);
 
     if process_track_count > 0 {
         for (process, audio) in process_tracks {
@@ -916,13 +914,6 @@ fn add_mixed_output_audio_source(
             warn_user(events, format!("output audio unavailable; continuing: {e}"));
         }
     }
-}
-
-fn should_add_mixed_output_track(
-    _process_track_count: usize,
-    _process_loopback_failed: bool,
-) -> bool {
-    true
 }
 
 fn audio_track(id: &str, track_index: u32, label: &str, kind: &str) -> ClipAudioTrack {
@@ -1804,13 +1795,6 @@ mod tests {
         let sidecar: clipline_events::ClipMarkers = serde_json::from_str(&json).unwrap();
         assert!(sidecar.markers.is_empty());
         assert_eq!(sidecar.audio_tracks, tracks);
-    }
-
-    #[test]
-    fn mixed_output_fallback_is_added_for_split_playback_safety() {
-        assert!(should_add_mixed_output_track(2, false));
-        assert!(should_add_mixed_output_track(2, true));
-        assert!(should_add_mixed_output_track(0, false));
     }
 
     #[test]

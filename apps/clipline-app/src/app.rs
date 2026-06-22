@@ -146,6 +146,12 @@ struct RuntimeInner {
     decodable_codecs: Vec<service::Codec>,
 }
 
+struct PreparedRuntimeRestart {
+    old_tx: Option<Sender<Cmd>>,
+    next_options: Option<ServiceOptions>,
+    cleared_active_game: bool,
+}
+
 impl RuntimeState {
     fn new(tx: Sender<Cmd>, settings: AppSettings, lol_url: Option<String>) -> Self {
         Self(Mutex::new(RuntimeInner {
@@ -210,6 +216,48 @@ impl RuntimeState {
         let old_tx = inner.tx.take();
         inner.last_save_request = None;
         Ok((old_tx, Some(next_options)))
+    }
+
+    fn prepare_settings_restart(
+        &self,
+        settings: AppSettings,
+    ) -> Result<PreparedRuntimeRestart, String> {
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        let cleared_active_game = inner.active_game.is_some()
+            && !active_game_still_configured(&settings, inner.active_game.as_ref());
+        if cleared_active_game {
+            inner.active_game = None;
+        }
+        inner.settings = settings;
+        let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
+        Ok(PreparedRuntimeRestart {
+            old_tx,
+            next_options,
+            cleared_active_game,
+        })
+    }
+
+    fn finish_prepared_restart<R: Runtime>(
+        &self,
+        app: AppHandle<R>,
+        prepared: PreparedRuntimeRestart,
+    ) -> Result<(), String> {
+        if let Some(tx) = prepared.old_tx {
+            let _ = tx.send(Cmd::Stop { announce: false });
+        }
+        if let Some(options) = prepared.next_options {
+            let (tx, rx) = service::spawn(options);
+            {
+                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+                inner.tx = Some(tx);
+                inner.last_save_request = None;
+            }
+            pump_events(app.clone(), rx);
+        }
+        if prepared.cleared_active_game {
+            let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
+        }
+        Ok(())
     }
 
     fn request_save(&self) -> bool {
@@ -282,36 +330,6 @@ impl RuntimeState {
             .ok()
             .and_then(|inner| parse_hotkey(&inner.settings.hotkey).ok())
             .is_some_and(|active| &active == shortcut)
-    }
-
-    fn restart<R: Runtime>(&self, app: AppHandle<R>, settings: AppSettings) -> Result<(), String> {
-        let (old_tx, next_options, cleared_active_game) = {
-            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            let cleared_active_game = inner.active_game.is_some()
-                && !active_game_still_configured(&settings, inner.active_game.as_ref());
-            if cleared_active_game {
-                inner.active_game = None;
-            }
-            inner.settings = settings;
-            let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
-            (old_tx, next_options, cleared_active_game)
-        };
-        if let Some(tx) = old_tx {
-            let _ = tx.send(Cmd::Stop { announce: false });
-        }
-        if let Some(options) = next_options {
-            let (tx, rx) = service::spawn(options);
-            {
-                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-                inner.tx = Some(tx);
-                inner.last_save_request = None;
-            }
-            pump_events(app.clone(), rx);
-        }
-        if cleared_active_game {
-            let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
-        }
-        Ok(())
     }
 
     fn set_recording<R: Runtime>(
@@ -891,8 +909,9 @@ fn save_settings<R: Runtime>(
     }
 
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
-    state.restart(app, settings.clone())?;
+    let prepared_restart = state.prepare_settings_restart(settings.clone())?;
     drop(cloud_save_guard);
+    state.finish_prepared_restart(app, prepared_restart)?;
     tray_items.set_hotkey_label(&settings.hotkey)?;
     crate::hotkeys::set_save_hotkey(&settings.hotkey)?;
     storage_settings.set_quota_bytes(quota_bytes);

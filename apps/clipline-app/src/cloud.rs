@@ -575,9 +575,9 @@ fn persist_record(state: &RuntimeState, record: &CloudUploadRecord) -> Result<()
 }
 
 fn mark_ready_timeout(record: &mut CloudUploadRecord) {
-    record.upload_status = "failed".to_string();
+    record.upload_status = "uploaded_processing".to_string();
     record.error = Some(format!(
-        "cloud upload completed, but cloud processing did not become ready within {} seconds; retry the upload to refresh the cloud link",
+        "cloud upload completed, but cloud processing did not become ready within {} seconds; the cloud link may finish processing shortly",
         READY_POLL_ATTEMPTS as u64 * READY_POLL_DELAY.as_secs()
     ));
     record.updated_at_unix = unix_now();
@@ -836,14 +836,14 @@ mod tests {
     }
 
     #[test]
-    fn ready_timeout_marks_upload_failed_with_retryable_error() {
+    fn ready_timeout_keeps_remote_link_available_without_retry_upload() {
         let mut record = upload_record("local", "D:\\Videos\\clip.mp4", "processing", 10);
         record.remote_clip_id = Some("remote-1".into());
         record.remote_url = Some("https://clips.example.com/clip/remote-1".into());
 
         mark_ready_timeout(&mut record);
 
-        assert_eq!(record.upload_status, "failed");
+        assert_eq!(record.upload_status, "uploaded_processing");
         assert_eq!(record.remote_clip_id.as_deref(), Some("remote-1"));
         assert_eq!(
             record.remote_url.as_deref(),
@@ -853,8 +853,8 @@ mod tests {
             record
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains("processing")),
-            "timeout should explain that cloud processing did not become ready"
+                .is_some_and(|error| error.contains("processing") && !error.contains("retry the upload")),
+            "timeout should explain that cloud processing is still pending without forcing a reupload"
         );
     }
 

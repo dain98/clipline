@@ -429,7 +429,7 @@ fn preview_clip_audio_tracks_file_with_mixer(
         return Ok(display_path);
     };
     let selected_indices = selected_audio_track_indices(&markers, &selected_audio_track_ids)?;
-    if selected_indices.len() == markers.audio_tracks.len() {
+    if selected_indices.len() == markers.audio_tracks.len() && selected_indices.len() <= 1 {
         return Ok(display_path);
     }
 
@@ -1209,8 +1209,8 @@ mod tests {
     }
 
     #[test]
-    fn all_audio_tracks_selected_returns_source_without_preview_mix() {
-        let dir = TestDir::new("audio-preview-all-source");
+    fn all_audio_tracks_selected_mixes_preview_when_source_has_multiple_tracks() {
+        let dir = TestDir::new("audio-preview-all-mixed");
         let source = dir.path().join("clip.mp4");
         std::fs::write(&source, b"not an mp4").unwrap();
         let markers = ClipMarkers {
@@ -1245,17 +1245,33 @@ mod tests {
         )
         .unwrap();
 
+        let preview_dir = dir.path().join("previews");
+        let mixed_preview = std::cell::RefCell::new(None);
+        let source_for_mixer = source.clone();
         let path = preview_clip_audio_tracks_file_with_mixer(
             source.clone(),
             source.display().to_string(),
             vec!["output".into(), "process:1".into(), "microphone".into()],
-            dir.path().join("previews"),
-            |_, _, _| Err("mixer should not run".into()),
+            preview_dir.clone(),
+            |input, output, selected| {
+                assert_eq!(input, source_for_mixer.as_path());
+                assert_eq!(selected, &[0, 1, 2]);
+                assert_eq!(output.parent(), Some(preview_dir.as_path()));
+                mixed_preview.replace(Some(output.to_path_buf()));
+                Ok(())
+            },
         )
-        .expect("all selected should keep the source");
+        .expect("all selected should get an audible preview mix");
 
-        assert_eq!(path, source.display().to_string());
-        assert!(!dir.path().join("previews").exists());
+        assert_eq!(
+            path,
+            mixed_preview
+                .borrow()
+                .as_ref()
+                .expect("mixer output path captured")
+                .display()
+                .to_string()
+        );
     }
 
     #[test]
