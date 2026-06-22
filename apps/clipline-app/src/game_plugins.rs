@@ -116,9 +116,14 @@ pub fn ensure_plugin_icon_cached(plugin_id: &str, exe_path: &str) {
     }
     if let Some(png) = crate::game_icon::extract_exe_icon_png(exe_path) {
         if let Some(parent) = cache.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("create icon cache dir {parent:?}: {e}");
+                return;
+            }
         }
-        let _ = std::fs::write(&cache, png);
+        if let Err(e) = std::fs::write(&cache, &png) {
+            eprintln!("write icon cache {cache:?}: {e}");
+        }
     }
 }
 

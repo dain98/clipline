@@ -355,7 +355,10 @@ fn run_reader(
                     }
                 }
             }
-            Err(_) => break,
+            Err(e) => {
+                eprintln!("ffmpeg reader: stdout read error: {e}");
+                break;
+            }
         }
     }
     if let Some(au) = framer.flush() {

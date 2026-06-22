@@ -38,25 +38,36 @@ impl StorageSettings {
     }
 
     pub fn quota_bytes(&self) -> Option<u64> {
-        self.quota_bytes.lock().map(|q| *q).unwrap_or(None)
+        match self.quota_bytes.lock() {
+            Ok(q) => *q,
+            Err(e) => {
+                eprintln!("quota_bytes lock poisoned: {e}");
+                None
+            }
+        }
     }
 
     pub fn set_quota_bytes(&self, quota_bytes: Option<u64>) {
-        if let Ok(mut q) = self.quota_bytes.lock() {
-            *q = quota_bytes;
+        match self.quota_bytes.lock() {
+            Ok(mut q) => *q = quota_bytes,
+            Err(e) => eprintln!("set_quota_bytes lock poisoned: {e}"),
         }
     }
 
     pub fn media_dir(&self) -> PathBuf {
-        self.media_dir
-            .lock()
-            .map(|dir| dir.clone())
-            .unwrap_or_else(|_| default_clips_dir())
+        match self.media_dir.lock() {
+            Ok(dir) => dir.clone(),
+            Err(e) => {
+                eprintln!("media_dir lock poisoned: {e}");
+                default_clips_dir()
+            }
+        }
     }
 
     pub fn set_media_dir(&self, media_dir: PathBuf) {
-        if let Ok(mut dir) = self.media_dir.lock() {
-            *dir = media_dir;
+        match self.media_dir.lock() {
+            Ok(mut dir) => *dir = media_dir,
+            Err(e) => eprintln!("set_media_dir lock poisoned: {e}"),
         }
     }
 

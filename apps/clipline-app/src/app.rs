@@ -111,10 +111,14 @@ struct MicTestState(Mutex<Option<Sender<()>>>);
 
 impl MicTestState {
     fn stop(&self) {
-        if let Ok(mut tx) = self.0.lock() {
-            if let Some(tx) = tx.take() {
-                let _ = tx.send(());
+        match self.0.lock() {
+            Ok(mut guard) => {
+                if let Some(tx) = guard.take() {
+                    // Receiver gone means the test thread already exited — not an error.
+                    let _ = tx.send(());
+                }
             }
+            Err(e) => eprintln!("mic test state lock poisoned: {e}"),
         }
     }
 }
@@ -177,8 +181,9 @@ impl RuntimeState {
                 _ => {}
             }
         }
-        if let Ok(mut inner) = self.0.lock() {
-            inner.decodable_codecs = codecs;
+        match self.0.lock() {
+            Ok(mut inner) => inner.decodable_codecs = codecs,
+            Err(e) => eprintln!("set_decodable_codecs lock poisoned: {e}"),
         }
     }
 
@@ -1152,7 +1157,9 @@ pub fn run() {
             // don't flash it. Show it for normal launches.
             if !launched_by_autostart {
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
+                    if let Err(e) = window.show() {
+                        eprintln!("show main window on launch: {e}");
+                    }
                 }
             }
 

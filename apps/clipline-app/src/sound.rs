@@ -6,13 +6,16 @@ use rodio::{Decoder, OutputStream, Sink};
 const SOUND_EFFECT_OGG: &[u8] = include_bytes!("../../../soundeffect.ogg");
 
 pub fn play_replay_saved() {
-    let _ = thread::Builder::new()
+    if let Err(e) = thread::Builder::new()
         .name("clipline-replay-sound".into())
         .spawn(|| {
             if let Err(e) = play_once() {
                 eprintln!("replay save sound: {e}");
             }
-        });
+        })
+    {
+        eprintln!("spawn replay sound thread: {e}");
+    }
 }
 
 fn play_once() -> Result<(), String> {
