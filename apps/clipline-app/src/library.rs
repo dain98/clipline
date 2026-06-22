@@ -479,12 +479,36 @@ pub(crate) fn mix_audio_tracks_with_ffmpeg(
     let mut cmd = Command::new(ffmpeg);
     suppress_console(&mut cmd);
     let output = cmd
-        .args(["-hide_banner", "-nostdin", "-y", "-i"])
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-fflags",
+            "+bitexact",
+            "-i",
+        ])
         .arg(source)
         .args(["-filter_complex", &filter])
         .args([
-            "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy", "-c:a", "libopus", "-b:a", "160k",
-            "-f", "mp4",
+            "-map",
+            "0:v:0",
+            "-map",
+            "[aout]",
+            "-map_metadata",
+            "-1",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "160k",
+            "-fflags",
+            "+bitexact",
+            "-flags",
+            "+bitexact",
+            "-bitexact",
+            "-f",
+            "mp4",
         ])
         .arg(&tmp)
         .stdin(Stdio::null())
@@ -1206,6 +1230,21 @@ mod tests {
         let err = ffmpeg_audio_mix_filter(&[]).expect_err("empty selection is invalid");
 
         assert!(err.contains("at least one"), "{err}");
+    }
+
+    #[test]
+    fn audio_mix_ffmpeg_command_requests_deterministic_mp4_output() {
+        let source = include_str!("library.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source before tests");
+
+        assert!(production_source.contains("\"-fflags\""));
+        assert!(production_source.contains("\"+bitexact\""));
+        assert!(production_source.contains("\"-map_metadata\""));
+        assert!(production_source.contains("\"-flags\""));
+        assert!(production_source.contains("\"-bitexact\""));
     }
 
     #[test]

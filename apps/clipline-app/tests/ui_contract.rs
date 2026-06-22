@@ -603,10 +603,29 @@ fn audio_preview_generation_is_not_eager_on_clip_open() {
         "all-track playback should keep the original source until the user changes selection"
     );
     assert!(
-        js.contains("function applyCloudClipSyncResult(result)")
+        js.contains("function applyCloudClipSyncResult(")
             && js.contains("removeCloudUploadRecordForPath(result.path)")
             && js.contains("upsertCloudUploadRecord(result.record)"),
         "cloud sync results must update or remove the local cloud record cache"
+    );
+    assert!(
+        js.contains("if (forceResume && currentClip && currentClip.path === clip.path) {")
+            && js.contains("video.play().catch(() => syncPlayState());"),
+        "preview generation failure while opening a clip must fall back to source playback"
+    );
+    assert!(
+        js.contains("function cloudUploadRecordForPath(path)")
+            && js.contains("applyCloudClipSyncResult(result, {")
+            && js.contains("expectedRecord, expectedLocalClipId, expectedUpdatedAtUnix"),
+        "cloud open-sync must capture the record identity it started from"
+    );
+    assert!(
+        js.contains("if (expectedRecord && current !== expectedRecord) return false;")
+            && js.contains("current.local_clip_id !== expectedLocalClipId")
+            && js.contains(
+                "Number(current.updated_at_unix || 0) > Number(expectedUpdatedAtUnix || 0)"
+            ),
+        "cloud open-sync must ignore stale results once a newer upload record exists"
     );
 }
 

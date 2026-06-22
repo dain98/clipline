@@ -7,6 +7,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
@@ -29,6 +30,9 @@ const DEFAULT_DEVICE_NAME: &str = "Clipline Desktop";
 const READY_POLL_ATTEMPTS: usize = 30;
 const READY_POLL_DELAY: Duration = Duration::from_secs(1);
 const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
+const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
+
+static UPLOAD_MIX_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Deserialize)]
 pub struct CloudConnectRequest {
@@ -144,23 +148,34 @@ pub async fn sync_cloud_clip_status(
                 removed: false,
             })
         }
-        Err(error)
-            if cloud_error_is_not_found(&error) && missing_remote_should_remove_record(&record) =>
+        Err(error) if cloud_error_is_not_found(&error) => match missing_remote_sync_action(&record)
         {
-            state.update_cloud(|cloud| {
-                remove_upload_record(cloud, &record);
-            })?;
-            Ok(CloudClipStatusSyncResult {
+            MissingRemoteSyncAction::Keep => Ok(CloudClipStatusSyncResult {
                 path: request.path,
-                record: None,
-                removed: true,
-            })
-        }
-        Err(error) if cloud_error_is_not_found(&error) => Ok(CloudClipStatusSyncResult {
-            path: request.path,
-            record: Some(record),
-            removed: false,
-        }),
+                record: Some(record),
+                removed: false,
+            }),
+            MissingRemoteSyncAction::ConfirmMissing => {
+                let mut updated = record;
+                mark_remote_not_found_once(&mut updated);
+                persist_record(&state, &updated)?;
+                Ok(CloudClipStatusSyncResult {
+                    path: request.path,
+                    record: Some(updated),
+                    removed: false,
+                })
+            }
+            MissingRemoteSyncAction::Remove => {
+                state.update_cloud(|cloud| {
+                    remove_upload_record(cloud, &record);
+                })?;
+                Ok(CloudClipStatusSyncResult {
+                    path: request.path,
+                    record: None,
+                    removed: true,
+                })
+            }
+        },
         Err(error) => Err(cloud_error(error)),
     }
 }
@@ -269,20 +284,17 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         .unwrap_or_else(|| cloud.default_visibility.clone());
     let description = normalize_upload_description(request.description.as_deref());
 
-    let source_bytes = tokio::fs::read(&target)
-        .await
-        .map_err(|e| format!("read clip: {e}"))?;
     let meta = std::fs::metadata(&target).map_err(|e| format!("read clip metadata: {e}"))?;
-    if source_bytes.is_empty() {
+    if meta.len() == 0 {
         return Err("clip file is empty".into());
     }
     let markers = read_markers(&target);
-    let bytes = upload_bytes_for_audio_selection(
+    let bytes = upload_bytes_for_audio_selection_from_path(
         &target,
-        source_bytes,
         markers.as_ref(),
         request.audio_track_ids.as_deref(),
-    )?;
+    )
+    .await?;
     let checksum = sha256_hex(&bytes);
     let local_clip_id = local_clip_id(&target, &meta, &checksum)?;
     let mut record = CloudUploadRecord {
@@ -485,6 +497,36 @@ fn normalize_upload_description(description: Option<&str>) -> Option<String> {
         .map(ToString::to_string)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UploadAudioSelectionPlan {
+    Original,
+    Remux(Vec<u32>),
+    Mix(Vec<u32>),
+}
+
+async fn upload_bytes_for_audio_selection_from_path(
+    source_path: &Path,
+    markers: Option<&ClipMarkers>,
+    selected_audio_track_ids: Option<&[String]>,
+) -> Result<Vec<u8>, String> {
+    match upload_audio_selection_plan(markers, selected_audio_track_ids)? {
+        UploadAudioSelectionPlan::Original => tokio::fs::read(source_path)
+            .await
+            .map_err(|e| format!("read clip: {e}")),
+        UploadAudioSelectionPlan::Remux(selected_indices) => {
+            let source_bytes = tokio::fs::read(source_path)
+                .await
+                .map_err(|e| format!("read clip: {e}"))?;
+            clipline_mp4::remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
+                .map_err(|e| e.to_string())
+        }
+        UploadAudioSelectionPlan::Mix(selected_indices) => {
+            mix_upload_audio_tracks_with_ffmpeg(source_path, &selected_indices)
+        }
+    }
+}
+
+#[cfg(test)]
 fn upload_bytes_for_audio_selection(
     source_path: &Path,
     source_bytes: Vec<u8>,
@@ -500,6 +542,7 @@ fn upload_bytes_for_audio_selection(
     )
 }
 
+#[cfg(test)]
 fn upload_bytes_for_audio_selection_with_mixer(
     source_path: &Path,
     source_bytes: Vec<u8>,
@@ -507,8 +550,24 @@ fn upload_bytes_for_audio_selection_with_mixer(
     selected_audio_track_ids: Option<&[String]>,
     mix_selected_audio_tracks: impl FnOnce(&Path, &[u32]) -> Result<Vec<u8>, String>,
 ) -> Result<Vec<u8>, String> {
+    match upload_audio_selection_plan(markers, selected_audio_track_ids)? {
+        UploadAudioSelectionPlan::Original => Ok(source_bytes),
+        UploadAudioSelectionPlan::Remux(selected_indices) => {
+            clipline_mp4::remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
+                .map_err(|e| e.to_string())
+        }
+        UploadAudioSelectionPlan::Mix(selected_indices) => {
+            mix_selected_audio_tracks(source_path, &selected_indices)
+        }
+    }
+}
+
+fn upload_audio_selection_plan(
+    markers: Option<&ClipMarkers>,
+    selected_audio_track_ids: Option<&[String]>,
+) -> Result<UploadAudioSelectionPlan, String> {
     let Some(selected_audio_track_ids) = selected_audio_track_ids else {
-        return Ok(source_bytes);
+        return Ok(UploadAudioSelectionPlan::Original);
     };
     let selected_ids: BTreeSet<&str> = selected_audio_track_ids
         .iter()
@@ -521,8 +580,7 @@ fn upload_bytes_for_audio_selection_with_mixer(
     let tracks = markers.map(|m| m.audio_tracks.as_slice()).unwrap_or(&[]);
     if tracks.is_empty() {
         if selected_ids.is_empty() {
-            return clipline_mp4::remux_with_selected_audio_tracks(&source_bytes, &[])
-                .map_err(|e| e.to_string());
+            return Ok(UploadAudioSelectionPlan::Remux(Vec::new()));
         }
         return Err("this clip has no selectable audio track metadata".into());
     }
@@ -540,11 +598,10 @@ fn upload_bytes_for_audio_selection_with_mixer(
         .map(|track| track.track_index)
         .collect();
     if selected_indices.len() > 1 {
-        return mix_selected_audio_tracks(source_path, &selected_indices);
+        Ok(UploadAudioSelectionPlan::Mix(selected_indices))
+    } else {
+        Ok(UploadAudioSelectionPlan::Remux(selected_indices))
     }
-
-    clipline_mp4::remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
-        .map_err(|e| e.to_string())
 }
 
 fn mix_upload_audio_tracks_with_ffmpeg(
@@ -570,9 +627,13 @@ fn unique_upload_mix_path() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
+    let counter = UPLOAD_MIX_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    upload_mix_path_for_parts(nanos, counter, std::process::id())
+}
+
+fn upload_mix_path_for_parts(nanos: u128, counter: u64, process_id: u32) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "clipline-upload-audio-mix-{}-{nanos}.mp4",
-        std::process::id()
+        "clipline-upload-audio-mix-{process_id}-{counter}-{nanos}.mp4"
     ))
 }
 
@@ -733,8 +794,29 @@ fn upload_status_for_remote_clip(clip: &ClipDetailResponse) -> String {
     }
 }
 
-fn missing_remote_should_remove_record(record: &CloudUploadRecord) -> bool {
-    record.upload_status.starts_with("uploaded_") && record.upload_status != "uploaded_processing"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissingRemoteSyncAction {
+    Keep,
+    ConfirmMissing,
+    Remove,
+}
+
+fn missing_remote_sync_action(record: &CloudUploadRecord) -> MissingRemoteSyncAction {
+    if !record.upload_status.starts_with("uploaded_")
+        || record.upload_status == "uploaded_processing"
+    {
+        return MissingRemoteSyncAction::Keep;
+    }
+    if record.error.as_deref() == Some(REMOTE_NOT_FOUND_SYNC_MARKER) {
+        MissingRemoteSyncAction::Remove
+    } else {
+        MissingRemoteSyncAction::ConfirmMissing
+    }
+}
+
+fn mark_remote_not_found_once(record: &mut CloudUploadRecord) {
+    record.error = Some(REMOTE_NOT_FOUND_SYNC_MARKER.to_string());
+    record.updated_at_unix = unix_now();
 }
 
 fn delete_uploaded_local_files(target: &Path) {
@@ -934,6 +1016,17 @@ mod tests {
     }
 
     #[test]
+    fn upload_audio_selection_plan_mixes_without_source_bytes_for_multiple_tracks() {
+        let markers = audio_markers();
+        let selected = vec!["output".to_string(), "microphone".to_string()];
+
+        assert_eq!(
+            upload_audio_selection_plan(Some(&markers), Some(&selected)).unwrap(),
+            UploadAudioSelectionPlan::Mix(vec![0, 1])
+        );
+    }
+
+    #[test]
     fn upload_audio_selection_remuxes_only_selected_track() {
         let source = two_audio_mp4();
         let markers = audio_markers();
@@ -967,6 +1060,14 @@ mod tests {
         .expect_err("unknown track");
 
         assert!(err.contains("unknown audio track"), "{err}");
+    }
+
+    #[test]
+    fn upload_mix_paths_are_unique_for_same_timestamp_and_process() {
+        let a = upload_mix_path_for_parts(123, 7, 42);
+        let b = upload_mix_path_for_parts(123, 8, 42);
+
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -1067,25 +1168,51 @@ mod tests {
     }
 
     #[test]
-    fn missing_remote_clip_removes_finalized_records_but_keeps_processing_records() {
-        assert!(missing_remote_should_remove_record(&upload_record(
-            "local",
-            "D:\\Videos\\clip.mp4",
-            "uploaded_public",
-            10
-        )));
-        assert!(!missing_remote_should_remove_record(&upload_record(
-            "local",
-            "D:\\Videos\\clip.mp4",
-            "uploaded_processing",
-            10
-        )));
-        assert!(!missing_remote_should_remove_record(&upload_record(
-            "local",
-            "D:\\Videos\\clip.mp4",
-            "processing",
-            10
-        )));
+    fn missing_remote_clip_keeps_unconfirmed_and_processing_records() {
+        assert_eq!(
+            missing_remote_sync_action(&upload_record(
+                "local",
+                "D:\\Videos\\clip.mp4",
+                "uploaded_public",
+                10
+            )),
+            MissingRemoteSyncAction::ConfirmMissing
+        );
+        assert_eq!(
+            missing_remote_sync_action(&upload_record(
+                "local",
+                "D:\\Videos\\clip.mp4",
+                "uploaded_processing",
+                10
+            )),
+            MissingRemoteSyncAction::Keep
+        );
+        assert_eq!(
+            missing_remote_sync_action(&upload_record(
+                "local",
+                "D:\\Videos\\clip.mp4",
+                "processing",
+                10
+            )),
+            MissingRemoteSyncAction::Keep
+        );
+    }
+
+    #[test]
+    fn missing_remote_clip_requires_confirmation_before_removing_finalized_record() {
+        let mut record = upload_record("local", "D:\\Videos\\clip.mp4", "uploaded_public", 10);
+
+        assert_eq!(
+            missing_remote_sync_action(&record),
+            MissingRemoteSyncAction::ConfirmMissing
+        );
+
+        mark_remote_not_found_once(&mut record);
+
+        assert_eq!(
+            missing_remote_sync_action(&record),
+            MissingRemoteSyncAction::Remove
+        );
     }
 
     #[test]

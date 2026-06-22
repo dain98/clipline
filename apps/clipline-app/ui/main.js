@@ -1704,9 +1704,13 @@ function cloudConnected() {
   return Boolean(cloud.connected_user_id && cloud.credential_target);
 }
 
-function clipCloudRecord(clip) {
+function cloudUploadRecordForPath(path) {
   const uploads = cloudSettings().uploads || {};
-  return Object.values(uploads).find((record) => record && record.path === clip.path) || null;
+  return Object.values(uploads).find((record) => record && record.path === path) || null;
+}
+
+function clipCloudRecord(clip) {
+  return clip ? cloudUploadRecordForPath(clip.path) : null;
 }
 
 function clipCloudVisibility(record) {
@@ -1767,8 +1771,20 @@ function removeCloudUploadRecordForPath(path) {
   return true;
 }
 
-function applyCloudClipSyncResult(result) {
+function applyCloudClipSyncResult(
+  result,
+  { expectedRecord = null, expectedLocalClipId = "", expectedUpdatedAtUnix = 0 } = {},
+) {
   if (!result) return false;
+  const current = cloudUploadRecordForPath(result.path);
+  if (expectedRecord && current !== expectedRecord) return false;
+  if (current && expectedLocalClipId && current.local_clip_id !== expectedLocalClipId) return false;
+  if (
+    current
+    && Number(current.updated_at_unix || 0) > Number(expectedUpdatedAtUnix || 0)
+  ) {
+    return false;
+  }
   let changed = false;
   if (result.removed) changed = removeCloudUploadRecordForPath(result.path);
   if (result.record) {
@@ -1786,9 +1802,12 @@ async function syncCloudClipStatus(clip) {
   if (!clip || !cloudConnected()) return;
   const record = clipCloudRecord(clip);
   if (!record || !record.remote_clip_id) return;
+  const expectedRecord = record;
+  const expectedLocalClipId = record.local_clip_id || "";
+  const expectedUpdatedAtUnix = record.updated_at_unix || 0;
   try {
     const result = await invoke("sync_cloud_clip_status", { request: { path: clip.path } });
-    applyCloudClipSyncResult(result);
+    applyCloudClipSyncResult(result, { expectedRecord, expectedLocalClipId, expectedUpdatedAtUnix });
   } catch (_) {
     // Keep the last known cloud state if the status check is unavailable.
   }
@@ -2388,6 +2407,9 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
     if (seq !== audioPreviewSeq) return;
     setDeckStatus("");
     $("error").textContent = String(e);
+    if (forceResume && currentClip && currentClip.path === clip.path) {
+      video.play().catch(() => syncPlayState());
+    }
   }
 }
 
