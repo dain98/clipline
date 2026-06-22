@@ -92,3 +92,138 @@ pub trait AudioSource {
     /// Track parameters for muxing this source's stream.
     fn track_config(&self) -> AudioTrackConfig;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clipline_mp4::VideoTrackConfig;
+
+    struct StubEncoder {
+        call_count: u32,
+    }
+
+    impl StubEncoder {
+        fn new() -> Self {
+            Self { call_count: 0 }
+        }
+    }
+
+    impl Encoder for StubEncoder {
+        fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
+            self.call_count += 1;
+            Ok(vec![EncodedPacket {
+                data: frame.data.cpu_bytes().to_vec(),
+                pts_s: frame.pts_s,
+                duration_s: 1.0 / 30.0,
+                is_keyframe: self.call_count == 1,
+            }])
+        }
+
+        fn track_config(&self) -> VideoTrackConfig {
+            VideoTrackConfig::h264(64, 64, 90_000, vec![0x67], vec![0x68])
+        }
+
+        fn finish(&mut self) -> Result<Vec<EncodedPacket>, EncodeError> {
+            Ok(vec![EncodedPacket {
+                data: b"flush".to_vec(),
+                pts_s: 99.0,
+                duration_s: 1.0 / 30.0,
+                is_keyframe: false,
+            }])
+        }
+    }
+
+    impl FrameData {
+        fn cpu_bytes(&self) -> &[u8] {
+            match self {
+                FrameData::Cpu(b) => b,
+                #[cfg(windows)]
+                _ => panic!("no GPU frames in test"),
+            }
+        }
+    }
+
+    #[test]
+    fn box_dyn_encoder_delegates_encode() {
+        let mut enc: Box<dyn Encoder> = Box::new(StubEncoder::new());
+        let frame = Frame {
+            pts_s: 0.5,
+            data: FrameData::Cpu(vec![1, 2, 3]),
+        };
+        let packets = enc.encode(&frame).unwrap();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].data, vec![1, 2, 3]);
+        assert_eq!(packets[0].pts_s, 0.5);
+        assert!(packets[0].is_keyframe);
+    }
+
+    #[test]
+    fn box_dyn_encoder_delegates_track_config() {
+        let enc: Box<dyn Encoder> = Box::new(StubEncoder::new());
+        let cfg = enc.track_config();
+        assert_eq!(cfg.width, 64);
+        assert_eq!(cfg.height, 64);
+        assert_eq!(cfg.timescale, 90_000);
+    }
+
+    #[test]
+    fn box_dyn_encoder_delegates_finish() {
+        let mut enc: Box<dyn Encoder> = Box::new(StubEncoder::new());
+        let packets = enc.finish().unwrap();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].data, b"flush");
+    }
+
+    #[test]
+    fn default_finish_returns_empty() {
+        struct MinimalEncoder;
+        impl Encoder for MinimalEncoder {
+            fn encode(&mut self, _: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
+                Ok(Vec::new())
+            }
+            fn track_config(&self) -> VideoTrackConfig {
+                VideoTrackConfig::h264(32, 32, 90_000, Vec::new(), Vec::new())
+            }
+        }
+        let mut enc = MinimalEncoder;
+        assert!(enc.finish().unwrap().is_empty());
+    }
+
+    #[test]
+    fn capture_error_display_includes_context() {
+        let err = CaptureError::Init("no device".into());
+        assert!(format!("{err}").contains("no device"));
+        let err = CaptureError::DeviceLost("gone".into());
+        assert!(format!("{err}").contains("gone"));
+        let err = CaptureError::Timeout(std::time::Duration::from_millis(500));
+        assert!(format!("{err}").contains("500ms"));
+    }
+
+    #[test]
+    fn encode_error_display_includes_context() {
+        let err = EncodeError::Backend("oom".into());
+        assert!(format!("{err}").contains("oom"));
+    }
+
+    #[test]
+    fn frame_data_cpu_variant_holds_bytes() {
+        let data = FrameData::Cpu(vec![0xDE, 0xAD]);
+        match data {
+            FrameData::Cpu(b) => assert_eq!(b, vec![0xDE, 0xAD]),
+            #[cfg(windows)]
+            _ => panic!("expected Cpu"),
+        }
+    }
+
+    #[test]
+    fn audio_packet_fields_are_accessible() {
+        let pkt = AudioPacket {
+            data: vec![0x01],
+            pts_s: 1.5,
+            duration_s: 0.02,
+        };
+        assert_eq!(pkt.data, vec![0x01]);
+        assert!((pkt.pts_s - 1.5).abs() < f64::EPSILON);
+        assert!((pkt.duration_s - 0.02).abs() < f64::EPSILON);
+    }
+}

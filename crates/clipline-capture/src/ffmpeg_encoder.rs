@@ -597,4 +597,131 @@ mod tests {
         );
         assert!(finish_unit(Codec::Av1, &au, 30, 30).1, "GOP boundary is");
     }
+
+    #[test]
+    fn finish_unit_classifies_hevc_irap_as_keyframe() {
+        // Annex B HEVC: BLA_W_LP (NAL type 16) → keyframe
+        let irap = [0x00, 0x00, 0x00, 0x01, 0x20, 0x01]; // NAL type = (0x20 >> 1) & 0x3F = 16
+        let (_sample, is_key) = finish_unit(Codec::Hevc, &irap, 30, 0);
+        assert!(is_key, "HEVC IRAP should be keyframe");
+        // Non-IRAP: TRAIL_R (NAL type 1)
+        let inter = [0x00, 0x00, 0x00, 0x01, 0x02, 0x01]; // NAL type = (0x02 >> 1) & 0x3F = 1
+        let (_s, is_key) = finish_unit(Codec::Hevc, &inter, 30, 5);
+        assert!(!is_key, "HEVC TRAIL_R should not be keyframe");
+    }
+
+    #[test]
+    fn empty_params_produces_correct_codec_variant() {
+        match empty_params(Codec::H264) {
+            VideoCodecParams::H264 { sps, pps } => {
+                assert!(sps.is_empty());
+                assert!(pps.is_empty());
+            }
+            _ => panic!("expected H264"),
+        }
+        match empty_params(Codec::Hevc) {
+            VideoCodecParams::Hevc { vps, sps, pps } => {
+                assert!(vps.is_empty());
+                assert!(sps.is_empty());
+                assert!(pps.is_empty());
+            }
+            _ => panic!("expected Hevc"),
+        }
+        match empty_params(Codec::Av1) {
+            VideoCodecParams::Av1 {
+                sequence_header_obu,
+            } => {
+                assert!(sequence_header_obu.is_empty());
+            }
+            _ => panic!("expected Av1"),
+        }
+    }
+
+    #[test]
+    fn rec709_limited_flags_include_all_four_bt709_params() {
+        let flags = rec709_limited_flags();
+        let joined = flags.join(" ");
+        assert!(joined.contains("-color_range tv"));
+        assert!(joined.contains("-colorspace bt709"));
+        assert!(joined.contains("-color_primaries bt709"));
+        assert!(joined.contains("-color_trc bt709"));
+    }
+
+    #[test]
+    fn backend_rate_control_nvenc_uses_cbr_with_preset() {
+        let rc = backend_rate_control(EncoderBackend::Nvenc, 8_000_000, 16_000_000);
+        let joined = rc.join(" ");
+        assert!(joined.contains("-rc cbr"));
+        assert!(joined.contains("-b:v 8000000"));
+        assert!(joined.contains("-maxrate 8000000"));
+        assert!(joined.contains("-bufsize 16000000"));
+        assert!(joined.contains("-preset p4"));
+        assert!(joined.contains("-tune ll"));
+    }
+
+    #[test]
+    fn backend_rate_control_amf_uses_cbr_with_lowlatency() {
+        let rc = backend_rate_control(EncoderBackend::Amf, 4_000_000, 8_000_000);
+        let joined = rc.join(" ");
+        assert!(joined.contains("-rc cbr"));
+        assert!(joined.contains("-usage lowlatency"));
+    }
+
+    #[test]
+    fn backend_rate_control_quicksync_has_cbr_and_low_power() {
+        let rc = backend_rate_control(EncoderBackend::QuickSync, 4_000_000, 8_000_000);
+        let joined = rc.join(" ");
+        assert!(joined.contains("-b:v 4000000"));
+        assert!(joined.contains("-low_power 0"));
+    }
+
+    #[test]
+    fn backend_rate_control_svtav1_has_no_maxrate() {
+        let rc = backend_rate_control(EncoderBackend::SvtAv1, 6_000_000, 12_000_000);
+        let joined = rc.join(" ");
+        assert!(joined.contains("-b:v 6000000"));
+        assert!(joined.contains("-preset 8"));
+        assert!(
+            !joined.contains("-maxrate"),
+            "SVT-AV1 rejects -maxrate"
+        );
+        assert!(
+            !joined.contains("-bufsize"),
+            "SVT-AV1 rejects -bufsize"
+        );
+    }
+
+    #[test]
+    fn backend_rate_control_mf_software_is_empty() {
+        let rc = backend_rate_control(EncoderBackend::MfSoftware, 4_000_000, 8_000_000);
+        assert!(rc.is_empty());
+    }
+
+    #[test]
+    fn set_params_if_empty_caches_on_first_call_only() {
+        use std::sync::{Arc, Mutex};
+        let params = Arc::new(Mutex::new(None));
+        // H.264 Annex B with SPS + PPS
+        let au = [
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x0A, 0xAC, // SPS (nal_type 7)
+            0x00, 0x00, 0x00, 0x01, 0x68, 0xEE, 0x38, 0x80, // PPS (nal_type 8)
+        ];
+        set_params_if_empty(Codec::H264, &au, &params);
+        assert!(params.lock().unwrap().is_some());
+        // A second call with different data should not overwrite
+        let au2 = [
+            0x00, 0x00, 0x00, 0x01, 0x67, 0xFF, 0xFF, // different SPS
+            0x00, 0x00, 0x00, 0x01, 0x68, 0xFF, 0xFF, // different PPS
+        ];
+        set_params_if_empty(Codec::H264, &au2, &params);
+        {
+            let guard = params.lock().unwrap();
+            match guard.as_ref().unwrap() {
+                VideoCodecParams::H264 { sps, .. } => {
+                    assert_eq!(sps, &[0x67, 0x64, 0x00, 0x0A, 0xAC], "first params cached");
+                }
+                _ => panic!("expected H264"),
+            }
+        }
+    }
 }

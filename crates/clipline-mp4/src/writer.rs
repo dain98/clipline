@@ -446,3 +446,398 @@ impl TrackState {
         full_box(*b"co64", 0, 0, p.into_vec())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fragment::FragSample;
+    use crate::init::{AudioTrackConfig, VideoTrackConfig};
+    use crate::walker::{children, find, walk};
+    use std::io::Cursor;
+
+    fn video_cfg() -> VideoTrackConfig {
+        VideoTrackConfig::h264(
+            64,
+            64,
+            90_000,
+            vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+            vec![0x68, 0xEE, 0x38, 0x80],
+        )
+    }
+
+    fn audio_cfg() -> AudioTrackConfig {
+        AudioTrackConfig {
+            channels: 2,
+            sample_rate: 48_000,
+            pre_skip: 312,
+        }
+    }
+
+    fn gop(start: u32) -> Vec<FragSample> {
+        (0..3)
+            .map(|i| FragSample {
+                data: format!("sample-{:04}", start + i).into_bytes(),
+                duration: 3000,
+                is_sync: i == 0,
+            })
+            .collect()
+    }
+
+    fn all_sync_gop() -> Vec<FragSample> {
+        (0..4)
+            .map(|_| FragSample {
+                data: vec![0xAA; 10],
+                duration: 960,
+                is_sync: true,
+            })
+            .collect()
+    }
+
+    // --- TrackState helper tests ---
+
+    fn make_track_state(cfg: TrackConfig, samples: &[(u32, u32, bool)]) -> TrackState {
+        let mut state = TrackState {
+            cfg,
+            next_decode_time: 0,
+            sizes: Vec::new(),
+            durations: Vec::new(),
+            sync: Vec::new(),
+            chunks: Vec::new(),
+        };
+        for &(size, duration, is_sync) in samples {
+            state.sizes.push(size);
+            state.durations.push(duration);
+            state.sync.push(is_sync);
+            state.next_decode_time += duration as u64;
+        }
+        state
+    }
+
+    #[test]
+    fn stts_run_length_encodes_equal_durations() {
+        let state = make_track_state(
+            TrackConfig::Video(video_cfg()),
+            &[
+                (100, 3000, true),
+                (100, 3000, false),
+                (100, 3000, false),
+                (100, 6000, true),
+                (100, 6000, false),
+            ],
+        );
+        let stts = state.stts();
+        // full_box header: 12 bytes; payload: entry_count(4) + 2 runs * 8
+        let boxes = walk(&stts);
+        assert_eq!(&boxes[0].fourcc, b"stts");
+        let p = boxes[0].payload_offset as usize;
+        let entry_count = u32::from_be_bytes(stts[p + 4..p + 8].try_into().unwrap());
+        assert_eq!(entry_count, 2, "two distinct duration runs");
+        // run 1: count=3, delta=3000
+        assert_eq!(
+            u32::from_be_bytes(stts[p + 8..p + 12].try_into().unwrap()),
+            3
+        );
+        assert_eq!(
+            u32::from_be_bytes(stts[p + 12..p + 16].try_into().unwrap()),
+            3000
+        );
+        // run 2: count=2, delta=6000
+        assert_eq!(
+            u32::from_be_bytes(stts[p + 16..p + 20].try_into().unwrap()),
+            2
+        );
+        assert_eq!(
+            u32::from_be_bytes(stts[p + 20..p + 24].try_into().unwrap()),
+            6000
+        );
+    }
+
+    #[test]
+    fn stss_none_when_all_sync() {
+        let state = make_track_state(
+            TrackConfig::Audio(audio_cfg()),
+            &[(50, 960, true), (50, 960, true), (50, 960, true)],
+        );
+        assert!(
+            state.stss().is_none(),
+            "all-sync track omits stss per spec"
+        );
+    }
+
+    #[test]
+    fn stss_lists_1_based_sync_sample_numbers() {
+        let state = make_track_state(
+            TrackConfig::Video(video_cfg()),
+            &[
+                (100, 3000, true),
+                (80, 3000, false),
+                (80, 3000, false),
+                (100, 3000, true),
+            ],
+        );
+        let stss = state.stss().expect("should have stss");
+        let boxes = walk(&stss);
+        let p = boxes[0].payload_offset as usize;
+        let n = u32::from_be_bytes(stss[p + 4..p + 8].try_into().unwrap());
+        assert_eq!(n, 2);
+        assert_eq!(
+            u32::from_be_bytes(stss[p + 8..p + 12].try_into().unwrap()),
+            1,
+            "first sync at sample 1"
+        );
+        assert_eq!(
+            u32::from_be_bytes(stss[p + 12..p + 16].try_into().unwrap()),
+            4,
+            "second sync at sample 4"
+        );
+    }
+
+    #[test]
+    fn stsc_run_length_encodes_chunk_sizes() {
+        let mut state = make_track_state(TrackConfig::Video(video_cfg()), &[]);
+        // 3 chunks: first two have 3 samples, third has 2
+        state.chunks = vec![(0, 3), (100, 3), (200, 2)];
+        let stsc = state.stsc();
+        let boxes = walk(&stsc);
+        let p = boxes[0].payload_offset as usize;
+        let entry_count = u32::from_be_bytes(stsc[p + 4..p + 8].try_into().unwrap());
+        assert_eq!(entry_count, 2, "two distinct runs");
+        // run 1: first_chunk=1, samples_per_chunk=3
+        assert_eq!(
+            u32::from_be_bytes(stsc[p + 8..p + 12].try_into().unwrap()),
+            1
+        );
+        assert_eq!(
+            u32::from_be_bytes(stsc[p + 12..p + 16].try_into().unwrap()),
+            3
+        );
+        // run 2: first_chunk=3, samples_per_chunk=2
+        assert_eq!(
+            u32::from_be_bytes(stsc[p + 20..p + 24].try_into().unwrap()),
+            3
+        );
+        assert_eq!(
+            u32::from_be_bytes(stsc[p + 24..p + 28].try_into().unwrap()),
+            2
+        );
+    }
+
+    #[test]
+    fn stsz_lists_every_sample_size() {
+        let state = make_track_state(
+            TrackConfig::Video(video_cfg()),
+            &[(100, 3000, true), (80, 3000, false), (90, 3000, false)],
+        );
+        let stsz = state.stsz();
+        let boxes = walk(&stsz);
+        let p = boxes[0].payload_offset as usize;
+        let sample_size = u32::from_be_bytes(stsz[p + 4..p + 8].try_into().unwrap());
+        assert_eq!(sample_size, 0, "variable size mode");
+        let count = u32::from_be_bytes(stsz[p + 8..p + 12].try_into().unwrap());
+        assert_eq!(count, 3);
+        assert_eq!(
+            u32::from_be_bytes(stsz[p + 12..p + 16].try_into().unwrap()),
+            100
+        );
+        assert_eq!(
+            u32::from_be_bytes(stsz[p + 16..p + 20].try_into().unwrap()),
+            80
+        );
+        assert_eq!(
+            u32::from_be_bytes(stsz[p + 20..p + 24].try_into().unwrap()),
+            90
+        );
+    }
+
+    #[test]
+    fn co64_lists_chunk_offsets() {
+        let mut state = make_track_state(TrackConfig::Video(video_cfg()), &[]);
+        state.chunks = vec![(1000, 3), (5000, 2)];
+        let co64 = state.co64();
+        let boxes = walk(&co64);
+        let p = boxes[0].payload_offset as usize;
+        let count = u32::from_be_bytes(co64[p + 4..p + 8].try_into().unwrap());
+        assert_eq!(count, 2);
+        assert_eq!(
+            u64::from_be_bytes(co64[p + 8..p + 16].try_into().unwrap()),
+            1000
+        );
+        assert_eq!(
+            u64::from_be_bytes(co64[p + 16..p + 24].try_into().unwrap()),
+            5000
+        );
+    }
+
+    #[test]
+    fn duration_media_ts_sums_all_durations() {
+        let state = make_track_state(
+            TrackConfig::Video(video_cfg()),
+            &[(100, 3000, true), (80, 3000, false), (90, 3000, false)],
+        );
+        assert_eq!(state.duration_media_ts(), 9000);
+    }
+
+    #[test]
+    fn duration_movie_ts_scales_to_movie_timescale() {
+        let state = make_track_state(
+            TrackConfig::Video(video_cfg()),
+            // 90_000 ticks at media timescale 90_000 = 1 second = 1000 movie ts
+            &[(100, 90_000, true)],
+        );
+        assert_eq!(state.duration_movie_ts(), 1000);
+    }
+
+    // --- HybridMp4Writer API tests ---
+
+    #[test]
+    fn write_fragment_multi_rejects_track_count_mismatch() {
+        let mut w =
+            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        let s1 = gop(0);
+        let s2 = gop(3);
+        let err = w.write_fragment_multi(&[&s1, &s2]);
+        assert!(err.is_err(), "2 slices for a 1-track writer");
+    }
+
+    #[test]
+    fn write_fragment_multi_no_ops_on_all_empty() {
+        let mut w =
+            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        let before = w.w.position();
+        w.write_fragment_multi(&[&[]]).unwrap();
+        assert_eq!(w.w.position(), before, "nothing written for empty samples");
+    }
+
+    #[test]
+    fn write_fragment_multi_borrowed_rejects_track_count_mismatch() {
+        let mut w = HybridMp4Writer::new_multi(
+            Cursor::new(Vec::new()),
+            vec![
+                TrackConfig::Video(video_cfg()),
+                TrackConfig::Audio(audio_cfg()),
+            ],
+        )
+        .unwrap();
+        let samples = gop(0);
+        let refs: Vec<FragSampleRef<'_>> = samples
+            .iter()
+            .map(|s| FragSampleRef {
+                data: &s.data,
+                duration: s.duration,
+                is_sync: s.is_sync,
+            })
+            .collect();
+        let err = w.write_fragment_multi_borrowed(&[&refs]);
+        assert!(err.is_err(), "1 slice for a 2-track writer");
+    }
+
+    #[test]
+    fn write_fragment_multi_borrowed_no_ops_on_all_empty() {
+        let mut w = HybridMp4Writer::new_multi(
+            Cursor::new(Vec::new()),
+            vec![
+                TrackConfig::Video(video_cfg()),
+                TrackConfig::Audio(audio_cfg()),
+            ],
+        )
+        .unwrap();
+        let before = w.w.position();
+        let empty_v: &[FragSampleRef<'_>] = &[];
+        let empty_a: &[FragSampleRef<'_>] = &[];
+        w.write_fragment_multi_borrowed(&[empty_v, empty_a])
+            .unwrap();
+        assert_eq!(w.w.position(), before);
+    }
+
+    #[test]
+    fn write_fragment_multi_from_source_rejects_track_count_mismatch() {
+        let mut w =
+            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        let source_data = vec![0u8; 100];
+        let mut source = Cursor::new(source_data);
+        let samples = [SourceSample {
+            offset: 0,
+            size: 10,
+            duration: 3000,
+            is_sync: true,
+        }];
+        let err = w.write_fragment_multi_from_source(&mut source, &[&samples, &samples]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn write_fragment_multi_from_source_no_ops_on_all_empty() {
+        let mut w =
+            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        let mut source = Cursor::new(Vec::<u8>::new());
+        let before = w.w.position();
+        let empty: &[SourceSample] = &[];
+        w.write_fragment_multi_from_source(&mut source, &[empty])
+            .unwrap();
+        assert_eq!(w.w.position(), before);
+    }
+
+    #[test]
+    fn finalize_produces_ftyp_mdat_moov_layout() {
+        let mut w =
+            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        w.write_fragment(&gop(0)).unwrap();
+        let buf = w.finalize().unwrap().into_inner();
+        let boxes = walk(&buf);
+        let fourccs: Vec<&[u8; 4]> = boxes.iter().map(|b| &b.fourcc).collect();
+        assert_eq!(fourccs, vec![b"ftyp", b"mdat", b"moov"]);
+    }
+
+    #[test]
+    fn finalize_multi_track_moov_has_one_trak_per_track() {
+        let mut w = HybridMp4Writer::new_multi(
+            Cursor::new(Vec::new()),
+            vec![
+                TrackConfig::Video(video_cfg()),
+                TrackConfig::Audio(audio_cfg()),
+            ],
+        )
+        .unwrap();
+        let video = gop(0);
+        let audio = all_sync_gop();
+        w.write_fragment_multi(&[&video, &audio]).unwrap();
+        let buf = w.finalize().unwrap().into_inner();
+
+        let boxes = walk(&buf);
+        let moov = find(&boxes, b"moov").unwrap();
+        let kids = children(&buf, moov);
+        let traks: Vec<_> = kids.iter().filter(|b| &b.fourcc == b"trak").collect();
+        assert_eq!(traks.len(), 2, "one trak per track");
+    }
+
+    #[test]
+    fn copy_exact_copies_all_bytes() {
+        let src = b"hello world";
+        let mut dst = Vec::new();
+        let mut buf = [0u8; 4]; // small buffer forces multiple iterations
+        copy_exact(&mut &src[..], &mut dst, src.len() as u64, &mut buf).unwrap();
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn sequence_number_increments_per_fragment() {
+        let mut w =
+            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        assert_eq!(w.next_sequence, 1);
+        w.write_fragment(&gop(0)).unwrap();
+        assert_eq!(w.next_sequence, 2);
+        w.write_fragment(&gop(3)).unwrap();
+        assert_eq!(w.next_sequence, 3);
+    }
+
+    #[test]
+    fn next_decode_time_advances_by_sample_durations() {
+        let mut w =
+            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        w.write_fragment(&gop(0)).unwrap();
+        // 3 samples × 3000 duration each
+        assert_eq!(w.tracks[0].next_decode_time, 9000);
+        w.write_fragment(&gop(3)).unwrap();
+        assert_eq!(w.tracks[0].next_decode_time, 18000);
+    }
+}
