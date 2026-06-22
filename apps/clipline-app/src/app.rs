@@ -534,6 +534,41 @@ fn minimize_request_action(settings: &AppSettings) -> MinimizeRequestAction {
     }
 }
 
+fn rebind_global_hotkey<E>(
+    old_shortcut: Shortcut,
+    new_shortcut: Shortcut,
+    old_is_registered: bool,
+    mut register: impl FnMut(Shortcut) -> Result<(), E>,
+    mut unregister: impl FnMut(Shortcut) -> Result<(), E>,
+) -> Result<(), String>
+where
+    E: std::fmt::Display,
+{
+    register(new_shortcut).map_err(|e| format!("register hotkey: {e}"))?;
+    if old_is_registered {
+        if let Err(e) = unregister(old_shortcut) {
+            let _ = unregister(new_shortcut);
+            return Err(format!("replace hotkey: {e}"));
+        }
+    }
+    Ok(())
+}
+
+fn retry_missing_global_hotkey<E>(
+    shortcut: Shortcut,
+    is_registered: bool,
+    register: impl FnOnce(Shortcut) -> Result<(), E>,
+) -> Option<String>
+where
+    E: std::fmt::Display,
+{
+    if is_registered {
+        None
+    } else {
+        register(shortcut).err().map(|e| e.to_string())
+    }
+}
+
 fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>, destroy: bool) -> Result<(), String> {
     app.state::<MicTestState>().stop();
     if let Some(window) = app.get_webview_window("main") {
@@ -920,12 +955,25 @@ fn save_settings<R: Runtime>(
     if settings.hotkey != old.hotkey {
         let old_shortcut = parse_hotkey(&old.hotkey)?;
         let new_shortcut = parse_hotkey(&settings.hotkey)?;
-        app.global_shortcut()
-            .register(new_shortcut)
-            .map_err(|e| format!("register hotkey: {e}"))?;
-        if let Err(e) = app.global_shortcut().unregister(old_shortcut) {
-            let _ = app.global_shortcut().unregister(new_shortcut);
-            return Err(format!("replace hotkey: {e}"));
+        let shortcuts = app.global_shortcut();
+        rebind_global_hotkey(
+            old_shortcut,
+            new_shortcut,
+            shortcuts.is_registered(old_shortcut),
+            |shortcut| shortcuts.register(shortcut),
+            |shortcut| shortcuts.unregister(shortcut),
+        )?;
+    } else {
+        let shortcut = parse_hotkey(&settings.hotkey)?;
+        let shortcuts = app.global_shortcut();
+        if let Some(e) =
+            retry_missing_global_hotkey(shortcut, shortcuts.is_registered(shortcut), |shortcut| {
+                shortcuts.register(shortcut)
+            })
+        {
+            let message = format!("global save hotkey still unavailable: {e}");
+            eprintln!("{message}");
+            let _ = app.emit("error", message);
         }
     }
 
@@ -1066,14 +1114,20 @@ pub fn run() {
             crate::library::storage_status
         ])
         .setup(move |app| {
-            app.global_shortcut().register(hotkey)?;
+            if let Err(e) = app.global_shortcut().register(hotkey) {
+                let message = format!("global save hotkey unavailable; continuing without it: {e}");
+                eprintln!("{message}");
+                let _ = app.handle().emit("error", message);
+            }
             if let Err(e) = crate::hotkeys::install_save_hook(&settings.hotkey, {
                 let app = app.handle().clone();
                 move || {
                     app.state::<RuntimeState>().request_save();
                 }
             }) {
-                eprintln!("low-level save hotkey unavailable: {e}");
+                let message = format!("low-level save hotkey unavailable: {e}");
+                eprintln!("{message}");
+                let _ = app.handle().emit("error", message);
             }
             // Bound the asset protocol to the configured media folder so clips
             // under a custom root play back, while the static config scope stays
@@ -1324,6 +1378,46 @@ mod tests {
     fn quota_parser_rejects_negative_or_non_numeric_values() {
         assert!(parse_quota_gb("-1").is_err());
         assert!(parse_quota_gb("nope").is_err());
+    }
+
+    #[test]
+    fn rebind_global_hotkey_skips_unregister_when_old_shortcut_is_stale() {
+        let old_shortcut = parse_hotkey("Alt+F10").unwrap();
+        let new_shortcut = parse_hotkey("Ctrl+F8").unwrap();
+        let mut registered = Vec::new();
+        let mut unregistered = Vec::new();
+
+        let result = rebind_global_hotkey(
+            old_shortcut,
+            new_shortcut,
+            false,
+            |shortcut| {
+                registered.push(shortcut);
+                Ok::<_, &'static str>(())
+            },
+            |shortcut| {
+                unregistered.push(shortcut);
+                Err::<(), _>("old shortcut was never registered")
+            },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(registered, vec![new_shortcut]);
+        assert!(unregistered.is_empty());
+    }
+
+    #[test]
+    fn missing_unchanged_global_hotkey_is_retried_without_blocking_save() {
+        let shortcut = parse_hotkey("Alt+F10").unwrap();
+        let mut registered = Vec::new();
+
+        let retry_error = retry_missing_global_hotkey(shortcut, false, |shortcut| {
+            registered.push(shortcut);
+            Err::<(), _>("still owned by another app")
+        });
+
+        assert_eq!(retry_error, Some("still owned by another app".to_string()));
+        assert_eq!(registered, vec![shortcut]);
     }
 
     #[test]

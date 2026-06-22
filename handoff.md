@@ -254,6 +254,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-22):
+- Startup now treats OS global-hotkey registration as best-effort. If `Alt+F10`
+  is already owned by another recorder/overlay, Clipline continues launching,
+  keeps the tray/menu path available, and still installs the low-level in-game
+  hotkey fallback instead of aborting during Tauri setup with no visible UI.
+  Settings rebinds now skip unregistering stale, never-registered shortcuts and
+  retry an unchanged missing shortcut without blocking unrelated settings saves.
 - Opening a cloud-uploaded clip now rechecks its remote Clipline Cloud state in the background:
   visibility/link changes refresh the local upload record, finalized remote deletions clear the
   local cloud badge/link, and temporary 404s for `uploaded_processing` records keep the local
