@@ -301,7 +301,18 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                 .await
                 .map_err(cloud_error)?,
         ),
-        Ok(None) => None,
+        Ok(None) => {
+            mark_ready_timeout(&mut record);
+            persist_record(&state, &record)?;
+            emit_upload_progress(
+                &app,
+                &record,
+                progress.file_size_bytes,
+                progress.file_size_bytes,
+                record.error.clone(),
+            );
+            None
+        }
         Err(error) => return Err(cloud_error(error)),
     };
 
@@ -327,8 +338,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         );
 
         if cloud.delete_local_after_upload {
-            let _ = std::fs::remove_file(&target);
-            let _ = std::fs::remove_file(target.with_extension("markers.json"));
+            delete_uploaded_local_files(&target);
         }
     }
 
@@ -562,6 +572,21 @@ fn persist_record(state: &RuntimeState, record: &CloudUploadRecord) -> Result<()
         replace_upload_record(cloud, record.clone());
     })?;
     Ok(())
+}
+
+fn mark_ready_timeout(record: &mut CloudUploadRecord) {
+    record.upload_status = "failed".to_string();
+    record.error = Some(format!(
+        "cloud upload completed, but cloud processing did not become ready within {} seconds; retry the upload to refresh the cloud link",
+        READY_POLL_ATTEMPTS as u64 * READY_POLL_DELAY.as_secs()
+    ));
+    record.updated_at_unix = unix_now();
+}
+
+fn delete_uploaded_local_files(target: &Path) {
+    let _ = std::fs::remove_file(target);
+    let _ = std::fs::remove_file(target.with_extension("markers.json"));
+    let _ = std::fs::remove_file(crate::poster::poster_path(target));
 }
 
 fn emit_upload_progress<R: Runtime>(
@@ -810,6 +835,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ready_timeout_marks_upload_failed_with_retryable_error() {
+        let mut record = upload_record("local", "D:\\Videos\\clip.mp4", "processing", 10);
+        record.remote_clip_id = Some("remote-1".into());
+        record.remote_url = Some("https://clips.example.com/clip/remote-1".into());
+
+        mark_ready_timeout(&mut record);
+
+        assert_eq!(record.upload_status, "failed");
+        assert_eq!(record.remote_clip_id.as_deref(), Some("remote-1"));
+        assert_eq!(
+            record.remote_url.as_deref(),
+            Some("https://clips.example.com/clip/remote-1")
+        );
+        assert!(
+            record
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("processing")),
+            "timeout should explain that cloud processing did not become ready"
+        );
+    }
+
+    #[test]
+    fn delete_uploaded_local_files_removes_poster_sidecar() {
+        let dir = test_dir("cloud-delete");
+        let clip = dir.join("clip.mp4");
+        let markers = clip.with_extension("markers.json");
+        let poster = crate::poster::poster_path(&clip);
+        std::fs::write(&clip, b"mp4").unwrap();
+        std::fs::write(&markers, b"{}").unwrap();
+        std::fs::write(&poster, b"jpg").unwrap();
+
+        delete_uploaded_local_files(&clip);
+
+        assert!(!clip.exists());
+        assert!(!markers.exists());
+        assert!(!poster.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn audio_markers() -> ClipMarkers {
         ClipMarkers {
             recording_start_s: 0.0,
@@ -895,5 +961,18 @@ mod tests {
             error: None,
             updated_at_unix,
         }
+    }
+
+    fn test_dir(name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-cloud-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

@@ -207,6 +207,13 @@ function selectedAudioTrackIdsForClip(clip = currentClip, selected = selectedAud
   return PlayerCore.selectedAudioTrackIds(clipAudioTracks(clip), [...selected]);
 }
 
+function applyDefaultAudioSelectionIfNeeded() {
+  const tracks = clipAudioTracks();
+  const selected = selectedAudioTrackIdsForClip();
+  if (!PlayerCore.selectionNeedsPreview(tracks, selected)) return;
+  applySelectedAudioTracksToPlayback();
+}
+
 function audioTrackLabel(track) {
   const label = track && track.label ? String(track.label).trim() : "";
   if (label) return label;
@@ -2412,6 +2419,9 @@ async function saveClipRename(ev) {
 
 function openClip(clip) {
   audioPreviewSeq += 1;
+  cancelAnimationFrame(rafId);
+  rafId = 0;
+  pendingSeek = null;
   currentClip = clip;
   currentReviewMediaPath = clip.path;
   resetSelectedAudioTracks(clip);
@@ -2435,6 +2445,7 @@ function openClip(clip) {
   noteActivity();
   requestAnimationFrame(updateStageFrame);
   video.play().catch(() => syncPlayState());
+  applyDefaultAudioSelectionIfNeeded();
 }
 
 function closeReview() {

@@ -430,6 +430,37 @@ fn normal_output_track_remains_directly_selectable() {
 }
 
 #[test]
+fn split_output_default_selection_requires_preview() {
+    let mut ctx = player_core_context();
+    let model = eval_json(
+        &mut ctx,
+        r#"
+        (() => {
+          const splitTracks = [
+            { id: 'output', kind: 'output', label: 'Output Audio' },
+            { id: 'process:1', kind: 'process_output', label: 'Game' },
+            { id: 'microphone', kind: 'microphone', label: 'Microphone' },
+          ];
+          const normalTracks = [
+            { id: 'output', kind: 'output', label: 'Output Audio' },
+            { id: 'microphone', kind: 'microphone', label: 'Microphone' },
+          ];
+          return {
+            splitDefault: PlayerCore.selectionNeedsPreview(splitTracks, PlayerCore.defaultAudioTrackIds(splitTracks)),
+            normalDefault: PlayerCore.selectionNeedsPreview(normalTracks, PlayerCore.defaultAudioTrackIds(normalTracks)),
+            normalPartial: PlayerCore.selectionNeedsPreview(normalTracks, ['microphone']),
+          };
+        })()
+        "#,
+    );
+
+    assert_eq!(
+        model,
+        r#"{"splitDefault":true,"normalDefault":false,"normalPartial":true}"#
+    );
+}
+
+#[test]
 fn key_intents_cover_the_documented_shortcuts() {
     let mut ctx = player_core_context();
     for code in ["Space", "KeyK"] {

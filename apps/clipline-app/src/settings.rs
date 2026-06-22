@@ -1,11 +1,17 @@
 //! Persisted application settings and mapping to recorder service options.
 
 use std::collections::{BTreeMap, HashSet};
+use std::ffi::OsStr;
+use std::io::Write;
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri_plugin_global_shortcut::Shortcut;
+use windows_sys::Win32::Storage::FileSystem::{
+    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+};
 
 use crate::service::{
     default_clips_dir, AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource,
@@ -873,7 +879,7 @@ impl AppSettings {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        std::fs::write(path, json).map_err(|e| e.to_string())
+        write_file_atomically(path, json.as_bytes())
     }
 
     pub fn load_or_default() -> Self {
@@ -1016,6 +1022,55 @@ fn config_base() -> PathBuf {
         })
         .unwrap_or_else(std::env::temp_dir)
         .join("Clipline")
+}
+
+fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = sibling_tmp_path(path)?;
+    let _ = std::fs::remove_file(&tmp);
+    {
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| format!("create temporary settings file: {e}"))?;
+        file.write_all(bytes)
+            .map_err(|e| format!("write temporary settings file: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("sync temporary settings file: {e}"))?;
+    }
+    if let Err(error) = replace_file(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
+fn sibling_tmp_path(path: &Path) -> Result<PathBuf, String> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "settings path must include a file name".to_string())?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".tmp");
+    Ok(path.with_file_name(tmp_name))
+}
+
+fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
+    let from_w = wide_null(from.as_os_str());
+    let to_w = wide_null(to.as_os_str());
+    let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
+    if unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), flags) } == 0 {
+        return Err(format!(
+            "replace settings file {to:?}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+fn wide_null(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 pub fn settings_path() -> PathBuf {
@@ -1216,6 +1271,12 @@ fn estimated_buffer_bytes(buffer_seconds: f64, bitrate_mbps: f64) -> usize {
 fn same_or_nested_path(child: &Path, parent: &Path) -> bool {
     let child = normalize_components(child);
     let parent = normalize_components(parent);
+    if cfg!(windows) {
+        let child = windows_component_keys(&child);
+        let parent = windows_component_keys(&parent);
+        return child == parent
+            || (child.len() > parent.len() && child[..parent.len()] == parent[..]);
+    }
     child == parent || child.starts_with(&parent)
 }
 
@@ -1225,6 +1286,12 @@ fn normalize_components(path: &Path) -> PathBuf {
         out.push(component.as_os_str());
     }
     out
+}
+
+fn windows_component_keys(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect()
 }
 
 #[cfg(test)]
@@ -1994,6 +2061,23 @@ mod tests {
     }
 
     #[test]
+    fn save_to_replaces_settings_via_temp_file() {
+        let dir = TestDir::new("atomic-save");
+        let path = dir.path().join("settings.json");
+        let tmp = dir.path().join("settings.json.tmp");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::write(&tmp, "stale").unwrap();
+
+        AppSettings::default().save_to(&path).unwrap();
+
+        assert!(!tmp.exists(), "save_to must not leave stale temp files");
+        assert_eq!(
+            AppSettings::load_from(&path).unwrap(),
+            AppSettings::default()
+        );
+    }
+
+    #[test]
     fn disk_replay_requires_acknowledgement_and_folder() {
         let mut settings = AppSettings {
             replay_storage: ReplayStorageSettings {
@@ -2023,6 +2107,29 @@ mod tests {
             replay_storage: ReplayStorageSettings {
                 mode: ReplayStorageMode::Disk,
                 disk_dir: media.join("cache").display().to_string(),
+                disk_quota_gb: 2.0,
+                disk_acknowledged: true,
+            },
+            ..AppSettings::default()
+        };
+
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn disk_replay_rejects_case_variant_media_folder_overlap() {
+        let media = std::env::temp_dir().join("clipline-media-case");
+        let media_dir = media.display().to_string().to_ascii_uppercase();
+        let cache_dir = media
+            .join("cache")
+            .display()
+            .to_string()
+            .to_ascii_lowercase();
+        let settings = AppSettings {
+            media_dir,
+            replay_storage: ReplayStorageSettings {
+                mode: ReplayStorageMode::Disk,
+                disk_dir: cache_dir,
                 disk_quota_gb: 2.0,
                 disk_acknowledged: true,
             },

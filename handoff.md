@@ -254,6 +254,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-21):
+- Bug-scan app reliability slice: recorder restarts now build replacement service options before
+  dropping the old command sender, settings saves go through a synced sibling temp file and atomic
+  replace, cloud ready-poll timeouts become retryable failed records instead of stuck `processing`,
+  cloud auto-delete removes poster sidecars, disk replay cache/media overlap checks are
+  case-insensitive on Windows, split-output clips apply the default selected-track preview on open,
+  and opening a new clip clears the previous playhead RAF/pending seek.
 - Split-audio review/upload semantics: when per-process output tracks exist, the "Output Audio"
   checklist row is a master toggle for those process output tracks, not an extra mixed track to
   include alongside them. The mixed Output Audio stream remains in the file as a fallback/safety

@@ -2,7 +2,7 @@
 //! wiring around the recorder service thread.
 
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tauri::image::Image;
@@ -121,6 +121,8 @@ impl MicTestState {
 
 pub(crate) struct RuntimeState(Mutex<RuntimeInner>);
 
+static CLOUD_SETTINGS_SAVE_LOCK: Mutex<()> = Mutex::new(());
+
 struct TrayItems<R: Runtime> {
     save_item: MenuItem<R>,
 }
@@ -198,6 +200,18 @@ impl RuntimeState {
         Ok(opts)
     }
 
+    fn prepare_service_restart(
+        inner: &mut RuntimeInner,
+    ) -> Result<(Option<Sender<Cmd>>, Option<ServiceOptions>), String> {
+        if inner.tx.is_none() {
+            return Ok((None, None));
+        }
+        let next_options = Self::options(inner)?;
+        let old_tx = inner.tx.take();
+        inner.last_save_request = None;
+        Ok((old_tx, Some(next_options)))
+    }
+
     fn request_save(&self) -> bool {
         const DOUBLE_TRIGGER_DEBOUNCE: Duration = Duration::from_millis(150);
 
@@ -241,15 +255,25 @@ impl RuntimeState {
     where
         F: FnOnce(&mut crate::settings::CloudSettings),
     {
-        // Atomic read-modify-write: hold the lock across the mutation and the
-        // persist so concurrent uploads can't each read the same `uploads` map,
-        // insert their own record, and have the later write-back drop the other.
-        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-        update(&mut inner.settings.cloud);
-        inner.settings.cloud.normalize();
-        let next = inner.settings.clone();
+        // Serialize cloud settings saves so concurrent uploads preserve their
+        // read-modify-write order without holding runtime state during disk I/O.
+        let _save_guard = CLOUD_SETTINGS_SAVE_LOCK
+            .lock()
+            .map_err(|_| "cloud settings save lock poisoned")?;
+        let next = {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            update(&mut inner.settings.cloud);
+            inner.settings.cloud.normalize();
+            inner.settings.clone()
+        };
         next.save()?;
         Ok(next)
+    }
+
+    fn lock_cloud_settings_save() -> Result<MutexGuard<'static, ()>, String> {
+        CLOUD_SETTINGS_SAVE_LOCK
+            .lock()
+            .map_err(|_| "cloud settings save lock poisoned".to_string())
     }
 
     fn active_shortcut_matches(&self, shortcut: &Shortcut) -> bool {
@@ -263,19 +287,13 @@ impl RuntimeState {
     fn restart<R: Runtime>(&self, app: AppHandle<R>, settings: AppSettings) -> Result<(), String> {
         let (old_tx, next_options, cleared_active_game) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            let old_tx = inner.tx.take();
-            inner.last_save_request = None;
             let cleared_active_game = inner.active_game.is_some()
                 && !active_game_still_configured(&settings, inner.active_game.as_ref());
             if cleared_active_game {
                 inner.active_game = None;
             }
             inner.settings = settings;
-            let next_options = if old_tx.is_some() {
-                Some(Self::options(&inner)?)
-            } else {
-                None
-            };
+            let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
             (old_tx, next_options, cleared_active_game)
         };
         if let Some(tx) = old_tx {
@@ -347,13 +365,7 @@ impl RuntimeState {
             if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
                 if game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref()) {
                     inner.active_game = detected;
-                    let old_tx = inner.tx.take();
-                    inner.last_save_request = None;
-                    let next_options = if old_tx.is_some() {
-                        Some(Self::options(&inner)?)
-                    } else {
-                        None
-                    };
+                    let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
                     (old_tx, next_options, true)
                 } else if inner.active_game != detected {
                     inner.active_game = detected;
@@ -363,13 +375,7 @@ impl RuntimeState {
                 }
             } else {
                 inner.active_game = detected;
-                let old_tx = inner.tx.take();
-                inner.last_save_request = None;
-                let next_options = if old_tx.is_some() {
-                    Some(Self::options(&inner)?)
-                } else {
-                    None
-                };
+                let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
                 (old_tx, next_options, true)
             }
         };
@@ -390,6 +396,15 @@ impl RuntimeState {
         }
         Ok(())
     }
+}
+
+fn preserve_backend_cloud_fields(settings: &mut AppSettings, backend: &AppSettings) {
+    settings.cloud.host_url = backend.cloud.host_url.clone();
+    settings.cloud.public_url = backend.cloud.public_url.clone();
+    settings.cloud.connected_user_id = backend.cloud.connected_user_id.clone();
+    settings.cloud.connected_username = backend.cloud.connected_username.clone();
+    settings.cloud.credential_target = backend.cloud.credential_target.clone();
+    settings.cloud.uploads = backend.cloud.uploads.clone();
 }
 
 fn same_game_window(current: Option<&DetectedGame>, next: Option<&DetectedGame>) -> bool {
@@ -836,20 +851,6 @@ fn save_settings<R: Runtime>(
 
     let old = state.settings();
 
-    // Cloud connection + upload state is backend-owned (mutated by cloud_connect
-    // and upload_clip_to_cloud via update_cloud). A settings Save carries the
-    // frontend's snapshot of these fields, which can be stale — e.g. a Save
-    // fired during an in-flight upload would clobber freshly written records or
-    // the connection identity. Keep the authoritative backend values; only the
-    // user-editable cloud preferences below come from the payload.
-    settings.cloud.host_url = old.cloud.host_url.clone();
-    settings.cloud.public_url = old.cloud.public_url.clone();
-    settings.cloud.connected_user_id = old.cloud.connected_user_id.clone();
-    settings.cloud.connected_username = old.cloud.connected_username.clone();
-    settings.cloud.credential_target = old.cloud.credential_target.clone();
-    settings.cloud.uploads = old.cloud.uploads.clone();
-    // (default_visibility, delete_local_after_upload, auto_upload_rules stay as sent.)
-
     // Apply the autostart registry change before persisting so settings.json
     // can never say "enabled" while the Run key update failed.
     if settings.open_on_startup != old.open_on_startup {
@@ -869,6 +870,16 @@ fn save_settings<R: Runtime>(
         }
     }
 
+    let cloud_save_guard = RuntimeState::lock_cloud_settings_save()?;
+    // Cloud connection + upload state is backend-owned (mutated by cloud_connect
+    // and upload_clip_to_cloud via update_cloud). A settings Save carries the
+    // frontend's snapshot of these fields, which can be stale — e.g. a Save
+    // fired during an in-flight upload would clobber freshly written records or
+    // the connection identity. Keep the authoritative backend values; only the
+    // user-editable cloud preferences below come from the payload.
+    preserve_backend_cloud_fields(&mut settings, &state.settings());
+    // (default_visibility, delete_local_after_upload, auto_upload_rules stay as sent.)
+
     if let Err(e) = settings.save() {
         if settings.hotkey != old.hotkey {
             let _ = app
@@ -881,6 +892,7 @@ fn save_settings<R: Runtime>(
 
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
     state.restart(app, settings.clone())?;
+    drop(cloud_save_guard);
     tray_items.set_hotkey_label(&settings.hotkey)?;
     crate::hotkeys::set_save_hotkey(&settings.hotkey)?;
     storage_settings.set_quota_bytes(quota_bytes);
@@ -1226,7 +1238,9 @@ fn tray_icon() -> Image<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::GameRecordingMode;
+    use crate::settings::{
+        CloudUploadRecord, GameRecordingMode, ReplayStorageMode, ReplayStorageSettings,
+    };
 
     #[test]
     fn quota_parser_converts_gib_to_bytes() {
@@ -1266,6 +1280,118 @@ mod tests {
     }
 
     #[test]
+    fn recording_sender_survives_restart_option_error() {
+        let (tx, _rx) = mpsc::channel();
+        let mut inner = RuntimeInner {
+            tx: Some(tx),
+            settings: invalid_disk_replay_settings(),
+            lol_url: None,
+            active_game: None,
+            last_save_request: Some(Instant::now()),
+            decodable_codecs: vec![service::Codec::H264],
+        };
+
+        let err = match RuntimeState::prepare_service_restart(&mut inner) {
+            Ok(_) => panic!("restart options should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("replay cache folder"), "{err}");
+        assert!(inner.tx.is_some(), "failed options must not drop sender");
+        assert!(
+            inner.last_save_request.is_some(),
+            "failed options must not clear debounce state"
+        );
+    }
+
+    #[test]
+    fn recording_sender_survives_game_restart_option_error() {
+        let (tx, _rx) = mpsc::channel();
+        let mut inner = RuntimeInner {
+            tx: Some(tx),
+            settings: invalid_disk_replay_settings(),
+            lol_url: None,
+            active_game: Some(DetectedGame {
+                id: "custom-game".into(),
+                name: "Game".into(),
+                hwnd: 42,
+                window_title: "Game".into(),
+                process_id: 7,
+                exe_name: "game.exe".into(),
+                recording_mode: GameRecordingMode::FullSession,
+            }),
+            last_save_request: Some(Instant::now()),
+            decodable_codecs: vec![service::Codec::H264],
+        };
+
+        let err = match RuntimeState::prepare_service_restart(&mut inner) {
+            Ok(_) => panic!("restart options should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("replay cache folder"), "{err}");
+        assert!(inner.tx.is_some(), "failed options must not drop sender");
+        assert!(
+            inner.last_save_request.is_some(),
+            "failed options must not clear debounce state"
+        );
+    }
+
+    #[test]
+    fn preserve_backend_cloud_fields_keeps_upload_state_but_allows_preferences() {
+        let mut frontend = AppSettings::default();
+        frontend.cloud.host_url = "https://stale.example.com".into();
+        frontend.cloud.public_url = Some("https://stale-public.example.com".into());
+        frontend.cloud.connected_user_id = Some("stale-user".into());
+        frontend.cloud.connected_username = Some("stale-name".into());
+        frontend.cloud.credential_target = Some("stale-target".into());
+        frontend.cloud.default_visibility = "public".into();
+        frontend.cloud.delete_local_after_upload = true;
+        frontend.cloud.auto_upload_rules = true;
+
+        let mut backend = AppSettings::default();
+        backend.cloud.host_url = "https://cloud.example.com".into();
+        backend.cloud.public_url = Some("https://public.example.com".into());
+        backend.cloud.connected_user_id = Some("user-1".into());
+        backend.cloud.connected_username = Some("dain".into());
+        backend.cloud.credential_target = Some("clipline:user-1".into());
+        backend.cloud.uploads.insert(
+            "local-1".into(),
+            CloudUploadRecord {
+                local_clip_id: "local-1".into(),
+                path: "D:\\Videos\\Clipline\\clip.mp4".into(),
+                remote_clip_id: Some("remote-1".into()),
+                remote_url: Some("https://public.example.com/remote-1".into()),
+                visibility: "private".into(),
+                upload_status: "uploaded_private".into(),
+                error: None,
+                updated_at_unix: 42,
+            },
+        );
+
+        preserve_backend_cloud_fields(&mut frontend, &backend);
+
+        assert_eq!(frontend.cloud.host_url, backend.cloud.host_url);
+        assert_eq!(frontend.cloud.public_url, backend.cloud.public_url);
+        assert_eq!(
+            frontend.cloud.connected_user_id,
+            backend.cloud.connected_user_id
+        );
+        assert_eq!(
+            frontend.cloud.connected_username,
+            backend.cloud.connected_username
+        );
+        assert_eq!(
+            frontend.cloud.credential_target,
+            backend.cloud.credential_target
+        );
+        assert_eq!(frontend.cloud.uploads, backend.cloud.uploads);
+        assert_eq!(frontend.cloud.default_visibility, "public");
+        assert!(frontend.cloud.delete_local_after_upload);
+        assert!(frontend.cloud.auto_upload_rules);
+    }
+
+    #[test]
     fn detected_game_identity_ignores_volatile_window_title() {
         let current = DetectedGame {
             id: "custom-game".into(),
@@ -1287,6 +1413,18 @@ mod tests {
 
         assert!(same_game_window(Some(&current), Some(&updated_title)));
         assert!(!same_game_window(Some(&current), Some(&different_window)));
+    }
+
+    fn invalid_disk_replay_settings() -> AppSettings {
+        AppSettings {
+            replay_storage: ReplayStorageSettings {
+                mode: ReplayStorageMode::Disk,
+                disk_dir: String::new(),
+                disk_quota_gb: 2.0,
+                disk_acknowledged: true,
+            },
+            ..AppSettings::default()
+        }
     }
 
     #[test]

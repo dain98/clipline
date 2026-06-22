@@ -570,11 +570,47 @@ fn audio_preview_generation_is_not_eager_on_clip_open() {
 
     assert!(
         !open_clip.contains("applySelectedAudioTracksToPlayback()"),
-        "opening a clip must not eagerly remux or mix a full-session audio preview"
+        "opening a clip must not unconditionally remux or mix a full-session audio preview"
+    );
+    assert!(
+        open_clip.contains("applyDefaultAudioSelectionIfNeeded();"),
+        "opening a clip should apply default audio only when source playback would not match it"
+    );
+    assert!(
+        js.contains("function applyDefaultAudioSelectionIfNeeded()")
+            && js.contains("PlayerCore.selectionNeedsPreview")
+            && js.contains("applySelectedAudioTracksToPlayback();"),
+        "default audio application must be gated by PlayerCore.selectionNeedsPreview"
     );
     assert!(
         js.contains("selected.length === tracks.length && currentReviewMediaPath === clip.path"),
         "all-track playback should keep the original source until the user changes selection"
+    );
+}
+
+#[test]
+fn open_clip_clears_previous_playback_loop_and_pending_seek() {
+    let js = main_js();
+    let open_clip_start = js.find("function openClip(clip)").unwrap();
+    let close_review_start = js.find("function closeReview()").unwrap();
+    let open_clip = &js[open_clip_start..close_review_start];
+    let cancel = open_clip
+        .find("cancelAnimationFrame(rafId);")
+        .expect("openClip cancels the previous playhead RAF");
+    let clear_seek = open_clip
+        .find("pendingSeek = null;")
+        .expect("openClip clears pending seek from previous clip");
+    let assign_clip = open_clip
+        .find("currentClip = clip;")
+        .expect("openClip assigns current clip");
+
+    assert!(
+        cancel < assign_clip,
+        "RAF must be canceled before switching clips"
+    );
+    assert!(
+        clear_seek < assign_clip,
+        "pending seek must be cleared before switching clips"
     );
 }
 
