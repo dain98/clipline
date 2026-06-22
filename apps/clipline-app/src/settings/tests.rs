@@ -6,37 +6,10 @@ use crate::service::{
 use crate::settings::persistence::sibling_tmp_path;
 use crate::settings::types::ReplayStorageMode;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
 
+use clipline_test_utils::TestDir;
 use serde_json::Value;
-
-struct TestDir(PathBuf);
-
-impl TestDir {
-    fn new(name: &str) -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "clipline-settings-{name}-{}-{unique}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 #[test]
 fn defaults_match_current_recorder_behavior() {
@@ -124,7 +97,7 @@ fn legacy_settings_default_capture_region() {
 
 #[test]
 fn load_repairs_disabled_stable_update_channel() {
-    let dir = TestDir::new("stable-update-channel");
+    let dir = TestDir::new("clipline-settings", "stable-update-channel");
     let path = dir.path().join("settings.json");
     std::fs::write(
         &path,
@@ -224,7 +197,7 @@ fn validation_rejects_relative_media_folder() {
 
 #[test]
 fn load_heals_invalid_media_folder_without_resetting_settings() {
-    let dir = TestDir::new("heal-media-folder");
+    let dir = TestDir::new("clipline-settings", "heal-media-folder");
     let path = dir.path().join("settings.json");
     std::fs::write(
         &path,
@@ -253,7 +226,7 @@ fn load_heals_invalid_media_folder_without_resetting_settings() {
 
 #[test]
 fn legacy_bitrate_migration_uses_output_resolution() {
-    let dir = TestDir::new("legacy-quality-resolution");
+    let dir = TestDir::new("clipline-settings", "legacy-quality-resolution");
     let path = dir.path().join("settings.json");
     std::fs::write(
         &path,
@@ -307,7 +280,7 @@ fn validation_rejects_out_of_range_audio_volume() {
 
 #[test]
 fn load_clamps_legacy_replay_window_to_two_minutes() {
-    let dir = TestDir::new("clamp-replay-window");
+    let dir = TestDir::new("clipline-settings", "clamp-replay-window");
     let path = dir.path().join("settings.json");
     std::fs::write(
         &path,
@@ -334,7 +307,7 @@ fn load_clamps_legacy_replay_window_to_two_minutes() {
 
 #[test]
 fn load_migrates_invalid_legacy_hotkey_without_resetting_settings() {
-    let dir = TestDir::new("migrate-hotkey");
+    let dir = TestDir::new("clipline-settings", "migrate-hotkey");
     let path = dir.path().join("settings.json");
     std::fs::write(
         &path,
@@ -370,7 +343,7 @@ fn load_migrates_invalid_legacy_hotkey_without_resetting_settings() {
 
 #[test]
 fn load_tolerates_unknown_video_encoder_without_resetting_settings() {
-    let dir = TestDir::new("unknown-encoder");
+    let dir = TestDir::new("clipline-settings", "unknown-encoder");
     let path = dir.path().join("settings.json");
     std::fs::write(
         &path,
@@ -399,7 +372,7 @@ fn load_tolerates_unknown_video_encoder_without_resetting_settings() {
 
 #[test]
 fn load_repairs_invalid_fields_without_resetting_valid_neighbors() {
-    let dir = TestDir::new("repair-invalid-fields");
+    let dir = TestDir::new("clipline-settings", "repair-invalid-fields");
     let path = dir.path().join("settings.json");
     std::fs::write(
         &path,
@@ -472,7 +445,7 @@ fn load_repairs_invalid_fields_without_resetting_valid_neighbors() {
 
 #[test]
 fn display_region_settings_round_trip_json() {
-    let dir = TestDir::new("region-round-trip");
+    let dir = TestDir::new("clipline-settings", "region-round-trip");
     let path = dir.path().join("settings.json");
     let settings = AppSettings {
         capture_mode: CaptureMode::DisplayRegion,
@@ -646,7 +619,7 @@ fn service_options_include_display_region_source() {
 
 #[test]
 fn settings_round_trip_json() {
-    let dir = TestDir::new("round-trip");
+    let dir = TestDir::new("clipline-settings", "round-trip");
     let path = dir.path().join("settings.json");
     let settings = AppSettings {
         video_quality: VideoQuality::Sharp,
@@ -762,7 +735,7 @@ fn thirty_second_replay_has_buffer_slack_for_encoder_overshoot() {
 
 #[test]
 fn load_normalizes_buffer_seconds_to_replay_plus_headroom() {
-    let dir = TestDir::new("buffer-headroom");
+    let dir = TestDir::new("clipline-settings", "buffer-headroom");
     let path = dir.path().join("settings.json");
     std::fs::write(
         &path,
@@ -790,7 +763,7 @@ fn load_normalizes_buffer_seconds_to_replay_plus_headroom() {
 
 #[test]
 fn save_to_replaces_settings_via_temp_file() {
-    let dir = TestDir::new("atomic-save");
+    let dir = TestDir::new("clipline-settings", "atomic-save");
     let path = dir.path().join("settings.json");
     let tmp = dir.path().join("settings.json.tmp");
     std::fs::write(&path, "{}").unwrap();
@@ -807,7 +780,7 @@ fn save_to_replaces_settings_via_temp_file() {
 
 #[test]
 fn temporary_settings_paths_are_unique_per_save_attempt() {
-    let dir = TestDir::new("atomic-save-unique-temp");
+    let dir = TestDir::new("clipline-settings", "atomic-save-unique-temp");
     let path = dir.path().join("settings.json");
 
     let first = sibling_tmp_path(&path).unwrap();

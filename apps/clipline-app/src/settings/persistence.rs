@@ -1,9 +1,7 @@
 //! Filesystem persistence for settings: path resolution, atomic writes,
 //! legacy field repair, and the JSON `load_from`/`save_to` impls.
 
-use std::ffi::OsStr;
 use std::io::Write;
-use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -259,8 +257,8 @@ pub(crate) fn sibling_tmp_path(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
-    let from_w = wide_null(from.as_os_str());
-    let to_w = wide_null(to.as_os_str());
+    let from_w = crate::util::wide_null(from.as_os_str());
+    let to_w = crate::util::wide_null(to.as_os_str());
     let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
     if unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), flags) } == 0 {
         return Err(format!(
@@ -269,10 +267,6 @@ fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn wide_null(value: &OsStr) -> Vec<u16> {
-    value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 pub(crate) fn deserialize_field<T>(object: &Map<String, Value>, key: &str) -> Option<T>

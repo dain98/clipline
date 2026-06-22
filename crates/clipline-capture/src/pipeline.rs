@@ -600,29 +600,7 @@ fn segment_fragment_refs<'a>(
 mod tests {
     use super::*;
     use crate::mock::{MockCapture, MockEncoder};
-    use std::path::PathBuf;
-
-    struct TestDir(PathBuf);
-
-    impl TestDir {
-        fn new(name: &str) -> Self {
-            let unique = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let dir = std::env::temp_dir().join(format!(
-                "clipline-pipeline-{name}-{}-{unique}",
-                std::process::id()
-            ));
-            Self(dir)
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use clipline_test_utils::TestDir;
 
     #[test]
     fn groups_packets_into_gop_aligned_segments() {
@@ -718,13 +696,13 @@ mod tests {
             .map(|(w, end)| (w.into_inner(), end))
             .unwrap();
 
-        let dir = TestDir::new("disk-equivalence");
+        let dir = TestDir::new("clipline-pipeline", "disk-equivalence");
         let mut disk = Recorder::new_with_replay_storage(
             MockCapture::new(90, 30),
             MockEncoder::new(30, 30),
             ReplayStorageConfig::Disk {
                 max_bytes: usize::MAX,
-                dir: dir.0.clone(),
+                dir: dir.path().to_path_buf(),
             },
         )
         .unwrap();
@@ -741,9 +719,8 @@ mod tests {
 
     #[test]
     fn full_session_sink_keeps_segments_evicted_from_replay_ring() {
-        let dir = TestDir::new("full-session");
-        std::fs::create_dir_all(&dir.0).unwrap();
-        let path = dir.0.join("session.mp4");
+        let dir = TestDir::new("clipline-pipeline", "full-session");
+        let path = dir.path().join("session.mp4");
         let file = std::fs::File::create(&path).unwrap();
         let mut rec = Recorder::new(MockCapture::new(90, 30), MockEncoder::new(30, 30), 4 * 1024);
 
@@ -768,9 +745,8 @@ mod tests {
 
     #[test]
     fn full_session_initializes_muxer_after_encoder_config_is_ready() {
-        let dir = TestDir::new("full-session-lazy-config");
-        std::fs::create_dir_all(&dir.0).unwrap();
-        let path = dir.0.join("session.mp4");
+        let dir = TestDir::new("clipline-pipeline", "full-session-lazy-config");
+        let path = dir.path().join("session.mp4");
         let file = std::fs::File::create(&path).unwrap();
         let mut rec = Recorder::new(
             MockCapture::new(60, 30),
