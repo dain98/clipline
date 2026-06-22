@@ -1,0 +1,238 @@
+//! Validation for the whole `AppSettings`: range checks, capture-region
+//! bounds, replay-storage overlap, game identity, and cloud state. Plus
+//! shared quota/path helpers used by both validation and persistence.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use super::types::ReplayStorageMode;
+use super::{
+    normalize_replay_cache_dir, replay_cache_quota_bytes_from_gb, AppSettings, CaptureMode,
+};
+use crate::service::OutputResolution;
+
+pub const MIN_REPLAY_WINDOW_S: f64 = 5.0;
+pub const MAX_REPLAY_WINDOW_S: f64 = 120.0;
+pub const MIN_BUFFER_SECONDS: f64 = 10.0;
+pub const MAX_BUFFER_SECONDS: f64 = 20.0 * 60.0;
+pub const MIN_BITRATE_MBPS: f64 = 1.0;
+pub const MAX_BITRATE_MBPS: f64 = 100.0;
+pub const MIN_AUDIO_VOLUME: f64 = 0.0;
+pub const MAX_AUDIO_VOLUME: f64 = 2.0;
+pub const MIN_CAPTURE_REGION_SIDE: u32 = 2;
+pub const MAX_CAPTURE_REGION_SIDE: u32 = 16_384;
+
+impl AppSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        if matches!(self.capture_mode, CaptureMode::WindowTitle)
+            && self.window_title.trim().is_empty()
+        {
+            return Err("window title is required for window capture".into());
+        }
+        if matches!(self.capture_mode, CaptureMode::DisplayRegion) {
+            if self.capture_region.width < MIN_CAPTURE_REGION_SIDE
+                || self.capture_region.height < MIN_CAPTURE_REGION_SIDE
+            {
+                return Err("capture region must be at least 2x2 pixels".into());
+            }
+            if self.capture_region.width > MAX_CAPTURE_REGION_SIDE
+                || self.capture_region.height > MAX_CAPTURE_REGION_SIDE
+            {
+                return Err("capture region is too large".into());
+            }
+        }
+        self.validate_games()?;
+        validate_range(
+            "output volume",
+            self.audio.output_volume,
+            MIN_AUDIO_VOLUME,
+            MAX_AUDIO_VOLUME,
+        )?;
+        validate_range(
+            "microphone volume",
+            self.audio.mic_volume,
+            MIN_AUDIO_VOLUME,
+            MAX_AUDIO_VOLUME,
+        )?;
+        validate_range(
+            "buffer seconds",
+            self.buffer_seconds,
+            MIN_BUFFER_SECONDS,
+            MAX_BUFFER_SECONDS,
+        )?;
+        validate_range(
+            "replay seconds",
+            self.replay_window_s,
+            MIN_REPLAY_WINDOW_S,
+            MAX_REPLAY_WINDOW_S,
+        )?;
+        if self.replay_window_s > self.buffer_seconds {
+            return Err("replay seconds cannot be longer than buffer seconds".into());
+        }
+        validate_range(
+            "bitrate Mbps",
+            self.effective_bitrate_mbps(),
+            MIN_BITRATE_MBPS,
+            MAX_BITRATE_MBPS,
+        )?;
+        if !matches!(self.fps, 30 | 60 | 90 | 120) {
+            return Err("fps must be 30, 60, 90, or 120".into());
+        }
+        if !self.update_channel.enabled() {
+            return Err(format!(
+                "{} update channel is not available yet",
+                self.update_channel.label()
+            ));
+        }
+        super::quota_bytes_from_gb(self.disk_quota_gb)?;
+        self.media_dir_path()?;
+        self.validate_replay_storage()?;
+        super::hotkey::normalize_hotkey(&self.hotkey)?;
+        self.cloud.validate()?;
+        Ok(())
+    }
+
+    pub fn effective_bitrate_mbps(&self) -> f64 {
+        self.video_quality.bitrate_mbps(self.output_resolution)
+    }
+
+    fn validate_games(&self) -> Result<(), String> {
+        let mut ids = HashSet::new();
+        for game in &self.games.custom_games {
+            let id = game.id.trim();
+            if id.is_empty() {
+                return Err("custom game id is required".into());
+            }
+            if !ids.insert(id.to_ascii_lowercase()) {
+                return Err(format!("custom game id {id:?} is duplicated"));
+            }
+            if game.name.trim().is_empty() {
+                return Err("custom game name is required".into());
+            }
+            if !game.has_match_identity() {
+                return Err(format!(
+                    "custom game {:?} needs a process or window identity",
+                    game.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_replay_storage(&self) -> Result<(), String> {
+        if matches!(self.replay_storage.mode, ReplayStorageMode::Memory) {
+            return Ok(());
+        }
+        if !self.replay_storage.disk_acknowledged {
+            return Err("disk replay buffer requires acknowledging SSD wear".into());
+        }
+        replay_cache_quota_bytes_from_gb(self.replay_storage.disk_quota_gb)?;
+        let cache_dir = normalize_replay_cache_dir(&self.replay_storage.disk_dir)?;
+        let media_dir = self.media_dir_path()?;
+        if same_or_nested_path(&cache_dir, &media_dir)
+            || same_or_nested_path(&media_dir, &cache_dir)
+        {
+            return Err("replay cache folder must be separate from the media folder".into());
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_range(name: &str, value: f64, min: f64, max: f64) -> Result<(), String> {
+    if !value.is_finite() || value < min || value > max {
+        return Err(format!("{name} must be between {min} and {max}"));
+    }
+    Ok(())
+}
+
+pub fn same_or_nested_path(child: &Path, parent: &Path) -> bool {
+    if cfg!(windows) {
+        let child = windows_component_keys(child);
+        let parent = windows_component_keys(parent);
+        return child == parent
+            || (child.len() > parent.len() && child[..parent.len()] == parent[..]);
+    }
+    let child = normalize_components(child);
+    let parent = normalize_components(parent);
+    child == parent || child.starts_with(&parent)
+}
+
+fn normalize_components(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        out.push(component.as_os_str());
+    }
+    out
+}
+
+fn windows_component_keys(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Prefix(prefix) => Some(windows_prefix_key(prefix.kind())),
+            std::path::Component::RootDir => Some("\\".to_string()),
+            std::path::Component::CurDir => None,
+            std::path::Component::ParentDir => Some("..".to_string()),
+            std::path::Component::Normal(value) => {
+                Some(value.to_string_lossy().to_ascii_lowercase())
+            }
+        })
+        .collect()
+}
+
+fn windows_prefix_key(prefix: std::path::Prefix<'_>) -> String {
+    match prefix {
+        std::path::Prefix::Disk(drive) | std::path::Prefix::VerbatimDisk(drive) => {
+            format!("disk:{}", char::from(drive).to_ascii_lowercase())
+        }
+        std::path::Prefix::UNC(server, share) | std::path::Prefix::VerbatimUNC(server, share) => {
+            format!(
+                "unc:{}\\{}",
+                server.to_string_lossy().to_ascii_lowercase(),
+                share.to_string_lossy().to_ascii_lowercase()
+            )
+        }
+        std::path::Prefix::Verbatim(value) => {
+            format!("verbatim:{}", value.to_string_lossy().to_ascii_lowercase())
+        }
+        std::path::Prefix::DeviceNS(value) => {
+            format!("device:{}", value.to_string_lossy().to_ascii_lowercase())
+        }
+    }
+}
+
+pub fn repair_fps(value: i64) -> u32 {
+    const FPS_STOPS: [u32; 4] = [30, 60, 90, 120];
+    let value = super::persistence::clamp_u32(value, FPS_STOPS[0], *FPS_STOPS.last().unwrap());
+    FPS_STOPS
+        .into_iter()
+        .min_by_key(|candidate| value.abs_diff(*candidate))
+        .unwrap_or(AppSettings::default().fps)
+}
+
+pub fn repair_video_quality_from_legacy_bitrate(
+    mbps: f64,
+    resolution: OutputResolution,
+) -> super::types::VideoQuality {
+    use super::types::VideoQuality;
+    [
+        VideoQuality::Compact,
+        VideoQuality::Balanced,
+        VideoQuality::Sharp,
+        VideoQuality::Maximum,
+    ]
+    .into_iter()
+    .min_by(|left, right| {
+        let left = left.bitrate_mbps(resolution);
+        let right = right.bitrate_mbps(resolution);
+        (mbps - left)
+            .abs()
+            .partial_cmp(&(mbps - right).abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
+    .unwrap_or_default()
+}
+
+pub fn repair_disk_quota_gb(value: f64) -> f64 {
+    const GIB_BYTES: u64 = 1024 * 1024 * 1024;
+    value.clamp(0.0, (u64::MAX / GIB_BYTES) as f64)
+}
