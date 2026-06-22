@@ -1210,10 +1210,8 @@ pub fn run() {
             // The main window is created hidden by default so autostart launches
             // don't flash it. Show it for normal launches.
             if !launched_by_autostart {
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Err(e) = window.show() {
-                        eprintln!("show main window on launch: {e}");
-                    }
+                if let Err(e) = open_main_window(app.handle()) {
+                    eprintln!("show main window on launch: {e}");
                 }
             }
 
@@ -1278,9 +1276,11 @@ fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
 
 fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
-        window.show().map_err(|e| e.to_string())?;
-        window.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
+        return reveal_main_window(
+            || window.show(),
+            || window.unminimize(),
+            || window.set_focus(),
+        );
     }
 
     let config = app
@@ -1294,8 +1294,24 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .build()
         .map_err(|e| e.to_string())?;
-    window.show().map_err(|e| e.to_string())?;
-    window.set_focus().map_err(|e| e.to_string())
+    reveal_main_window(
+        || window.show(),
+        || window.unminimize(),
+        || window.set_focus(),
+    )
+}
+
+fn reveal_main_window<E>(
+    show: impl FnOnce() -> Result<(), E>,
+    unminimize: impl FnOnce() -> Result<(), E>,
+    focus: impl FnOnce() -> Result<(), E>,
+) -> Result<(), String>
+where
+    E: std::fmt::Display,
+{
+    show().map_err(|e| e.to_string())?;
+    unminimize().map_err(|e| e.to_string())?;
+    focus().map_err(|e| e.to_string())
 }
 
 fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>) {
@@ -1703,6 +1719,29 @@ mod tests {
             MouseButton::Middle,
             MouseButtonState::Up
         ));
+    }
+
+    #[test]
+    fn opening_main_window_restores_before_focus() {
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        reveal_main_window(
+            || {
+                calls.borrow_mut().push("show");
+                Ok::<(), String>(())
+            },
+            || {
+                calls.borrow_mut().push("unminimize");
+                Ok::<(), String>(())
+            },
+            || {
+                calls.borrow_mut().push("focus");
+                Ok::<(), String>(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*calls.borrow(), ["show", "unminimize", "focus"]);
     }
 
     #[test]
