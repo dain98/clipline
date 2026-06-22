@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -14,6 +15,8 @@ pub const DEFAULT_BASE: &str = "https://127.0.0.1:2999";
 pub enum Error {
     #[error("live client request failed: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("refusing to disable certificate validation for non-loopback URL: {0}")]
+    NotLoopback(String),
 }
 
 /// Client for the League Live Client Data API. The real endpoint serves a
@@ -24,6 +27,14 @@ pub struct LiveClient {
     http: reqwest::Client,
 }
 
+impl std::fmt::Debug for LiveClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveClient")
+            .field("base", &self.base)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Deserialize)]
 struct GameStats {
     #[serde(rename = "gameTime")]
@@ -32,14 +43,15 @@ struct GameStats {
 
 impl LiveClient {
     pub fn new(base: impl Into<String>) -> Result<Self, Error> {
+        let base = base.into();
+        if !is_loopback_url(&base).unwrap_or(false) {
+            return Err(Error::NotLoopback(base));
+        }
         let http = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .timeout(Duration::from_secs(2))
             .build()?;
-        Ok(Self {
-            base: base.into(),
-            http,
-        })
+        Ok(Self { base, http })
     }
 
     /// Client against the real local game endpoint.
@@ -85,6 +97,28 @@ impl LiveClient {
     }
 }
 
+/// Returns `Some(true)` for loopback URLs (cert validation can safely be
+/// skipped for Riot's self-signed local cert), `Some(false)` for other
+/// well-formed URLs, and `None` for unparseable inputs.
+fn is_loopback_url(base: &str) -> Option<bool> {
+    let url = reqwest::Url::parse(base).ok()?;
+    let host = url.host_str()?;
+    if host == "localhost" {
+        return Some(true);
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Some(ip.is_loopback());
+    }
+    // Strip brackets from IPv6 literals like `[::1]`.
+    let trimmed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+    if let Some(inner) = trimmed {
+        if let Ok(ip) = inner.parse::<IpAddr>() {
+            return Some(ip.is_loopback());
+        }
+    }
+    Some(false)
+}
+
 pub fn player_summary_from_list(
     players: &[PlayerListEntry],
     local_player: &str,
@@ -116,6 +150,32 @@ pub fn player_summary_from_list(
 mod tests {
     use super::*;
     use crate::raw::{PlayerListEntry, PlayerScores};
+
+    #[test]
+    fn is_loopback_url_accepts_loopback_variants() {
+        assert_eq!(is_loopback_url("https://127.0.0.1:2999"), Some(true));
+        assert_eq!(is_loopback_url("https://127.0.0.1"), Some(true));
+        assert_eq!(is_loopback_url("http://localhost:1234"), Some(true));
+        assert_eq!(is_loopback_url("https://[::1]:2999"), Some(true));
+    }
+
+    #[test]
+    fn is_loopback_url_rejects_remote_hosts() {
+        assert_eq!(is_loopback_url("https://example.com"), Some(false));
+        assert_eq!(is_loopback_url("https://192.168.1.1:2999"), Some(false));
+        assert_eq!(is_loopback_url("https://10.0.0.1"), Some(false));
+    }
+
+    #[test]
+    fn is_loopback_url_returns_none_for_garbage() {
+        assert_eq!(is_loopback_url("not a url"), None);
+    }
+
+    #[test]
+    fn new_rejects_non_loopback_url() {
+        let err = LiveClient::new("https://example.com:2999").unwrap_err();
+        assert!(matches!(err, Error::NotLoopback(_)));
+    }
 
     fn player(
         summoner_name: &str,
