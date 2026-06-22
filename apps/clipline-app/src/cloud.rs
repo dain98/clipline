@@ -239,7 +239,9 @@ pub async fn cloud_connect(
     })?;
 
     if old_target.as_deref().is_some_and(|old| old != target) {
-        let _ = delete_credential(old_target.as_deref().unwrap());
+        if let Err(e) = delete_credential(old_target.as_deref().unwrap()) {
+            eprintln!("delete old cloud credential: {e}");
+        }
     }
 
     Ok(connection_status(&settings.cloud))
@@ -251,7 +253,9 @@ pub fn cloud_disconnect(
 ) -> Result<CloudConnectionStatus, String> {
     let old_target = state.settings().cloud.credential_target;
     if let Some(target) = old_target.as_deref() {
-        let _ = delete_credential(target);
+        if let Err(e) = delete_credential(target) {
+            eprintln!("delete cloud credential on disconnect: {e}");
+        }
     }
     let settings = state.update_cloud(|cloud| {
         cloud.connected_user_id = None;
@@ -820,7 +824,10 @@ fn mark_remote_not_found_once(record: &mut CloudUploadRecord) {
 }
 
 fn delete_uploaded_local_files(target: &Path) {
-    let _ = std::fs::remove_file(target);
+    if let Err(e) = std::fs::remove_file(target) {
+        eprintln!("delete local clip after upload {target:?}: {e}");
+    }
+    // Sidecars may not exist — ignore missing-file errors.
     let _ = std::fs::remove_file(target.with_extension("markers.json"));
     let _ = std::fs::remove_file(crate::poster::poster_path(target));
 }

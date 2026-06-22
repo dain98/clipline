@@ -1380,8 +1380,13 @@ fn write_session_game_meta(session_dir: &Path, active_game: Option<&ActiveGame>)
         return;
     }
     let doc = serde_json::json!({ "id": game.id, "name": game.name });
-    if let Ok(json) = serde_json::to_string(&doc) {
-        let _ = std::fs::write(&meta_path, json);
+    match serde_json::to_string(&doc) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&meta_path, json) {
+                eprintln!("write session game meta {meta_path:?}: {e}");
+            }
+        }
+        Err(e) => eprintln!("serialize session game meta: {e}"),
     }
 }
 

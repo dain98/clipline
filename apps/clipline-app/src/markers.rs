@@ -36,14 +36,23 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<Poller
                 .build()
             {
                 Ok(rt) => rt,
-                Err(_) => return,
+                Err(e) => {
+                    eprintln!("lol poller: failed to build tokio runtime: {e}");
+                    return;
+                }
             };
             rt.block_on(async move {
                 let client = match base_url {
                     Some(url) => LiveClient::new(url),
                     None => LiveClient::default_local(),
                 };
-                let Ok(client) = client else { return };
+                let client = match client {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("lol poller: failed to create live client: {e}");
+                        return;
+                    }
+                };
                 loop {
                     // Wait for a game: the endpoint 404s/refuses otherwise.
                     let local_player = loop {
