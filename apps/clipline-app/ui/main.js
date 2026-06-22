@@ -1749,6 +1749,51 @@ function replaceCloudRecordPath(oldPath, newPath) {
   if (currentSettings) currentSettings.cloud = cloud;
 }
 
+function removeCloudUploadRecordForPath(path) {
+  const cloud = cloudSettings();
+  const uploads = cloud.uploads || {};
+  const nextUploads = {};
+  let changed = false;
+  for (const [key, record] of Object.entries(uploads)) {
+    if (record && record.path === path) {
+      changed = true;
+      continue;
+    }
+    nextUploads[key] = record;
+  }
+  if (!changed) return false;
+  cloud.uploads = nextUploads;
+  if (currentSettings) currentSettings.cloud = cloud;
+  return true;
+}
+
+function applyCloudClipSyncResult(result) {
+  if (!result) return false;
+  let changed = false;
+  if (result.removed) changed = removeCloudUploadRecordForPath(result.path);
+  if (result.record) {
+    upsertCloudUploadRecord(result.record);
+    changed = true;
+  }
+  if (changed) {
+    renderClips();
+    syncUploadClipButton();
+  }
+  return changed;
+}
+
+async function syncCloudClipStatus(clip) {
+  if (!clip || !cloudConnected()) return;
+  const record = clipCloudRecord(clip);
+  if (!record || !record.remote_clip_id) return;
+  try {
+    const result = await invoke("sync_cloud_clip_status", { request: { path: clip.path } });
+    applyCloudClipSyncResult(result);
+  } catch (_) {
+    // Keep the last known cloud state if the status check is unavailable.
+  }
+}
+
 function upsertCloudProgress(progress) {
   if (!progress || !progress.local_clip_id) return;
   const current = (cloudSettings().uploads || {})[progress.local_clip_id] || {};
@@ -2448,6 +2493,7 @@ function openClip(clip) {
   if (!applyDefaultAudioSelectionIfNeeded({ shouldResume: true })) {
     video.play().catch(() => syncPlayState());
   }
+  syncCloudClipStatus(clip);
 }
 
 function closeReview() {

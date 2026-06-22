@@ -1012,6 +1012,7 @@ pub fn run() {
             crate::cloud::cloud_connect,
             crate::cloud::cloud_disconnect,
             crate::cloud::upload_clip_to_cloud,
+            crate::cloud::sync_cloud_clip_status,
             crate::library::list_clips,
             crate::library::clip_poster,
             crate::library::delete_clip,

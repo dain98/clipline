@@ -56,6 +56,11 @@ pub struct UploadClipCommandRequest {
     pub audio_track_ids: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SyncCloudClipStatusRequest {
+    pub path: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CloudConnectionStatus {
     pub connected: bool,
@@ -87,10 +92,77 @@ pub struct CloudUploadResult {
     pub clip: Option<ClipDetailResponse>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct CloudClipStatusSyncResult {
+    pub path: String,
+    pub record: Option<CloudUploadRecord>,
+    pub removed: bool,
+}
+
 #[tauri::command]
 pub fn cloud_status(state: tauri::State<RuntimeState>) -> CloudConnectionStatus {
     let settings = state.settings();
     connection_status(&settings.cloud)
+}
+
+#[tauri::command]
+pub async fn sync_cloud_clip_status(
+    state: tauri::State<'_, RuntimeState>,
+    request: SyncCloudClipStatusRequest,
+) -> Result<CloudClipStatusSyncResult, String> {
+    let settings = state.settings();
+    let cloud = settings.cloud.clone();
+    let Some(record) = cloud_record_for_path(&cloud, &request.path) else {
+        return Ok(CloudClipStatusSyncResult {
+            path: request.path,
+            record: None,
+            removed: false,
+        });
+    };
+    let Some(remote_clip_id) = record.remote_clip_id.clone() else {
+        return Ok(CloudClipStatusSyncResult {
+            path: request.path,
+            record: Some(record),
+            removed: false,
+        });
+    };
+    let token_target = cloud
+        .credential_target
+        .clone()
+        .ok_or_else(|| "connect to Clipline Cloud first".to_string())?;
+    let token = read_credential(&token_target)?;
+    let client = connected_client(&cloud, &token)?;
+
+    match client.get_clip(&remote_clip_id).await {
+        Ok(clip) => {
+            let mut updated = record;
+            apply_remote_clip_to_record(&cloud, &mut updated, &clip);
+            persist_record(&state, &updated)?;
+            Ok(CloudClipStatusSyncResult {
+                path: request.path,
+                record: Some(updated),
+                removed: false,
+            })
+        }
+        Err(error)
+            if cloud_error_is_not_found(&error) && missing_remote_should_remove_record(&record) =>
+        {
+            state.update_cloud(|cloud| {
+                remove_upload_record(cloud, &record);
+            })?;
+            Ok(CloudClipStatusSyncResult {
+                path: request.path,
+                record: None,
+                removed: true,
+            })
+        }
+        Err(error) if cloud_error_is_not_found(&error) => Ok(CloudClipStatusSyncResult {
+            path: request.path,
+            record: Some(record),
+            removed: false,
+        }),
+        Err(error) => Err(cloud_error(error)),
+    }
 }
 
 #[tauri::command]
@@ -317,17 +389,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     };
 
     if let Some(clip) = &clip {
-        record.visibility = clip.visibility.clone();
-        record.remote_url = clip
-            .public_url
-            .clone()
-            .or_else(|| cloud_clip_url(&cloud, &clip.id));
-        record.upload_status = if clip.visibility == "private" {
-            "uploaded_private".to_string()
-        } else {
-            "uploaded_public".to_string()
-        };
-        record.updated_at_unix = unix_now();
+        apply_remote_clip_to_record(&cloud, &mut record, clip);
         persist_record(&state, &record)?;
         emit_upload_progress(
             &app,
@@ -560,11 +622,26 @@ fn existing_retry_status(cloud: &CloudSettings, local_clip_id: &str, path: &str)
     }
 }
 
+fn cloud_record_for_path(cloud: &CloudSettings, path: &str) -> Option<CloudUploadRecord> {
+    cloud
+        .uploads
+        .values()
+        .filter(|record| record.path == path)
+        .max_by_key(|record| record.updated_at_unix)
+        .cloned()
+}
+
 fn replace_upload_record(cloud: &mut CloudSettings, record: CloudUploadRecord) {
     cloud
         .uploads
         .retain(|key, existing| key == &record.local_clip_id || existing.path != record.path);
     cloud.uploads.insert(record.local_clip_id.clone(), record);
+}
+
+fn remove_upload_record(cloud: &mut CloudSettings, record: &CloudUploadRecord) {
+    cloud
+        .uploads
+        .retain(|key, existing| key != &record.local_clip_id && existing.path != record.path);
 }
 
 fn persist_record(state: &RuntimeState, record: &CloudUploadRecord) -> Result<(), String> {
@@ -581,6 +658,36 @@ fn mark_ready_timeout(record: &mut CloudUploadRecord) {
         READY_POLL_ATTEMPTS as u64 * READY_POLL_DELAY.as_secs()
     ));
     record.updated_at_unix = unix_now();
+}
+
+fn apply_remote_clip_to_record(
+    cloud: &CloudSettings,
+    record: &mut CloudUploadRecord,
+    clip: &ClipDetailResponse,
+) {
+    record.visibility = clip.visibility.clone();
+    record.remote_clip_id = Some(clip.id.clone());
+    record.remote_url = clip
+        .public_url
+        .clone()
+        .or_else(|| cloud_clip_url(cloud, &clip.id));
+    record.upload_status = upload_status_for_remote_clip(clip);
+    record.error = None;
+    record.updated_at_unix = unix_now();
+}
+
+fn upload_status_for_remote_clip(clip: &ClipDetailResponse) -> String {
+    if clip.status != "ready" {
+        "uploaded_processing".to_string()
+    } else if clip.visibility == "private" {
+        "uploaded_private".to_string()
+    } else {
+        "uploaded_public".to_string()
+    }
+}
+
+fn missing_remote_should_remove_record(record: &CloudUploadRecord) -> bool {
+    record.upload_status.starts_with("uploaded_") && record.upload_status != "uploaded_processing"
 }
 
 fn delete_uploaded_local_files(target: &Path) {
@@ -725,6 +832,10 @@ fn cloud_error(error: CloudApiError) -> String {
     error.to_string()
 }
 
+fn cloud_error_is_not_found(error: &CloudApiError) -> bool {
+    matches!(error, CloudApiError::Api { status, .. } if status.as_u16() == 404)
+}
+
 fn last_os_error(action: &str) -> String {
     format!("{action}: {}", std::io::Error::last_os_error())
 }
@@ -859,6 +970,58 @@ mod tests {
     }
 
     #[test]
+    fn cloud_clip_detail_updates_record_visibility_status_and_url() {
+        let cloud = CloudSettings {
+            public_url: Some("https://clips.example.com".into()),
+            ..CloudSettings::default()
+        };
+        let mut record = upload_record("local", "D:\\Videos\\clip.mp4", "uploaded_public", 10);
+        record.remote_clip_id = Some("remote-1".into());
+        record.remote_url = Some("https://clips.example.com/old".into());
+
+        apply_remote_clip_to_record(
+            &cloud,
+            &mut record,
+            &clip_detail(
+                "remote-1",
+                "unlisted",
+                "ready",
+                Some("https://share.example.com/c/1"),
+            ),
+        );
+
+        assert_eq!(record.visibility, "unlisted");
+        assert_eq!(record.upload_status, "uploaded_public");
+        assert_eq!(
+            record.remote_url.as_deref(),
+            Some("https://share.example.com/c/1")
+        );
+        assert!(record.error.is_none());
+    }
+
+    #[test]
+    fn missing_remote_clip_removes_finalized_records_but_keeps_processing_records() {
+        assert!(missing_remote_should_remove_record(&upload_record(
+            "local",
+            "D:\\Videos\\clip.mp4",
+            "uploaded_public",
+            10
+        )));
+        assert!(!missing_remote_should_remove_record(&upload_record(
+            "local",
+            "D:\\Videos\\clip.mp4",
+            "uploaded_processing",
+            10
+        )));
+        assert!(!missing_remote_should_remove_record(&upload_record(
+            "local",
+            "D:\\Videos\\clip.mp4",
+            "processing",
+            10
+        )));
+    }
+
+    #[test]
     fn delete_uploaded_local_files_removes_poster_sidecar() {
         let dir = test_dir("cloud-delete");
         let clip = dir.join("clip.mp4");
@@ -960,6 +1123,42 @@ mod tests {
             upload_status: upload_status.into(),
             error: None,
             updated_at_unix,
+        }
+    }
+
+    fn clip_detail(
+        id: &str,
+        visibility: &str,
+        status: &str,
+        public_url: Option<&str>,
+    ) -> ClipDetailResponse {
+        let now = Utc::now();
+        ClipDetailResponse {
+            id: id.into(),
+            client_clip_id: Some("local".into()),
+            title: "Clip".into(),
+            game_name: None,
+            game_id: None,
+            game_executable: None,
+            source_type: Some("replay".into()),
+            recorded_at: None,
+            uploaded_at: Some(now),
+            duration_ms: None,
+            file_size_bytes: None,
+            width: None,
+            height: None,
+            fps: None,
+            container: Some("mp4".into()),
+            video_codec: None,
+            audio_codec: None,
+            checksum_sha256: None,
+            visibility: visibility.into(),
+            status: status.into(),
+            public_share_id: None,
+            public_url: public_url.map(str::to_string),
+            markers: Vec::new(),
+            created_at: now,
+            updated_at: now,
         }
     }
 

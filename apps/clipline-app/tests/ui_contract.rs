@@ -407,7 +407,9 @@ fn review_player_owns_all_controls() {
             && !main_js().contains(" · cloud:")
             && app_rs().contains("crate::cloud::cloud_connect")
             && app_rs().contains("crate::cloud::upload_clip_to_cloud")
+            && app_rs().contains("crate::cloud::sync_cloud_clip_status")
             && app_rs().contains("crate::library::preview_clip_audio_tracks")
+            && main_js().contains("sync_cloud_clip_status")
             && styles_css().contains(".cloud-connect-grid")
             && styles_css().contains(".cloud-connect-fields")
             && styles_css().contains(".cloud-connect-fields[hidden] { display: none; }")
@@ -576,6 +578,10 @@ fn audio_preview_generation_is_not_eager_on_clip_open() {
         open_clip.contains("applyDefaultAudioSelectionIfNeeded({ shouldResume: true })"),
         "opening a clip should apply default audio only when source playback would not match it"
     );
+    assert!(
+        open_clip.contains("syncCloudClipStatus(clip);"),
+        "opening a clip should refresh its cloud record in the background"
+    );
     let source_play = open_clip
         .find("video.play().catch(() => syncPlayState());")
         .expect("openClip should still start direct source playback when no preview is needed");
@@ -595,6 +601,12 @@ fn audio_preview_generation_is_not_eager_on_clip_open() {
     assert!(
         js.contains("selected.length === tracks.length && currentReviewMediaPath === clip.path"),
         "all-track playback should keep the original source until the user changes selection"
+    );
+    assert!(
+        js.contains("function applyCloudClipSyncResult(result)")
+            && js.contains("removeCloudUploadRecordForPath(result.path)")
+            && js.contains("upsertCloudUploadRecord(result.record)"),
+        "cloud sync results must update or remove the local cloud record cache"
     );
 }
 
