@@ -347,6 +347,7 @@ function fillSettings(s) {
   $("set-mic-mono").checked = (audio.mic_channels || "mono") === "mono";
   $("set-buffer").value = Number(s.buffer_seconds) || ((Number(s.replay_window_s) || 60) + 15);
   $("set-replay").value = Math.min(120, Number(s.replay_window_s) || 60);
+  $("set-backend").value = s.capture_backend || "auto";
   $("set-encoder").value = s.video_encoder || "auto";
   $("set-output-resolution").value = outputResolutionOption(s.output_resolution).id;
   $("set-bitrate").value = s.video_quality
@@ -390,6 +391,7 @@ function readSettings() {
     && String(currentSettings.window_title || "").trim().length > 0;
   return {
     capture_mode: preserveLegacyWindow ? "window_title" : capture.capture_mode,
+    capture_backend: $("set-backend").value,
     window_title: preserveLegacyWindow ? currentSettings.window_title : "",
     capture_region: preserveLegacyWindow
       ? (currentSettings.capture_region || capture.capture_region)
@@ -802,7 +804,20 @@ function syncCaptureFields() {
   const isEditableRegion = $("set-capture").value === "display_region";
   $("capture-region-editor").hidden = !isEditableRegion;
   if (isEditableRegion) renderRegionEditor();
+  syncCaptureBackendSummary();
   updateCaptureStatus();
+}
+
+function syncCaptureBackendSummary() {
+  const summary = $("backend-summary");
+  if (!summary) return;
+  if ($("set-backend").value === "desktop_duplication") {
+    summary.textContent =
+      "Removes the Windows 10 capture border for displays and regions. Display/region only (not single windows); the mouse cursor may be missing on some systems. Falls back to Windows Graphics Capture if unavailable.";
+  } else {
+    summary.textContent =
+      "Windows Graphics Capture works everywhere, including single windows. On Windows 10 it may show a yellow capture border.";
+  }
 }
 
 function syncRecordingFields() {
@@ -3650,6 +3665,7 @@ $("set-capture").addEventListener("change", () => {
   captureTargetDirty = true;
   syncCaptureFields();
 });
+$("set-backend").addEventListener("change", syncCaptureBackendSummary);
 for (const id of ["set-output-enabled", "set-audio-split-output", "set-mic-enabled"]) {
   $(id).addEventListener("change", syncAudioFields);
 }

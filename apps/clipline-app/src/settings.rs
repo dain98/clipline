@@ -15,8 +15,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::service::{
-    default_clips_dir, AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource,
-    OutputResolution, RecordingMode, ReplayStorageOptions, ServiceOptions, VideoEncoder,
+    default_clips_dir, AudioChannelMode, AudioOptions, CaptureBackend, CaptureRegion,
+    CaptureSource, OutputResolution, RecordingMode, ReplayStorageOptions, ServiceOptions,
+    VideoEncoder,
 };
 use crate::updates::{normalize_channel, UpdateChannel};
 
@@ -621,6 +622,8 @@ fn validate_upload_status(value: &str) -> Result<(), String> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppSettings {
     pub capture_mode: CaptureMode,
+    #[serde(default)]
+    pub capture_backend: CaptureBackend,
     pub window_title: String,
     #[serde(default)]
     pub capture_region: CaptureRegionSettings,
@@ -660,6 +663,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             capture_mode: CaptureMode::PrimaryMonitor,
+            capture_backend: CaptureBackend::Auto,
             window_title: String::new(),
             capture_region: CaptureRegionSettings::default(),
             games: GameSettings::default(),
@@ -770,6 +774,7 @@ impl AppSettings {
                     CaptureSource::DisplayRegion(self.capture_region.to_service_region())
                 }
             },
+            capture_backend: self.capture_backend,
             active_game_plugin_id: None,
             active_game: None,
             media_dir: self.media_dir_path()?,
@@ -818,6 +823,10 @@ impl AppSettings {
         let mut settings = Self {
             capture_mode: deserialize_field(object, "capture_mode")
                 .unwrap_or_else(|| defaults.capture_mode.clone()),
+            // Unknown/malformed backend values (hand-edit, downgrade) repair to
+            // the default instead of failing the whole-file parse.
+            capture_backend: deserialize_field(object, "capture_backend")
+                .unwrap_or(defaults.capture_backend),
             window_title: string_field(object, "window_title")
                 .unwrap_or_else(|| defaults.window_title.clone()),
             capture_region: CaptureRegionSettings::load_from_value(object.get("capture_region")),
@@ -1747,6 +1756,7 @@ mod tests {
             &path,
             r#"{
                 "capture_mode": "future_capture",
+                "capture_backend": "smart_future",
                 "window_title": "Keep this window title",
                 "capture_region": {
                     "display_id": "\\\\.\\DISPLAY2",
@@ -1779,6 +1789,7 @@ mod tests {
         let settings = AppSettings::load_from(&path).unwrap();
 
         assert_eq!(settings.capture_mode, CaptureMode::PrimaryMonitor);
+        assert_eq!(settings.capture_backend, CaptureBackend::Auto);
         assert_eq!(settings.window_title, "Keep this window title");
         assert_eq!(
             settings.capture_region.display_id.as_deref(),
@@ -1925,6 +1936,23 @@ mod tests {
         let opts = settings.to_service_options(None).unwrap();
 
         assert_eq!(opts.video_encoder, VideoEncoder::AmfH264);
+    }
+
+    #[test]
+    fn service_options_include_capture_backend_choice() {
+        let settings = AppSettings {
+            capture_backend: CaptureBackend::DesktopDuplication,
+            ..AppSettings::default()
+        };
+
+        let opts = settings.to_service_options(None).unwrap();
+
+        assert_eq!(opts.capture_backend, CaptureBackend::DesktopDuplication);
+    }
+
+    #[test]
+    fn capture_backend_defaults_to_auto() {
+        assert_eq!(AppSettings::default().capture_backend, CaptureBackend::Auto);
     }
 
     #[test]
