@@ -13,7 +13,7 @@
 //! already in the desktop image (only a hardware-overlay cursor is absent; see
 //! the issue #42 follow-up).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{Interface, HRESULT};
 use windows::Win32::Foundation::{E_ACCESSDENIED, POINT};
@@ -42,11 +42,28 @@ const DEFAULT_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 /// Cap a single `AcquireNextFrame` wait so a long first-frame budget still
 /// polls (and access-loss recreation is retried within the budget).
 const MAX_ACQUIRE_WAIT: Duration = Duration::from_millis(1000);
+/// Back-off after an immediate, recoverable miss (access-loss recreate,
+/// pointer-only/no-new-content frame, or a skipped frame). `AcquireNextFrame`
+/// returns instantly in these cases, so without a wait the recorder would spin
+/// and race the replay timeline ahead of wall clock during a UAC prompt / lock.
+const RETRY_BACKOFF: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy)]
 enum CopyMode {
     Full,
     Region(CropRect),
+}
+
+/// Result of one `AcquireNextFrame` attempt.
+enum AcquireOutcome {
+    /// A frame to emit.
+    Frame(Frame),
+    /// `AcquireNextFrame` waited the full slice with no new frame — real time
+    /// was consumed, so the caller only needs to re-check the deadline.
+    WaitedOut,
+    /// An immediate, recoverable miss (access loss recreated, no new desktop
+    /// content, or a skipped frame). The caller must back off, not spin.
+    RetryImmediately,
 }
 
 pub struct DxgiDuplicationCapture {
@@ -138,31 +155,38 @@ impl DxgiDuplicationCapture {
         self.clock
     }
 
-    /// Pull a frame, waiting up to `timeout`. `Ok(None)` means the source ended
-    /// (never happens for duplication — it is recreated on loss). A timeout maps
-    /// to `CaptureError::Timeout` so the caller's cadencer reuses the last frame.
+    /// Pull a frame, waiting up to `timeout`. A timeout maps to
+    /// `CaptureError::Timeout` so the caller's cadencer reuses the last frame.
+    ///
+    /// The budget is tracked against a real wall-clock deadline, not by
+    /// subtracting the requested slice: access-loss and no-new-content misses
+    /// return from `AcquireNextFrame` instantly, so a naive subtraction would
+    /// let the recorder spin and advance the replay timeline far faster than
+    /// real time during a UAC prompt / lock. Immediate misses back off instead.
     pub fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
-        // Poll in bounded slices so a long first-frame budget still makes
-        // progress and access-loss recreation gets retried within the budget.
-        let mut remaining = timeout;
+        let start = Instant::now();
         loop {
-            let wait = remaining.min(MAX_ACQUIRE_WAIT);
-            match self.try_acquire_and_copy(wait)? {
-                Some(frame) => return Ok(Some(frame)),
-                None => {
-                    remaining = remaining.saturating_sub(wait);
-                    if remaining.is_zero() {
-                        return Err(CaptureError::Timeout(timeout));
-                    }
+            let Some(remaining) = timeout.checked_sub(start.elapsed()) else {
+                return Err(CaptureError::Timeout(timeout));
+            };
+            if remaining.is_zero() {
+                return Err(CaptureError::Timeout(timeout));
+            }
+            match self.try_acquire(remaining.min(MAX_ACQUIRE_WAIT))? {
+                AcquireOutcome::Frame(frame) => return Ok(Some(frame)),
+                // AcquireNextFrame already consumed real time; just loop and
+                // re-check the deadline.
+                AcquireOutcome::WaitedOut => {}
+                // Returned immediately — sleep so we honor wall-clock cadence.
+                AcquireOutcome::RetryImmediately => {
+                    std::thread::sleep(remaining.min(RETRY_BACKOFF));
                 }
             }
         }
     }
 
-    /// One acquire→copy→release cycle. `Ok(None)` is recoverable (timed out this
-    /// slice, recreated after access loss, or a frame we deliberately skipped);
-    /// the caller loops until the budget is spent.
-    fn try_acquire_and_copy(&mut self, wait: Duration) -> Result<Option<Frame>, CaptureError> {
+    /// One acquire→copy→release cycle.
+    fn try_acquire(&mut self, wait: Duration) -> Result<AcquireOutcome, CaptureError> {
         // Defensive: never hold two frames across an acquire.
         self.release_held_frame();
 
@@ -173,12 +197,14 @@ impl DxgiDuplicationCapture {
         let acquired = unsafe { self.dupl.AcquireNextFrame(timeout_ms, &mut info, &mut resource) };
         match acquired {
             Ok(()) => self.frame_held = true,
-            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                return Ok(AcquireOutcome::WaitedOut)
+            }
             Err(e) if is_access_lost(e.code()) => {
                 // Mode change, UAC/secure desktop, session lock. Recreate the
                 // duplication and let the caller retry — never drop the engine.
                 self.recreate_duplication();
-                return Ok(None);
+                return Ok(AcquireOutcome::RetryImmediately);
             }
             Err(e) if e.code() == DXGI_ERROR_DEVICE_REMOVED => {
                 return Err(CaptureError::DeviceLost(format!("DXGI device removed: {e}")))
@@ -187,27 +213,35 @@ impl DxgiDuplicationCapture {
         }
 
         // A frame is held — release on every path below.
-        let result = self.copy_frame(&info, resource.as_ref());
+        let outcome = self.copy_frame(&info, resource.as_ref());
         self.release_held_frame();
-        result
+        outcome
     }
 
     fn copy_frame(
         &mut self,
         info: &DXGI_OUTDUPL_FRAME_INFO,
         resource: Option<&IDXGIResource>,
-    ) -> Result<Option<Frame>, CaptureError> {
+    ) -> Result<AcquireOutcome, CaptureError> {
         let dev = |e: windows::core::Error| CaptureError::DeviceLost(e.to_string());
         let Some(resource) = resource else {
-            return Ok(None);
+            return Ok(AcquireOutcome::RetryImmediately);
         };
+        // No new desktop content this acquire (`LastPresentTime`/`AccumulatedFrames`
+        // both zero is a pointer-only or empty update). Skip it once we have a seed
+        // frame so the cadencer reuses the last texture at the target FPS instead of
+        // re-encoding identical frames on every cursor move — the cursor isn't
+        // composited in v1. The first frame is always taken so capture can start.
+        if info.LastPresentTime == 0 && info.AccumulatedFrames == 0 && self.has_emitted() {
+            return Ok(AcquireOutcome::RetryImmediately);
+        }
         // SAFETY: the desktop resource is an ID3D11Texture2D on the shared device.
         let source: ID3D11Texture2D = resource.cast().map_err(dev)?;
         let desc = d3d11::texture_desc(&source);
         // The duplicated desktop is documented as always B8G8R8A8_UNORM; bail to
         // reuse-last on the theoretical mismatch rather than risk a copy error.
         if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
-            return Ok(None);
+            return Ok(AcquireOutcome::RetryImmediately);
         }
         let (source_w, source_h) = (desc.Width, desc.Height);
         let crop = match self.copy_mode {
@@ -223,7 +257,7 @@ impl DxgiDuplicationCapture {
         // Region no longer fits (e.g. a resolution change mid-recording) — reuse
         // the last frame instead of emitting a bad crop.
         let Some(crop) = crop else {
-            return Ok(None);
+            return Ok(AcquireOutcome::RetryImmediately);
         };
         let copy = d3d11::create_bgra_texture(&self.device, crop.width, crop.height).map_err(dev)?;
         d3d11::copy_texture_region(
@@ -236,15 +270,22 @@ impl DxgiDuplicationCapture {
             crop.height,
         );
         let ticks = self.timestamp(info);
-        Ok(Some(Frame {
+        Ok(AcquireOutcome::Frame(Frame {
             pts_s: self.clock.pts_s(ticks),
             data: FrameData::Gpu(copy),
         }))
     }
 
+    /// Whether at least one frame has been emitted (the seed). Until then,
+    /// no-new-content frames are still taken so capture can start.
+    fn has_emitted(&self) -> bool {
+        self.last_ticks_100ns != i64::MIN
+    }
+
     /// `LastPresentTime` is a raw QPC counter; convert to the shared 100 ns
-    /// timebase. A zero value (pointer-only update, no new desktop frame) is
-    /// stamped "now". Monotonicity is enforced at the source.
+    /// timebase. A zero value is only reached here for the seed frame (later
+    /// no-content frames are skipped in `copy_frame`), so stamp it "now".
+    /// Monotonicity is enforced at the source.
     fn timestamp(&mut self, info: &DXGI_OUTDUPL_FRAME_INFO) -> i64 {
         let ticks = if info.LastPresentTime > 0 {
             qpc_to_ticks_100ns(info.LastPresentTime, self.qpc_freq)
