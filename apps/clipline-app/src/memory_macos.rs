@@ -4,9 +4,7 @@ pub struct MemoryStatus {
 }
 
 #[allow(dead_code)]
-// Kept for API parity with Windows while memory status remains a Milestone 1 stub on macOS.
+// Kept for API parity with Windows while the platform facade owns the Milestone 1 stub path.
 pub fn current_process_tree_memory() -> Result<MemoryStatus, String> {
-    Ok(MemoryStatus {
-        private_working_set_bytes: 0,
-    })
+    Err("macOS memory status is not implemented in Milestone 1".into())
 }

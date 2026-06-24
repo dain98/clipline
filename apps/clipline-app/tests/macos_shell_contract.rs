@@ -135,3 +135,53 @@ fn macos_service_stub_exposes_app_facing_contract() {
         );
     }
 }
+
+#[test]
+fn app_commands_use_platform_facade() {
+    let app = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"))
+        .expect("read app.rs");
+
+    for forbidden in [
+        "clipline_capture::windows::display::enumerate_displays",
+        "clipline_capture::windows::wasapi::enumerate_audio_devices",
+        "crate::memory::current_process_tree_memory()",
+    ] {
+        assert!(
+            !app.contains(forbidden),
+            "app.rs should call platform facade instead of {forbidden}"
+        );
+    }
+
+    for required in [
+        "use crate::platform::{AudioDeviceLists, DisplayInfo};",
+        "crate::platform::list_displays()",
+        "crate::platform::list_audio_devices()",
+        "crate::platform::memory_status()",
+        "#[cfg(windows)]\nfn start_microphone_test_windows",
+        "#[cfg(target_os = \"macos\")]\n    {\n        let _ = (app, state, device_id, volume, mono);\n        Err(\"macOS microphone test is not implemented in Milestone 1\".into())",
+    ] {
+        assert!(
+            app.contains(required),
+            "missing platform app usage: {required}"
+        );
+    }
+}
+
+#[test]
+fn macos_hotkey_and_memory_stubs_exist() {
+    let hotkeys = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/hotkeys_macos.rs"),
+    )
+    .expect("read hotkeys_macos.rs");
+    let memory = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/memory_macos.rs"),
+    )
+    .expect("read memory_macos.rs");
+
+    assert!(hotkeys.contains("pub fn install_save_hook"));
+    assert!(hotkeys.contains("focused-game hotkey fallback"));
+    assert!(hotkeys.contains("pub fn set_save_hotkey"));
+    assert!(memory.contains("pub struct MemoryStatus"));
+    assert!(memory.contains("private_working_set_bytes"));
+    assert!(memory.contains("macOS memory status is not implemented in Milestone 1"));
+}

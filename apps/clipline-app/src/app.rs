@@ -15,8 +15,9 @@ use tauri_plugin_updater::UpdaterExt;
 
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
-use crate::platform::{AudioDeviceLists, DisplayInfo, PlatformCapabilities};
 use crate::platform;
+use crate::platform::{AudioDeviceLists, DisplayInfo};
+use crate::platform::PlatformCapabilities;
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode, GameRecordingMode,
@@ -71,7 +72,7 @@ impl GameDetectionEvent {
 
 #[tauri::command]
 fn memory_status() -> Result<crate::memory::MemoryStatus, String> {
-    platform::memory_status()
+    crate::platform::memory_status()
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -743,12 +744,12 @@ async fn choose_replay_cache_folder(
 
 #[tauri::command]
 fn list_displays() -> Result<Vec<DisplayInfo>, String> {
-    platform::list_displays()
+    crate::platform::list_displays()
 }
 
 #[tauri::command]
 fn list_audio_devices() -> Result<AudioDeviceLists, String> {
-    platform::list_audio_devices()
+    crate::platform::list_audio_devices()
 }
 
 #[tauri::command]
@@ -757,7 +758,7 @@ fn platform_capabilities() -> PlatformCapabilities {
 }
 
 #[cfg(windows)]
-fn start_microphone_test_impl<R: Runtime>(
+fn start_microphone_test_windows<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<MicTestState>,
     device_id: Option<String>,
@@ -823,17 +824,6 @@ fn start_microphone_test_impl<R: Runtime>(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn start_microphone_test_impl<R: Runtime>(
-    _app: AppHandle<R>,
-    _state: tauri::State<MicTestState>,
-    _device_id: Option<String>,
-    _volume: f64,
-    _mono: bool,
-) -> Result<(), String> {
-    Err("microphone monitor is unavailable on macOS shell stubs".into())
-}
-
 #[tauri::command]
 fn start_microphone_test<R: Runtime>(
     app: AppHandle<R>,
@@ -842,7 +832,15 @@ fn start_microphone_test<R: Runtime>(
     volume: f64,
     mono: bool,
 ) -> Result<(), String> {
-    start_microphone_test_impl(app, state, device_id, volume, mono)
+    #[cfg(windows)]
+    {
+        start_microphone_test_windows(app, state, device_id, volume, mono)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (app, state, device_id, volume, mono);
+        Err("macOS microphone test is not implemented in Milestone 1".into())
+    }
 }
 
 /// Every encoder this machine can use, for the Settings dropdown. Each
