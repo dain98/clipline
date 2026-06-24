@@ -106,27 +106,20 @@ fn platform_facade_exposes_macos_capability_model() {
 }
 
 #[test]
-fn macos_capabilities_do_not_offer_permission_actions_for_unimplemented_features() {
+fn macos_capabilities_advertise_display_capture_only() {
     let macos =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/platform/macos.rs"))
             .expect("read platform/macos.rs");
 
-    for feature in [
-        "display_capture",
-        "window_capture",
-        "display_region_capture",
-        "microphone",
-        "in_game_hotkey_fallback",
-    ] {
-        let assignment = format!("{feature}: CapabilityStatus::unavailable(");
-        assert!(
-            macos.contains(&assignment),
-            "{feature} should be unavailable, not a permission action, until implemented"
-        );
-    }
+    assert!(macos.contains("display_capture: CapabilityStatus::available()"));
+    assert!(macos.contains("hardware_encode: CapabilityStatus::available()"));
+    assert!(macos.contains("window_capture: CapabilityStatus::unavailable("));
+    assert!(macos.contains("display_region_capture: CapabilityStatus::unavailable("));
+    assert!(macos.contains("system_audio: CapabilityStatus::unavailable("));
+    assert!(macos.contains("microphone: CapabilityStatus::unavailable("));
     assert!(
         !macos.contains("CapabilityStatus::needs_permission("),
-        "macOS Milestone 1 capabilities should not imply Settings can enable unimplemented features"
+        "macOS capabilities should not imply Settings can enable unimplemented features"
     );
 }
 
@@ -151,7 +144,7 @@ fn game_detection_uses_platform_window_type() {
 }
 
 #[test]
-fn macos_service_stub_exposes_app_facing_contract() {
+fn macos_service_wires_real_display_replay_recording() {
     let service =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service_macos.rs"))
             .expect("read service_macos.rs");
@@ -167,42 +160,32 @@ fn macos_service_stub_exposes_app_facing_contract() {
         "pub fn default_clips_dir() -> PathBuf",
         "pub fn clips_dir(root: &Path) -> Result<PathBuf, String>",
         "pub fn available_encoder_options() -> Vec<EncoderOption>",
-    ] {
-        assert!(
-            service.contains(required),
-            "missing service contract: {required}"
-        );
-    }
-
-    for required in [
-        "Vec::new()",
-        ".name(\"clipline-recorder-stub\".into())",
-        "encoder: \"Unavailable on macOS Milestone 1\".into(),",
-        "message: \"macOS recording is not implemented in Milestone 1\".into(),",
+        "ScreenCaptureKitCapture::new",
+        "FfmpegVideoEncoder::new",
+        "EncoderBackend::VideoToolbox",
+        "Recorder::new_with_replay_storage",
+        "rec.step()",
+        "save(&rec, &path, opts.replay_window_s)",
+        "Event::Saved",
+        "message: \"macOS window capture is not implemented in this slice\".into()",
+        "message: \"macOS region capture is not implemented in this slice\".into()",
+        "macOS full-session recording is not implemented in this slice",
         "Cmd::Stop { announce } => {",
         "if announce {",
     ] {
         assert!(
             service.contains(required),
-            "missing macOS stub behavior: {required}"
+            "missing macOS recording behavior: {required}"
         );
     }
+    assert!(!service.contains("clipline-recorder-stub"));
+    assert!(!service.contains("macOS recording is not implemented in Milestone 1"));
 }
 
 #[test]
-fn macos_recording_start_fails_before_spawning_stub_service() {
+fn macos_recording_start_checks_availability_before_spawning_service() {
     let app = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"))
         .expect("read app.rs");
-    let service =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service_macos.rs"))
-            .expect("read service_macos.rs");
-
-    assert!(
-        service.contains(
-            "pub fn ensure_recording_available() -> Result<(), String> {\n    Err(\"macOS recording is not implemented in Milestone 1\".into())\n}"
-        ),
-        "macOS must expose recording as unavailable before app start_recording can spawn the stub"
-    );
     let guard = app
         .find("service::ensure_recording_available()?;")
         .expect("start_recording should check service availability");

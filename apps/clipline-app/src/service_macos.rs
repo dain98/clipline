@@ -1,6 +1,20 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use clipline_capture::ffmpeg;
+use clipline_capture::ffmpeg_encoder::FfmpegVideoEncoder;
+use clipline_capture::probe::{
+    rank_encoders, EncoderApi, EncoderBackend, EncoderCandidate, EncoderCapability,
+    EncoderPreference,
+};
+use clipline_capture::{CaptureEngine, Encoder, Recorder, ReplayStorageConfig};
+use clipline_storage::sessions::{session_label, SessionTracker};
+use clipline_storage::{enforce_quota, storage_status, StorageStatus};
+
+use crate::macos_capture::{ScreenCaptureKitCapture, ScreenCaptureKitConfig};
+
+use crate::video_encoder::encoder_label;
 pub use crate::video_encoder::{codec_id, EncoderOption, VideoEncoder};
 pub use clipline_capture::probe::Codec;
 
@@ -44,8 +58,29 @@ pub enum AudioChannelMode {
 }
 
 pub fn available_encoder_options() -> Vec<EncoderOption> {
-    let _ = codec_id(Codec::H264);
-    Vec::new()
+    let mut seen = std::collections::BTreeSet::new();
+    let mut options = Vec::new();
+    for cap in macos_encoder_capabilities() {
+        for &codec in &cap.codecs {
+            let Some(encoder) = VideoEncoder::from_parts(cap.backend, codec) else {
+                continue;
+            };
+            if !seen.insert(encoder.id()) {
+                continue;
+            }
+            let candidate = EncoderCandidate {
+                api: cap.api,
+                backend: cap.backend,
+                codec,
+            };
+            options.push(EncoderOption {
+                id: encoder.id().to_string(),
+                name: encoder_label(candidate),
+                codec: codec_id(codec).to_string(),
+            });
+        }
+    }
+    options
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -63,7 +98,7 @@ pub struct AudioOptions {
 impl Default for AudioOptions {
     fn default() -> Self {
         Self {
-            output_enabled: true,
+            output_enabled: false,
             output_device_id: None,
             output_volume: 1.0,
             split_output_by_process: false,
@@ -109,7 +144,6 @@ pub enum OutputResolution {
 
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum Event {
     Status {
         recording: bool,
@@ -190,89 +224,367 @@ impl Default for ServiceOptions {
     }
 }
 
+type MacRecorder = Recorder<ScreenCaptureKitCapture, FfmpegVideoEncoder>;
+
 pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
-    let ServiceOptions {
-        capture_source,
-        capture_backend,
-        active_game_plugin_id,
-        active_game,
-        media_dir,
-        lol_url,
-        replay_window_s,
-        buffer_bytes,
-        replay_storage,
-        disk_quota_bytes,
-        recording_mode,
-        fps,
-        bitrate_bps,
-        video_encoder,
-        output_resolution,
-        decodable_codecs,
-        audio,
-    } = opts;
-    let _ = (
-        capture_source,
-        capture_backend,
-        active_game_plugin_id,
-        media_dir,
-        lol_url,
-        replay_window_s,
-        buffer_bytes,
-        replay_storage,
-        disk_quota_bytes,
-        recording_mode,
-        fps,
-        bitrate_bps,
-        video_encoder,
-        output_resolution,
-        decodable_codecs,
-        audio,
-    );
-    if let Some(active_game) = active_game {
-        let _ = (active_game.id, active_game.name);
-    }
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
     std::thread::Builder::new()
-        .name("clipline-recorder-stub".into())
+        .name("clipline-recorder".into())
         .spawn(move || {
-            let _ = event_tx.send(Event::Status {
-                recording: false,
-                segments: 0,
-                buffered_s: 0.0,
-                buffered_mb: 0.0,
-                full_session: false,
-                encoder: "Unavailable on macOS Milestone 1".into(),
-            });
-            while let Ok(cmd) = cmd_rx.recv() {
-                match cmd {
-                    Cmd::Save => {
-                        let _ = event_tx.send(Event::Error {
-                            message: "macOS recording is not implemented in Milestone 1".into(),
-                        });
-                    }
-                    Cmd::Stop { announce } => {
-                        if announce {
-                            let _ = event_tx.send(Event::Status {
-                                recording: false,
-                                segments: 0,
-                                buffered_s: 0.0,
-                                buffered_mb: 0.0,
-                                full_session: false,
-                                encoder: String::new(),
-                            });
-                        }
-                        break;
-                    }
-                }
+            if let Err(e) = run(opts, cmd_rx, &event_tx) {
+                let _ = event_tx.send(Event::Error { message: e });
+                send_stopped(&event_tx);
             }
         })
-        .expect("spawn macOS recorder stub thread");
+        .expect("spawn macOS recorder thread");
     (cmd_tx, event_rx)
 }
 
 pub fn ensure_recording_available() -> Result<(), String> {
-    Err("macOS recording is not implemented in Milestone 1".into())
+    let has_videotoolbox = ffmpeg::locate().is_some()
+        && macos_encoder_capabilities().iter().any(|cap| {
+            cap.api == EncoderApi::Ffmpeg
+                && cap.backend == EncoderBackend::VideoToolbox
+                && cap.codecs.contains(&Codec::H264)
+        });
+    if has_videotoolbox {
+        Ok(())
+    } else {
+        Err("macOS recording requires FFmpeg with h264_videotoolbox".into())
+    }
+}
+
+fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> Result<(), String> {
+    let _ = (
+        &opts.capture_backend,
+        &opts.active_game_plugin_id,
+        &opts.lol_url,
+    );
+    if let Some(active_game) = &opts.active_game {
+        let _ = (&active_game.id, &active_game.name);
+    }
+    reject_unsupported_options(&opts, events)?;
+
+    let capture_config = ScreenCaptureKitConfig {
+        fps: opts.fps,
+        max_height: max_height(opts.output_resolution),
+    };
+    let capture = ScreenCaptureKitCapture::new(capture_config).map_err(|e| format!("init: {e}"))?;
+    let stream = capture.stream_info();
+    let (encoder, active) = build_encoder(&opts, stream.width, stream.height, events)?;
+    let encoder_status = encoder_label(active);
+    let replay_storage = replay_storage_config(&opts)?;
+    let mut rec = Recorder::new_with_replay_storage(capture, encoder, replay_storage)
+        .map_err(|e| format!("replay cache: {e}"))?;
+    let clips_root = clips_dir(&opts.media_dir)?;
+    let session = SessionTracker::new(local_session_label(false));
+    let mut last_status = Instant::now();
+
+    send_recording_status(events, &rec, &encoder_status);
+
+    loop {
+        match rec.step() {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(e) => return Err(format!("recording: {e}")),
+        }
+
+        if last_status.elapsed() >= Duration::from_secs(1) {
+            last_status = Instant::now();
+            send_recording_status(events, &rec, &encoder_status);
+        }
+
+        loop {
+            match cmd_rx.try_recv() {
+                Ok(cmd) => match cmd {
+                    Cmd::Save => {
+                        let session_dir = clips_root.join(session.current());
+                        if let Err(e) = std::fs::create_dir_all(&session_dir) {
+                            let _ = events.send(Event::Error {
+                                message: format!("create session folder {session_dir:?}: {e}"),
+                            });
+                            continue;
+                        }
+                        let path = unique_media_path(&session_dir, "clip");
+                        match save(&rec, &path, opts.replay_window_s) {
+                            Ok((_, seconds)) => {
+                                emit_saved_clip(events, &clips_root, &path, seconds, &opts);
+                            }
+                            Err(e) => {
+                                let _ = events.send(Event::Error { message: e });
+                                let _ = std::fs::remove_file(&path);
+                            }
+                        }
+                    }
+                    Cmd::Stop { announce } => {
+                        finish_recorder(&mut rec, events)?;
+                        if announce {
+                            send_stopped(events);
+                        }
+                        return Ok(());
+                    }
+                },
+                Err(TryRecvError::Disconnected) => {
+                    finish_recorder(&mut rec, events)?;
+                    send_stopped(events);
+                    return Ok(());
+                }
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+    }
+
+    finish_recorder(&mut rec, events)?;
+    send_stopped(events);
+    Ok(())
+}
+
+fn reject_unsupported_options(opts: &ServiceOptions, events: &Sender<Event>) -> Result<(), String> {
+    match &opts.capture_source {
+        CaptureSource::PrimaryMonitor => {}
+        CaptureSource::WindowTitle(_) | CaptureSource::WindowHandle { .. } => {
+            let _ = events.send(Event::Error {
+                message: "macOS window capture is not implemented in this slice".into(),
+            });
+            return Err("macOS window capture is not implemented in this slice".into());
+        }
+        CaptureSource::DisplayRegion(_) => {
+            let _ = events.send(Event::Error {
+                message: "macOS region capture is not implemented in this slice".into(),
+            });
+            return Err("macOS region capture is not implemented in this slice".into());
+        }
+    }
+
+    if opts.recording_mode == RecordingMode::FullSession {
+        return Err("macOS full-session recording is not implemented in this slice".into());
+    }
+    if opts.audio.output_enabled || opts.audio.split_output_by_process || opts.audio.mic_enabled {
+        return Err("macOS audio capture is not implemented in this slice".into());
+    }
+    Ok(())
+}
+
+fn build_encoder(
+    opts: &ServiceOptions,
+    width: u32,
+    height: u32,
+    events: &Sender<Event>,
+) -> Result<(FfmpegVideoEncoder, EncoderCandidate), String> {
+    let preference = opts.video_encoder.preference();
+    let explicit_target = match preference {
+        EncoderPreference::Explicit { backend, codec } => Some((backend, codec)),
+        EncoderPreference::Auto => None,
+    };
+    let candidates = rank_encoders(
+        macos_encoder_capabilities(),
+        &opts.decodable_codecs,
+        preference,
+    );
+    if candidates.is_empty() {
+        return Err("init: no usable macOS H.264 VideoToolbox encoder found".into());
+    }
+    let ffmpeg = ffmpeg::locate().ok_or_else(|| "init: ffmpeg not located".to_string())?;
+    let mut last_err = String::new();
+    for candidate in candidates {
+        match FfmpegVideoEncoder::new(
+            &ffmpeg,
+            candidate.backend,
+            candidate.codec,
+            width,
+            height,
+            opts.fps,
+            opts.bitrate_bps,
+        ) {
+            Ok(enc) => {
+                if let Some((backend, codec)) = explicit_target {
+                    if candidate.backend != backend || candidate.codec != codec {
+                        warn_user(
+                            events,
+                            format!(
+                                "{:?} encoder unavailable on macOS; using {} instead",
+                                opts.video_encoder,
+                                encoder_label(candidate)
+                            ),
+                        );
+                    }
+                }
+                return Ok((enc, candidate));
+            }
+            Err(e) => last_err = e.to_string(),
+        }
+    }
+    let _ = events.send(Event::Error {
+        message: format!("macOS VideoToolbox encoder failed: {last_err}"),
+    });
+    Err(format!(
+        "init: macOS VideoToolbox encoder failed: {last_err}"
+    ))
+}
+
+fn macos_encoder_capabilities() -> &'static [EncoderCapability] {
+    use std::sync::OnceLock;
+
+    static CAPS: OnceLock<Vec<EncoderCapability>> = OnceLock::new();
+    CAPS.get_or_init(|| {
+        ffmpeg::probe()
+            .into_iter()
+            .filter_map(|mut cap| {
+                if cap.api != EncoderApi::Ffmpeg || cap.backend != EncoderBackend::VideoToolbox {
+                    return None;
+                }
+                cap.codecs.retain(|codec| *codec == Codec::H264);
+                (!cap.codecs.is_empty()).then_some(cap)
+            })
+            .collect()
+    })
+}
+
+fn replay_storage_config(opts: &ServiceOptions) -> Result<ReplayStorageConfig, String> {
+    match &opts.replay_storage {
+        ReplayStorageOptions::Memory => Ok(ReplayStorageConfig::Memory {
+            max_bytes: opts.buffer_bytes,
+        }),
+        ReplayStorageOptions::Disk { dir, quota_bytes } => {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("create replay cache folder {dir:?}: {e}"))?;
+            Ok(ReplayStorageConfig::Disk {
+                max_bytes: usize::try_from(*quota_bytes).unwrap_or(usize::MAX),
+                dir: dir.clone(),
+            })
+        }
+    }
+}
+
+fn finish_recorder(rec: &mut MacRecorder, events: &Sender<Event>) -> Result<(), String> {
+    match rec.finish_stream() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let message = format!("finish: {e}");
+            warn_user(events, message.clone());
+            Err(message)
+        }
+    }
+}
+
+fn send_stopped(events: &Sender<Event>) {
+    let _ = events.send(Event::Status {
+        recording: false,
+        segments: 0,
+        buffered_s: 0.0,
+        buffered_mb: 0.0,
+        full_session: false,
+        encoder: String::new(),
+    });
+}
+
+fn send_recording_status(events: &Sender<Event>, rec: &MacRecorder, encoder_status: &str) {
+    let _ = events.send(Event::Status {
+        recording: true,
+        segments: rec.ring_len(),
+        buffered_s: rec.buffered_span_s(),
+        buffered_mb: rec.ring_bytes() as f64 / (1024.0 * 1024.0),
+        full_session: false,
+        encoder: encoder_status.to_string(),
+    });
+}
+
+fn warn_user(events: &Sender<Event>, message: String) {
+    let _ = events.send(Event::Error { message });
+}
+
+fn emit_saved_clip(
+    events: &Sender<Event>,
+    clips_dir: &Path,
+    path: &Path,
+    seconds: f64,
+    opts: &ServiceOptions,
+) {
+    let report = enforce_quota(clips_dir, opts.disk_quota_bytes, Some(path)).unwrap_or_else(|_| {
+        let status = storage_status(clips_dir, opts.disk_quota_bytes).unwrap_or(StorageStatus {
+            clip_count: 0,
+            total_bytes: 0,
+            quota_bytes: opts.disk_quota_bytes,
+        });
+        clipline_storage::GcReport {
+            deleted_clips: 0,
+            freed_bytes: 0,
+            status,
+        }
+    });
+    let _ = events.send(Event::Saved {
+        path: path.display().to_string(),
+        seconds,
+        markers: 0,
+        full_session: false,
+        gc_deleted: report.deleted_clips,
+        gc_freed_bytes: report.freed_bytes,
+        storage_total_bytes: report.status.total_bytes,
+        storage_quota_bytes: report.status.quota_bytes,
+        storage_over_quota: report.status.is_over_quota(),
+    });
+}
+
+fn save(
+    rec: &Recorder<impl CaptureEngine, impl Encoder>,
+    path: &Path,
+    window_s: f64,
+) -> Result<(f64, f64), String> {
+    let saved_from = rec
+        .save_window_bounds(window_s, None)
+        .map(|(start, _)| start);
+    let file = std::fs::File::create(path).map_err(|e| format!("create {path:?}: {e}"))?;
+    let (_, end) = rec
+        .save_replay(file, window_s, None)
+        .map_err(|e| format!("save: {e}"))?;
+    Ok((end, end - saved_from.unwrap_or(end)))
+}
+
+fn unique_media_path(session_dir: &Path, prefix: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    for attempt in 0u32..1024 {
+        let name = if attempt == 0 {
+            format!("{prefix}_{stamp}.mp4")
+        } else {
+            format!("{prefix}_{stamp}_{attempt}.mp4")
+        };
+        let candidate = session_dir.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    let fallback = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    session_dir.join(format!("{prefix}_{fallback}.mp4"))
+}
+
+fn max_height(resolution: OutputResolution) -> Option<u32> {
+    match resolution {
+        OutputResolution::Source => None,
+        OutputResolution::P1440 => Some(1440),
+        OutputResolution::P1080 => Some(1080),
+        OutputResolution::P720 => Some(720),
+        OutputResolution::P480 => Some(480),
+    }
+}
+
+fn local_session_label(league_match: bool) -> String {
+    use chrono::{Datelike, Local, Timelike};
+    let now = Local::now();
+    session_label(
+        now.year(),
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        league_match,
+    )
 }
 
 pub fn default_clips_dir() -> PathBuf {

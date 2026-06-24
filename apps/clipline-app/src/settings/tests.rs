@@ -495,10 +495,37 @@ fn service_options_include_estimated_buffer_bytes() {
     assert_eq!(opts.disk_quota_bytes, Some(DEFAULT_DISK_QUOTA_BYTES));
     assert_eq!(opts.media_dir, PathBuf::from(default_media_dir()));
     assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
+    #[cfg(not(target_os = "macos"))]
     assert_eq!(opts.audio, AudioOptions::default());
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        opts.audio,
+        AudioOptions {
+            output_enabled: false,
+            output_device_id: None,
+            output_volume: 1.0,
+            split_output_by_process: false,
+            mic_enabled: false,
+            mic_device_id: None,
+            mic_volume: 1.0,
+            mic_channels: AudioChannelMode::Mono,
+        }
+    );
     assert_eq!(opts.replay_storage, ReplayStorageOptions::Memory);
     assert!(opts.buffer_bytes >= 200 * 1024 * 1024);
     assert!(opts.buffer_bytes < 240 * 1024 * 1024);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_service_options_disable_unsupported_output_audio_for_video_only_recording() {
+    let settings = AppSettings::default();
+
+    let opts = settings.to_service_options(None).unwrap();
+
+    assert!(!opts.audio.output_enabled);
+    assert_eq!(opts.audio.output_device_id, None);
+    assert!(!opts.audio.split_output_by_process);
 }
 
 #[test]
@@ -519,10 +546,19 @@ fn service_options_include_audio_settings() {
 
     let opts = settings.to_service_options(None).unwrap();
 
-    assert!(opts.audio.output_enabled);
-    assert_eq!(opts.audio.output_device_id.as_deref(), Some("output-id"));
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(opts.audio.output_enabled);
+        assert_eq!(opts.audio.output_device_id.as_deref(), Some("output-id"));
+        assert!(!opts.audio.split_output_by_process);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        assert!(!opts.audio.output_enabled);
+        assert_eq!(opts.audio.output_device_id, None);
+        assert!(!opts.audio.split_output_by_process);
+    }
     assert_eq!(opts.audio.output_volume, 0.75);
-    assert!(!opts.audio.split_output_by_process);
     assert!(opts.audio.mic_enabled);
     assert_eq!(opts.audio.mic_device_id.as_deref(), Some("mic-id"));
     assert_eq!(opts.audio.mic_volume, 1.5);

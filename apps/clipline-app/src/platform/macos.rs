@@ -8,9 +8,7 @@ use super::{
 pub fn capabilities() -> PlatformCapabilities {
     PlatformCapabilities {
         os: PlatformOs::Macos,
-        display_capture: CapabilityStatus::unavailable(
-            "ScreenCaptureKit display capture is not implemented in Milestone 1",
-        ),
+        display_capture: CapabilityStatus::available(),
         window_capture: CapabilityStatus::unavailable(
             "ScreenCaptureKit window capture is not implemented in Milestone 1",
         ),
@@ -31,9 +29,7 @@ pub fn capabilities() -> PlatformCapabilities {
             "macOS focused-game hotkey fallback is not implemented in Milestone 1",
         ),
         startup_login_item: CapabilityStatus::available(),
-        hardware_encode: CapabilityStatus::unavailable(
-            "macOS encoder probing is not implemented in Milestone 1",
-        ),
+        hardware_encode: CapabilityStatus::available(),
         hdr_capture: CapabilityStatus::unavailable("HDR capture is not implemented yet"),
         player_decode: CapabilityStatus::available(),
         file_clipboard: CapabilityStatus::available(),

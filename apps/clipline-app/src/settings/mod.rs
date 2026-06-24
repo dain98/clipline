@@ -133,6 +133,14 @@ impl AppSettings {
 
     pub fn to_service_options(&self, lol_url: Option<String>) -> Result<ServiceOptions, String> {
         self.validate()?;
+        let mut audio = self.audio.to_service_options();
+        #[cfg(target_os = "macos")]
+        {
+            audio.output_enabled = false;
+            audio.output_device_id = None;
+            audio.split_output_by_process = false;
+        }
+
         Ok(ServiceOptions {
             capture_source: match self.capture_mode {
                 CaptureMode::PrimaryMonitor => CaptureSource::PrimaryMonitor,
@@ -161,7 +169,7 @@ impl AppSettings {
             video_encoder: self.video_encoder,
             output_resolution: self.output_resolution,
             decodable_codecs: vec![clipline_capture::probe::Codec::H264],
-            audio: self.audio.to_service_options(),
+            audio,
         })
     }
 }
