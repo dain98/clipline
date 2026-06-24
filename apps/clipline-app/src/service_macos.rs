@@ -317,5 +317,23 @@ pub fn clips_dir(root: &Path) -> Result<PathBuf, String> {
     if root.as_os_str().is_empty() {
         return Err("media folder is required".into());
     }
+    std::fs::create_dir_all(root).map_err(|e| format!("create {root:?}: {e}"))?;
     Ok(root.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clipline_test_utils::TestDir;
+
+    #[test]
+    fn clips_dir_creates_configured_root() {
+        let dir = TestDir::new("clipline-service-macos", "configured-root");
+        let root = dir.path().join("media");
+
+        let resolved = clips_dir(&root).unwrap();
+
+        assert_eq!(resolved, root);
+        assert!(root.is_dir());
+    }
 }
