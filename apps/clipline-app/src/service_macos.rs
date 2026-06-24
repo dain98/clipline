@@ -75,11 +75,8 @@ pub struct EncoderOption {
 }
 
 pub fn available_encoder_options() -> Vec<EncoderOption> {
-    vec![EncoderOption {
-        id: "auto".to_string(),
-        name: "Automatic".to_string(),
-        codec: codec_id(Codec::H264).to_string(),
-    }]
+    let _ = codec_id(Codec::H264);
+    Vec::new()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -268,47 +265,53 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
     std::thread::Builder::new()
-        .name("clipline-recorder-macos-stub".into())
+        .name("clipline-recorder-stub".into())
         .spawn(move || {
+            let _ = event_tx.send(Event::Status {
+                recording: false,
+                segments: 0,
+                buffered_s: 0.0,
+                buffered_mb: 0.0,
+                full_session: false,
+                encoder: "Unavailable on macOS M1".into(),
+            });
             while let Ok(cmd) = cmd_rx.recv() {
-                if let Cmd::Stop { announce } = cmd {
-                    let _ = announce;
-                    let _ = event_tx.send(Event::Status {
-                        recording: false,
-                        segments: 0,
-                        buffered_s: 0.0,
-                        buffered_mb: 0.0,
-                        full_session: false,
-                        encoder: String::new(),
-                    });
-                    break;
+                match cmd {
+                    Cmd::Save => {
+                        let _ = event_tx.send(Event::Error {
+                            message: "macOS recording is not implemented in Milestone 1".into(),
+                        });
+                    }
+                    Cmd::Stop { announce } => {
+                        if announce {
+                            let _ = event_tx.send(Event::Status {
+                                recording: false,
+                                segments: 0,
+                                buffered_s: 0.0,
+                                buffered_mb: 0.0,
+                                full_session: false,
+                                encoder: String::new(),
+                            });
+                        }
+                        break;
+                    }
                 }
             }
         })
-        .expect("spawn macos recorder stub");
+        .expect("spawn macOS recorder stub thread");
     (cmd_tx, event_rx)
 }
 
-pub(crate) fn default_clips_dir() -> PathBuf {
+pub fn default_clips_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Movies")
-        .join("Clipline")
+        .map(|home| home.join("Movies").join("Clipline"))
+        .unwrap_or_else(|| std::env::temp_dir().join("Clipline"))
 }
 
-pub(crate) fn clips_dir(media_dir: &Path) -> Result<PathBuf, String> {
-    clips_dir_resolved(media_dir, default_clips_dir).map(|(dir, _)| dir)
-}
-
-pub(crate) fn clips_dir_resolved(
-    media_dir: &Path,
-    fallback: impl FnOnce() -> PathBuf,
-) -> Result<(PathBuf, bool), String> {
-    if std::fs::create_dir_all(media_dir).is_ok() {
-        return Ok((media_dir.to_path_buf(), false));
+pub fn clips_dir(root: &Path) -> Result<PathBuf, String> {
+    if root.as_os_str().is_empty() {
+        return Err("media folder is required".into());
     }
-    let dir = fallback();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
-    Ok((dir, true))
+    Ok(root.to_path_buf())
 }

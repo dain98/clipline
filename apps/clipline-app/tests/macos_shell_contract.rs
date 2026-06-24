@@ -97,3 +97,41 @@ fn game_detection_uses_platform_window_type() {
         "game plugins should not import Windows window types directly"
     );
 }
+
+#[test]
+fn macos_service_stub_exposes_app_facing_contract() {
+    let service =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service_macos.rs"))
+            .expect("read service_macos.rs");
+
+    for required in [
+        "pub enum Cmd",
+        "pub enum Event",
+        "pub struct ServiceOptions",
+        "pub enum CaptureBackend",
+        "pub enum VideoEncoder",
+        "pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>)",
+        "pub fn default_clips_dir() -> PathBuf",
+        "pub fn clips_dir(root: &Path) -> Result<PathBuf, String>",
+        "pub fn available_encoder_options() -> Vec<EncoderOption>",
+    ] {
+        assert!(
+            service.contains(required),
+            "missing service contract: {required}"
+        );
+    }
+
+    for required in [
+        "Vec::new()",
+        ".name(\"clipline-recorder-stub\".into())",
+        "encoder: \"Unavailable on macOS M1\".into(),",
+        "message: \"macOS recording is not implemented in Milestone 1\".into(),",
+        "Cmd::Stop { announce } => {",
+        "if announce {",
+    ] {
+        assert!(
+            service.contains(required),
+            "missing macOS stub behavior: {required}"
+        );
+    }
+}
