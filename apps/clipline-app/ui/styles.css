@@ -312,6 +312,35 @@ label span { white-space: nowrap; }
   opacity: 0.85;
 }
 
+.rail-hotkey {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  min-height: 34px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: #111720;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.1;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.rail-hotkey::before {
+  content: "Save";
+  display: block;
+  width: 100%;
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 600;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
 .rail-game {
   display: flex;
   align-items: center;

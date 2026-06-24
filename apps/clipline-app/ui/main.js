@@ -59,6 +59,7 @@ const {
   clipKind,
   keyIntent,
   hotkeyFromKeyEvent,
+  hotkeyFromMouseEvent,
   displayMapLayout,
   displayMapHeight,
   regionForDisplay,
@@ -361,6 +362,7 @@ function fillSettings(s) {
   $("set-replay-disk-quota").value = replayStorage.disk_quota_gb ?? 2;
   $("set-replay-disk-ack").checked = !!replayStorage.disk_acknowledged;
   $("set-hotkey").value = s.hotkey;
+  updateHotkeyLabels(s.hotkey);
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
   $("set-minimize-to-tray").checked = !!s.minimize_to_tray;
@@ -1077,6 +1079,17 @@ function updateCaptureStatus() {
   renderRailGame();
 }
 
+function saveHotkeyLabel() {
+  return (currentSettings && currentSettings.hotkey) || $("set-hotkey").value || "Alt+F10";
+}
+
+function updateHotkeyLabels(hotkey = saveHotkeyLabel()) {
+  const label = String(hotkey || "Alt+F10");
+  $("rail-hotkey").textContent = label;
+  $("rail-hotkey").title = `Save Replay: ${label}`;
+  $("rail-save").title = `Save Replay (${label})`;
+}
+
 function fallbackCaptureSourceLabel(settings) {
   if (settings && settings.capture_mode === "display_region") {
     const display = displays.find((item) => isFullDisplayRegion(settings.capture_region, item));
@@ -1108,7 +1121,7 @@ function setHotkeyStatus(message, state = "") {
 function beginHotkeyCapture() {
   hotkeyCaptureActive = true;
   $("set-hotkey").classList.add("recording");
-  setHotkeyStatus("Press F1-F11 or F13-F24. Ctrl/Alt/Shift are optional.", "recording");
+  setHotkeyStatus("Press an F-key, or Ctrl/Alt/Shift plus middle mouse, Mouse4, or Mouse5.", "recording");
 }
 
 function endHotkeyCapture(message = "Click the field to record a new shortcut.", state = "") {
@@ -1122,7 +1135,22 @@ function recordHotkey(ev) {
   ev.preventDefault();
   ev.stopPropagation();
 
-  const result = hotkeyFromKeyEvent(ev);
+  applyHotkeyCaptureResult(hotkeyFromKeyEvent(ev));
+}
+
+function recordMouseHotkey(ev) {
+  if (!hotkeyCaptureActive) {
+    if (ev.button === 0) return;
+    beginHotkeyCapture();
+  }
+  if (ev.button === 0) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+
+  applyHotkeyCaptureResult(hotkeyFromMouseEvent(ev));
+}
+
+function applyHotkeyCaptureResult(result) {
   switch (result.kind) {
     case "captured":
       $("set-hotkey").value = result.value;
@@ -2251,7 +2279,7 @@ function renderClips() {
   if (!clipsCache.length) {
     const empty = document.createElement("div");
     empty.className = "gallery-empty";
-    empty.textContent = "No clips yet — press Alt+F10 while something plays.";
+    empty.textContent = `No clips yet - press ${saveHotkeyLabel()} while something plays.`;
     root.appendChild(empty);
     return;
   }
@@ -3876,6 +3904,9 @@ $("settings-close").addEventListener("click", () => toggleSettings(false));
 $("set-hotkey").addEventListener("focus", beginHotkeyCapture);
 $("set-hotkey").addEventListener("click", beginHotkeyCapture);
 $("set-hotkey").addEventListener("keydown", recordHotkey);
+$("set-hotkey").addEventListener("mousedown", recordMouseHotkey);
+$("set-hotkey").addEventListener("auxclick", (ev) => ev.preventDefault());
+$("set-hotkey").addEventListener("contextmenu", (ev) => ev.preventDefault());
 $("set-hotkey").addEventListener("paste", (ev) => ev.preventDefault());
 $("set-hotkey").addEventListener("blur", () => {
   if (hotkeyCaptureActive) endHotkeyCapture("Shortcut unchanged.");

@@ -2,11 +2,10 @@
 //! and per-clip uploads through the first-party API client.
 
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::ptr;
 use std::slice;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use clipline_cloud_api::{
@@ -30,8 +29,6 @@ const READY_POLL_ATTEMPTS: usize = 30;
 const READY_POLL_DELAY: Duration = Duration::from_secs(1);
 const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
-
-static UPLOAD_MIX_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Deserialize)]
 pub struct CloudConnectRequest {
@@ -504,7 +501,6 @@ fn normalize_upload_description(description: Option<&str>) -> Option<String> {
 enum UploadAudioSelectionPlan {
     Original,
     Remux(Vec<u32>),
-    Mix(Vec<u32>),
 }
 
 async fn upload_bytes_for_audio_selection_from_path(
@@ -523,44 +519,20 @@ async fn upload_bytes_for_audio_selection_from_path(
             clipline_mp4::remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
                 .map_err(|e| e.to_string())
         }
-        UploadAudioSelectionPlan::Mix(selected_indices) => {
-            mix_upload_audio_tracks_with_ffmpeg(source_path, &selected_indices)
-        }
     }
 }
 
 #[cfg(test)]
 fn upload_bytes_for_audio_selection(
-    source_path: &Path,
     source_bytes: Vec<u8>,
     markers: Option<&ClipMarkers>,
     selected_audio_track_ids: Option<&[String]>,
-) -> Result<Vec<u8>, String> {
-    upload_bytes_for_audio_selection_with_mixer(
-        source_path,
-        source_bytes,
-        markers,
-        selected_audio_track_ids,
-        mix_upload_audio_tracks_with_ffmpeg,
-    )
-}
-
-#[cfg(test)]
-fn upload_bytes_for_audio_selection_with_mixer(
-    source_path: &Path,
-    source_bytes: Vec<u8>,
-    markers: Option<&ClipMarkers>,
-    selected_audio_track_ids: Option<&[String]>,
-    mix_selected_audio_tracks: impl FnOnce(&Path, &[u32]) -> Result<Vec<u8>, String>,
 ) -> Result<Vec<u8>, String> {
     match upload_audio_selection_plan(markers, selected_audio_track_ids)? {
         UploadAudioSelectionPlan::Original => Ok(source_bytes),
         UploadAudioSelectionPlan::Remux(selected_indices) => {
             clipline_mp4::remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
                 .map_err(|e| e.to_string())
-        }
-        UploadAudioSelectionPlan::Mix(selected_indices) => {
-            mix_selected_audio_tracks(source_path, &selected_indices)
         }
     }
 }
@@ -582,44 +554,7 @@ fn upload_audio_selection_plan(
 
     let selected_indices =
         crate::util::selected_audio_track_indices(markers.unwrap(), selected_audio_track_ids)?;
-    if selected_indices.len() > 1 {
-        Ok(UploadAudioSelectionPlan::Mix(selected_indices))
-    } else {
-        Ok(UploadAudioSelectionPlan::Remux(selected_indices))
-    }
-}
-
-fn mix_upload_audio_tracks_with_ffmpeg(
-    source_path: &Path,
-    selected_audio_track_indices: &[u32],
-) -> Result<Vec<u8>, String> {
-    let mixed = unique_upload_mix_path();
-    let result = (|| {
-        crate::library::mix_audio_tracks_with_ffmpeg(
-            source_path,
-            &mixed,
-            selected_audio_track_indices,
-        )?;
-        std::fs::read(&mixed).map_err(|e| format!("read mixed upload audio: {e}"))
-    })();
-    let _ = std::fs::remove_file(&mixed);
-    let _ = std::fs::remove_file(mixed.with_extension("mp4.tmp"));
-    result
-}
-
-fn unique_upload_mix_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let counter = UPLOAD_MIX_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    upload_mix_path_for_parts(nanos, counter, std::process::id())
-}
-
-fn upload_mix_path_for_parts(nanos: u128, counter: u64, process_id: u32) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "clipline-upload-audio-mix-{process_id}-{counter}-{nanos}.mp4"
-    ))
+    Ok(UploadAudioSelectionPlan::Remux(selected_indices))
 }
 
 fn read_clip_game(path: &Path, markers: Option<&ClipMarkers>) -> Option<crate::library::ClipGame> {
@@ -961,35 +896,27 @@ mod tests {
     }
 
     #[test]
-    fn upload_audio_selection_mixes_multiple_selected_tracks_for_cloud_playback() {
+    fn upload_audio_selection_remuxes_multiple_selected_tracks() {
         let source = two_audio_mp4();
         let markers = audio_markers();
         let selected = vec!["output".to_string(), "microphone".to_string()];
 
-        let out = upload_bytes_for_audio_selection_with_mixer(
-            Path::new("clip.mp4"),
-            source,
-            Some(&markers),
-            Some(&selected),
-            |source, indices| {
-                assert_eq!(source, Path::new("clip.mp4"));
-                assert_eq!(indices, &[0, 1]);
-                Ok(b"mixed upload mp4".to_vec())
-            },
-        )
-        .unwrap();
+        let out =
+            upload_bytes_for_audio_selection(source, Some(&markers), Some(&selected)).unwrap();
 
-        assert_eq!(out, b"mixed upload mp4");
+        assert!(out.windows(6).any(|w| w == b"V00000"));
+        assert!(out.windows(6).any(|w| w == b"A00000"));
+        assert!(out.windows(6).any(|w| w == b"B00000"));
     }
 
     #[test]
-    fn upload_audio_selection_plan_mixes_without_source_bytes_for_multiple_tracks() {
+    fn upload_audio_selection_plan_remuxes_without_source_bytes_for_multiple_tracks() {
         let markers = audio_markers();
         let selected = vec!["output".to_string(), "microphone".to_string()];
 
         assert_eq!(
             upload_audio_selection_plan(Some(&markers), Some(&selected)).unwrap(),
-            UploadAudioSelectionPlan::Mix(vec![0, 1])
+            UploadAudioSelectionPlan::Remux(vec![0, 1])
         );
     }
 
@@ -999,13 +926,8 @@ mod tests {
         let markers = audio_markers();
         let selected = vec!["microphone".to_string()];
 
-        let out = upload_bytes_for_audio_selection(
-            Path::new("clip.mp4"),
-            source,
-            Some(&markers),
-            Some(&selected),
-        )
-        .unwrap();
+        let out =
+            upload_bytes_for_audio_selection(source, Some(&markers), Some(&selected)).unwrap();
 
         assert!(out.windows(6).any(|w| w == b"V00000"));
         assert!(!out.windows(6).any(|w| w == b"A00000"));
@@ -1018,23 +940,10 @@ mod tests {
         let markers = audio_markers();
         let selected = vec!["discord".to_string()];
 
-        let err = upload_bytes_for_audio_selection(
-            Path::new("clip.mp4"),
-            source,
-            Some(&markers),
-            Some(&selected),
-        )
-        .expect_err("unknown track");
+        let err = upload_bytes_for_audio_selection(source, Some(&markers), Some(&selected))
+            .expect_err("unknown track");
 
         assert!(err.contains("unknown audio track"), "{err}");
-    }
-
-    #[test]
-    fn upload_mix_paths_are_unique_for_same_timestamp_and_process() {
-        let a = upload_mix_path_for_parts(123, 7, 42);
-        let b = upload_mix_path_for_parts(123, 8, 42);
-
-        assert_ne!(a, b);
     }
 
     #[test]
@@ -1324,7 +1233,7 @@ mod tests {
     }
 
     fn test_dir(name: &str) -> std::path::PathBuf {
-        let unique = SystemTime::now()
+        let unique = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();

@@ -660,7 +660,7 @@ const PlayerCore = (() => {
       ev.code === "ShiftLeft" ||
       ev.code === "ShiftRight"
     ) {
-      return { kind: "pending", message: "Now press an F-key." };
+      return { kind: "pending", message: "Now press an F-key or mouse button." };
     }
 
     const key = functionKeyNumber(ev);
@@ -676,6 +676,36 @@ const PlayerCore = (() => {
     if (ev.altKey) parts.push("Alt");
     if (ev.shiftKey) parts.push("Shift");
     parts.push(`F${key}`);
+    return { kind: "captured", value: parts.join("+") };
+  };
+
+  const mouseButtonHotkeyName = (button) => {
+    switch (Number(button)) {
+      case 1:
+        return "Middle";
+      case 3:
+        return "Mouse4";
+      case 4:
+        return "Mouse5";
+      default:
+        return null;
+    }
+  };
+
+  const hotkeyFromMouseEvent = (ev) => {
+    const key = mouseButtonHotkeyName(ev.button);
+    if (!key) {
+      return { kind: "invalid", message: "Use middle, Mouse4, or Mouse5 as a mouse shortcut." };
+    }
+    if (!ev.ctrlKey && !ev.altKey && !ev.shiftKey) {
+      return { kind: "invalid", message: "Mouse shortcuts need Ctrl, Alt, or Shift." };
+    }
+
+    const parts = [];
+    if (ev.ctrlKey) parts.push("Ctrl");
+    if (ev.altKey) parts.push("Alt");
+    if (ev.shiftKey) parts.push("Shift");
+    parts.push(key);
     return { kind: "captured", value: parts.join("+") };
   };
 
@@ -848,6 +878,7 @@ const PlayerCore = (() => {
     clipKind,
     keyIntent,
     hotkeyFromKeyEvent,
+    hotkeyFromMouseEvent,
     displayBounds,
     displayMapLayout,
     displayMapHeight,
