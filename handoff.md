@@ -11,9 +11,9 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-19): a working tray recorder with a first-party review player
+## Current state (2026-06-24): a working tray recorder with a first-party review player
 
-Thirty milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
+Thirty-one milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -247,6 +247,13 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      `clipline-mp4::remux_with_selected_audio_tracks` without mutating the source clip; selecting
      every track keeps the original bytes. New audio sessions that appear after recording starts
      are not discovered dynamically yet.
+31. **Mouse hotkeys + selected-track uploads** — Settings > Hotkeys accepts middle mouse,
+     Mouse4, and Mouse5, with optional Ctrl/Alt/Shift, in addition to F1-F11/F13-F24. Keyboard
+     F-key shortcuts still use Tauri's OS global-shortcut registration plus the low-level fallback;
+     mouse-button shortcuts are hook-only through the Windows low-level input hook. The rail now
+     shows the active Save Replay hotkey below RAM. Cloud upload no longer needs FFmpeg for
+     selected audio tracks: every explicit audio selection is stream-copy remuxed into an MP4
+     containing exactly those tracks, including multi-track selections.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -259,6 +266,14 @@ Recent fixes (2026-06-24):
   tray menu/icon events, close-to-tray handling, window event summaries, WebView labels,
   and before/after window state around `Open Clipline` (`visible`, `minimized`, `focused`,
   position, and size). The log rotates to `clipline.old.log` after 1 MiB.
+- Save Replay hotkeys now support middle mouse, Mouse4, and Mouse5, optionally combined with
+  Ctrl/Alt/Shift. Mouse hotkeys skip the OS global-shortcut registration path and are handled by
+  the low-level input hook; switching between keyboard and mouse hotkeys unregisters/registers
+  only the keyboard shortcut side. The rail shows the current save hotkey below RAM.
+- Cloud upload now always remuxes explicit selected audio tracks instead of mixing multiple
+  selections through FFmpeg. Multi-track uploads preserve each selected MP4 audio track, which
+  matches the cloud player's current no-track-toggle model and avoids the old
+  "ffmpeg is not available for audio track mixing" failure.
 
 Recent fixes (2026-06-22):
 - Tray "Open Clipline" now uses the same reveal path as a normal foreground launch:
@@ -275,9 +290,8 @@ Recent fixes (2026-06-22):
   visibility/link changes refresh the local upload record, finalized remote deletions clear the
   local cloud badge/link, and temporary 404s for `uploaded_processing` records keep the local
   processing record.
-- Cloud uploads now mix multiple selected audio tracks into one Opus stream so cloud playback hears
-  output plus microphone instead of only the first MP4 audio stream. Single-track and muted uploads
-  still use the lightweight remux path.
+- Cloud uploads briefly mixed multiple selected audio tracks into one Opus stream, but this was
+  replaced on 2026-06-24 with selected-track remuxing for every explicit upload selection.
 - Debug/Cargo builds now keep Windows startup registration disabled and clear stale debug Run-key
   entries on launch/status checks; installed release builds keep normal startup behavior.
 

@@ -103,6 +103,7 @@ fn review_player_owns_all_controls() {
         "id=\"copy-clip\"",
         "id=\"stage-overlay\"",
         "id=\"memory-usage\"",
+        "id=\"rail-hotkey\"",
         "id=\"rail-dot\"",
         "id=\"rail-status-text\"",
         "id=\"rail-status\"",
@@ -563,6 +564,28 @@ fn review_player_owns_all_controls() {
             "{id} must render an SVG icon, not a text label"
         );
     }
+}
+
+#[test]
+fn rail_shows_save_hotkey() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    assert!(
+        html.contains("id=\"rail-hotkey\""),
+        "sidebar rail must expose the current save hotkey"
+    );
+    assert!(
+        js.contains("function updateHotkeyLabels(")
+            && js.contains("rail-hotkey")
+            && js.contains("Save Replay ("),
+        "main.js must keep rail and button hotkey labels in sync"
+    );
+    assert!(
+        css.contains(".rail-hotkey"),
+        "rail hotkey needs stable compact styling"
+    );
 }
 
 #[test]

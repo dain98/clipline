@@ -22,7 +22,8 @@ use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
-    parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode, GameRecordingMode,
+    is_global_shortcut_hotkey, parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode,
+    GameRecordingMode,
 };
 use crate::updates::UpdateChannel;
 
@@ -441,7 +442,7 @@ impl RuntimeState {
         self.0
             .lock()
             .ok()
-            .and_then(|inner| parse_hotkey(&inner.settings.hotkey).ok())
+            .and_then(|inner| parse_global_hotkey(&inner.settings.hotkey).ok().flatten())
             .is_some_and(|active| &active == shortcut)
     }
 
@@ -1034,6 +1035,14 @@ fn stop_microphone_test(state: tauri::State<MicTestState>) {
     state.stop();
 }
 
+fn parse_global_hotkey(raw: &str) -> Result<Option<Shortcut>, String> {
+    if is_global_shortcut_hotkey(raw)? {
+        parse_hotkey(raw).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 #[tauri::command]
 fn save_settings<R: Runtime>(
     app: AppHandle<R>,
@@ -1071,28 +1080,45 @@ fn save_settings<R: Runtime>(
             .map_err(|e| format!("update Windows startup registration: {e}"))?;
     }
 
+    let old_global_hotkey = parse_global_hotkey(&old.hotkey)?;
+    let new_global_hotkey = parse_global_hotkey(&settings.hotkey)?;
+    let shortcuts = app.global_shortcut();
     if settings.hotkey != old.hotkey {
-        let old_shortcut = parse_hotkey(&old.hotkey)?;
-        let new_shortcut = parse_hotkey(&settings.hotkey)?;
-        let shortcuts = app.global_shortcut();
-        rebind_global_hotkey(
-            old_shortcut,
-            new_shortcut,
-            shortcuts.is_registered(old_shortcut),
-            |shortcut| shortcuts.register(shortcut),
-            |shortcut| shortcuts.unregister(shortcut),
-        )?;
+        match (old_global_hotkey, new_global_hotkey) {
+            (Some(old_shortcut), Some(new_shortcut)) => {
+                rebind_global_hotkey(
+                    old_shortcut,
+                    new_shortcut,
+                    shortcuts.is_registered(old_shortcut),
+                    |shortcut| shortcuts.register(shortcut),
+                    |shortcut| shortcuts.unregister(shortcut),
+                )?;
+            }
+            (Some(old_shortcut), None) => {
+                if shortcuts.is_registered(old_shortcut) {
+                    shortcuts
+                        .unregister(old_shortcut)
+                        .map_err(|e| format!("unregister old hotkey: {e}"))?;
+                }
+            }
+            (None, Some(new_shortcut)) => {
+                shortcuts
+                    .register(new_shortcut)
+                    .map_err(|e| format!("register hotkey: {e}"))?;
+            }
+            (None, None) => {}
+        }
     } else {
-        let shortcut = parse_hotkey(&settings.hotkey)?;
-        let shortcuts = app.global_shortcut();
-        if let Some(e) =
-            retry_missing_global_hotkey(shortcut, shortcuts.is_registered(shortcut), |shortcut| {
-                shortcuts.register(shortcut)
-            })
-        {
-            let message = format!("global save hotkey still unavailable: {e}");
-            eprintln!("{message}");
-            let _ = app.emit("error", message);
+        if let Some(shortcut) = new_global_hotkey {
+            if let Some(e) = retry_missing_global_hotkey(
+                shortcut,
+                shortcuts.is_registered(shortcut),
+                |shortcut| shortcuts.register(shortcut),
+            ) {
+                let message = format!("global save hotkey still unavailable: {e}");
+                eprintln!("{message}");
+                let _ = app.emit("error", message);
+            }
         }
     }
 
@@ -1108,10 +1134,13 @@ fn save_settings<R: Runtime>(
 
     if let Err(e) = settings.save() {
         if settings.hotkey != old.hotkey {
-            let _ = app
-                .global_shortcut()
-                .unregister(parse_hotkey(&settings.hotkey)?);
-            let _ = app.global_shortcut().register(parse_hotkey(&old.hotkey)?);
+            let shortcuts = app.global_shortcut();
+            if let Some(shortcut) = new_global_hotkey {
+                let _ = shortcuts.unregister(shortcut);
+            }
+            if let Some(shortcut) = old_global_hotkey {
+                let _ = shortcuts.register(shortcut);
+            }
         }
         return Err(e);
     }
@@ -1177,8 +1206,8 @@ pub fn run() {
             .to_service_options(lol_url.clone())
             .unwrap_or_else(|_| ServiceOptions::default()),
     );
-    let hotkey =
-        parse_hotkey(&settings.hotkey).unwrap_or_else(|_| parse_hotkey("Alt+F10").unwrap());
+    let global_hotkey = parse_global_hotkey(&settings.hotkey)
+        .unwrap_or_else(|_| Some(parse_hotkey("Alt+F10").unwrap()));
 
     tauri::Builder::default()
         .manage(RuntimeState::new(cmd_tx, settings.clone(), lol_url))
@@ -1239,10 +1268,13 @@ pub fn run() {
             crate::library::storage_status
         ])
         .setup(move |app| {
-            if let Err(e) = app.global_shortcut().register(hotkey) {
-                let message = format!("global save hotkey unavailable; continuing without it: {e}");
-                eprintln!("{message}");
-                let _ = app.handle().emit("error", message);
+            if let Some(hotkey) = global_hotkey {
+                if let Err(e) = app.global_shortcut().register(hotkey) {
+                    let message =
+                        format!("global save hotkey unavailable; continuing without it: {e}");
+                    eprintln!("{message}");
+                    let _ = app.handle().emit("error", message);
+                }
             }
             if let Err(e) = crate::hotkeys::install_save_hook(&settings.hotkey, {
                 let app = app.handle().clone();

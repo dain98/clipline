@@ -216,11 +216,26 @@ fn capture_source_labels_are_sidebar_friendly() {
 fn fmt_ago_is_pure_in_now() {
     let mut ctx = player_core_context();
     assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000, 958)"), "just now");
-    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000, 940)"), "1 minute ago");
-    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000, 700)"), "5 minutes ago");
-    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(11800, 1000)"), "3 hours ago");
-    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000000, 827200)"), "2 days ago");
-    assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(2000000, 185600)"), "3 weeks ago");
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.fmtAgo(1000, 940)"),
+        "1 minute ago"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.fmtAgo(1000, 700)"),
+        "5 minutes ago"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.fmtAgo(11800, 1000)"),
+        "3 hours ago"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.fmtAgo(1000000, 827200)"),
+        "2 days ago"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.fmtAgo(2000000, 185600)"),
+        "3 weeks ago"
+    );
     // Clock skew must not produce negative ages.
     assert_eq!(eval(&mut ctx, "PlayerCore.fmtAgo(1000, 1005)"), "just now");
 }
@@ -612,6 +627,39 @@ fn hotkey_recorder_formats_modifier_function_keys() {
 }
 
 #[test]
+fn hotkey_recorder_formats_mouse_buttons() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromMouseEvent({ button: 1, ctrlKey: false, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"Middle"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromMouseEvent({ button: 3, ctrlKey: true, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"Ctrl+Mouse4"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromMouseEvent({ button: 4, ctrlKey: false, altKey: true, shiftKey: true })"
+        ),
+        r#"{"kind":"captured","value":"Alt+Shift+Mouse5"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromMouseEvent({ button: 0, ctrlKey: false, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"invalid","message":"Use middle, Mouse4, or Mouse5 as a mouse shortcut."}"#
+    );
+}
+
+#[test]
 fn hotkey_recorder_reports_pending_cancel_and_invalid_inputs() {
     let mut ctx = player_core_context();
     assert_eq!(
@@ -619,7 +667,7 @@ fn hotkey_recorder_reports_pending_cancel_and_invalid_inputs() {
             &mut ctx,
             "PlayerCore.hotkeyFromKeyEvent({ code: 'ControlLeft', ctrlKey: true })"
         ),
-        r#"{"kind":"pending","message":"Now press an F-key."}"#
+        r#"{"kind":"pending","message":"Now press an F-key or mouse button."}"#
     );
     assert_eq!(
         eval_json(
