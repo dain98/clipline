@@ -24,6 +24,18 @@ fn app_rs() -> String {
     fs::read_to_string(path).expect("read src/app.rs")
 }
 
+#[test]
+fn default_capability_covers_recovery_windows() {
+    let capability =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json"))
+            .expect("read default capability");
+
+    assert!(
+        capability.contains("\"main-recovery-*\""),
+        "recovery windows need the same frontend command permissions as main"
+    );
+}
+
 fn library_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library.rs");
     fs::read_to_string(path).expect("read src/library.rs")

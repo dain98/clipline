@@ -267,6 +267,10 @@ Recent fixes (2026-06-24):
   tray menu/icon events, close-to-tray handling, window event summaries, WebView labels,
   and before/after window state around `Open Clipline` (`visible`, `minimized`, `focused`,
   position, and size). The log rotates to `clipline.old.log` after 1 MiB.
+- Tray close now hides the app window instead of destroying it. A destroyed Tauri window can leave
+  a `main` webview label behind whose state calls fail with `failed to receive message from
+  webview`; `Open Clipline` now treats that as a dead handle and opens a `main-recovery-*`
+  replacement window with the same frontend permissions.
 - Save Replay hotkeys now support middle mouse, Mouse4, and Mouse5 when combined with
   Ctrl/Alt/Shift. Mouse hotkeys skip the OS global-shortcut registration path and are handled by
   an on-demand low-level mouse hook; switching between keyboard and mouse hotkeys

@@ -28,6 +28,8 @@ use crate::settings::{
 use crate::updates::UpdateChannel;
 
 const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 1_048_576;
+const MAIN_WINDOW_LABEL: &str = "main";
+const MAIN_WINDOW_RECOVERY_PREFIX: &str = "main-recovery-";
 static DIAGNOSTIC_LOG: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
 #[derive(serde::Serialize)]
@@ -181,6 +183,48 @@ fn webview_labels<R: Runtime>(app: &AppHandle<R>) -> String {
     let mut labels = app.webview_windows().into_keys().collect::<Vec<_>>();
     labels.sort();
     format!("[{}]", labels.join(","))
+}
+
+fn is_app_window_label(label: &str) -> bool {
+    label == MAIN_WINDOW_LABEL || label.starts_with(MAIN_WINDOW_RECOVERY_PREFIX)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainWindowOpenTarget {
+    ExistingMain,
+    ExistingRecovery,
+    NewMain,
+    NewRecovery,
+}
+
+fn main_window_open_target(
+    main_responsive: Option<bool>,
+    recovery_responsive: Option<bool>,
+) -> MainWindowOpenTarget {
+    match (main_responsive, recovery_responsive) {
+        (Some(true), _) => MainWindowOpenTarget::ExistingMain,
+        (_, Some(true)) => MainWindowOpenTarget::ExistingRecovery,
+        (Some(false), _) => MainWindowOpenTarget::NewRecovery,
+        (None, _) => MainWindowOpenTarget::NewMain,
+    }
+}
+
+fn next_recovery_window_label<I, S>(existing_labels: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let existing = existing_labels
+        .into_iter()
+        .map(|label| label.as_ref().to_string())
+        .collect::<std::collections::HashSet<_>>();
+    for n in 1.. {
+        let label = format!("{MAIN_WINDOW_RECOVERY_PREFIX}{n}");
+        if !existing.contains(&label) {
+            return label;
+        }
+    }
+    unreachable!("unbounded recovery label search should always find a label")
 }
 
 fn window_state_summary<R: Runtime>(window: &WebviewWindow<R>) -> String {
@@ -678,24 +722,27 @@ where
     }
 }
 
-fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>, destroy: bool) -> Result<(), String> {
+fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     app.state::<MicTestState>().stop();
     log_diagnostic(format!(
-        "send main window to tray destroy={destroy} webviews={}",
+        "send main window to tray webviews={}",
         webview_labels(app)
     ));
-    if let Some(window) = app.get_webview_window("main") {
-        log_window_state("send-to-tray before", &window);
-        if destroy {
-            window.destroy().map_err(|e| e.to_string())?;
-            log_diagnostic("send-to-tray destroy ok");
-        } else {
-            window.hide().map_err(|e| e.to_string())?;
-            log_diagnostic("send-to-tray hide ok");
-            log_window_state("send-to-tray after hide", &window);
-        }
-    } else {
-        log_diagnostic("send-to-tray skipped: main window not found");
+    let mut windows = app
+        .webview_windows()
+        .into_iter()
+        .filter(|(label, _)| is_app_window_label(label))
+        .collect::<Vec<_>>();
+    windows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if windows.is_empty() {
+        log_diagnostic("send-to-tray skipped: app window not found");
+    }
+    for (label, window) in windows {
+        log_window_state(&format!("send-to-tray before label={label}"), &window);
+        window.hide().map_err(|e| e.to_string())?;
+        log_diagnostic(format!("send-to-tray hide ok label={label}"));
+        log_window_state(&format!("send-to-tray after hide label={label}"), &window);
     }
     Ok(())
 }
@@ -726,16 +773,15 @@ fn should_open_on_tray_click(button: MouseButton, button_state: MouseButtonState
 #[tauri::command]
 fn minimize_main_window<R: Runtime>(
     app: AppHandle<R>,
+    window: WebviewWindow<R>,
     state: tauri::State<RuntimeState>,
 ) -> Result<(), String> {
     match minimize_request_action(&state.settings()) {
         MinimizeRequestAction::Taskbar => {
-            if let Some(window) = app.get_webview_window("main") {
-                window.minimize().map_err(|e| e.to_string())?;
-            }
+            window.minimize().map_err(|e| e.to_string())?;
             Ok(())
         }
-        MinimizeRequestAction::Tray => send_main_window_to_tray(&app, false),
+        MinimizeRequestAction::Tray => send_main_window_to_tray(&app),
     }
 }
 
@@ -1399,13 +1445,13 @@ pub fn run() {
                 label,
                 event: WindowEvent::CloseRequested { api, .. },
                 ..
-            } if label == "main" => {
-                log_diagnostic("window event: main close requested");
+            } if is_app_window_label(&label) => {
+                log_diagnostic(format!("window event: app close requested label={label}"));
                 api.prevent_close();
                 match close_request_action(&app.state::<RuntimeState>().settings()) {
                     CloseRequestAction::Tray => {
                         log_diagnostic("close request action: tray");
-                        if let Err(e) = send_main_window_to_tray(app, true) {
+                        if let Err(e) = send_main_window_to_tray(app) {
                             log_diagnostic(format!("close to tray failed: {e}"));
                             eprintln!("close to tray: {e}");
                         }
@@ -1465,64 +1511,100 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         "open_main_window start webviews={}",
         webview_labels(app)
     ));
-    if let Some(window) = app.get_webview_window("main") {
-        log_window_state("open existing before reveal", &window);
-        let result = reveal_main_window(
-            || {
-                let result = window.show();
-                log_diagnostic(format!(
-                    "open existing show: {}",
-                    result_debug(result.as_ref())
-                ));
-                result
-            },
-            || {
-                let result = window.unminimize();
-                log_diagnostic(format!(
-                    "open existing unminimize: {}",
-                    result_debug(result.as_ref())
-                ));
-                result
-            },
-            || {
-                let result = window.set_focus();
-                log_diagnostic(format!(
-                    "open existing set_focus: {}",
-                    result_debug(result.as_ref())
-                ));
-                result
-            },
-        );
-        log_window_state("open existing after reveal", &window);
-        return result;
-    }
+    let main_window = app.get_webview_window(MAIN_WINDOW_LABEL);
+    let main_responsive = main_window.as_ref().map(window_is_responsive);
+    let recovery_window = find_responsive_recovery_window(app);
+    let recovery_responsive = recovery_window.as_ref().map(|_| true);
 
-    log_diagnostic("open_main_window rebuilding missing main window");
-    let config = app
+    match main_window_open_target(main_responsive, recovery_responsive) {
+        MainWindowOpenTarget::ExistingMain => {
+            let window = main_window.expect("target requires main window");
+            log_window_state("open existing before reveal", &window);
+            let result = reveal_logged_window(&window, "open existing");
+            log_window_state("open existing after reveal", &window);
+            result
+        }
+        MainWindowOpenTarget::ExistingRecovery => {
+            let window = recovery_window.expect("target requires recovery window");
+            log_window_state("open recovery before reveal", &window);
+            let result = reveal_logged_window(&window, "open recovery");
+            log_window_state("open recovery after reveal", &window);
+            result
+        }
+        MainWindowOpenTarget::NewMain => {
+            log_diagnostic("open_main_window rebuilding missing main window");
+            let window = build_main_window(app, MAIN_WINDOW_LABEL)?;
+            log_window_state("open rebuilt before reveal", &window);
+            let result = reveal_logged_window(&window, "open rebuilt");
+            log_window_state("open rebuilt after reveal", &window);
+            result
+        }
+        MainWindowOpenTarget::NewRecovery => {
+            if let Some(window) = main_window.as_ref() {
+                log_window_state("open dead main before recovery", window);
+            }
+            let label = next_recovery_window_label(app.webview_windows().into_keys());
+            log_diagnostic(format!(
+                "open_main_window main handle unresponsive; building recovery label={label}"
+            ));
+            let window = build_main_window(app, &label)?;
+            log_window_state("open recovery rebuilt before reveal", &window);
+            let result = reveal_logged_window(&window, "open recovery rebuilt");
+            log_window_state("open recovery rebuilt after reveal", &window);
+            result
+        }
+    }
+}
+
+fn window_is_responsive<R: Runtime>(window: &WebviewWindow<R>) -> bool {
+    window.is_visible().is_ok()
+}
+
+fn find_responsive_recovery_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
+    let mut windows = app
+        .webview_windows()
+        .into_iter()
+        .filter(|(label, _)| label.starts_with(MAIN_WINDOW_RECOVERY_PREFIX))
+        .collect::<Vec<_>>();
+    windows.sort_by(|a, b| a.0.cmp(&b.0));
+    windows
+        .into_iter()
+        .map(|(_, window)| window)
+        .find(window_is_responsive)
+}
+
+fn build_main_window<R: Runtime>(
+    app: &AppHandle<R>,
+    label: &str,
+) -> Result<WebviewWindow<R>, String> {
+    let mut config = app
         .config()
         .app
         .windows
         .first()
         .ok_or_else(|| "missing main window config".to_string())?
         .clone();
-    let window = WebviewWindowBuilder::from_config(app, &config)
+    config.label = label.to_string();
+    WebviewWindowBuilder::from_config(app, &config)
         .map_err(|e| e.to_string())?
         .build()
-        .map_err(|e| e.to_string())?;
-    log_window_state("open rebuilt before reveal", &window);
-    let result = reveal_main_window(
+        .map_err(|e| e.to_string())
+}
+
+fn reveal_logged_window<R: Runtime>(
+    window: &WebviewWindow<R>,
+    context: &str,
+) -> Result<(), String> {
+    reveal_main_window(
         || {
             let result = window.show();
-            log_diagnostic(format!(
-                "open rebuilt show: {}",
-                result_debug(result.as_ref())
-            ));
+            log_diagnostic(format!("{context} show: {}", result_debug(result.as_ref())));
             result
         },
         || {
             let result = window.unminimize();
             log_diagnostic(format!(
-                "open rebuilt unminimize: {}",
+                "{context} unminimize: {}",
                 result_debug(result.as_ref())
             ));
             result
@@ -1530,14 +1612,12 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         || {
             let result = window.set_focus();
             log_diagnostic(format!(
-                "open rebuilt set_focus: {}",
+                "{context} set_focus: {}",
                 result_debug(result.as_ref())
             ));
             result
         },
-    );
-    log_window_state("open rebuilt after reveal", &window);
-    result
+    )
 }
 
 fn reveal_main_window<E>(
@@ -1958,6 +2038,43 @@ mod tests {
             MouseButton::Middle,
             MouseButtonState::Up
         ));
+    }
+
+    #[test]
+    fn app_window_labels_include_recovery_windows() {
+        assert!(is_app_window_label("main"));
+        assert!(is_app_window_label("main-recovery-1"));
+        assert!(!is_app_window_label("settings"));
+        assert!(!is_app_window_label("mainframe"));
+    }
+
+    #[test]
+    fn dead_main_window_opens_recovery_window() {
+        assert_eq!(
+            main_window_open_target(Some(false), None),
+            MainWindowOpenTarget::NewRecovery
+        );
+        assert_eq!(
+            main_window_open_target(Some(false), Some(true)),
+            MainWindowOpenTarget::ExistingRecovery
+        );
+        assert_eq!(
+            main_window_open_target(Some(true), Some(true)),
+            MainWindowOpenTarget::ExistingMain
+        );
+        assert_eq!(
+            main_window_open_target(None, None),
+            MainWindowOpenTarget::NewMain
+        );
+    }
+
+    #[test]
+    fn recovery_window_labels_skip_existing_labels() {
+        assert_eq!(next_recovery_window_label(["main"]), "main-recovery-1");
+        assert_eq!(
+            next_recovery_window_label(["main", "main-recovery-1", "main-recovery-2"]),
+            "main-recovery-3"
+        );
     }
 
     #[test]
