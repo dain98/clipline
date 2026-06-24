@@ -16,8 +16,8 @@ use tauri_plugin_updater::UpdaterExt;
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
 use crate::platform;
-use crate::platform::{AudioDeviceLists, DisplayInfo};
 use crate::platform::PlatformCapabilities;
+use crate::platform::{AudioDeviceLists, DisplayInfo};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode, GameRecordingMode,
@@ -330,6 +330,7 @@ impl RuntimeState {
     }
 
     fn start_recording<R: Runtime>(&self, app: AppHandle<R>) -> Result<bool, String> {
+        service::ensure_recording_available()?;
         let rx = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             if inner.tx.is_some() {
@@ -924,7 +925,7 @@ fn save_settings<R: Runtime>(
         && autostart_should_mutate_for_current_build()
     {
         settings.open_on_startup = set_autostart(&app, settings.open_on_startup)
-            .map_err(|e| format!("update Windows startup registration: {e}"))?;
+            .map_err(|e| format!("update startup registration: {e}"))?;
     }
 
     if settings.hotkey != old.hotkey {

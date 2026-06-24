@@ -1,39 +1,34 @@
 use crate::memory::MemoryStatus;
 
 use super::{
-    AudioDeviceLists, CapabilityStatus, CapturableWindow, DisplayInfo, PermissionAction,
-    PlatformCapabilities, PlatformOs,
+    AudioDeviceLists, CapabilityStatus, CapturableWindow, DisplayInfo, PlatformCapabilities,
+    PlatformOs,
 };
 
 pub fn capabilities() -> PlatformCapabilities {
     PlatformCapabilities {
         os: PlatformOs::Macos,
-        display_capture: CapabilityStatus::needs_permission(
+        display_capture: CapabilityStatus::unavailable(
             "ScreenCaptureKit display capture is not implemented in Milestone 1",
-            PermissionAction::OpenScreenRecordingSettings,
         ),
-        window_capture: CapabilityStatus::needs_permission(
+        window_capture: CapabilityStatus::unavailable(
             "ScreenCaptureKit window capture is not implemented in Milestone 1",
-            PermissionAction::OpenScreenRecordingSettings,
         ),
-        display_region_capture: CapabilityStatus::needs_permission(
+        display_region_capture: CapabilityStatus::unavailable(
             "ScreenCaptureKit region capture is not implemented in Milestone 1",
-            PermissionAction::OpenScreenRecordingSettings,
         ),
         system_audio: CapabilityStatus::unavailable(
             "macOS system audio capture is not implemented in Milestone 1",
         ),
-        microphone: CapabilityStatus::needs_permission(
+        microphone: CapabilityStatus::unavailable(
             "macOS microphone capture is not implemented in Milestone 1",
-            PermissionAction::OpenMicrophoneSettings,
         ),
         per_process_audio: CapabilityStatus::unavailable(
             "macOS per-process output audio is not available in v1",
         ),
         global_hotkey: CapabilityStatus::available(),
-        in_game_hotkey_fallback: CapabilityStatus::needs_permission(
+        in_game_hotkey_fallback: CapabilityStatus::unavailable(
             "macOS focused-game hotkey fallback is not implemented in Milestone 1",
-            PermissionAction::OpenInputMonitoringSettings,
         ),
         startup_login_item: CapabilityStatus::available(),
         hardware_encode: CapabilityStatus::unavailable(

@@ -302,6 +302,10 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
     (cmd_tx, event_rx)
 }
 
+pub fn ensure_recording_available() -> Result<(), String> {
+    Err("macOS recording is not implemented in Milestone 1".into())
+}
+
 pub fn default_clips_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)

@@ -1,7 +1,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlatformOs {
-    #[allow(dead_code)] // Staged cross-platform model: Windows variant is exercised on the Windows build.
+    #[allow(dead_code)]
+    // Staged cross-platform model: Windows variant is exercised on the Windows build.
     Windows,
     Macos,
 }
@@ -30,6 +31,7 @@ impl CapabilityStatus {
         }
     }
 
+    #[allow(dead_code)] // Used by later native macOS permission checks once the features exist.
     pub fn needs_permission(reason: impl Into<String>, action: PermissionAction) -> Self {
         Self {
             available: false,
@@ -41,11 +43,13 @@ impl CapabilityStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[allow(clippy::enum_variant_names)]
+#[allow(dead_code)] // Staged for native permission-aware capability checks after Milestone 1.
 #[serde(rename_all = "snake_case")]
 pub enum PermissionAction {
     OpenScreenRecordingSettings,
     OpenMicrophoneSettings,
-    #[allow(dead_code)] // Staged macOS shell wiring: accessibility path is intentionally not represented yet.
+    #[allow(dead_code)]
+    // Staged macOS shell wiring: accessibility path is intentionally not represented yet.
     OpenAccessibilitySettings,
     OpenInputMonitoringSettings,
 }

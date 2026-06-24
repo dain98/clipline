@@ -1,15 +1,15 @@
 //! Clipline Cloud desktop integration: connection state, OS credential storage,
 //! and per-clip uploads through the first-party API client.
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(windows)]
 use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::ptr;
 #[cfg(windows)]
 use std::slice;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use clipline_cloud_api::{
@@ -202,6 +202,8 @@ pub async fn cloud_connect(
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_DEVICE_NAME)
         .to_string();
+
+    ensure_cloud_connect_available()?;
 
     let connected = clipline_cloud_api::connect_with_device_token(
         request.host_url.trim(),
@@ -864,6 +866,16 @@ fn cloud_clip_url(cloud: &CloudSettings, clip_id: &str) -> Option<String> {
 
 fn credential_target(host_url: &str, user_id: &str) -> String {
     format!("Clipline Cloud:{host_url}:{user_id}")
+}
+
+#[cfg(windows)]
+fn ensure_cloud_connect_available() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_cloud_connect_available() -> Result<(), String> {
+    Err("macOS cloud connect is unavailable until Keychain storage is implemented".into())
 }
 
 #[cfg(windows)]

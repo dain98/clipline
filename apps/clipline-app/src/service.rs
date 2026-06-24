@@ -511,6 +511,10 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
     (cmd_tx, event_rx)
 }
 
+pub fn ensure_recording_available() -> Result<(), String> {
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MarkerSourceKind {
     Plugin,
@@ -1971,7 +1975,6 @@ mod tests {
         assert!((first_seconds - 2.0).abs() < 1e-6);
         assert!((second_seconds - 2.0).abs() < 1e-6);
     }
-
 
     #[test]
     fn clips_dir_uses_configured_root_when_creatable() {

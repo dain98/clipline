@@ -46,6 +46,9 @@ fn real_modules_are_declared_for_macos() {
     let main_rs = main_rs();
     for required in [
         "#[cfg(any(windows, target_os = \"macos\"))]\nmod app;",
+        "#[cfg(any(windows, target_os = \"macos\"))]\nmod cloud;",
+        "#[cfg(any(windows, target_os = \"macos\"))]\nmod game_icon;",
+        "#[cfg(any(windows, target_os = \"macos\"))]\nmod library;",
         "#[cfg(any(windows, target_os = \"macos\"))]\nmod settings;",
         "#[cfg(any(windows, target_os = \"macos\"))]\nmod platform;",
         "#[cfg(target_os = \"macos\")]\n#[path = \"service_macos.rs\"]\nmod service;",
@@ -53,6 +56,29 @@ fn real_modules_are_declared_for_macos() {
         assert!(
             main_rs.contains(required),
             "missing macOS module declaration: {required}"
+        );
+    }
+}
+
+#[test]
+fn tracked_macos_modules_are_declared_or_intentionally_absent() {
+    let main_rs = main_rs();
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for entry in fs::read_dir(&src_dir).expect("read src dir") {
+        let entry = entry.expect("read src entry");
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.ends_with("_macos.rs") {
+            continue;
+        }
+
+        let module = name.trim_end_matches(".rs").trim_end_matches("_macos");
+        let expected_path_attr = format!("#[path = \"{name}\"]\nmod {module}");
+        assert!(
+            main_rs.contains(&expected_path_attr),
+            "{name} is tracked but not wired through main.rs"
         );
     }
 }
@@ -76,6 +102,31 @@ fn platform_facade_exposes_macos_capability_model() {
             "missing platform type: {required}"
         );
     }
+}
+
+#[test]
+fn macos_capabilities_do_not_offer_permission_actions_for_unimplemented_features() {
+    let macos =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/platform/macos.rs"))
+            .expect("read platform/macos.rs");
+
+    for feature in [
+        "display_capture",
+        "window_capture",
+        "display_region_capture",
+        "microphone",
+        "in_game_hotkey_fallback",
+    ] {
+        let assignment = format!("{feature}: CapabilityStatus::unavailable(");
+        assert!(
+            macos.contains(&assignment),
+            "{feature} should be unavailable, not a permission action, until implemented"
+        );
+    }
+    assert!(
+        !macos.contains("CapabilityStatus::needs_permission("),
+        "macOS Milestone 1 capabilities should not imply Settings can enable unimplemented features"
+    );
 }
 
 #[test]
@@ -111,6 +162,7 @@ fn macos_service_stub_exposes_app_facing_contract() {
         "pub enum CaptureBackend",
         "pub enum VideoEncoder",
         "pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>)",
+        "pub fn ensure_recording_available() -> Result<(), String>",
         "pub fn default_clips_dir() -> PathBuf",
         "pub fn clips_dir(root: &Path) -> Result<PathBuf, String>",
         "pub fn available_encoder_options() -> Vec<EncoderOption>",
@@ -134,6 +186,32 @@ fn macos_service_stub_exposes_app_facing_contract() {
             "missing macOS stub behavior: {required}"
         );
     }
+}
+
+#[test]
+fn macos_recording_start_fails_before_spawning_stub_service() {
+    let app = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"))
+        .expect("read app.rs");
+    let service =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service_macos.rs"))
+            .expect("read service_macos.rs");
+
+    assert!(
+        service.contains(
+            "pub fn ensure_recording_available() -> Result<(), String> {\n    Err(\"macOS recording is not implemented in Milestone 1\".into())\n}"
+        ),
+        "macOS must expose recording as unavailable before app start_recording can spawn the stub"
+    );
+    let guard = app
+        .find("service::ensure_recording_available()?;")
+        .expect("start_recording should check service availability");
+    let spawn = app
+        .find("let (tx, rx) = service::spawn(Self::options(&inner)?);")
+        .expect("start_recording should spawn the service after the availability check");
+    assert!(
+        guard < spawn,
+        "recording availability must be checked before spawning the service"
+    );
 }
 
 #[test]
@@ -170,14 +248,12 @@ fn app_commands_use_platform_facade() {
 
 #[test]
 fn macos_hotkey_and_memory_stubs_exist() {
-    let hotkeys = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/hotkeys_macos.rs"),
-    )
-    .expect("read hotkeys_macos.rs");
-    let memory = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/memory_macos.rs"),
-    )
-    .expect("read memory_macos.rs");
+    let hotkeys =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/hotkeys_macos.rs"))
+            .expect("read hotkeys_macos.rs");
+    let memory =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/memory_macos.rs"))
+            .expect("read memory_macos.rs");
 
     assert!(hotkeys.contains("pub fn install_save_hook"));
     assert!(hotkeys.contains("focused-game hotkey fallback"));
@@ -199,10 +275,9 @@ fn os_specific_helpers_are_cfg_gated() {
         .expect("read cloud.rs");
     let library = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library.rs"))
         .expect("read library.rs");
-    let game_icon = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/game_icon.rs"),
-    )
-    .expect("read game_icon.rs");
+    let game_icon =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/game_icon.rs"))
+            .expect("read game_icon.rs");
 
     assert!(persistence.contains("#[cfg(windows)]\nfn replace_file"));
     assert!(persistence.contains("#[cfg(not(windows))]\nfn replace_file"));
@@ -212,4 +287,29 @@ fn os_specific_helpers_are_cfg_gated() {
     assert!(library.contains("#[cfg(windows)]\nfn copy_file_to_clipboard"));
     assert!(library.contains("#[cfg(target_os = \"macos\")]\nfn copy_file_to_clipboard"));
     assert!(game_icon.contains("#[cfg(target_os = \"macos\")]\npub fn extract_exe_icon_png"));
+}
+
+#[test]
+fn macos_cloud_connect_fails_before_network_request() {
+    let cloud = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cloud.rs"))
+        .expect("read cloud.rs");
+
+    assert!(
+        cloud.contains("#[cfg(target_os = \"macos\")]\nfn ensure_cloud_connect_available"),
+        "macOS cloud connect should have an explicit platform availability guard"
+    );
+    assert!(
+        cloud.contains("Err(\"macOS cloud connect is unavailable until Keychain storage is implemented\".into())"),
+        "macOS cloud connect should return a clear Keychain milestone error"
+    );
+    let guard = cloud
+        .find("ensure_cloud_connect_available()?;")
+        .expect("cloud_connect should check platform availability");
+    let network = cloud
+        .find("clipline_cloud_api::connect_with_device_token")
+        .expect("cloud_connect should still use real network connect on supported platforms");
+    assert!(
+        guard < network,
+        "macOS availability must be checked before any cloud network request"
+    );
 }

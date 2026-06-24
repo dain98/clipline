@@ -6,8 +6,8 @@ mod macos;
 mod windows;
 
 pub use types::{
-    AudioDeviceLists, CapabilityStatus, CapturableWindow, DisplayInfo,
-    PermissionAction, PlatformCapabilities, PlatformOs,
+    AudioDeviceLists, CapabilityStatus, CapturableWindow, DisplayInfo, PlatformCapabilities,
+    PlatformOs,
 };
 
 // Keep this unconditional for Windows facade implementation; macOS currently
