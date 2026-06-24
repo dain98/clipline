@@ -24,15 +24,34 @@ fn app_rs() -> String {
     fs::read_to_string(path).expect("read src/app.rs")
 }
 
+fn tauri_config() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+    fs::read_to_string(path).expect("read tauri.conf.json")
+}
+
 #[test]
-fn default_capability_covers_recovery_windows() {
+fn default_capability_only_targets_main_window() {
     let capability =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json"))
             .expect("read default capability");
 
     assert!(
-        capability.contains("\"main-recovery-*\""),
-        "recovery windows need the same frontend command permissions as main"
+        capability.contains("\"windows\": [\"main\"]"),
+        "frontend commands should only target Clipline's main window"
+    );
+    assert!(
+        !capability.contains("main-recovery"),
+        "recovery windows are intentionally not created or granted frontend command permissions"
+    );
+}
+
+#[test]
+fn windows_installer_requires_modern_webview2_runtime() {
+    let config = tauri_config();
+
+    assert!(
+        config.contains("\"minimumWebview2Version\""),
+        "Windows 10 installs must repair/update stale WebView2 runtimes before Clipline starts"
     );
 }
 

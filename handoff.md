@@ -262,6 +262,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-24):
+- Windows 10 follow-up from Nate's 0.1.12 logs: the recovery-window build also produced
+  immediate `failed to receive message from webview` state calls, while Windows 11 works
+  normally. Treat this as WebView2/runtime creation trouble, not a hidden-window bug. The next
+  build removes the `main-recovery-*` churn, keeps revealing the existing `main` handle when
+  getters fail, logs Microsoft Edge WebView2 runtime registry `pv` values at startup, and sets
+  `minimumWebview2Version = 120.0.2210.55` so Windows 10 installs repair/update stale runtimes.
 - Published Nightly 0.1.12 with the mouse-hotkey, selected-audio-track upload remux, release
   diagnostics, and dead-window recovery work from PR #51.
 - Added release-build diagnostics for the tray/open-window path. Clipline now appends
@@ -271,8 +277,9 @@ Recent fixes (2026-06-24):
   position, and size). The log rotates to `clipline.old.log` after 1 MiB.
 - Tray close now hides the app window instead of destroying it. A destroyed Tauri window can leave
   a `main` webview label behind whose state calls fail with `failed to receive message from
-  webview`; `Open Clipline` now treats that as a dead handle and opens a `main-recovery-*`
-  replacement window with the same frontend permissions.
+  webview`; 0.1.12 briefly tried recovery labels, but Windows 10 logs showed new recovery
+  webviews failing the same way, so the recovery path was removed again in favor of WebView2
+  runtime diagnostics and installer enforcement.
 - Save Replay hotkeys now support middle mouse, Mouse4, and Mouse5 when combined with
   Ctrl/Alt/Shift. Mouse hotkeys skip the OS global-shortcut registration path and are handled by
   an on-demand low-level mouse hook; switching between keyboard and mouse hotkeys

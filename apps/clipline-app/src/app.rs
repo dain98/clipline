@@ -29,7 +29,6 @@ use crate::updates::UpdateChannel;
 
 const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 1_048_576;
 const MAIN_WINDOW_LABEL: &str = "main";
-const MAIN_WINDOW_RECOVERY_PREFIX: &str = "main-recovery-";
 static DIAGNOSTIC_LOG: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
 #[derive(serde::Serialize)]
@@ -186,45 +185,21 @@ fn webview_labels<R: Runtime>(app: &AppHandle<R>) -> String {
 }
 
 fn is_app_window_label(label: &str) -> bool {
-    label == MAIN_WINDOW_LABEL || label.starts_with(MAIN_WINDOW_RECOVERY_PREFIX)
+    label == MAIN_WINDOW_LABEL
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainWindowOpenTarget {
     ExistingMain,
-    ExistingRecovery,
     NewMain,
-    NewRecovery,
 }
 
-fn main_window_open_target(
-    main_responsive: Option<bool>,
-    recovery_responsive: Option<bool>,
-) -> MainWindowOpenTarget {
-    match (main_responsive, recovery_responsive) {
-        (Some(true), _) => MainWindowOpenTarget::ExistingMain,
-        (_, Some(true)) => MainWindowOpenTarget::ExistingRecovery,
-        (Some(false), _) => MainWindowOpenTarget::NewRecovery,
-        (None, _) => MainWindowOpenTarget::NewMain,
+fn main_window_open_target(main_window_present: bool) -> MainWindowOpenTarget {
+    if main_window_present {
+        MainWindowOpenTarget::ExistingMain
+    } else {
+        MainWindowOpenTarget::NewMain
     }
-}
-
-fn next_recovery_window_label<I, S>(existing_labels: I) -> String
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let existing = existing_labels
-        .into_iter()
-        .map(|label| label.as_ref().to_string())
-        .collect::<std::collections::HashSet<_>>();
-    for n in 1.. {
-        let label = format!("{MAIN_WINDOW_RECOVERY_PREFIX}{n}");
-        if !existing.contains(&label) {
-            return label;
-        }
-    }
-    unreachable!("unbounded recovery label search should always find a label")
 }
 
 fn window_state_summary<R: Runtime>(window: &WebviewWindow<R>) -> String {
@@ -242,6 +217,58 @@ fn window_state_summary<R: Runtime>(window: &WebviewWindow<R>) -> String {
 
 fn log_window_state<R: Runtime>(context: &str, window: &WebviewWindow<R>) {
     log_diagnostic(format!("{context}: {}", window_state_summary(window)));
+}
+
+const WEBVIEW2_RUNTIME_CLIENT_GUID: &str = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+
+fn webview2_runtime_registry_keys() -> [String; 3] {
+    [
+        format!(
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_RUNTIME_CLIENT_GUID}"
+        ),
+        format!(r"HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_RUNTIME_CLIENT_GUID}"),
+        format!(r"HKCU\Software\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_RUNTIME_CLIENT_GUID}"),
+    ]
+}
+
+fn parse_reg_pv_output(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let name = fields.next()?;
+        let kind = fields.next()?;
+        if !name.eq_ignore_ascii_case("pv") || !kind.eq_ignore_ascii_case("REG_SZ") {
+            return None;
+        }
+        let value = fields.collect::<Vec<_>>().join(" ");
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+fn query_registry_pv(key: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let output = std::process::Command::new("reg.exe")
+        .args(["query", key, "/v", "pv"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_reg_pv_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn webview2_runtime_diagnostic() -> String {
+    let entries = webview2_runtime_registry_keys()
+        .into_iter()
+        .map(|key| {
+            let version = query_registry_pv(&key).unwrap_or_else(|| "missing".to_string());
+            format!("{key}={version}")
+        })
+        .collect::<Vec<_>>();
+    format!("webview2_runtime_versions {}", entries.join("; "))
 }
 
 #[tauri::command]
@@ -1210,6 +1237,7 @@ pub fn run() {
         env!("CARGO_PKG_VERSION"),
         diagnostic_log_path()
     ));
+    log_diagnostic(webview2_runtime_diagnostic());
     let mut lol_url = None::<String>;
     if let Some(i) = args.iter().position(|a| a == "--window") {
         if let Some(title) = args.get(i + 1) {
@@ -1512,23 +1540,13 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         webview_labels(app)
     ));
     let main_window = app.get_webview_window(MAIN_WINDOW_LABEL);
-    let main_responsive = main_window.as_ref().map(window_is_responsive);
-    let recovery_window = find_responsive_recovery_window(app);
-    let recovery_responsive = recovery_window.as_ref().map(|_| true);
 
-    match main_window_open_target(main_responsive, recovery_responsive) {
+    match main_window_open_target(main_window.is_some()) {
         MainWindowOpenTarget::ExistingMain => {
             let window = main_window.expect("target requires main window");
             log_window_state("open existing before reveal", &window);
             let result = reveal_logged_window(&window, "open existing");
             log_window_state("open existing after reveal", &window);
-            result
-        }
-        MainWindowOpenTarget::ExistingRecovery => {
-            let window = recovery_window.expect("target requires recovery window");
-            log_window_state("open recovery before reveal", &window);
-            let result = reveal_logged_window(&window, "open recovery");
-            log_window_state("open recovery after reveal", &window);
             result
         }
         MainWindowOpenTarget::NewMain => {
@@ -1539,38 +1557,7 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
             log_window_state("open rebuilt after reveal", &window);
             result
         }
-        MainWindowOpenTarget::NewRecovery => {
-            if let Some(window) = main_window.as_ref() {
-                log_window_state("open dead main before recovery", window);
-            }
-            let label = next_recovery_window_label(app.webview_windows().into_keys());
-            log_diagnostic(format!(
-                "open_main_window main handle unresponsive; building recovery label={label}"
-            ));
-            let window = build_main_window(app, &label)?;
-            log_window_state("open recovery rebuilt before reveal", &window);
-            let result = reveal_logged_window(&window, "open recovery rebuilt");
-            log_window_state("open recovery rebuilt after reveal", &window);
-            result
-        }
     }
-}
-
-fn window_is_responsive<R: Runtime>(window: &WebviewWindow<R>) -> bool {
-    window.is_visible().is_ok()
-}
-
-fn find_responsive_recovery_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
-    let mut windows = app
-        .webview_windows()
-        .into_iter()
-        .filter(|(label, _)| label.starts_with(MAIN_WINDOW_RECOVERY_PREFIX))
-        .collect::<Vec<_>>();
-    windows.sort_by(|a, b| a.0.cmp(&b.0));
-    windows
-        .into_iter()
-        .map(|(_, window)| window)
-        .find(window_is_responsive)
 }
 
 fn build_main_window<R: Runtime>(
@@ -2041,39 +2028,35 @@ mod tests {
     }
 
     #[test]
-    fn app_window_labels_include_recovery_windows() {
+    fn app_window_labels_include_only_main_window() {
         assert!(is_app_window_label("main"));
-        assert!(is_app_window_label("main-recovery-1"));
+        assert!(!is_app_window_label("main-recovery-1"));
         assert!(!is_app_window_label("settings"));
         assert!(!is_app_window_label("mainframe"));
     }
 
     #[test]
-    fn dead_main_window_opens_recovery_window() {
+    fn unresponsive_main_window_reveals_existing_handle() {
         assert_eq!(
-            main_window_open_target(Some(false), None),
-            MainWindowOpenTarget::NewRecovery
-        );
-        assert_eq!(
-            main_window_open_target(Some(false), Some(true)),
-            MainWindowOpenTarget::ExistingRecovery
-        );
-        assert_eq!(
-            main_window_open_target(Some(true), Some(true)),
+            main_window_open_target(true),
             MainWindowOpenTarget::ExistingMain
         );
         assert_eq!(
-            main_window_open_target(None, None),
+            main_window_open_target(false),
             MainWindowOpenTarget::NewMain
         );
     }
 
     #[test]
-    fn recovery_window_labels_skip_existing_labels() {
-        assert_eq!(next_recovery_window_label(["main"]), "main-recovery-1");
+    fn parses_webview2_runtime_version_from_reg_output() {
+        let output = r#"
+HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}
+    pv    REG_SZ    120.0.2210.55
+"#;
+
         assert_eq!(
-            next_recovery_window_label(["main", "main-recovery-1", "main-recovery-2"]),
-            "main-recovery-3"
+            parse_reg_pv_output(output).as_deref(),
+            Some("120.0.2210.55")
         );
     }
 

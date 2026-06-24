@@ -45,6 +45,7 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "minimumWebview2Version": "120.0.2210.55",
       "webviewInstallMode": {
         "type": "offlineInstaller"
       },
