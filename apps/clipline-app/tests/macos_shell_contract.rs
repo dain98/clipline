@@ -278,6 +278,10 @@ fn macos_bundle_and_update_status_are_explicit() {
     let app = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"))
         .expect("read app.rs");
 
+    assert!(
+        config.contains("\"identifier\": \"io.clipline.desktop\""),
+        "macOS bundle identifier should not end with .app"
+    );
     assert!(config.contains("\"targets\": [\"nsis\", \"dmg\", \"app\"]"));
     assert!(
         !config.contains("for Windows"),
