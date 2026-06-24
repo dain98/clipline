@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{Map, Value};
+#[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
@@ -134,6 +135,7 @@ impl AppSettings {
     }
 }
 
+#[cfg(windows)]
 pub fn config_base() -> PathBuf {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
@@ -143,6 +145,16 @@ pub fn config_base() -> PathBuf {
                 .map(|home| home.join("AppData").join("Roaming"))
         })
         .unwrap_or_else(std::env::temp_dir)
+        .join("Clipline")
+}
+
+#[cfg(not(windows))]
+pub fn config_base() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Library")
+        .join("Application Support")
         .join("Clipline")
 }
 
@@ -256,6 +268,7 @@ pub(crate) fn sibling_tmp_path(path: &Path) -> Result<PathBuf, String> {
     Ok(path.with_file_name(tmp_name))
 }
 
+#[cfg(windows)]
 fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
     let from_w = crate::util::wide_null(from.as_os_str());
     let to_w = crate::util::wide_null(to.as_os_str());
@@ -267,6 +280,11 @@ fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::rename(from, to).map_err(|e| format!("replace settings file {to:?}: {e}"))
 }
 
 pub(crate) fn deserialize_field<T>(object: &Map<String, Value>, key: &str) -> Option<T>

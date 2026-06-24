@@ -12,24 +12,24 @@ fn main() {
 
 #[cfg(any(windows, target_os = "macos"))]
 mod app;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 mod cloud;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 mod cloud_upload;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 mod game_icon;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 mod game_plugins;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 mod games;
 #[cfg(windows)]
 mod hotkeys;
 #[cfg(target_os = "macos")]
 #[path = "hotkeys_macos.rs"]
 mod hotkeys;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 mod library;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 mod markers;
 #[cfg(windows)]
 mod memory;
@@ -38,7 +38,7 @@ mod memory;
 mod memory;
 #[cfg(any(windows, target_os = "macos"))]
 mod platform;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 mod poster;
 #[cfg(windows)]
 mod service;
@@ -47,9 +47,9 @@ mod service;
 mod service;
 #[cfg(any(windows, target_os = "macos"))]
 mod settings;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 mod sound;
 #[cfg(any(windows, target_os = "macos"))]
 mod updates;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 mod util;
