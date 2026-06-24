@@ -841,6 +841,11 @@ fn start_microphone_test<R: Runtime>(
         let _ = (app, state, device_id, volume, mono);
         Err("macOS microphone test is not implemented in Milestone 1".into())
     }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (app, state, device_id, volume, mono);
+        Err("Microphone test is unsupported on this platform".into())
+    }
 }
 
 /// Every encoder this machine can use, for the Settings dropdown. Each

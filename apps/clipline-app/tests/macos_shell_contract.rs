@@ -159,6 +159,7 @@ fn app_commands_use_platform_facade() {
         "crate::platform::memory_status()",
         "#[cfg(windows)]\nfn start_microphone_test_windows",
         "#[cfg(target_os = \"macos\")]\n    {\n        let _ = (app, state, device_id, volume, mono);\n        Err(\"macOS microphone test is not implemented in Milestone 1\".into())",
+        "#[cfg(not(any(windows, target_os = \"macos\")))]\n    {\n        let _ = (app, state, device_id, volume, mono);\n        Err(\"Microphone test is unsupported on this platform\".into())",
     ] {
         assert!(
             app.contains(required),
