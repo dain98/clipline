@@ -56,3 +56,44 @@ fn real_modules_are_declared_for_macos() {
         );
     }
 }
+
+#[test]
+fn platform_facade_exposes_macos_capability_model() {
+    let types =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/platform/types.rs"))
+            .expect("read platform/types.rs");
+
+    for required in [
+        "pub struct PlatformCapabilities",
+        "pub in_game_hotkey_fallback: CapabilityStatus",
+        "pub hardware_encode: CapabilityStatus",
+        "pub hdr_capture: CapabilityStatus",
+        "pub player_decode: CapabilityStatus",
+        "pub struct CapturableWindow",
+    ] {
+        assert!(
+            types.contains(required),
+            "missing platform type: {required}"
+        );
+    }
+}
+
+#[test]
+fn game_detection_uses_platform_window_type() {
+    let games = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/games.rs"))
+        .expect("read games.rs");
+    let plugins =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/game_plugins.rs"))
+            .expect("read game_plugins.rs");
+
+    assert!(games.contains("use crate::platform::CapturableWindow;"));
+    assert!(plugins.contains("use crate::platform::CapturableWindow;"));
+    assert!(
+        !games.contains("clipline_capture::windows::CapturableWindow"),
+        "game detection should not import Windows window types directly"
+    );
+    assert!(
+        !plugins.contains("clipline_capture::windows::CapturableWindow"),
+        "game plugins should not import Windows window types directly"
+    );
+}

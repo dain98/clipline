@@ -8,9 +8,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
-use clipline_capture::windows::CapturableWindow;
-
 use crate::markers::PollerMsg;
+use crate::platform::CapturableWindow;
 use crate::settings::{GamePluginSettings, GameRecordingMode, GameSettings};
 
 pub const LEAGUE_OF_LEGENDS_ID: &str = "league_of_legends";
@@ -169,10 +168,9 @@ static GAME_PLUGINS: [GamePlugin; 1] = [GamePlugin {
 mod league_of_legends {
     use std::sync::mpsc::Receiver;
 
-    use clipline_capture::windows::CapturableWindow;
-
     use super::GameEventSourceContext;
     use crate::markers::PollerMsg;
+    use crate::platform::CapturableWindow;
 
     const IN_GAME_EXE: &str = "League of Legends.exe";
 

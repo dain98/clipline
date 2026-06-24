@@ -1,7 +1,9 @@
 //! Custom game detection. This layer only consumes visible window/process
-//! metadata exposed by Win32; it never opens game memory or injects code.
+//! metadata exposed by the platform facade; it never opens game memory or
+//! injects code.
 
-use clipline_capture::windows::{enumerate_capturable_windows, CapturableWindow};
+use crate::platform;
+use crate::platform::CapturableWindow;
 
 use crate::game_plugins::{self, GamePluginInfo};
 use crate::settings::{CustomGameSettings, GameRecordingMode, GameSettings};
@@ -34,7 +36,7 @@ pub fn game_plugin_catalog() -> Vec<GamePluginInfo> {
 
 pub fn list_game_windows() -> Vec<GameWindowInfo> {
     let current_pid = std::process::id();
-    let mut windows: Vec<_> = enumerate_capturable_windows()
+    let mut windows: Vec<_> = platform::enumerate_capturable_windows()
         .into_iter()
         .filter(|window| window.process_id != current_pid)
         .map(|window| GameWindowInfo {
@@ -61,7 +63,7 @@ pub fn detect_active_game(settings: &GameSettings) -> Option<DetectedGame> {
     if !has_enabled_games(settings) {
         return None;
     }
-    detect_active_game_from_windows(settings, enumerate_capturable_windows())
+    detect_active_game_from_windows(settings, platform::enumerate_capturable_windows())
 }
 
 pub fn detect_active_game_from_windows(
