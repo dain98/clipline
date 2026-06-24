@@ -20,6 +20,10 @@ use clipline_events::{ClipMarkers, GameId};
 use security_framework::os::macos::keychain::SecKeychain;
 #[cfg(target_os = "macos")]
 use security_framework::os::macos::passwords::find_generic_password;
+#[cfg(target_os = "macos")]
+use security_framework::passwords::delete_generic_password;
+#[cfg(target_os = "macos")]
+use security_framework_sys::base::errSecItemNotFound;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
 #[cfg(windows)]
@@ -965,12 +969,10 @@ fn delete_credential(target: &str) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn delete_credential(target: &str) -> Result<(), String> {
-    match find_generic_password(None, KEYCHAIN_SERVICE, target) {
-        Ok((_, item)) => {
-            item.delete();
-            Ok(())
-        }
-        Err(_) => Ok(()),
+    match delete_generic_password(KEYCHAIN_SERVICE, target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == errSecItemNotFound => Ok(()),
+        Err(error) => Err(format!("delete cloud token from Keychain: {error}")),
     }
 }
 

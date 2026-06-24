@@ -660,11 +660,20 @@ fn updater_error_status(
     channel: UpdateChannel,
     error: &tauri_plugin_updater::Error,
 ) -> Option<String> {
-    let message = error.to_string();
-    if cfg!(target_os = "macos") && message.contains("darwin") && message.contains("platforms") {
-        Some(macos_update_artifact_missing_message(channel))
-    } else {
-        None
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+
+    match error {
+        tauri_plugin_updater::Error::TargetNotFound(target) if target.contains("darwin") => {
+            Some(macos_update_artifact_missing_message(channel))
+        }
+        tauri_plugin_updater::Error::TargetsNotFound(targets)
+            if targets.iter().any(|target| target.contains("darwin")) =>
+        {
+            Some(macos_update_artifact_missing_message(channel))
+        }
+        _ => None,
     }
 }
 
@@ -1763,6 +1772,42 @@ mod tests {
         assert_eq!(
             macos_update_artifact_missing_message(UpdateChannel::Nightly),
             "No macOS update artifact is published yet for Nightly. Publish a signed macOS app or DMG artifact first."
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn updater_error_status_uses_typed_macos_target_errors() {
+        assert_eq!(
+            updater_error_status(
+                UpdateChannel::Nightly,
+                &tauri_plugin_updater::Error::TargetNotFound("darwin-aarch64".into()),
+            ),
+            Some(macos_update_artifact_missing_message(
+                UpdateChannel::Nightly
+            ))
+        );
+        assert_eq!(
+            updater_error_status(
+                UpdateChannel::Nightly,
+                &tauri_plugin_updater::Error::TargetsNotFound(vec![
+                    "linux-x86_64".into(),
+                    "darwin-aarch64".into(),
+                ]),
+            ),
+            Some(macos_update_artifact_missing_message(
+                UpdateChannel::Nightly
+            ))
+        );
+        assert_eq!(
+            updater_error_status(
+                UpdateChannel::Nightly,
+                &tauri_plugin_updater::Error::Network(
+                    "the platform `darwin-aarch64` was not found in the response `platforms` object"
+                        .into(),
+                ),
+            ),
+            None
         );
     }
 

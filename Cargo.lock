@@ -932,6 +932,7 @@ dependencies = [
  "rfd",
  "rodio",
  "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "tauri",

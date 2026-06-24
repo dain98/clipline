@@ -1,6 +1,9 @@
 use std::collections::VecDeque;
 use std::process::Command;
 
+const MACOS_PS: &str = "/bin/ps";
+const MACOS_PGREP: &str = "/usr/bin/pgrep";
+
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct MemoryStatus {
     pub private_working_set_bytes: u64,
@@ -22,7 +25,7 @@ pub fn current_process_tree_memory() -> Result<MemoryStatus, String> {
 }
 
 fn rss_bytes_for_pid(pid: u32) -> Result<u64, String> {
-    let output = Command::new("ps")
+    let output = Command::new(MACOS_PS)
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()
         .map_err(|e| format!("read process memory: {e}"))?;
@@ -33,7 +36,7 @@ fn rss_bytes_for_pid(pid: u32) -> Result<u64, String> {
 }
 
 fn child_pids(pid: u32) -> Vec<u32> {
-    let Ok(output) = Command::new("pgrep")
+    let Ok(output) = Command::new(MACOS_PGREP)
         .args(["-P", &pid.to_string()])
         .output()
     else {

@@ -261,8 +261,10 @@ fn macos_hotkey_and_memory_stubs_exist() {
     assert!(hotkeys.contains("pub fn install_save_hook"));
     assert!(hotkeys.contains("focused-game hotkey fallback"));
     assert!(hotkeys.contains("pub fn set_save_hotkey"));
-    assert!(memory.contains("Command::new(\"ps\")"));
-    assert!(memory.contains("Command::new(\"pgrep\")"));
+    assert!(memory.contains("const MACOS_PS: &str = \"/bin/ps\";"));
+    assert!(memory.contains("const MACOS_PGREP: &str = \"/usr/bin/pgrep\";"));
+    assert!(memory.contains("Command::new(MACOS_PS)"));
+    assert!(memory.contains("Command::new(MACOS_PGREP)"));
     assert!(memory.contains("parse_ps_rss_kib"));
     assert!(!memory.contains("macOS memory status is not implemented in Milestone 1"));
     assert!(platform.contains("crate::memory::current_process_tree_memory()"));
@@ -271,9 +273,8 @@ fn macos_hotkey_and_memory_stubs_exist() {
 
 #[test]
 fn macos_bundle_and_update_status_are_explicit() {
-    let config =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"))
-            .expect("read tauri.conf.json");
+    let config = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"))
+        .expect("read tauri.conf.json");
     let app = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"))
         .expect("read app.rs");
 
@@ -333,11 +334,17 @@ fn macos_cloud_credentials_use_keychain_before_network_uploads() {
     assert!(cloud.contains("const KEYCHAIN_SERVICE: &str = \"Clipline Cloud\";"));
     assert!(cloud.contains("security_framework::os::macos::keychain::SecKeychain"));
     assert!(cloud.contains("security_framework::os::macos::passwords::find_generic_password"));
+    assert!(cloud.contains("security_framework::passwords::delete_generic_password"));
+    assert!(cloud.contains("security_framework_sys::base::errSecItemNotFound"));
     assert!(cloud.contains("set_generic_password(KEYCHAIN_SERVICE, target, token.as_bytes())"));
     assert!(cloud.contains("find_generic_password(None, KEYCHAIN_SERVICE, target)"));
     assert!(
-        cloud.contains("item.delete();"),
-        "macOS disconnect should delete the Keychain item"
+        cloud.contains("delete_generic_password(KEYCHAIN_SERVICE, target)"),
+        "macOS disconnect should delete Keychain items through the Result-returning API"
+    );
+    assert!(
+        cloud.contains("error.code() == errSecItemNotFound"),
+        "macOS disconnect should only ignore Keychain item-not-found errors"
     );
     let network = cloud
         .find("clipline_cloud_api::connect_with_device_token")
@@ -345,7 +352,10 @@ fn macos_cloud_credentials_use_keychain_before_network_uploads() {
     let write = cloud
         .find("write_credential(&target, &result.username, &result.token)?;")
         .expect("cloud_connect should persist the returned token");
-    assert!(network < write, "token should be stored after a successful connect");
+    assert!(
+        network < write,
+        "token should be stored after a successful connect"
+    );
 }
 
 #[test]
@@ -361,11 +371,14 @@ fn macos_file_actions_are_native_and_available() {
         "reveal_clip should reveal the selected clip, not only open its parent folder"
     );
     assert!(
-        library.contains("Command::new(\"open\")") && library.contains(".arg(\"-R\")"),
+        library.contains("const MACOS_OPEN: &str = \"/usr/bin/open\";")
+            && library.contains("Command::new(MACOS_OPEN)")
+            && library.contains(".arg(\"-R\")"),
         "macOS reveal should use Finder's open -R behavior"
     );
     assert!(
-        library.contains("Command::new(\"osascript\")")
+        library.contains("const MACOS_OSASCRIPT: &str = \"/usr/bin/osascript\";")
+            && library.contains("Command::new(MACOS_OSASCRIPT)")
             && library.contains("set the clipboard to POSIX file"),
         "macOS clipboard copy should put a Finder file on the pasteboard"
     );

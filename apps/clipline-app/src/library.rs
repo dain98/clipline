@@ -6,13 +6,13 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 #[cfg(windows)]
 use std::mem::size_of;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(windows)]
 use std::ptr;
 use std::sync::Mutex;
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt;
 
 use clipline_events::{is_timeline_marker, ClipMarker, ClipMarkers, GameId};
 use clipline_mp4::{remux_with_selected_audio_tracks, trim_keyframe_aligned_file};
@@ -34,6 +34,11 @@ use crate::service::{clips_dir, default_clips_dir};
 use crate::util;
 #[cfg(windows)]
 use crate::util::last_os_error;
+
+#[cfg(target_os = "macos")]
+const MACOS_OPEN: &str = "/usr/bin/open";
+#[cfg(target_os = "macos")]
+const MACOS_OSASCRIPT: &str = "/usr/bin/osascript";
 
 pub struct StorageSettings {
     quota_bytes: Mutex<Option<u64>>,
@@ -620,8 +625,6 @@ fn export_clip_file(source: PathBuf, start_s: f64, end_s: f64) -> Result<Exporte
     })
 }
 
-
-
 fn audio_preview_path(
     preview_dir: &Path,
     source: &Path,
@@ -736,7 +739,7 @@ fn open_folder_path(dir: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn open_folder_path(dir: &Path) -> Result<(), String> {
-    Command::new("open")
+    Command::new(MACOS_OPEN)
         .arg(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -760,7 +763,7 @@ fn reveal_file_path(path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn reveal_file_path(path: &Path) -> Result<(), String> {
-    Command::new("open")
+    Command::new(MACOS_OPEN)
         .arg("-R")
         .arg(path)
         .stdin(Stdio::null())
@@ -885,7 +888,7 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
         "set the clipboard to POSIX file \"{}\"",
         escape_applescript_string(&path.display().to_string())
     );
-    let output = Command::new("osascript")
+    let output = Command::new(MACOS_OSASCRIPT)
         .arg("-e")
         .arg(script)
         .stdin(Stdio::null())
@@ -998,8 +1001,6 @@ impl Drop for ClipboardClose {
         }
     }
 }
-
-
 
 fn filter_timeline_markers(mut markers: ClipMarkers) -> ClipMarkers {
     markers.markers.retain(|m| is_timeline_marker(&m.event));
