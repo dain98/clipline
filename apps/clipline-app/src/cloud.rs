@@ -1,9 +1,12 @@
 //! Clipline Cloud desktop integration: connection state, OS credential storage,
 //! and per-clip uploads through the first-party API client.
 
+#[cfg(windows)]
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::ptr;
+#[cfg(windows)]
 use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,8 +16,17 @@ use clipline_cloud_api::{
     sha256_hex, ClipDetailResponse, CloudApiError, CloudClient, CreateUploadRequest,
 };
 use clipline_events::{ClipMarkers, GameId};
+#[cfg(target_os = "macos")]
+use security_framework::os::macos::keychain::SecKeychain;
+#[cfg(target_os = "macos")]
+use security_framework::os::macos::passwords::find_generic_password;
+#[cfg(target_os = "macos")]
+use security_framework::passwords::delete_generic_password;
+#[cfg(target_os = "macos")]
+use security_framework_sys::base::errSecItemNotFound;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
+#[cfg(windows)]
 use windows_sys::Win32::Security::Credentials::{
     CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
     CRED_TYPE_GENERIC,
@@ -23,13 +35,17 @@ use windows_sys::Win32::Security::Credentials::{
 use crate::app::RuntimeState;
 use crate::library::{validate_clip_path, StorageSettings};
 use crate::settings::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
-use crate::util::{last_os_error, unix_now, wide_null};
+use crate::util::unix_now;
+#[cfg(windows)]
+use crate::util::{last_os_error, wide_null};
 
 const DEFAULT_DEVICE_NAME: &str = "Clipline Desktop";
 const READY_POLL_ATTEMPTS: usize = 30;
 const READY_POLL_DELAY: Duration = Duration::from_secs(1);
 const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "Clipline Cloud";
 
 static UPLOAD_MIX_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -197,7 +213,9 @@ pub async fn cloud_connect(
         .unwrap_or(DEFAULT_DEVICE_NAME)
         .to_string();
 
-    let connected = clipline_cloud_api::connect_with_device_token(
+    ensure_cloud_connect_available()?;
+
+    let result = clipline_cloud_api::connect_with_device_token(
         request.host_url.trim(),
         request.username.trim().to_string(),
         request.password,
@@ -207,29 +225,39 @@ pub async fn cloud_connect(
     .await
     .map_err(cloud_error)?;
 
-    let host_url = connected
+    let host_url = result
         .client
         .base_url()
         .as_str()
         .trim_end_matches('/')
         .to_string();
-    let public_url = connected
+    let public_url = result
         .discovery
         .public_url
         .trim()
         .trim_end_matches('/')
         .to_string();
-    let target = credential_target(&host_url, &connected.user.id);
-    write_credential(&target, &connected.user.username, &connected.token)?;
+    let user_id = result.user.id.clone();
+    let connected_username = result.user.username.clone();
+    struct StoredCredential {
+        username: String,
+        token: String,
+    }
+    let result = StoredCredential {
+        username: connected_username.clone(),
+        token: result.token,
+    };
+    let target = credential_target(&host_url, &user_id);
+    write_credential(&target, &result.username, &result.token)?;
 
     let old_target = state.settings().cloud.credential_target;
     let settings = state.update_cloud(|cloud| {
         let identity_changed = cloud.host_url != host_url
-            || cloud.connected_user_id.as_deref() != Some(connected.user.id.as_str());
+            || cloud.connected_user_id.as_deref() != Some(user_id.as_str());
         cloud.host_url = host_url.clone();
         cloud.public_url = Some(public_url.clone());
-        cloud.connected_user_id = Some(connected.user.id.clone());
-        cloud.connected_username = Some(connected.user.username.clone());
+        cloud.connected_user_id = Some(user_id.clone());
+        cloud.connected_username = Some(result.username.clone());
         cloud.credential_target = Some(target.clone());
         cloud.default_visibility = visibility.clone();
         if identity_changed {
@@ -860,6 +888,17 @@ fn credential_target(host_url: &str, user_id: &str) -> String {
     format!("Clipline Cloud:{host_url}:{user_id}")
 }
 
+#[cfg(windows)]
+fn ensure_cloud_connect_available() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_cloud_connect_available() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
 fn write_credential(target: &str, username: &str, token: &str) -> Result<(), String> {
     let mut target_w = wide_null(OsStr::new(target));
     let mut username_w = wide_null(OsStr::new(username));
@@ -885,6 +924,15 @@ fn write_credential(target: &str, username: &str, token: &str) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn write_credential(target: &str, _username: &str, token: &str) -> Result<(), String> {
+    SecKeychain::default()
+        .map_err(|e| format!("open Keychain: {e}"))?
+        .set_generic_password(KEYCHAIN_SERVICE, target, token.as_bytes())
+        .map_err(|e| format!("store cloud token in Keychain: {e}"))
+}
+
+#[cfg(windows)]
 fn read_credential(target: &str) -> Result<String, String> {
     let target_w = wide_null(OsStr::new(target));
     let mut raw: *mut CREDENTIALW = ptr::null_mut();
@@ -902,6 +950,15 @@ fn read_credential(target: &str) -> Result<String, String> {
     String::from_utf8(bytes.to_vec()).map_err(|_| "cloud token is not valid UTF-8".to_string())
 }
 
+#[cfg(target_os = "macos")]
+fn read_credential(target: &str) -> Result<String, String> {
+    let (password, _) = find_generic_password(None, KEYCHAIN_SERVICE, target)
+        .map_err(|e| format!("read cloud token from Keychain: {e}"))?;
+    String::from_utf8(password.as_ref().to_vec())
+        .map_err(|_| "cloud token is not valid UTF-8".to_string())
+}
+
+#[cfg(windows)]
 fn delete_credential(target: &str) -> Result<(), String> {
     let target_w = wide_null(OsStr::new(target));
     if unsafe { CredDeleteW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
@@ -910,8 +967,19 @@ fn delete_credential(target: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn delete_credential(target: &str) -> Result<(), String> {
+    match delete_generic_password(KEYCHAIN_SERVICE, target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == errSecItemNotFound => Ok(()),
+        Err(error) => Err(format!("delete cloud token from Keychain: {error}")),
+    }
+}
+
+#[cfg(windows)]
 struct CredentialFree(*mut CREDENTIALW);
 
+#[cfg(windows)]
 impl Drop for CredentialFree {
     fn drop(&mut self) {
         if !self.0.is_null() {

@@ -4,27 +4,41 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+#[cfg(windows)]
 use std::mem::size_of;
+#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(windows)]
 use std::ptr;
 use std::sync::Mutex;
 
 use clipline_events::{is_timeline_marker, ClipMarker, ClipMarkers, GameId};
 use clipline_mp4::{remux_with_selected_audio_tracks, trim_keyframe_aligned_file};
 use clipline_storage::storage_status as read_storage_status;
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+#[cfg(windows)]
 use windows_sys::Win32::System::DataExchange::{CloseClipboard, OpenClipboard, SetClipboardData};
+#[cfg(windows)]
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+#[cfg(windows)]
 use windows_sys::Win32::System::Ole::CF_HDROP;
+#[cfg(windows)]
 use windows_sys::Win32::UI::Shell::DROPFILES;
 
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::service::{clips_dir, default_clips_dir};
 use crate::util;
+#[cfg(windows)]
 use crate::util::last_os_error;
+
+#[cfg(target_os = "macos")]
+const MACOS_OPEN: &str = "/usr/bin/open";
+#[cfg(target_os = "macos")]
+const MACOS_OSASCRIPT: &str = "/usr/bin/osascript";
 
 pub struct StorageSettings {
     quota_bytes: Mutex<Option<u64>>,
@@ -611,8 +625,6 @@ fn export_clip_file(source: PathBuf, start_s: f64, end_s: f64) -> Result<Exporte
     })
 }
 
-
-
 fn audio_preview_path(
     preview_dir: &Path,
     source: &Path,
@@ -695,10 +707,7 @@ pub(crate) fn validate_clip_path(
 #[tauri::command]
 pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let target = validate_clip_path(&settings, &path)?;
-    let dir = target
-        .parent()
-        .ok_or_else(|| "clip has no containing folder".to_string())?;
-    open_folder_path(dir)
+    reveal_file_path(&target)
 }
 
 #[tauri::command]
@@ -716,11 +725,52 @@ pub fn open_media_folder(settings: tauri::State<StorageSettings>) -> Result<(), 
     open_folder_path(&dir)
 }
 
+#[cfg(windows)]
 fn open_folder_path(dir: &Path) -> Result<(), String> {
-    std::process::Command::new("explorer.exe")
+    Command::new("explorer")
         .arg(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("open explorer: {e}"))?;
+        .map_err(|e| format!("open folder {dir:?}: {e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_folder_path(dir: &Path) -> Result<(), String> {
+    Command::new(MACOS_OPEN)
+        .arg(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("open folder {dir:?}: {e}"))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn reveal_file_path(path: &Path) -> Result<(), String> {
+    Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("reveal clip {path:?}: {e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_file_path(path: &Path) -> Result<(), String> {
+    Command::new(MACOS_OPEN)
+        .arg("-R")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("reveal clip {path:?}: {e}"))?;
     Ok(())
 }
 
@@ -797,6 +847,7 @@ fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, n
     }
 }
 
+#[cfg(windows)]
 fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
     let payload = dropfiles_payload(path);
     let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, payload.len()) };
@@ -831,6 +882,35 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
+    let script = format!(
+        "set the clipboard to POSIX file \"{}\"",
+        escape_applescript_string(&path.display().to_string())
+    );
+    let output = Command::new(MACOS_OSASCRIPT)
+        .arg("-e")
+        .arg(script)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("copy file to Finder clipboard: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "copy file to Finder clipboard failed".into()
+        } else {
+            format!("copy file to Finder clipboard: {stderr}")
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn escape_applescript_string(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(windows)]
 fn dropfiles_payload(path: &Path) -> Vec<u8> {
     let mut wide = shell_clipboard_path_wide(path);
     wide.extend([0, 0]);
@@ -855,6 +935,7 @@ fn dropfiles_payload(path: &Path) -> Vec<u8> {
     payload
 }
 
+#[cfg(windows)]
 fn shell_clipboard_path_wide(path: &Path) -> Vec<u16> {
     const BACKSLASH: u16 = b'\\' as u16;
     const QUESTION: u16 = b'?' as u16;
@@ -878,10 +959,12 @@ fn shell_clipboard_path_wide(path: &Path) -> Vec<u16> {
     }
 }
 
+#[cfg(windows)]
 struct ClipboardTransfer {
     handle: HGLOBAL,
 }
 
+#[cfg(windows)]
 impl ClipboardTransfer {
     fn new(handle: HGLOBAL) -> Self {
         Self { handle }
@@ -896,6 +979,7 @@ impl ClipboardTransfer {
     }
 }
 
+#[cfg(windows)]
 impl Drop for ClipboardTransfer {
     fn drop(&mut self) {
         if !self.handle.is_null() {
@@ -906,8 +990,10 @@ impl Drop for ClipboardTransfer {
     }
 }
 
+#[cfg(windows)]
 struct ClipboardClose;
 
+#[cfg(windows)]
 impl Drop for ClipboardClose {
     fn drop(&mut self) {
         unsafe {
@@ -915,8 +1001,6 @@ impl Drop for ClipboardClose {
         }
     }
 }
-
-
 
 fn filter_timeline_markers(mut markers: ClipMarkers) -> ClipMarkers {
     markers.markers.retain(|m| is_timeline_marker(&m.event));
@@ -1154,6 +1238,15 @@ mod tests {
         assert_eq!(cropped.audio_tracks, tracks);
         assert_eq!(cropped.markers.len(), 0);
         assert!((cropped.duration_s - 4.0).abs() < 1e-9);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn applescript_string_escapes_quotes_and_backslashes() {
+        assert_eq!(
+            escape_applescript_string(r#"/tmp/a "quoted" \ clip.mp4"#),
+            r#"/tmp/a \"quoted\" \\ clip.mp4"#
+        );
     }
 
     #[test]
@@ -1463,6 +1556,7 @@ mod tests {
         assert!(validate_clip_path(&settings, not_mp4.to_str().unwrap()).is_err());
     }
 
+    #[cfg(windows)]
     #[test]
     fn dropfiles_payload_strips_verbatim_prefix_and_marks_unicode() {
         let path = Path::new(r"\\?\C:\Users\dain\Videos\Clipline\clïp 雪.mp4");
@@ -1482,6 +1576,7 @@ mod tests {
         assert_eq!(decoded, r"C:\Users\dain\Videos\Clipline\clïp 雪.mp4");
     }
 
+    #[cfg(windows)]
     #[test]
     fn shell_clipboard_path_wide_converts_verbatim_unc_paths() {
         let path = Path::new(r"\\?\UNC\nas\clips\clïp 雪.mp4");

@@ -3,20 +3,28 @@
 //! file path the user pointed us at — no injection, no game memory. Every GDI
 //! handle is released before returning.
 
+#[cfg(windows)]
 use std::ffi::OsStr;
+#[cfg(windows)]
 use std::mem::size_of;
+#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 
 use base64::Engine as _;
+#[cfg(windows)]
 use windows_sys::Win32::Graphics::Gdi::{
     DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
     BI_RGB, DIB_RGB_COLORS,
 };
+#[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+#[cfg(windows)]
 use windows_sys::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+#[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 
 /// The shell's "large" icon is 32x32 — plenty for a list badge.
+#[cfg(windows)]
 pub fn extract_exe_icon_png(exe_path: &str) -> Option<Vec<u8>> {
     let trimmed = exe_path.trim();
     if trimmed.is_empty() {
@@ -45,6 +53,11 @@ pub fn extract_exe_icon_png(exe_path: &str) -> Option<Vec<u8>> {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub fn extract_exe_icon_png(_exe_path: &str) -> Option<Vec<u8>> {
+    None
+}
+
 /// Wrap PNG bytes as a `data:` URL the webview can use directly in `<img src>`.
 pub fn png_data_url(png: &[u8]) -> String {
     let b64 = base64::engine::general_purpose::STANDARD.encode(png);
@@ -56,6 +69,7 @@ pub fn extract_exe_icon_data_url(exe_path: &str) -> Option<String> {
     extract_exe_icon_png(exe_path).map(|png| png_data_url(&png))
 }
 
+#[cfg(windows)]
 unsafe fn icon_to_png(hicon: HICON) -> Option<Vec<u8>> {
     let mut icon_info: ICONINFO = std::mem::zeroed();
     if GetIconInfo(hicon, &mut icon_info) == 0 {
@@ -75,6 +89,7 @@ unsafe fn icon_to_png(hicon: HICON) -> Option<Vec<u8>> {
     result
 }
 
+#[cfg(windows)]
 unsafe fn color_bitmap_to_png(
     hbm_color: windows_sys::Win32::Graphics::Gdi::HBITMAP,
 ) -> Option<Vec<u8>> {
@@ -135,6 +150,7 @@ unsafe fn color_bitmap_to_png(
     encode_rgba_png(width as u32, height as u32, &buf)
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     {

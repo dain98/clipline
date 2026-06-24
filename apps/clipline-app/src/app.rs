@@ -1,7 +1,7 @@
 //! Tauri shell: tray, Alt+F10 global hotkey, status webview — all thin
 //! wiring around the recorder service thread.
 
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -15,35 +15,14 @@ use tauri_plugin_updater::UpdaterExt;
 
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
+use crate::platform;
+use crate::platform::PlatformCapabilities;
+use crate::platform::{AudioDeviceLists, DisplayInfo};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode, GameRecordingMode,
 };
 use crate::updates::UpdateChannel;
-
-#[derive(serde::Serialize)]
-struct DisplayInfo {
-    id: String,
-    name: String,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    is_primary: bool,
-}
-
-#[derive(serde::Serialize)]
-struct AudioDeviceInfo {
-    id: String,
-    name: String,
-    is_default: bool,
-}
-
-#[derive(serde::Serialize)]
-struct AudioDeviceLists {
-    outputs: Vec<AudioDeviceInfo>,
-    inputs: Vec<AudioDeviceInfo>,
-}
 
 #[derive(serde::Serialize, Clone)]
 struct GameDetectionEvent {
@@ -93,12 +72,13 @@ impl GameDetectionEvent {
 
 #[tauri::command]
 fn memory_status() -> Result<crate::memory::MemoryStatus, String> {
-    crate::memory::current_process_tree_memory()
+    crate::platform::memory_status()
 }
 
 #[derive(serde::Serialize, Clone)]
 // Tauri events are JSON, so the live monitor keeps 30 ms chunks as compact
 // i16 samples instead of shipping f32 PCM through IPC.
+#[cfg(windows)]
 struct MicMonitorEvent {
     rms: f32,
     peak: f32,
@@ -350,6 +330,7 @@ impl RuntimeState {
     }
 
     fn start_recording<R: Runtime>(&self, app: AppHandle<R>) -> Result<bool, String> {
+        service::ensure_recording_available()?;
         let rx = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             if inner.tx.is_some() {
@@ -653,7 +634,10 @@ async fn check_update_for_channel<R: Runtime>(
         Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
             Ok((None, Some(missing_release_metadata_message(channel))))
         }
-        Err(e) => Err(e.to_string()),
+        Err(e) => match updater_error_status(channel, &e) {
+            Some(status) => Ok((None, Some(status))),
+            None => Err(e.to_string()),
+        },
     }
 }
 
@@ -663,6 +647,34 @@ fn missing_release_metadata_message(channel: UpdateChannel) -> String {
         channel.label(),
         channel.label()
     )
+}
+
+fn macos_update_artifact_missing_message(channel: UpdateChannel) -> String {
+    format!(
+        "No macOS update artifact is published yet for {}. Publish a signed macOS app or DMG artifact first.",
+        channel.label()
+    )
+}
+
+fn updater_error_status(
+    channel: UpdateChannel,
+    error: &tauri_plugin_updater::Error,
+) -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+
+    match error {
+        tauri_plugin_updater::Error::TargetNotFound(target) if target.contains("darwin") => {
+            Some(macos_update_artifact_missing_message(channel))
+        }
+        tauri_plugin_updater::Error::TargetsNotFound(targets)
+            if targets.iter().any(|target| target.contains("darwin")) =>
+        {
+            Some(macos_update_artifact_missing_message(channel))
+        }
+        _ => None,
+    }
 }
 
 #[tauri::command]
@@ -764,95 +776,29 @@ async fn choose_replay_cache_folder(
 
 #[tauri::command]
 fn list_displays() -> Result<Vec<DisplayInfo>, String> {
-    clipline_capture::windows::display::enumerate_displays()
-        .map_err(|e| e.to_string())
-        .map(|displays| {
-            displays
-                .into_iter()
-                .map(|display| DisplayInfo {
-                    id: display.id,
-                    name: display.name,
-                    x: display.x,
-                    y: display.y,
-                    width: display.width,
-                    height: display.height,
-                    is_primary: display.is_primary,
-                })
-                .collect()
-        })
+    crate::platform::list_displays()
 }
 
 #[tauri::command]
 fn list_audio_devices() -> Result<AudioDeviceLists, String> {
-    clipline_capture::windows::wasapi::enumerate_audio_devices()
-        .map_err(|e| e.to_string())
-        .map(|devices| AudioDeviceLists {
-            outputs: devices
-                .outputs
-                .into_iter()
-                .map(|device| AudioDeviceInfo {
-                    id: device.id,
-                    name: device.name,
-                    is_default: device.is_default,
-                })
-                .collect(),
-            inputs: devices
-                .inputs
-                .into_iter()
-                .map(|device| AudioDeviceInfo {
-                    id: device.id,
-                    name: device.name,
-                    is_default: device.is_default,
-                })
-                .collect(),
-        })
-}
-
-/// Every encoder this machine can use, for the Settings dropdown. Each
-/// option carries its codec key so the frontend can flag codecs the in-app
-/// player cannot decode.
-///
-/// `(async)` so Tauri runs this off the main thread: the first call triggers
-/// FFmpeg encoder probing (several test-encode subprocesses, ~5s), which would
-/// otherwise freeze the UI since synchronous commands run on the main thread.
-#[tauri::command(async)]
-fn probe_encoders() -> Vec<service::EncoderOption> {
-    service::available_encoder_options()
+    crate::platform::list_audio_devices()
 }
 
 #[tauri::command]
-fn list_game_windows() -> Vec<GameWindowInfo> {
-    crate::games::list_game_windows()
+fn platform_capabilities() -> PlatformCapabilities {
+    platform::capabilities()
 }
 
-/// Extract an executable's icon as a PNG `data:` URL for the custom-games UI.
-/// Returns `None` when the path has no usable icon.
-#[tauri::command]
-fn extract_window_icon(exe_path: String) -> Option<String> {
-    crate::game_icon::extract_exe_icon_data_url(&exe_path)
-}
-
-#[tauri::command]
-fn list_game_plugins() -> Vec<GamePluginInfo> {
-    crate::games::game_plugin_catalog()
-}
-
-/// The frontend reports which codecs WebView2 can decode (canPlayType) so
-/// Automatic selection never records a clip the review player can't show.
-/// Takes effect on the next recorder (re)start.
-#[tauri::command]
-fn report_decode_support(state: tauri::State<RuntimeState>, codecs: Vec<String>) {
-    state.set_decodable_codecs(&codecs);
-}
-
-#[tauri::command]
-fn start_microphone_test<R: Runtime>(
+#[cfg(windows)]
+fn start_microphone_test_windows<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<MicTestState>,
     device_id: Option<String>,
     volume: f64,
     mono: bool,
 ) -> Result<(), String> {
+    use std::sync::mpsc;
+
     state.stop();
     let channels = if mono {
         clipline_capture::windows::wasapi::WasapiChannelMode::Mono
@@ -911,6 +857,67 @@ fn start_microphone_test<R: Runtime>(
 }
 
 #[tauri::command]
+fn start_microphone_test<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<MicTestState>,
+    device_id: Option<String>,
+    volume: f64,
+    mono: bool,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        start_microphone_test_windows(app, state, device_id, volume, mono)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (app, state, device_id, volume, mono);
+        Err("macOS microphone test is not implemented in Milestone 1".into())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (app, state, device_id, volume, mono);
+        Err("Microphone test is unsupported on this platform".into())
+    }
+}
+
+/// Every encoder this machine can use, for the Settings dropdown. Each
+/// option carries its codec key so the frontend can flag codecs the in-app
+/// player cannot decode.
+///
+/// `(async)` so Tauri runs this off the main thread: the first call triggers
+/// FFmpeg encoder probing (several test-encode subprocesses, ~5s), which would
+/// otherwise freeze the UI since synchronous commands run on the main thread.
+#[tauri::command(async)]
+fn probe_encoders() -> Vec<service::EncoderOption> {
+    service::available_encoder_options()
+}
+
+#[tauri::command]
+fn list_game_windows() -> Vec<GameWindowInfo> {
+    crate::games::list_game_windows()
+}
+
+/// Extract an executable's icon as a PNG `data:` URL for the custom-games UI.
+/// Returns `None` when the path has no usable icon.
+#[tauri::command]
+fn extract_window_icon(exe_path: String) -> Option<String> {
+    crate::game_icon::extract_exe_icon_data_url(&exe_path)
+}
+
+#[tauri::command]
+fn list_game_plugins() -> Vec<GamePluginInfo> {
+    crate::games::game_plugin_catalog()
+}
+
+/// The frontend reports which codecs WebView2 can decode (canPlayType) so
+/// Automatic selection never records a clip the review player can't show.
+/// Takes effect on the next recorder (re)start.
+#[tauri::command]
+fn report_decode_support(state: tauri::State<RuntimeState>, codecs: Vec<String>) {
+    state.set_decodable_codecs(&codecs);
+}
+
+#[tauri::command]
 fn stop_microphone_test(state: tauri::State<MicTestState>) {
     state.stop();
 }
@@ -949,7 +956,7 @@ fn save_settings<R: Runtime>(
         && autostart_should_mutate_for_current_build()
     {
         settings.open_on_startup = set_autostart(&app, settings.open_on_startup)
-            .map_err(|e| format!("update Windows startup registration: {e}"))?;
+            .map_err(|e| format!("update startup registration: {e}"))?;
     }
 
     if settings.hotkey != old.hotkey {
@@ -1090,6 +1097,7 @@ pub fn run() {
             list_game_plugins,
             list_game_windows,
             extract_window_icon,
+            platform_capabilities,
             memory_status,
             start_microphone_test,
             stop_microphone_test,
@@ -1378,6 +1386,7 @@ mod tests {
     use crate::settings::{
         CloudUploadRecord, GameRecordingMode, ReplayStorageMode, ReplayStorageSettings,
     };
+    use std::sync::mpsc;
 
     #[test]
     fn quota_parser_converts_gib_to_bytes() {
@@ -1755,6 +1764,50 @@ mod tests {
         assert_eq!(
             missing_release_metadata_message(UpdateChannel::Nightly),
             "No Nightly release metadata is published yet. Publish a Nightly release first."
+        );
+    }
+
+    #[test]
+    fn macos_update_artifact_message_names_channel() {
+        assert_eq!(
+            macos_update_artifact_missing_message(UpdateChannel::Nightly),
+            "No macOS update artifact is published yet for Nightly. Publish a signed macOS app or DMG artifact first."
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn updater_error_status_uses_typed_macos_target_errors() {
+        assert_eq!(
+            updater_error_status(
+                UpdateChannel::Nightly,
+                &tauri_plugin_updater::Error::TargetNotFound("darwin-aarch64".into()),
+            ),
+            Some(macos_update_artifact_missing_message(
+                UpdateChannel::Nightly
+            ))
+        );
+        assert_eq!(
+            updater_error_status(
+                UpdateChannel::Nightly,
+                &tauri_plugin_updater::Error::TargetsNotFound(vec![
+                    "linux-x86_64".into(),
+                    "darwin-aarch64".into(),
+                ]),
+            ),
+            Some(macos_update_artifact_missing_message(
+                UpdateChannel::Nightly
+            ))
+        );
+        assert_eq!(
+            updater_error_status(
+                UpdateChannel::Nightly,
+                &tauri_plugin_updater::Error::Network(
+                    "the platform `darwin-aarch64` was not found in the response `platforms` object"
+                        .into(),
+                ),
+            ),
+            None
         );
     }
 

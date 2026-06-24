@@ -28,11 +28,14 @@ pub mod types;
 pub(crate) mod validation;
 
 pub use cloud::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
-pub use games::{GamePluginSettings, GameRecordingMode, GameSettings};
+pub use games::GamePluginSettings;
+pub use games::{GameRecordingMode, GameSettings};
 pub use hotkey::{normalize_hotkey, parse_hotkey};
+#[cfg(windows)]
+pub use persistence::icon_cache_dir;
 pub use persistence::{
-    audio_preview_cache_dir, icon_cache_dir, normalize_media_dir, normalize_replay_cache_dir,
-    quota_bytes_from_gb, replay_cache_quota_bytes_from_gb, settings_path,
+    audio_preview_cache_dir, normalize_media_dir, normalize_replay_cache_dir, quota_bytes_from_gb,
+    replay_cache_quota_bytes_from_gb, settings_path,
 };
 #[allow(unused_imports)]
 pub use types::{
@@ -130,6 +133,14 @@ impl AppSettings {
 
     pub fn to_service_options(&self, lol_url: Option<String>) -> Result<ServiceOptions, String> {
         self.validate()?;
+        let mut audio = self.audio.to_service_options();
+        #[cfg(target_os = "macos")]
+        {
+            audio.output_enabled = false;
+            audio.output_device_id = None;
+            audio.split_output_by_process = false;
+        }
+
         Ok(ServiceOptions {
             capture_source: match self.capture_mode {
                 CaptureMode::PrimaryMonitor => CaptureSource::PrimaryMonitor,
@@ -158,7 +169,7 @@ impl AppSettings {
             video_encoder: self.video_encoder,
             output_resolution: self.output_resolution,
             decodable_codecs: vec![clipline_capture::probe::Codec::H264],
-            audio: self.audio.to_service_options(),
+            audio,
         })
     }
 }

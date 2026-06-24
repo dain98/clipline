@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{Map, Value};
+#[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
@@ -135,21 +136,42 @@ impl AppSettings {
 }
 
 pub fn config_base() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(PathBuf::from)
-                .map(|home| home.join("AppData").join("Roaming"))
-        })
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Clipline")
+    #[cfg(windows)]
+    {
+        return std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(PathBuf::from)
+                    .map(|home| home.join("AppData").join("Roaming"))
+            })
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Clipline");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| {
+                home.join("Library")
+                    .join("Application Support")
+                    .join("Clipline")
+            })
+            .unwrap_or_else(|| std::env::temp_dir().join("Clipline"))
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        std::env::temp_dir().join("Clipline")
+    }
 }
 
 pub fn settings_path() -> PathBuf {
     config_base().join("settings.json")
 }
 
+#[cfg(windows)]
 pub fn icon_cache_dir() -> PathBuf {
     config_base().join("icons")
 }
@@ -256,17 +278,29 @@ pub(crate) fn sibling_tmp_path(path: &Path) -> Result<PathBuf, String> {
     Ok(path.with_file_name(tmp_name))
 }
 
+#[cfg(windows)]
 fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
-    let from_w = crate::util::wide_null(from.as_os_str());
-    let to_w = crate::util::wide_null(to.as_os_str());
-    let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
-    if unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), flags) } == 0 {
+    let from = crate::util::wide_null(from.as_os_str());
+    let to = crate::util::wide_null(to.as_os_str());
+    let ok = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
         return Err(format!(
-            "replace settings file {to:?}: {}",
+            "replace settings file: {}",
             std::io::Error::last_os_error()
         ));
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::rename(from, to).map_err(|e| format!("replace settings file: {e}"))
 }
 
 pub(crate) fn deserialize_field<T>(object: &Map<String, Value>, key: &str) -> Option<T>

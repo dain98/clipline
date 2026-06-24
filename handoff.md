@@ -334,10 +334,36 @@ Recent fixes (2026-06-19):
   path, so retrying with a different audio-track selection does not leave stale failed state in
   the library.
 
-Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
-options still override startup behavior: `--window <title substring>` to capture one window
-instead of the primary monitor, `--lol-url <url>` to point the marker poller at a mock, and
-`--disk-quota-gb <n>` to override the saved quota for that launch). The media folder is now a
+Recent macOS port work (2026-06-24):
+- The Tauri app now builds and runs on macOS with native file actions, native memory/status
+  helpers, Keychain-backed cloud credentials, login-item lifecycle plumbing, a macOS bundle
+  identifier (`io.clipline.desktop`), and a default media folder of `~/Movies/Clipline`.
+- Primary-display **video replay recording** is implemented on macOS through a bundled
+  `clipline-sck-helper` Swift sidecar. The helper owns ScreenCaptureKit, emits compact NV12
+  frames over a binary stdout protocol (`CLNV` stream header, `FRAM` frame records), and Rust
+  feeds those CPU frames into the existing `Recorder`/MP4 save path through FFmpeg
+  `h264_videotoolbox`.
+- This macOS recording slice is deliberately video-only and primary-display-only. System audio,
+  microphone audio, per-process audio, window capture, display-region capture, game-window
+  capture, full-session recording, HDR, and focused-game hotkey fallback remain unavailable with
+  explicit errors/capability states. `AppSettings::to_service_options` disables unsupported macOS
+  output audio before recorder start so default settings can exercise video replay recording.
+- The helper is compiled by `apps/clipline-app/build.rs` into
+  `target/clipline-sidecars/clipline-sck-helper`; `apps/clipline-app/tauri.macos.conf.json`
+  bundles it as `Contents/Resources/clipline-sck-helper`. The asset protocol allows
+  `Movies/Clipline` MP4 playback paths.
+- Manual macOS recording smoke needs Screen Recording permission in System Settings if the helper
+  reports a ScreenCaptureKit permission/startup error. FFmpeg must be discoverable and must offer
+  `h264_videotoolbox`; `ensure_recording_available` returns
+  `macOS recording requires FFmpeg with h264_videotoolbox` otherwise.
+- Next recommended macOS recording work: add audio capture **or** window/region capture in a
+  separate slice; do not combine both in one milestone.
+
+Run it: `cargo run -p clipline-app` (settings persist under the platform config directory:
+`%APPDATA%\Clipline\settings.json` on Windows, the corresponding Application Support path on
+macOS; options still override startup behavior: `--window <title substring>` to capture one
+window instead of the primary monitor, `--lol-url <url>` to point the marker poller at a mock,
+and `--disk-quota-gb <n>` to override the saved quota for that launch). The media folder is now a
 saved Storage setting; changing it affects future library scans, saves, exports, and quota checks.
 Useful examples: `record_smoke -- --seconds 5 --window <w> --audio` (full pipeline + sync
 report + ffprobe), `wgc_smoke` (capture only). Everything is verified live on this machine —

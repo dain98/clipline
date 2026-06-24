@@ -25,6 +25,8 @@ pub enum EncoderBackend {
     Nvenc,
     Amf,
     QuickSync,
+    /// Apple VideoToolbox H.264 through FFmpeg on macOS.
+    VideoToolbox,
     /// Software AV1 (SVT-AV1) via FFmpeg.
     SvtAv1,
     /// Microsoft software H.264 MFT — last resort.
@@ -170,6 +172,27 @@ mod tests {
         assert_eq!(
             ranked[2],
             cand(EncoderApi::Ffmpeg, EncoderBackend::Amf, Codec::Av1)
+        );
+    }
+
+    #[test]
+    fn auto_uses_videotoolbox_h264_before_software_av1() {
+        let caps = vec![
+            cap(EncoderApi::Ffmpeg, EncoderBackend::SvtAv1, &[Codec::Av1]),
+            cap(
+                EncoderApi::Ffmpeg,
+                EncoderBackend::VideoToolbox,
+                &[Codec::H264],
+            ),
+        ];
+        let ranked = rank_encoders(&caps, ALL_CODECS, EncoderPreference::Auto);
+        assert_eq!(
+            ranked[0],
+            cand(
+                EncoderApi::Ffmpeg,
+                EncoderBackend::VideoToolbox,
+                Codec::H264
+            )
         );
     }
 

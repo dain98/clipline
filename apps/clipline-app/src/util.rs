@@ -1,7 +1,9 @@
 //! Shared helpers used by multiple app modules.
 
 use std::collections::BTreeSet;
+#[cfg(windows)]
 use std::ffi::OsStr;
+#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,11 +18,13 @@ pub(crate) fn read_markers_raw(path: &Path) -> Option<ClipMarkers> {
 }
 
 /// Encode an OS string as a null-terminated UTF-16 vector for Win32 wide APIs.
+#[cfg(windows)]
 pub(crate) fn wide_null(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 /// Format a Win32 last-OS-error into a human-readable message.
+#[cfg(windows)]
 pub(crate) fn last_os_error(action: &str) -> String {
     format!("{action}: {}", std::io::Error::last_os_error())
 }

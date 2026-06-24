@@ -512,6 +512,16 @@ fn backend_rate_control(backend: EncoderBackend, bitrate_bps: u32, bufsize: u64)
             v.extend([s("-low_power"), s("0")]);
             v
         }
+        EncoderBackend::VideoToolbox => vec![
+            s("-b:v"),
+            b,
+            s("-constant_bit_rate"),
+            s("true"),
+            s("-allow_sw"),
+            s("true"),
+            s("-realtime"),
+            s("true"),
+        ],
         EncoderBackend::SvtAv1 => vec![s("-b:v"), b, s("-preset"), s("8")],
         EncoderBackend::MfSoftware => Vec::new(),
     }
@@ -676,6 +686,16 @@ mod tests {
         let joined = rc.join(" ");
         assert!(joined.contains("-b:v 4000000"));
         assert!(joined.contains("-low_power 0"));
+    }
+
+    #[test]
+    fn backend_rate_control_videotoolbox_uses_realtime_h264_flags() {
+        let rc = backend_rate_control(EncoderBackend::VideoToolbox, 4_000_000, 8_000_000);
+        let joined = rc.join(" ");
+        assert!(joined.contains("-b:v 4000000"));
+        assert!(joined.contains("-constant_bit_rate true"));
+        assert!(joined.contains("-allow_sw true"));
+        assert!(joined.contains("-realtime true"));
     }
 
     #[test]

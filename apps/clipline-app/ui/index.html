@@ -118,7 +118,7 @@
             <button id="upload-clip" class="icon-button" title="Upload to Clipline Cloud" disabled>
               <svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>
             </button>
-            <button id="open-folder" class="icon-button" title="Show this clip in Explorer">
+            <button id="open-folder" class="icon-button" title="Show this clip in folder">
               <svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
             </button>
             <button id="copy-clip" class="icon-button" title="Copy clip to clipboard">
@@ -259,11 +259,11 @@
             <div class="setting-row">
               <div class="setting-info">
                 <strong>Open on startup</strong>
-                <span>Launch Clipline automatically when you sign in to Windows.</span>
+                <span id="open-startup-description">Launch Clipline automatically when you sign in.</span>
               </div>
               <label class="check-line">
                 <input id="set-open-on-startup" type="checkbox" />
-                <span>Start Clipline on Windows login</span>
+                <span id="open-startup-label">Start Clipline on login</span>
               </label>
             </div>
             <div class="setting-row">

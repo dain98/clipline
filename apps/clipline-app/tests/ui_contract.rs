@@ -566,6 +566,30 @@ fn review_player_owns_all_controls() {
 }
 
 #[test]
+fn general_settings_copy_is_platform_aware() {
+    let html = index_html();
+    let js = main_js();
+
+    assert!(
+        html.contains("id=\"open-startup-description\"")
+            && html.contains("id=\"open-startup-label\""),
+        "startup setting text should have ids for platform-specific copy"
+    );
+    assert!(
+        !html.contains("Start Clipline on Windows login")
+            && !html.contains("sign in to Windows"),
+        "startup copy should not be hard-coded to Windows in static HTML"
+    );
+    assert!(
+        js.contains("function platformLabel")
+            && js.contains("function applyPlatformCopy")
+            && js.contains("open-startup-description")
+            && js.contains("open-startup-label"),
+        "main.js should install platform-specific settings copy"
+    );
+}
+
+#[test]
 fn audio_preview_generation_is_not_eager_on_clip_open() {
     let js = main_js();
     let open_clip_start = js.find("function openClip(clip)").unwrap();
