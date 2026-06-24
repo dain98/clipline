@@ -262,6 +262,8 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-24):
+- Published Nightly 0.1.12 with the mouse-hotkey, selected-audio-track upload remux, release
+  diagnostics, and dead-window recovery work from PR #51.
 - Added release-build diagnostics for the tray/open-window path. Clipline now appends
   single-line entries to `%APPDATA%\Clipline\clipline.log`, including startup args,
   tray menu/icon events, close-to-tray handling, window event summaries, WebView labels,
