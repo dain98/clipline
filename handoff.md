@@ -253,6 +253,13 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > shape is a full-size clapper icon on the left, only for videos that are actually user-created
 > clips, likely after finishing a clearer labeling model.
 
+Recent fixes (2026-06-24):
+- Added release-build diagnostics for the tray/open-window path. Clipline now appends
+  single-line entries to `%APPDATA%\Clipline\clipline.log`, including startup args,
+  tray menu/icon events, close-to-tray handling, window event summaries, WebView labels,
+  and before/after window state around `Open Clipline` (`visible`, `minimized`, `focused`,
+  position, and size). The log rotates to `clipline.old.log` after 1 MiB.
+
 Recent fixes (2026-06-22):
 - Tray "Open Clipline" now uses the same reveal path as a normal foreground launch:
   show the hidden WebView window, restore it if it is minimized, then focus it. This fixes
