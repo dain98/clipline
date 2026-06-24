@@ -176,7 +176,7 @@ fn macos_service_stub_exposes_app_facing_contract() {
     for required in [
         "Vec::new()",
         ".name(\"clipline-recorder-stub\".into())",
-        "encoder: \"Unavailable on macOS M1\".into(),",
+        "encoder: \"Unavailable on macOS Milestone 1\".into(),",
         "message: \"macOS recording is not implemented in Milestone 1\".into(),",
         "Cmd::Stop { announce } => {",
         "if announce {",

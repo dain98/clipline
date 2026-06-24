@@ -273,7 +273,7 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
                 buffered_s: 0.0,
                 buffered_mb: 0.0,
                 full_session: false,
-                encoder: "Unavailable on macOS M1".into(),
+                encoder: "Unavailable on macOS Milestone 1".into(),
             });
             while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
