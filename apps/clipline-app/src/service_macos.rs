@@ -113,7 +113,10 @@ impl Default for AudioOptions {
 pub enum ReplayStorageOptions {
     #[default]
     Memory,
-    Disk { dir: PathBuf, quota_bytes: u64 },
+    Disk {
+        dir: PathBuf,
+        quota_bytes: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -140,6 +143,7 @@ pub enum OutputResolution {
 
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum Event {
     Status {
         recording: bool,
@@ -220,14 +224,55 @@ impl Default for ServiceOptions {
     }
 }
 
-pub fn spawn(_opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
+pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
+    let ServiceOptions {
+        capture_source,
+        capture_backend,
+        active_game_plugin_id,
+        active_game,
+        media_dir,
+        lol_url,
+        replay_window_s,
+        buffer_bytes,
+        replay_storage,
+        disk_quota_bytes,
+        recording_mode,
+        fps,
+        bitrate_bps,
+        video_encoder,
+        output_resolution,
+        decodable_codecs,
+        audio,
+    } = opts;
+    let _ = (
+        capture_source,
+        capture_backend,
+        active_game_plugin_id,
+        media_dir,
+        lol_url,
+        replay_window_s,
+        buffer_bytes,
+        replay_storage,
+        disk_quota_bytes,
+        recording_mode,
+        fps,
+        bitrate_bps,
+        video_encoder,
+        output_resolution,
+        decodable_codecs,
+        audio,
+    );
+    if let Some(active_game) = active_game {
+        let _ = (active_game.id, active_game.name);
+    }
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("clipline-recorder-macos-stub".into())
         .spawn(move || {
             while let Ok(cmd) = cmd_rx.recv() {
-                if let Cmd::Stop { .. } = cmd {
+                if let Cmd::Stop { announce } = cmd {
+                    let _ = announce;
                     let _ = event_tx.send(Event::Status {
                         recording: false,
                         segments: 0,

@@ -1,9 +1,13 @@
 //! Shared helpers used by multiple app modules.
 
+#[cfg(windows)]
 use std::collections::BTreeSet;
+#[cfg(windows)]
 use std::ffi::OsStr;
+#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
+#[cfg(windows)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clipline_events::ClipMarkers;
@@ -16,16 +20,19 @@ pub(crate) fn read_markers_raw(path: &Path) -> Option<ClipMarkers> {
 }
 
 /// Encode an OS string as a null-terminated UTF-16 vector for Win32 wide APIs.
+#[cfg(windows)]
 pub(crate) fn wide_null(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 /// Format a Win32 last-OS-error into a human-readable message.
+#[cfg(windows)]
 pub(crate) fn last_os_error(action: &str) -> String {
     format!("{action}: {}", std::io::Error::last_os_error())
 }
 
 /// Current wall-clock time as seconds since the Unix epoch.
+#[cfg(windows)]
 pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -35,6 +42,7 @@ pub(crate) fn unix_now() -> u64 {
 
 /// Resolve user-facing audio track IDs to their MP4 track indices, validating
 /// for duplicates and unknown IDs.
+#[cfg(windows)]
 pub(crate) fn selected_audio_track_indices(
     markers: &ClipMarkers,
     selected_audio_track_ids: &[String],

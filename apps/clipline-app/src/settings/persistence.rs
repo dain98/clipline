@@ -162,6 +162,7 @@ pub fn settings_path() -> PathBuf {
     config_base().join("settings.json")
 }
 
+#[cfg(windows)]
 pub fn icon_cache_dir() -> PathBuf {
     config_base().join("icons")
 }

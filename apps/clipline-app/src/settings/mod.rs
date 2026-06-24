@@ -28,11 +28,15 @@ pub mod types;
 pub(crate) mod validation;
 
 pub use cloud::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
-pub use games::{GamePluginSettings, GameRecordingMode, GameSettings};
+#[cfg(windows)]
+pub use games::GamePluginSettings;
+pub use games::{GameRecordingMode, GameSettings};
 pub use hotkey::{normalize_hotkey, parse_hotkey};
+#[cfg(windows)]
+pub use persistence::icon_cache_dir;
 pub use persistence::{
-    audio_preview_cache_dir, icon_cache_dir, normalize_media_dir, normalize_replay_cache_dir,
-    quota_bytes_from_gb, replay_cache_quota_bytes_from_gb, settings_path,
+    audio_preview_cache_dir, normalize_media_dir, normalize_replay_cache_dir, quota_bytes_from_gb,
+    replay_cache_quota_bytes_from_gb, settings_path,
 };
 #[allow(unused_imports)]
 pub use types::{
