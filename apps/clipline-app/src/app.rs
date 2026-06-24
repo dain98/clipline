@@ -15,35 +15,13 @@ use tauri_plugin_updater::UpdaterExt;
 
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
+use crate::platform::{AudioDeviceLists, DisplayInfo, PlatformCapabilities};
+use crate::platform;
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode, GameRecordingMode,
 };
 use crate::updates::UpdateChannel;
-
-#[derive(serde::Serialize)]
-struct DisplayInfo {
-    id: String,
-    name: String,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    is_primary: bool,
-}
-
-#[derive(serde::Serialize)]
-struct AudioDeviceInfo {
-    id: String,
-    name: String,
-    is_default: bool,
-}
-
-#[derive(serde::Serialize)]
-struct AudioDeviceLists {
-    outputs: Vec<AudioDeviceInfo>,
-    inputs: Vec<AudioDeviceInfo>,
-}
 
 #[derive(serde::Serialize, Clone)]
 struct GameDetectionEvent {
@@ -93,7 +71,7 @@ impl GameDetectionEvent {
 
 #[tauri::command]
 fn memory_status() -> Result<crate::memory::MemoryStatus, String> {
-    crate::memory::current_process_tree_memory()
+    platform::memory_status()
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -765,69 +743,17 @@ async fn choose_replay_cache_folder(
 
 #[tauri::command]
 fn list_displays() -> Result<Vec<DisplayInfo>, String> {
-    #[cfg(windows)]
-    {
-        return clipline_capture::windows::display::enumerate_displays()
-            .map_err(|e| e.to_string())
-            .map(|displays| {
-                displays
-                    .into_iter()
-                    .map(|display| DisplayInfo {
-                        id: display.id,
-                        name: display.name,
-                        x: display.x,
-                        y: display.y,
-                        width: display.width,
-                        height: display.height,
-                        is_primary: display.is_primary,
-                    })
-                    .collect()
-            });
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        Err("display enumeration is unavailable on macOS shell stubs".into())
-    }
-}
-
-#[cfg(windows)]
-fn list_audio_devices_impl() -> Result<AudioDeviceLists, String> {
-    clipline_capture::windows::wasapi::enumerate_audio_devices()
-        .map_err(|e| e.to_string())
-        .map(|devices| AudioDeviceLists {
-            outputs: devices
-                .outputs
-                .into_iter()
-                .map(|device| AudioDeviceInfo {
-                    id: device.id,
-                    name: device.name,
-                    is_default: device.is_default,
-                })
-                .collect(),
-            inputs: devices
-                .inputs
-                .into_iter()
-                .map(|device| AudioDeviceInfo {
-                    id: device.id,
-                    name: device.name,
-                    is_default: device.is_default,
-                })
-                .collect(),
-        })
-}
-
-#[cfg(target_os = "macos")]
-fn list_audio_devices_impl() -> Result<AudioDeviceLists, String> {
-    Ok(AudioDeviceLists {
-        outputs: Vec::new(),
-        inputs: Vec::new(),
-    })
+    platform::list_displays()
 }
 
 #[tauri::command]
 fn list_audio_devices() -> Result<AudioDeviceLists, String> {
-    list_audio_devices_impl()
+    platform::list_audio_devices()
+}
+
+#[tauri::command]
+fn platform_capabilities() -> PlatformCapabilities {
+    platform::capabilities()
 }
 
 #[cfg(windows)]
@@ -1136,6 +1062,7 @@ pub fn run() {
             list_game_plugins,
             list_game_windows,
             extract_window_icon,
+            platform_capabilities,
             memory_status,
             start_microphone_test,
             stop_microphone_test,

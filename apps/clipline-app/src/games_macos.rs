@@ -1,4 +1,5 @@
 use crate::game_plugins::GamePluginInfo;
+use crate::platform;
 use crate::settings::{GameRecordingMode, GameSettings};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -25,7 +26,15 @@ pub fn game_plugin_catalog() -> Vec<GamePluginInfo> {
 }
 
 pub fn list_game_windows() -> Vec<GameWindowInfo> {
-    Vec::new()
+    platform::enumerate_capturable_windows()
+        .into_iter()
+        .map(|window| GameWindowInfo {
+            title: window.title,
+            process_id: window.process_id,
+            exe_name: window.exe_name,
+            exe_path: window.exe_path,
+        })
+        .collect()
 }
 
 pub fn detect_active_game(_settings: &GameSettings) -> Option<DetectedGame> {

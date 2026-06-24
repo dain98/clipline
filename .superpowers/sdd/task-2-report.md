@@ -76,3 +76,27 @@
 
 - The focused verification command passes, but the new facade currently produces compile-time warnings for unused exports/types/functions on macOS.
 - Task 1 macOS stub modules such as `games_macos.rs` and `game_plugins_macos.rs` remain in place; this task established the facade and rerouted the shared detection code, but did not widen macOS module wiring beyond the brief.
+
+## Warning Fix (Task 2 noise pass)
+
+- What changed:
+  - Routed app commands for displays, audio devices, and memory through the platform facade in `apps/clipline-app/src/app.rs` (`list_displays`, `list_audio_devices`, `memory_status`).
+  - Added a new `platform_capabilities` command so `crate::platform::capabilities()` is now consumed by the shell command surface.
+  - Updated `apps/clipline-app/src/games_macos.rs` to consume `platform::enumerate_capturable_windows()` so the macOS game-window listing is wired to the facade.
+  - Kept the macOS facade behavior stubbed while reusing the shared memory shim in `apps/clipline-app/src/platform/macos.rs`.
+  - Added narrow, documented staging suppressions for intentionally unused staged symbols:
+    - `AudioDeviceInfo` re-export path in `apps/clipline-app/src/platform/mod.rs`
+    - `PlatformOs::Windows`
+    - `PermissionAction::OpenAccessibilitySettings`
+- Test command and warning status:
+  - `cargo test -p clipline-app --test macos_shell_contract` → PASS, 5 passed, **0 warnings**.
+- Files changed:
+  - `apps/clipline-app/src/app.rs`
+  - `apps/clipline-app/src/games_macos.rs`
+  - `apps/clipline-app/src/platform/macos.rs`
+  - `apps/clipline-app/src/platform/mod.rs`
+  - `apps/clipline-app/src/platform/types.rs`
+- Commit created:
+  - `c0d2728` — fix(app): quiet staged platform facade warnings
+- Concerns:
+  - None beyond the already-staged facade intentionally limited to stubbed macOS behavior.

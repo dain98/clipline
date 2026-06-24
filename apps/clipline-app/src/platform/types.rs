@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlatformOs {
+    #[allow(dead_code)] // Staged cross-platform model: Windows variant is exercised on the Windows build.
     Windows,
     Macos,
 }
@@ -43,6 +44,7 @@ impl CapabilityStatus {
 pub enum PermissionAction {
     OpenScreenRecordingSettings,
     OpenMicrophoneSettings,
+    #[allow(dead_code)] // Staged macOS shell wiring: accessibility path is intentionally not represented yet.
     OpenAccessibilitySettings,
     OpenInputMonitoringSettings,
 }
