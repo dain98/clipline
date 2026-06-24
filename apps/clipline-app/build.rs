@@ -18,16 +18,19 @@ fn build_macos_helper() {
     let out_dir = repo_root(&manifest_dir).join("target/clipline-sidecars");
     std::fs::create_dir_all(&out_dir).expect("create target/clipline-sidecars");
     let helper_out = out_dir.join("clipline-sck-helper");
-    let status = Command::new("xcrun")
-        .args([
-            "swiftc",
-            "-O",
-            "-target",
-            "arm64-apple-macosx13.0",
-            "-framework",
-            "Foundation",
-            "-o",
-        ])
+    let mut command = Command::new("xcrun");
+    command.args(["swiftc", "-O", "-target", "arm64-apple-macosx13.0"]);
+    for framework in [
+        "Foundation",
+        "ScreenCaptureKit",
+        "CoreGraphics",
+        "CoreMedia",
+        "CoreVideo",
+    ] {
+        command.arg("-framework").arg(framework);
+    }
+    let status = command
+        .arg("-o")
         .arg(&helper_out)
         .arg(&helper_src)
         .status()

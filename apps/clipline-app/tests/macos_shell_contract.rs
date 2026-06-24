@@ -321,6 +321,20 @@ fn macos_screencapturekit_helper_is_built_and_bundled() {
 }
 
 #[test]
+fn macos_capture_wrapper_uses_helper_resource_and_protocol_magic() {
+    let main_rs = main_rs();
+    let capture =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/macos_capture.rs"))
+            .expect("read macos_capture.rs");
+    assert!(main_rs.contains("#[cfg(target_os = \"macos\")]\nmod macos_capture;"));
+    assert!(capture.contains("CLIPLINE_SCK_HELPER"));
+    assert!(capture.contains("clipline-sck-helper"));
+    assert!(capture.contains("b\"CLNV\""));
+    assert!(capture.contains("b\"FRAM\""));
+    assert!(capture.contains("impl CaptureEngine for ScreenCaptureKitCapture"));
+}
+
+#[test]
 fn macos_asset_scope_allows_default_movies_folder() {
     let config = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"))
         .expect("read tauri.conf.json");

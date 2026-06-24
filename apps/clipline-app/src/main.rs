@@ -42,6 +42,8 @@ mod memory;
 #[cfg(target_os = "macos")]
 #[path = "memory_macos.rs"]
 mod memory;
+#[cfg(target_os = "macos")]
+mod macos_capture;
 #[cfg(any(windows, target_os = "macos"))]
 mod platform;
 #[cfg(windows)]
