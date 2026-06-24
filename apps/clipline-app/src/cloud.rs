@@ -1,12 +1,15 @@
 //! Clipline Cloud desktop integration: connection state, OS credential storage,
 //! and per-clip uploads through the first-party API client.
 
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::ptr;
-use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(windows)]
+use std::ffi::OsStr;
+#[cfg(windows)]
+use std::ptr;
+#[cfg(windows)]
+use std::slice;
 
 use chrono::{DateTime, Utc};
 use clipline_cloud_api::{
@@ -15,6 +18,7 @@ use clipline_cloud_api::{
 use clipline_events::{ClipMarkers, GameId};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
+#[cfg(windows)]
 use windows_sys::Win32::Security::Credentials::{
     CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
     CRED_TYPE_GENERIC,
@@ -23,7 +27,9 @@ use windows_sys::Win32::Security::Credentials::{
 use crate::app::RuntimeState;
 use crate::library::{validate_clip_path, StorageSettings};
 use crate::settings::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
-use crate::util::{last_os_error, unix_now, wide_null};
+use crate::util::unix_now;
+#[cfg(windows)]
+use crate::util::{last_os_error, wide_null};
 
 const DEFAULT_DEVICE_NAME: &str = "Clipline Desktop";
 const READY_POLL_ATTEMPTS: usize = 30;
@@ -860,6 +866,7 @@ fn credential_target(host_url: &str, user_id: &str) -> String {
     format!("Clipline Cloud:{host_url}:{user_id}")
 }
 
+#[cfg(windows)]
 fn write_credential(target: &str, username: &str, token: &str) -> Result<(), String> {
     let mut target_w = wide_null(OsStr::new(target));
     let mut username_w = wide_null(OsStr::new(username));
@@ -885,6 +892,12 @@ fn write_credential(target: &str, username: &str, token: &str) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn write_credential(_target: &str, _username: &str, _token: &str) -> Result<(), String> {
+    Err("macOS Keychain storage is not implemented in Milestone 1".into())
+}
+
+#[cfg(windows)]
 fn read_credential(target: &str) -> Result<String, String> {
     let target_w = wide_null(OsStr::new(target));
     let mut raw: *mut CREDENTIALW = ptr::null_mut();
@@ -902,6 +915,12 @@ fn read_credential(target: &str) -> Result<String, String> {
     String::from_utf8(bytes.to_vec()).map_err(|_| "cloud token is not valid UTF-8".to_string())
 }
 
+#[cfg(target_os = "macos")]
+fn read_credential(_target: &str) -> Result<String, String> {
+    Err("macOS Keychain storage is not implemented in Milestone 1".into())
+}
+
+#[cfg(windows)]
 fn delete_credential(target: &str) -> Result<(), String> {
     let target_w = wide_null(OsStr::new(target));
     if unsafe { CredDeleteW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
@@ -910,8 +929,15 @@ fn delete_credential(target: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn delete_credential(_target: &str) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
 struct CredentialFree(*mut CREDENTIALW);
 
+#[cfg(windows)]
 impl Drop for CredentialFree {
     fn drop(&mut self) {
         if !self.0.is_null() {

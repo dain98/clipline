@@ -12,17 +12,11 @@ fn main() {
 
 #[cfg(any(windows, target_os = "macos"))]
 mod app;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod cloud;
-#[cfg(target_os = "macos")]
-#[path = "cloud_macos.rs"]
-mod cloud;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod cloud_upload;
-#[cfg(windows)]
-mod game_icon;
-#[cfg(target_os = "macos")]
-#[path = "game_icon_macos.rs"]
+#[cfg(any(windows, target_os = "macos"))]
 mod game_icon;
 #[cfg(windows)]
 mod game_plugins;
@@ -39,10 +33,7 @@ mod hotkeys;
 #[cfg(target_os = "macos")]
 #[path = "hotkeys_macos.rs"]
 mod hotkeys;
-#[cfg(windows)]
-mod library;
-#[cfg(target_os = "macos")]
-#[path = "library_macos.rs"]
+#[cfg(any(windows, target_os = "macos"))]
 mod library;
 #[cfg(windows)]
 mod markers;

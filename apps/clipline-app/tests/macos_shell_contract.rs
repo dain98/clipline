@@ -186,3 +186,30 @@ fn macos_hotkey_and_memory_stubs_exist() {
     assert!(memory.contains("private_working_set_bytes"));
     assert!(memory.contains("macOS memory status is not implemented in Milestone 1"));
 }
+
+#[test]
+fn os_specific_helpers_are_cfg_gated() {
+    let persistence = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/settings/persistence.rs"),
+    )
+    .expect("read persistence.rs");
+    let util = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/util.rs"))
+        .expect("read util.rs");
+    let cloud = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cloud.rs"))
+        .expect("read cloud.rs");
+    let library = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library.rs"))
+        .expect("read library.rs");
+    let game_icon = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/game_icon.rs"),
+    )
+    .expect("read game_icon.rs");
+
+    assert!(persistence.contains("#[cfg(windows)]\nfn replace_file"));
+    assert!(persistence.contains("#[cfg(not(windows))]\nfn replace_file"));
+    assert!(util.contains("#[cfg(windows)]\npub(crate) fn wide_null"));
+    assert!(cloud.contains("#[cfg(windows)]\nfn write_credential"));
+    assert!(cloud.contains("#[cfg(target_os = \"macos\")]\nfn write_credential"));
+    assert!(library.contains("#[cfg(windows)]\nfn copy_file_to_clipboard"));
+    assert!(library.contains("#[cfg(target_os = \"macos\")]\nfn copy_file_to_clipboard"));
+    assert!(game_icon.contains("#[cfg(target_os = \"macos\")]\npub fn extract_exe_icon_png"));
+}

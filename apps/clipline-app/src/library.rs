@@ -4,26 +4,35 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+#[cfg(windows)]
 use std::mem::size_of;
-use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(windows)]
 use std::ptr;
 use std::sync::Mutex;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 
 use clipline_events::{is_timeline_marker, ClipMarker, ClipMarkers, GameId};
 use clipline_mp4::{remux_with_selected_audio_tracks, trim_keyframe_aligned_file};
 use clipline_storage::storage_status as read_storage_status;
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+#[cfg(windows)]
 use windows_sys::Win32::System::DataExchange::{CloseClipboard, OpenClipboard, SetClipboardData};
+#[cfg(windows)]
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+#[cfg(windows)]
 use windows_sys::Win32::System::Ole::CF_HDROP;
+#[cfg(windows)]
 use windows_sys::Win32::UI::Shell::DROPFILES;
 
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::service::{clips_dir, default_clips_dir};
 use crate::util;
+#[cfg(windows)]
 use crate::util::last_os_error;
 
 pub struct StorageSettings {
@@ -716,11 +725,27 @@ pub fn open_media_folder(settings: tauri::State<StorageSettings>) -> Result<(), 
     open_folder_path(&dir)
 }
 
+#[cfg(windows)]
 fn open_folder_path(dir: &Path) -> Result<(), String> {
-    std::process::Command::new("explorer.exe")
+    Command::new("explorer")
         .arg(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("open explorer: {e}"))?;
+        .map_err(|e| format!("open folder {dir:?}: {e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_folder_path(dir: &Path) -> Result<(), String> {
+    Command::new("open")
+        .arg(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("open folder {dir:?}: {e}"))?;
     Ok(())
 }
 
@@ -797,6 +822,7 @@ fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, n
     }
 }
 
+#[cfg(windows)]
 fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
     let payload = dropfiles_payload(path);
     let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, payload.len()) };
@@ -831,6 +857,12 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn copy_file_to_clipboard(_path: &Path) -> Result<(), String> {
+    Err("Finder clipboard copy is not implemented in Milestone 1".into())
+}
+
+#[cfg(windows)]
 fn dropfiles_payload(path: &Path) -> Vec<u8> {
     let mut wide = shell_clipboard_path_wide(path);
     wide.extend([0, 0]);
@@ -855,6 +887,7 @@ fn dropfiles_payload(path: &Path) -> Vec<u8> {
     payload
 }
 
+#[cfg(windows)]
 fn shell_clipboard_path_wide(path: &Path) -> Vec<u16> {
     const BACKSLASH: u16 = b'\\' as u16;
     const QUESTION: u16 = b'?' as u16;
@@ -878,10 +911,12 @@ fn shell_clipboard_path_wide(path: &Path) -> Vec<u16> {
     }
 }
 
+#[cfg(windows)]
 struct ClipboardTransfer {
     handle: HGLOBAL,
 }
 
+#[cfg(windows)]
 impl ClipboardTransfer {
     fn new(handle: HGLOBAL) -> Self {
         Self { handle }
@@ -896,6 +931,7 @@ impl ClipboardTransfer {
     }
 }
 
+#[cfg(windows)]
 impl Drop for ClipboardTransfer {
     fn drop(&mut self) {
         if !self.handle.is_null() {
@@ -906,8 +942,10 @@ impl Drop for ClipboardTransfer {
     }
 }
 
+#[cfg(windows)]
 struct ClipboardClose;
 
+#[cfg(windows)]
 impl Drop for ClipboardClose {
     fn drop(&mut self) {
         unsafe {
@@ -1463,6 +1501,7 @@ mod tests {
         assert!(validate_clip_path(&settings, not_mp4.to_str().unwrap()).is_err());
     }
 
+    #[cfg(windows)]
     #[test]
     fn dropfiles_payload_strips_verbatim_prefix_and_marks_unicode() {
         let path = Path::new(r"\\?\C:\Users\dain\Videos\Clipline\clïp 雪.mp4");
@@ -1482,6 +1521,7 @@ mod tests {
         assert_eq!(decoded, r"C:\Users\dain\Videos\Clipline\clïp 雪.mp4");
     }
 
+    #[cfg(windows)]
     #[test]
     fn shell_clipboard_path_wide_converts_verbatim_unc_paths() {
         let path = Path::new(r"\\?\UNC\nas\clips\clïp 雪.mp4");
