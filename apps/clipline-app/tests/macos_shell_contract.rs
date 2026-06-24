@@ -313,3 +313,34 @@ fn macos_cloud_connect_fails_before_network_request() {
         "macOS availability must be checked before any cloud network request"
     );
 }
+
+#[test]
+fn macos_file_actions_are_native_and_available() {
+    let library = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library.rs"))
+        .expect("read library.rs");
+    let macos =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/platform/macos.rs"))
+            .expect("read platform/macos.rs");
+
+    assert!(
+        library.contains("fn reveal_file_path(path: &Path) -> Result<(), String>"),
+        "reveal_clip should reveal the selected clip, not only open its parent folder"
+    );
+    assert!(
+        library.contains("Command::new(\"open\")") && library.contains(".arg(\"-R\")"),
+        "macOS reveal should use Finder's open -R behavior"
+    );
+    assert!(
+        library.contains("Command::new(\"osascript\")")
+            && library.contains("set the clipboard to POSIX file"),
+        "macOS clipboard copy should put a Finder file on the pasteboard"
+    );
+    assert!(
+        library.contains("fn escape_applescript_string(raw: &str) -> String"),
+        "AppleScript command text must escape paths before invoking osascript"
+    );
+    assert!(
+        macos.contains("file_clipboard: CapabilityStatus::available()"),
+        "Finder clipboard copy should be advertised once implemented"
+    );
+}

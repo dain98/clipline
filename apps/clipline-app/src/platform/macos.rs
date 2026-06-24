@@ -36,9 +36,7 @@ pub fn capabilities() -> PlatformCapabilities {
         ),
         hdr_capture: CapabilityStatus::unavailable("HDR capture is not implemented yet"),
         player_decode: CapabilityStatus::available(),
-        file_clipboard: CapabilityStatus::unavailable(
-            "Finder clipboard copy is not implemented in Milestone 1",
-        ),
+        file_clipboard: CapabilityStatus::available(),
         updater: CapabilityStatus::available(),
     }
 }

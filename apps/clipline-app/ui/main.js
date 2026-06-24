@@ -102,6 +102,7 @@ let customGames = [];
 let gameWindows = [];
 let activeDetectedGame = null;
 let captureTargetDirty = false;
+let platformCapabilities = { os: "windows" };
 // Codecs WebView2 can decode in the review player (H.264 always; HEVC/AV1
 // probed at startup). Drives the playback caveat and the recorder's
 // Automatic-codec policy via report_decode_support.
@@ -379,6 +380,20 @@ function fillSettings(s) {
   updateCaptureStatus();
   syncUploadClipButton();
   if (clipsCache.length) renderClips();
+}
+
+function platformLabel() {
+  return platformCapabilities && platformCapabilities.os === "macos" ? "Mac" : "Windows";
+}
+
+function applyPlatformCopy() {
+  const label = platformLabel();
+  $("open-startup-description").textContent =
+    label === "Mac"
+      ? "Launch Clipline automatically when you sign in to macOS."
+      : "Launch Clipline automatically when you sign in to Windows.";
+  $("open-startup-label").textContent =
+    label === "Mac" ? "Start Clipline at Mac login" : "Start Clipline on Windows login";
 }
 
 function readSettings() {
@@ -3984,6 +3999,13 @@ syncVolume();
 syncAllRangeProgress();
 async function loadInitialSettings() {
   await loadGamePlugins();
+  try {
+    platformCapabilities = await invoke("platform_capabilities");
+    applyPlatformCopy();
+  } catch (e) {
+    console.warn("could not read platform capabilities:", e);
+    applyPlatformCopy();
+  }
   let settings = await invoke("get_settings");
   // The registry Run key is the ground truth for startup. Reconcile the UI
   // in case the entry was changed externally since the last save.

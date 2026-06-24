@@ -704,10 +704,7 @@ pub(crate) fn validate_clip_path(
 #[tauri::command]
 pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let target = validate_clip_path(&settings, &path)?;
-    let dir = target
-        .parent()
-        .ok_or_else(|| "clip has no containing folder".to_string())?;
-    open_folder_path(dir)
+    reveal_file_path(&target)
 }
 
 #[tauri::command]
@@ -746,6 +743,31 @@ fn open_folder_path(dir: &Path) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("open folder {dir:?}: {e}"))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn reveal_file_path(path: &Path) -> Result<(), String> {
+    Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("reveal clip {path:?}: {e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_file_path(path: &Path) -> Result<(), String> {
+    Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("reveal clip {path:?}: {e}"))?;
     Ok(())
 }
 
@@ -858,8 +880,31 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn copy_file_to_clipboard(_path: &Path) -> Result<(), String> {
-    Err("Finder clipboard copy is not implemented in Milestone 1".into())
+fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
+    let script = format!(
+        "set the clipboard to POSIX file \"{}\"",
+        escape_applescript_string(&path.display().to_string())
+    );
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("copy file to Finder clipboard: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "copy file to Finder clipboard failed".into()
+        } else {
+            format!("copy file to Finder clipboard: {stderr}")
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn escape_applescript_string(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(windows)]
@@ -1192,6 +1237,15 @@ mod tests {
         assert_eq!(cropped.audio_tracks, tracks);
         assert_eq!(cropped.markers.len(), 0);
         assert!((cropped.duration_s - 4.0).abs() < 1e-9);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn applescript_string_escapes_quotes_and_backslashes() {
+        assert_eq!(
+            escape_applescript_string(r#"/tmp/a "quoted" \ clip.mp4"#),
+            r#"/tmp/a \"quoted\" \\ clip.mp4"#
+        );
     }
 
     #[test]
