@@ -38,6 +38,11 @@ const KNOWN_ENCODERS: &[(&str, EncoderBackend, Codec)] = &[
     ("h264_qsv", EncoderBackend::QuickSync, Codec::H264),
     ("hevc_qsv", EncoderBackend::QuickSync, Codec::Hevc),
     ("av1_qsv", EncoderBackend::QuickSync, Codec::Av1),
+    (
+        "h264_videotoolbox",
+        EncoderBackend::VideoToolbox,
+        Codec::H264,
+    ),
     ("libsvtav1", EncoderBackend::SvtAv1, Codec::Av1),
 ];
 
@@ -55,7 +60,10 @@ pub fn encoder_name(backend: EncoderBackend, codec: Codec) -> Option<&'static st
 fn is_hardware(backend: EncoderBackend) -> bool {
     matches!(
         backend,
-        EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::QuickSync
+        EncoderBackend::Nvenc
+            | EncoderBackend::Amf
+            | EncoderBackend::QuickSync
+            | EncoderBackend::VideoToolbox
     )
 }
 
@@ -273,6 +281,30 @@ mod tests {
         assert!(found.contains(&(EncoderBackend::Amf, Codec::Hevc)));
         assert!(found.contains(&(EncoderBackend::QuickSync, Codec::Av1)));
         assert_eq!(found.len(), 10, "9 hw + libsvtav1");
+    }
+
+    #[test]
+    fn parses_videotoolbox_h264_encoder() {
+        let output = "\
+ Encoders:
+ V..... = Video
+ ------
+ V....D h264_videotoolbox    VideoToolbox H.264 Encoder (codec h264)";
+        let found = parse_available_encoders(output);
+        assert_eq!(found, vec![(EncoderBackend::VideoToolbox, Codec::H264)]);
+    }
+
+    #[test]
+    fn encoder_name_knows_videotoolbox_h264_only() {
+        assert_eq!(
+            encoder_name(EncoderBackend::VideoToolbox, Codec::H264),
+            Some("h264_videotoolbox")
+        );
+        assert_eq!(
+            encoder_name(EncoderBackend::VideoToolbox, Codec::Hevc),
+            None
+        );
+        assert_eq!(encoder_name(EncoderBackend::VideoToolbox, Codec::Av1), None);
     }
 
     #[test]

@@ -51,6 +51,7 @@ fn real_modules_are_declared_for_macos() {
         "#[cfg(any(windows, target_os = \"macos\"))]\nmod library;",
         "#[cfg(any(windows, target_os = \"macos\"))]\nmod settings;",
         "#[cfg(any(windows, target_os = \"macos\"))]\nmod platform;",
+        "#[cfg(any(windows, target_os = \"macos\"))]\nmod video_encoder;",
         "#[cfg(target_os = \"macos\")]\n#[path = \"service_macos.rs\"]\nmod service;",
     ] {
         assert!(
@@ -160,7 +161,7 @@ fn macos_service_stub_exposes_app_facing_contract() {
         "pub enum Event",
         "pub struct ServiceOptions",
         "pub enum CaptureBackend",
-        "pub enum VideoEncoder",
+        "pub use crate::video_encoder::{codec_id, EncoderOption, VideoEncoder};",
         "pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>)",
         "pub fn ensure_recording_available() -> Result<(), String>",
         "pub fn default_clips_dir() -> PathBuf",

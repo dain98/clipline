@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
+pub use crate::video_encoder::{codec_id, EncoderOption, VideoEncoder};
 pub use clipline_capture::probe::Codec;
 
 pub enum Cmd {
@@ -40,38 +41,6 @@ pub enum AudioChannelMode {
     #[default]
     Mono,
     Stereo,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VideoEncoder {
-    #[default]
-    Auto,
-    NvencH264,
-    NvencHevc,
-    NvencAv1,
-    AmfH264,
-    AmfHevc,
-    AmfAv1,
-    QuickSyncH264,
-    QuickSyncHevc,
-    QuickSyncAv1,
-    SvtAv1,
-}
-
-pub fn codec_id(codec: Codec) -> &'static str {
-    match codec {
-        Codec::Av1 => "av1",
-        Codec::Hevc => "hevc",
-        Codec::H264 => "h264",
-    }
-}
-
-#[derive(serde::Serialize)]
-pub struct EncoderOption {
-    pub id: String,
-    pub name: String,
-    pub codec: String,
 }
 
 pub fn available_encoder_options() -> Vec<EncoderOption> {

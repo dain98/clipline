@@ -62,3 +62,5 @@ mod sound;
 mod updates;
 #[cfg(any(windows, target_os = "macos"))]
 mod util;
+#[cfg(any(windows, target_os = "macos"))]
+mod video_encoder;
