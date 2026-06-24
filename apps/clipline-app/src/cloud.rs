@@ -16,6 +16,10 @@ use clipline_cloud_api::{
     sha256_hex, ClipDetailResponse, CloudApiError, CloudClient, CreateUploadRequest,
 };
 use clipline_events::{ClipMarkers, GameId};
+#[cfg(target_os = "macos")]
+use security_framework::os::macos::keychain::SecKeychain;
+#[cfg(target_os = "macos")]
+use security_framework::os::macos::passwords::find_generic_password;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
 #[cfg(windows)]
@@ -36,6 +40,8 @@ const READY_POLL_ATTEMPTS: usize = 30;
 const READY_POLL_DELAY: Duration = Duration::from_secs(1);
 const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "Clipline Cloud";
 
 static UPLOAD_MIX_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -205,7 +211,7 @@ pub async fn cloud_connect(
 
     ensure_cloud_connect_available()?;
 
-    let connected = clipline_cloud_api::connect_with_device_token(
+    let result = clipline_cloud_api::connect_with_device_token(
         request.host_url.trim(),
         request.username.trim().to_string(),
         request.password,
@@ -215,29 +221,39 @@ pub async fn cloud_connect(
     .await
     .map_err(cloud_error)?;
 
-    let host_url = connected
+    let host_url = result
         .client
         .base_url()
         .as_str()
         .trim_end_matches('/')
         .to_string();
-    let public_url = connected
+    let public_url = result
         .discovery
         .public_url
         .trim()
         .trim_end_matches('/')
         .to_string();
-    let target = credential_target(&host_url, &connected.user.id);
-    write_credential(&target, &connected.user.username, &connected.token)?;
+    let user_id = result.user.id.clone();
+    let connected_username = result.user.username.clone();
+    struct StoredCredential {
+        username: String,
+        token: String,
+    }
+    let result = StoredCredential {
+        username: connected_username.clone(),
+        token: result.token,
+    };
+    let target = credential_target(&host_url, &user_id);
+    write_credential(&target, &result.username, &result.token)?;
 
     let old_target = state.settings().cloud.credential_target;
     let settings = state.update_cloud(|cloud| {
         let identity_changed = cloud.host_url != host_url
-            || cloud.connected_user_id.as_deref() != Some(connected.user.id.as_str());
+            || cloud.connected_user_id.as_deref() != Some(user_id.as_str());
         cloud.host_url = host_url.clone();
         cloud.public_url = Some(public_url.clone());
-        cloud.connected_user_id = Some(connected.user.id.clone());
-        cloud.connected_username = Some(connected.user.username.clone());
+        cloud.connected_user_id = Some(user_id.clone());
+        cloud.connected_username = Some(result.username.clone());
         cloud.credential_target = Some(target.clone());
         cloud.default_visibility = visibility.clone();
         if identity_changed {
@@ -875,7 +891,7 @@ fn ensure_cloud_connect_available() -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn ensure_cloud_connect_available() -> Result<(), String> {
-    Err("macOS cloud connect is unavailable until Keychain storage is implemented".into())
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -905,8 +921,11 @@ fn write_credential(target: &str, username: &str, token: &str) -> Result<(), Str
 }
 
 #[cfg(target_os = "macos")]
-fn write_credential(_target: &str, _username: &str, _token: &str) -> Result<(), String> {
-    Err("macOS Keychain storage is not implemented in Milestone 1".into())
+fn write_credential(target: &str, _username: &str, token: &str) -> Result<(), String> {
+    SecKeychain::default()
+        .map_err(|e| format!("open Keychain: {e}"))?
+        .set_generic_password(KEYCHAIN_SERVICE, target, token.as_bytes())
+        .map_err(|e| format!("store cloud token in Keychain: {e}"))
 }
 
 #[cfg(windows)]
@@ -928,8 +947,11 @@ fn read_credential(target: &str) -> Result<String, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn read_credential(_target: &str) -> Result<String, String> {
-    Err("macOS Keychain storage is not implemented in Milestone 1".into())
+fn read_credential(target: &str) -> Result<String, String> {
+    let (password, _) = find_generic_password(None, KEYCHAIN_SERVICE, target)
+        .map_err(|e| format!("read cloud token from Keychain: {e}"))?;
+    String::from_utf8(password.as_ref().to_vec())
+        .map_err(|_| "cloud token is not valid UTF-8".to_string())
 }
 
 #[cfg(windows)]
@@ -942,8 +964,14 @@ fn delete_credential(target: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn delete_credential(_target: &str) -> Result<(), String> {
-    Ok(())
+fn delete_credential(target: &str) -> Result<(), String> {
+    match find_generic_password(None, KEYCHAIN_SERVICE, target) {
+        Ok((_, item)) => {
+            let _ = item.delete();
+            Ok(())
+        }
+        Err(_) => Ok(()),
+    }
 }
 
 #[cfg(windows)]

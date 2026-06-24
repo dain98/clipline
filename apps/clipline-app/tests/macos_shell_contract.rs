@@ -316,28 +316,36 @@ fn os_specific_helpers_are_cfg_gated() {
 }
 
 #[test]
-fn macos_cloud_connect_fails_before_network_request() {
+fn macos_cloud_credentials_use_keychain_before_network_uploads() {
+    let manifest = manifest();
     let cloud = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cloud.rs"))
         .expect("read cloud.rs");
 
     assert!(
-        cloud.contains("#[cfg(target_os = \"macos\")]\nfn ensure_cloud_connect_available"),
-        "macOS cloud connect should have an explicit platform availability guard"
+        manifest.contains("[target.'cfg(target_os = \"macos\")'.dependencies]")
+            && manifest.contains("security-framework = \"3.7.0\""),
+        "macOS builds should depend directly on security-framework for Keychain access"
     );
     assert!(
-        cloud.contains("Err(\"macOS cloud connect is unavailable until Keychain storage is implemented\".into())"),
-        "macOS cloud connect should return a clear Keychain milestone error"
+        !cloud.contains("macOS cloud connect is unavailable until Keychain storage is implemented"),
+        "cloud connect should no longer be blocked on macOS"
     );
-    let guard = cloud
-        .find("ensure_cloud_connect_available()?;")
-        .expect("cloud_connect should check platform availability");
+    assert!(cloud.contains("const KEYCHAIN_SERVICE: &str = \"Clipline Cloud\";"));
+    assert!(cloud.contains("security_framework::os::macos::keychain::SecKeychain"));
+    assert!(cloud.contains("security_framework::os::macos::passwords::find_generic_password"));
+    assert!(cloud.contains("set_generic_password(KEYCHAIN_SERVICE, target, token.as_bytes())"));
+    assert!(cloud.contains("find_generic_password(None, KEYCHAIN_SERVICE, target)"));
+    assert!(
+        cloud.contains("item.delete();"),
+        "macOS disconnect should delete the Keychain item"
+    );
     let network = cloud
         .find("clipline_cloud_api::connect_with_device_token")
-        .expect("cloud_connect should still use real network connect on supported platforms");
-    assert!(
-        guard < network,
-        "macOS availability must be checked before any cloud network request"
-    );
+        .expect("cloud_connect should use real network connect");
+    let write = cloud
+        .find("write_credential(&target, &result.username, &result.token)?;")
+        .expect("cloud_connect should persist the returned token");
+    assert!(network < write, "token should be stored after a successful connect");
 }
 
 #[test]
