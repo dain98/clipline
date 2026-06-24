@@ -634,7 +634,10 @@ async fn check_update_for_channel<R: Runtime>(
         Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
             Ok((None, Some(missing_release_metadata_message(channel))))
         }
-        Err(e) => Err(e.to_string()),
+        Err(e) => match updater_error_status(channel, &e) {
+            Some(status) => Ok((None, Some(status))),
+            None => Err(e.to_string()),
+        },
     }
 }
 
@@ -644,6 +647,25 @@ fn missing_release_metadata_message(channel: UpdateChannel) -> String {
         channel.label(),
         channel.label()
     )
+}
+
+fn macos_update_artifact_missing_message(channel: UpdateChannel) -> String {
+    format!(
+        "No macOS update artifact is published yet for {}. Publish a signed macOS app or DMG artifact first.",
+        channel.label()
+    )
+}
+
+fn updater_error_status(
+    channel: UpdateChannel,
+    error: &tauri_plugin_updater::Error,
+) -> Option<String> {
+    let message = error.to_string();
+    if cfg!(target_os = "macos") && message.contains("darwin") && message.contains("platforms") {
+        Some(macos_update_artifact_missing_message(channel))
+    } else {
+        None
+    }
 }
 
 #[tauri::command]
@@ -1733,6 +1755,14 @@ mod tests {
         assert_eq!(
             missing_release_metadata_message(UpdateChannel::Nightly),
             "No Nightly release metadata is published yet. Publish a Nightly release first."
+        );
+    }
+
+    #[test]
+    fn macos_update_artifact_message_names_channel() {
+        assert_eq!(
+            macos_update_artifact_missing_message(UpdateChannel::Nightly),
+            "No macOS update artifact is published yet for Nightly. Publish a signed macOS app or DMG artifact first."
         );
     }
 

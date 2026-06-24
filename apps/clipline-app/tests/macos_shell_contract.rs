@@ -254,13 +254,39 @@ fn macos_hotkey_and_memory_stubs_exist() {
     let memory =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/memory_macos.rs"))
             .expect("read memory_macos.rs");
+    let platform =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/platform/macos.rs"))
+            .expect("read platform/macos.rs");
 
     assert!(hotkeys.contains("pub fn install_save_hook"));
     assert!(hotkeys.contains("focused-game hotkey fallback"));
     assert!(hotkeys.contains("pub fn set_save_hotkey"));
-    assert!(memory.contains("pub struct MemoryStatus"));
-    assert!(memory.contains("private_working_set_bytes"));
-    assert!(memory.contains("macOS memory status is not implemented in Milestone 1"));
+    assert!(memory.contains("Command::new(\"ps\")"));
+    assert!(memory.contains("Command::new(\"pgrep\")"));
+    assert!(memory.contains("parse_ps_rss_kib"));
+    assert!(!memory.contains("macOS memory status is not implemented in Milestone 1"));
+    assert!(platform.contains("crate::memory::current_process_tree_memory()"));
+    assert!(!platform.contains("macOS memory status is not implemented in Milestone 1"));
+}
+
+#[test]
+fn macos_bundle_and_update_status_are_explicit() {
+    let config =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"))
+            .expect("read tauri.conf.json");
+    let app = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"))
+        .expect("read app.rs");
+
+    assert!(config.contains("\"targets\": [\"nsis\", \"dmg\", \"app\"]"));
+    assert!(
+        !config.contains("for Windows"),
+        "bundle product copy should not describe Clipline as Windows-only"
+    );
+    assert!(
+        app.contains("macos_update_artifact_missing_message")
+            && app.contains("No macOS update artifact is published yet"),
+        "macOS updater artifact gaps should return an actionable status"
+    );
 }
 
 #[test]

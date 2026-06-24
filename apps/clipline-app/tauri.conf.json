@@ -33,11 +33,11 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "dmg", "app"],
     "createUpdaterArtifacts": true,
     "publisher": "Clipline",
     "shortDescription": "Lightweight, ad-free game recorder with automatic event markers",
-    "longDescription": "Clipline is a lightweight, ad-free, open-source game recorder for Windows — anti-cheat-safe capture, a ShadowPlay-style replay buffer, and automatic in-game event markers (League of Legends), with a built-in review/trim player.",
+    "longDescription": "Clipline is a lightweight, ad-free, open-source game recorder — anti-cheat-safe capture, a ShadowPlay-style replay buffer, and automatic in-game event markers (League of Legends), with a built-in review/trim player.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
