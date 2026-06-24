@@ -64,5 +64,5 @@ pub fn list_audio_devices() -> Result<AudioDeviceLists, String> {
 }
 
 pub fn memory_status() -> Result<MemoryStatus, String> {
-    crate::memory::current_process_tree_memory()
+    Err("macOS memory status is not implemented in Milestone 1".into())
 }

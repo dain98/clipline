@@ -10,8 +10,9 @@ pub use types::{
     PermissionAction, PlatformCapabilities, PlatformOs,
 };
 
-#[cfg(target_os = "macos")]
-#[allow(unused_imports)] // Staged facade API: AudioDeviceInfo is part of the public contract for later macOS shell wiring.
+// Keep this unconditional for Windows facade implementation; macOS currently
+// keeps it unused because the full audio facade wiring is still staged.
+#[cfg_attr(target_os = "macos", allow(unused_imports))]
 pub use types::AudioDeviceInfo;
 
 #[cfg(target_os = "macos")]
