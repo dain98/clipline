@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 
 use clipline_capture::{CaptureEngine, CaptureError, Frame, FrameData};
 
@@ -57,7 +57,11 @@ impl ScreenCaptureKitCapture {
             .stdout
             .take()
             .ok_or_else(|| CaptureError::Init("ScreenCaptureKit helper stdout missing".into()))?;
-        let info = read_stream_header(&mut stdout)?;
+        let stderr = child.stderr.take();
+        let info = match read_stream_header(&mut stdout) {
+            Ok(info) => info,
+            Err(err) => return Err(helper_startup_error(err, &mut child, stderr)),
+        };
         Ok(Self {
             child,
             stdout,
@@ -101,6 +105,34 @@ fn helper_path() -> Result<PathBuf, CaptureError> {
     Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/clipline-sidecars")
         .join(HELPER_NAME))
+}
+
+fn helper_startup_error(
+    err: CaptureError,
+    child: &mut Child,
+    stderr: Option<ChildStderr>,
+) -> CaptureError {
+    let _ = child.kill();
+    let status = child.wait().ok();
+    let mut message = match err {
+        CaptureError::Init(message) => message,
+        other => other.to_string(),
+    };
+    if let Some(mut stderr) = stderr {
+        let mut text = String::new();
+        if stderr.read_to_string(&mut text).is_ok() {
+            let text = text.trim();
+            if !text.is_empty() {
+                message.push_str("; helper stderr: ");
+                message.push_str(text);
+            }
+        }
+    }
+    if let Some(status) = status {
+        message.push_str("; helper exited with ");
+        message.push_str(&status.to_string());
+    }
+    CaptureError::Init(message)
 }
 
 fn read_stream_header(mut r: impl Read) -> Result<StreamInfo, CaptureError> {
@@ -273,5 +305,52 @@ mod tests {
         let err = read_frame(&mut Cursor::new(bytes), 4, 2).unwrap_err();
 
         assert!(err.to_string().contains("NV12 payload"));
+    }
+
+    #[test]
+    fn helper_startup_error_includes_stderr_when_header_is_missing() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-sck-helper-test-{}-{}",
+            std::process::id(),
+            unique_test_suffix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let helper = dir.join("helper.sh");
+        fs::write(
+            &helper,
+            "#!/bin/sh\necho 'ScreenCaptureKit permission denied' >&2\nexit 42\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&helper).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&helper, permissions).unwrap();
+
+        let result = ScreenCaptureKitCapture::new_with_helper(
+            helper,
+            ScreenCaptureKitConfig {
+                fps: 30,
+                max_height: Some(720),
+            },
+        );
+        let err = match result {
+            Ok(_) => panic!("helper should fail before producing a stream header"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("permission denied"));
+        assert!(!err
+            .to_string()
+            .contains("capture init failed: capture init failed"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn unique_test_suffix() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     }
 }
