@@ -28,7 +28,6 @@ pub mod types;
 pub(crate) mod validation;
 
 pub use cloud::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
-#[cfg(windows)]
 pub use games::GamePluginSettings;
 pub use games::{GameRecordingMode, GameSettings};
 pub use hotkey::{normalize_hotkey, parse_hotkey};

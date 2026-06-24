@@ -1354,6 +1354,7 @@ mod tests {
     use crate::settings::{
         CloudUploadRecord, GameRecordingMode, ReplayStorageMode, ReplayStorageSettings,
     };
+    use std::sync::mpsc;
 
     #[test]
     fn quota_parser_converts_gib_to_bytes() {

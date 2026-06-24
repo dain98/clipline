@@ -40,6 +40,7 @@ impl CapabilityStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[allow(clippy::enum_variant_names)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionAction {
     OpenScreenRecordingSettings,

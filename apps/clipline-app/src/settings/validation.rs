@@ -152,6 +152,12 @@ pub fn same_or_nested_path(child: &Path, parent: &Path) -> bool {
         return child == parent
             || (child.len() > parent.len() && child[..parent.len()] == parent[..]);
     }
+    if cfg!(target_os = "macos") {
+        let child = case_folded_component_keys(child);
+        let parent = case_folded_component_keys(parent);
+        return child == parent
+            || (child.len() > parent.len() && child[..parent.len()] == parent[..]);
+    }
     let child = normalize_components(child);
     let parent = normalize_components(parent);
     child == parent || child.starts_with(&parent)
@@ -163,6 +169,15 @@ fn normalize_components(path: &Path) -> PathBuf {
         out.push(component.as_os_str());
     }
     out
+}
+
+fn case_folded_component_keys(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::CurDir => None,
+            other => Some(other.as_os_str().to_string_lossy().to_ascii_lowercase()),
+        })
+        .collect()
 }
 
 fn windows_component_keys(path: &Path) -> Vec<String> {

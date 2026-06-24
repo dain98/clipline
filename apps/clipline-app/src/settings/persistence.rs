@@ -151,14 +151,14 @@ pub fn config_base() -> PathBuf {
 
     #[cfg(target_os = "macos")]
     {
-        return std::env::var_os("HOME")
+        std::env::var_os("HOME")
             .map(PathBuf::from)
             .map(|home| {
                 home.join("Library")
                     .join("Application Support")
                     .join("Clipline")
             })
-            .unwrap_or_else(|| std::env::temp_dir().join("Clipline"));
+            .unwrap_or_else(|| std::env::temp_dir().join("Clipline"))
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]

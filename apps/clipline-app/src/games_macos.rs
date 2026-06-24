@@ -1,4 +1,4 @@
-use crate::game_plugins::GamePluginInfo;
+use crate::game_plugins::{self, GamePluginInfo};
 use crate::platform;
 use crate::settings::{GameRecordingMode, GameSettings};
 
@@ -22,7 +22,10 @@ pub struct DetectedGame {
 }
 
 pub fn game_plugin_catalog() -> Vec<GamePluginInfo> {
-    Vec::new()
+    game_plugins::all()
+        .iter()
+        .map(|plugin| plugin.info())
+        .collect()
 }
 
 pub fn list_game_windows() -> Vec<GameWindowInfo> {
@@ -42,5 +45,9 @@ pub fn detect_active_game(_settings: &GameSettings) -> Option<DetectedGame> {
 }
 
 pub fn built_in_game_still_configured(_settings: &GameSettings, _id: &str) -> bool {
-    false
+    _settings.auto_detect
+        && game_plugins::all()
+            .iter()
+            .find(|plugin| plugin.id == _id)
+            .is_some_and(|plugin| plugin.settings(_settings).enabled)
 }
