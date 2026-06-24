@@ -1,14 +1,19 @@
 //! Tauri shell: tray, Alt+F10 global hotkey, status webview — all thin
 //! wiring around the recorder service thread.
 
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, Manager, Runtime, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_updater::UpdaterExt;
@@ -20,6 +25,9 @@ use crate::settings::{
     parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode, GameRecordingMode,
 };
 use crate::updates::UpdateChannel;
+
+const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 1_048_576;
+static DIAGNOSTIC_LOG: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
 #[derive(serde::Serialize)]
 struct DisplayInfo {
@@ -89,6 +97,106 @@ impl GameDetectionEvent {
             },
         }
     }
+}
+
+fn diagnostic_log_path_from_appdata(appdata: &Path) -> PathBuf {
+    appdata.join("Clipline").join("clipline.log")
+}
+
+fn diagnostic_log_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .map(|appdata| diagnostic_log_path_from_appdata(&appdata))
+}
+
+fn open_diagnostic_log() -> Result<File, String> {
+    let path = diagnostic_log_path().ok_or_else(|| "APPDATA is not set".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create log directory: {e}"))?;
+    }
+    rotate_diagnostic_log_if_needed(&path)?;
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("open diagnostic log {path:?}: {e}"))
+}
+
+fn rotate_diagnostic_log_if_needed(path: &Path) -> Result<(), String> {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Ok(());
+    };
+    if metadata.len() <= DIAGNOSTIC_LOG_MAX_BYTES {
+        return Ok(());
+    }
+
+    let rotated = path.with_file_name("clipline.old.log");
+    if let Err(e) = std::fs::remove_file(&rotated) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("remove old diagnostic log {rotated:?}: {e}"));
+        }
+    }
+    std::fs::rename(path, &rotated).map_err(|e| format!("rotate diagnostic log: {e}"))
+}
+
+fn diagnostic_log() -> &'static Mutex<Option<File>> {
+    DIAGNOSTIC_LOG.get_or_init(|| Mutex::new(open_diagnostic_log().ok()))
+}
+
+fn format_diagnostic_log_line(
+    timestamp: chrono::DateTime<chrono::Utc>,
+    pid: u32,
+    message: &str,
+) -> String {
+    let message = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!(
+        "{} pid={pid} {message}",
+        timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    )
+}
+
+fn log_diagnostic(message: impl AsRef<str>) {
+    let line = format_diagnostic_log_line(chrono::Utc::now(), std::process::id(), message.as_ref());
+    if let Ok(mut log) = diagnostic_log().lock() {
+        if let Some(file) = log.as_mut() {
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+        }
+    }
+}
+
+fn result_debug<T, E>(result: Result<T, E>) -> String
+where
+    T: std::fmt::Debug,
+    E: std::fmt::Display,
+{
+    match result {
+        Ok(value) => format!("ok({value:?})"),
+        Err(e) => format!("err({e})"),
+    }
+}
+
+fn webview_labels<R: Runtime>(app: &AppHandle<R>) -> String {
+    let mut labels = app.webview_windows().into_keys().collect::<Vec<_>>();
+    labels.sort();
+    format!("[{}]", labels.join(","))
+}
+
+fn window_state_summary<R: Runtime>(window: &WebviewWindow<R>) -> String {
+    format!(
+        "label={} visible={} minimized={} focused={} outer_position={} outer_size={} inner_size={}",
+        window.label(),
+        result_debug(window.is_visible()),
+        result_debug(window.is_minimized()),
+        result_debug(window.is_focused()),
+        result_debug(window.outer_position()),
+        result_debug(window.outer_size()),
+        result_debug(window.inner_size())
+    )
+}
+
+fn log_window_state<R: Runtime>(context: &str, window: &WebviewWindow<R>) {
+    log_diagnostic(format!("{context}: {}", window_state_summary(window)));
 }
 
 #[tauri::command]
@@ -571,17 +679,28 @@ where
 
 fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>, destroy: bool) -> Result<(), String> {
     app.state::<MicTestState>().stop();
+    log_diagnostic(format!(
+        "send main window to tray destroy={destroy} webviews={}",
+        webview_labels(app)
+    ));
     if let Some(window) = app.get_webview_window("main") {
+        log_window_state("send-to-tray before", &window);
         if destroy {
             window.destroy().map_err(|e| e.to_string())?;
+            log_diagnostic("send-to-tray destroy ok");
         } else {
             window.hide().map_err(|e| e.to_string())?;
+            log_diagnostic("send-to-tray hide ok");
+            log_window_state("send-to-tray after hide", &window);
         }
+    } else {
+        log_diagnostic("send-to-tray skipped: main window not found");
     }
     Ok(())
 }
 
 fn quit_app<R: Runtime>(app: &AppHandle<R>) {
+    log_diagnostic("quit app requested");
     app.state::<MicTestState>().stop();
     app.state::<RuntimeState>()
         .send(Cmd::Stop { announce: false });
@@ -1011,6 +1130,11 @@ fn save_settings<R: Runtime>(
 pub fn run() {
     let mut settings = AppSettings::load_or_default();
     let args: Vec<String> = std::env::args().collect();
+    log_diagnostic(format!(
+        "run start version={} args={args:?} log_path={:?}",
+        env!("CARGO_PKG_VERSION"),
+        diagnostic_log_path()
+    ));
     let mut lol_url = None::<String>;
     if let Some(i) = args.iter().position(|a| a == "--window") {
         if let Some(title) = args.get(i + 1) {
@@ -1036,6 +1160,7 @@ pub fn run() {
         }
     }
     if let Err(e) = settings.validate() {
+        log_diagnostic(format!("settings invalid; using defaults: {e}"));
         eprintln!("invalid settings, using defaults: {e}");
         settings = AppSettings::default();
     }
@@ -1163,6 +1288,10 @@ pub fn run() {
             // When launched by the autostart registry entry, start in the tray
             // instead of flashing the main window.
             let launched_by_autostart = std::env::args().any(|arg| arg == "--autostart");
+            log_diagnostic(format!(
+                "setup start launched_by_autostart={launched_by_autostart} webviews={}",
+                webview_labels(app.handle())
+            ));
 
             let save_item = MenuItem::with_id(
                 app,
@@ -1183,26 +1312,38 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "open" => {
+                        log_diagnostic("tray menu event: open");
                         if let Err(e) = open_main_window(app) {
+                            log_diagnostic(format!("tray menu open failed: {e}"));
                             eprintln!("open window: {e}");
                         }
                     }
                     "save" => {
+                        log_diagnostic("tray menu event: save");
                         app.state::<RuntimeState>().request_save();
                     }
                     "quit" => {
+                        log_diagnostic("tray menu event: quit");
                         quit_app(app);
                     }
-                    _ => {}
+                    other => {
+                        log_diagnostic(format!("tray menu event: unknown id={other}"));
+                    }
                 })
                 .on_tray_icon_event(|tray, event| {
+                    if !matches!(event, TrayIconEvent::Move { .. }) {
+                        log_diagnostic(format!("tray icon event: {event:?}"));
+                    }
                     if should_open_on_tray_event(&event) {
+                        log_diagnostic("tray icon event requests open");
                         if let Err(e) = open_main_window(tray.app_handle()) {
+                            log_diagnostic(format!("tray icon open failed: {e}"));
                             eprintln!("open window: {e}");
                         }
                     }
                 })
                 .build(app)?;
+            log_diagnostic(format!("tray build complete webviews={}", webview_labels(app.handle())));
 
             pump_events(app.handle().clone(), event_rx);
             spawn_game_detector(app.handle().clone());
@@ -1210,7 +1351,9 @@ pub fn run() {
             // The main window is created hidden by default so autostart launches
             // don't flash it. Show it for normal launches.
             if !launched_by_autostart {
+                log_diagnostic("normal launch opening main window");
                 if let Err(e) = open_main_window(app.handle()) {
+                    log_diagnostic(format!("normal launch open failed: {e}"));
                     eprintln!("show main window on launch: {e}");
                 }
             }
@@ -1225,22 +1368,33 @@ pub fn run() {
                 event: WindowEvent::CloseRequested { api, .. },
                 ..
             } if label == "main" => {
+                log_diagnostic("window event: main close requested");
                 api.prevent_close();
                 match close_request_action(&app.state::<RuntimeState>().settings()) {
                     CloseRequestAction::Tray => {
+                        log_diagnostic("close request action: tray");
                         if let Err(e) = send_main_window_to_tray(app, true) {
+                            log_diagnostic(format!("close to tray failed: {e}"));
                             eprintln!("close to tray: {e}");
                         }
                     }
-                    CloseRequestAction::Quit => quit_app(app),
+                    CloseRequestAction::Quit => {
+                        log_diagnostic("close request action: quit");
+                        quit_app(app);
+                    }
                 }
+            }
+            tauri::RunEvent::WindowEvent { label, event, .. } => {
+                log_diagnostic(format!("window event: label={label} event={event:?}"));
             }
             tauri::RunEvent::ExitRequested {
                 code: None, api, ..
             } => {
+                log_diagnostic("exit requested without code; preventing exit");
                 api.prevent_exit();
             }
             tauri::RunEvent::Exit => {
+                log_diagnostic("run event: exit");
                 app.state::<MicTestState>().stop();
                 app.state::<RuntimeState>()
                     .send(Cmd::Stop { announce: false });
@@ -1275,14 +1429,43 @@ fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
 }
 
 fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    log_diagnostic(format!(
+        "open_main_window start webviews={}",
+        webview_labels(app)
+    ));
     if let Some(window) = app.get_webview_window("main") {
-        return reveal_main_window(
-            || window.show(),
-            || window.unminimize(),
-            || window.set_focus(),
+        log_window_state("open existing before reveal", &window);
+        let result = reveal_main_window(
+            || {
+                let result = window.show();
+                log_diagnostic(format!(
+                    "open existing show: {}",
+                    result_debug(result.as_ref())
+                ));
+                result
+            },
+            || {
+                let result = window.unminimize();
+                log_diagnostic(format!(
+                    "open existing unminimize: {}",
+                    result_debug(result.as_ref())
+                ));
+                result
+            },
+            || {
+                let result = window.set_focus();
+                log_diagnostic(format!(
+                    "open existing set_focus: {}",
+                    result_debug(result.as_ref())
+                ));
+                result
+            },
         );
+        log_window_state("open existing after reveal", &window);
+        return result;
     }
 
+    log_diagnostic("open_main_window rebuilding missing main window");
     let config = app
         .config()
         .app
@@ -1294,11 +1477,35 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .build()
         .map_err(|e| e.to_string())?;
-    reveal_main_window(
-        || window.show(),
-        || window.unminimize(),
-        || window.set_focus(),
-    )
+    log_window_state("open rebuilt before reveal", &window);
+    let result = reveal_main_window(
+        || {
+            let result = window.show();
+            log_diagnostic(format!(
+                "open rebuilt show: {}",
+                result_debug(result.as_ref())
+            ));
+            result
+        },
+        || {
+            let result = window.unminimize();
+            log_diagnostic(format!(
+                "open rebuilt unminimize: {}",
+                result_debug(result.as_ref())
+            ));
+            result
+        },
+        || {
+            let result = window.set_focus();
+            log_diagnostic(format!(
+                "open rebuilt set_focus: {}",
+                result_debug(result.as_ref())
+            ));
+            result
+        },
+    );
+    log_window_state("open rebuilt after reveal", &window);
+    result
 }
 
 fn reveal_main_window<E>(
@@ -1742,6 +1949,30 @@ mod tests {
         .unwrap();
 
         assert_eq!(*calls.borrow(), ["show", "unminimize", "focus"]);
+    }
+
+    #[test]
+    fn diagnostic_log_path_uses_clipline_appdata_file() {
+        let path = diagnostic_log_path_from_appdata(std::path::Path::new(
+            r"C:\Users\friend\AppData\Roaming",
+        ));
+
+        assert_eq!(
+            path,
+            std::path::PathBuf::from(r"C:\Users\friend\AppData\Roaming\Clipline\clipline.log")
+        );
+    }
+
+    #[test]
+    fn diagnostic_log_line_is_timestamped_and_single_line() {
+        let timestamp = chrono::DateTime::parse_from_rfc3339("2026-06-24T12:34:56.789Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert_eq!(
+            format_diagnostic_log_line(timestamp, 42, "tray open\nshow: ok"),
+            "2026-06-24T12:34:56.789Z pid=42 tray open show: ok"
+        );
     }
 
     #[test]
