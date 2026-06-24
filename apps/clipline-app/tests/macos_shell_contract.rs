@@ -296,6 +296,39 @@ fn macos_bundle_and_update_status_are_explicit() {
 }
 
 #[test]
+fn macos_screencapturekit_helper_is_built_and_bundled() {
+    let build = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs"))
+        .expect("read build.rs");
+    let base_config =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"))
+            .expect("read tauri.conf.json");
+
+    assert!(build.contains("ScreenCaptureKitHelper.swift"));
+    assert!(build.contains("xcrun"));
+    assert!(build.contains("swiftc"));
+    assert!(build.contains("clipline-sidecars"));
+    assert!(build.contains("clipline-sck-helper"));
+    assert!(build.contains("cargo:rerun-if-changed=macos/ScreenCaptureKitHelper.swift"));
+    assert!(
+        !base_config.contains("clipline-sck-helper"),
+        "base Tauri config should not include the macOS-only helper resource"
+    );
+
+    let macos_config =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.macos.conf.json"))
+            .expect("read tauri.macos.conf.json");
+    assert!(macos_config.contains("\"../../target/clipline-sidecars/clipline-sck-helper\": \"\""));
+}
+
+#[test]
+fn macos_asset_scope_allows_default_movies_folder() {
+    let config = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"))
+        .expect("read tauri.conf.json");
+    assert!(config.contains("\"**/Movies/Clipline/*.mp4\""));
+    assert!(config.contains("\"**/Movies/Clipline/**/*.mp4\""));
+}
+
+#[test]
 fn os_specific_helpers_are_cfg_gated() {
     let persistence = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src/settings/persistence.rs"),

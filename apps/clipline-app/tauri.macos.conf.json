@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../../target/clipline-sidecars/clipline-sck-helper": ""
+    }
+  }
+}
