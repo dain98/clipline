@@ -524,12 +524,10 @@ async fn upload_bytes_for_audio_selection_from_path(
 
 #[cfg(test)]
 fn upload_bytes_for_audio_selection(
-    source_path: &Path,
     source_bytes: Vec<u8>,
     markers: Option<&ClipMarkers>,
     selected_audio_track_ids: Option<&[String]>,
 ) -> Result<Vec<u8>, String> {
-    let _ = source_path;
     match upload_audio_selection_plan(markers, selected_audio_track_ids)? {
         UploadAudioSelectionPlan::Original => Ok(source_bytes),
         UploadAudioSelectionPlan::Remux(selected_indices) => {
@@ -903,13 +901,8 @@ mod tests {
         let markers = audio_markers();
         let selected = vec!["output".to_string(), "microphone".to_string()];
 
-        let out = upload_bytes_for_audio_selection(
-            Path::new("clip.mp4"),
-            source,
-            Some(&markers),
-            Some(&selected),
-        )
-        .unwrap();
+        let out =
+            upload_bytes_for_audio_selection(source, Some(&markers), Some(&selected)).unwrap();
 
         assert!(out.windows(6).any(|w| w == b"V00000"));
         assert!(out.windows(6).any(|w| w == b"A00000"));
@@ -933,13 +926,8 @@ mod tests {
         let markers = audio_markers();
         let selected = vec!["microphone".to_string()];
 
-        let out = upload_bytes_for_audio_selection(
-            Path::new("clip.mp4"),
-            source,
-            Some(&markers),
-            Some(&selected),
-        )
-        .unwrap();
+        let out =
+            upload_bytes_for_audio_selection(source, Some(&markers), Some(&selected)).unwrap();
 
         assert!(out.windows(6).any(|w| w == b"V00000"));
         assert!(!out.windows(6).any(|w| w == b"A00000"));
@@ -952,13 +940,8 @@ mod tests {
         let markers = audio_markers();
         let selected = vec!["discord".to_string()];
 
-        let err = upload_bytes_for_audio_selection(
-            Path::new("clip.mp4"),
-            source,
-            Some(&markers),
-            Some(&selected),
-        )
-        .expect_err("unknown track");
+        let err = upload_bytes_for_audio_selection(source, Some(&markers), Some(&selected))
+            .expect_err("unknown track");
 
         assert!(err.contains("unknown audio track"), "{err}");
     }

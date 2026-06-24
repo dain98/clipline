@@ -632,9 +632,9 @@ fn hotkey_recorder_formats_mouse_buttons() {
     assert_eq!(
         eval_json(
             &mut ctx,
-            "PlayerCore.hotkeyFromMouseEvent({ button: 1, ctrlKey: false, altKey: false, shiftKey: false })"
+            "PlayerCore.hotkeyFromMouseEvent({ button: 1, ctrlKey: true, altKey: false, shiftKey: false })"
         ),
-        r#"{"kind":"captured","value":"Middle"}"#
+        r#"{"kind":"captured","value":"Ctrl+Middle"}"#
     );
     assert_eq!(
         eval_json(
@@ -656,6 +656,13 @@ fn hotkey_recorder_formats_mouse_buttons() {
             "PlayerCore.hotkeyFromMouseEvent({ button: 0, ctrlKey: false, altKey: false, shiftKey: false })"
         ),
         r#"{"kind":"invalid","message":"Use middle, Mouse4, or Mouse5 as a mouse shortcut."}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromMouseEvent({ button: 1, ctrlKey: false, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"invalid","message":"Mouse shortcuts need Ctrl, Alt, or Shift."}"#
     );
 }
 

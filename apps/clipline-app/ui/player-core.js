@@ -697,6 +697,9 @@ const PlayerCore = (() => {
     if (!key) {
       return { kind: "invalid", message: "Use middle, Mouse4, or Mouse5 as a mouse shortcut." };
     }
+    if (!ev.ctrlKey && !ev.altKey && !ev.shiftKey) {
+      return { kind: "invalid", message: "Mouse shortcuts need Ctrl, Alt, or Shift." };
+    }
 
     const parts = [];
     if (ev.ctrlKey) parts.push("Ctrl");

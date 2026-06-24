@@ -11,12 +11,16 @@ pub fn parse_hotkey(raw: &str) -> Result<Shortcut, String> {
 
 pub fn is_global_shortcut_hotkey(raw: &str) -> Result<bool, String> {
     Ok(matches!(
-        parse_hotkey_key(&normalize_hotkey(raw)?)?,
+        normalize_hotkey_parts(raw)?.1,
         HotkeyKey::Function(_)
     ))
 }
 
 pub fn normalize_hotkey(raw: &str) -> Result<String, String> {
+    normalize_hotkey_parts(raw).map(|(normalized, _)| normalized)
+}
+
+fn normalize_hotkey_parts(raw: &str) -> Result<(String, HotkeyKey), String> {
     let mut ctrl = false;
     let mut alt = false;
     let mut shift = false;
@@ -62,6 +66,9 @@ pub fn normalize_hotkey(raw: &str) -> Result<String, String> {
     }
 
     let key = key.ok_or("hotkey needs a key")?;
+    if key.is_mouse_button() && !ctrl && !alt && !shift {
+        return Err("mouse hotkeys need Ctrl, Alt, or Shift".into());
+    }
 
     let mut parts = Vec::new();
     if ctrl {
@@ -73,8 +80,8 @@ pub fn normalize_hotkey(raw: &str) -> Result<String, String> {
     if shift {
         parts.push("Shift".to_string());
     }
-    parts.push(key.label().to_string());
-    Ok(parts.join("+"))
+    parts.push(key.label());
+    Ok((parts.join("+"), key))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,62 +93,25 @@ enum HotkeyKey {
 }
 
 impl HotkeyKey {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::Function(1) => "F1",
-            Self::Function(2) => "F2",
-            Self::Function(3) => "F3",
-            Self::Function(4) => "F4",
-            Self::Function(5) => "F5",
-            Self::Function(6) => "F6",
-            Self::Function(7) => "F7",
-            Self::Function(8) => "F8",
-            Self::Function(9) => "F9",
-            Self::Function(10) => "F10",
-            Self::Function(11) => "F11",
-            Self::Function(13) => "F13",
-            Self::Function(14) => "F14",
-            Self::Function(15) => "F15",
-            Self::Function(16) => "F16",
-            Self::Function(17) => "F17",
-            Self::Function(18) => "F18",
-            Self::Function(19) => "F19",
-            Self::Function(20) => "F20",
-            Self::Function(21) => "F21",
-            Self::Function(22) => "F22",
-            Self::Function(23) => "F23",
-            Self::Function(24) => "F24",
-            Self::Function(_) => "F?",
-            Self::Middle => "Middle",
-            Self::Mouse4 => "Mouse4",
-            Self::Mouse5 => "Mouse5",
+            Self::Function(n) => format!("F{n}"),
+            Self::Middle => "Middle".to_string(),
+            Self::Mouse4 => "Mouse4".to_string(),
+            Self::Mouse5 => "Mouse5".to_string(),
         }
     }
-}
 
-fn parse_hotkey_key(normalized: &str) -> Result<HotkeyKey, String> {
-    normalized
-        .split('+')
-        .find_map(|part| match part {
-            "Ctrl" | "Alt" | "Shift" => None,
-            key => Some(key),
-        })
-        .and_then(mouse_key_from_token)
-        .or_else(|| {
-            normalized.split('+').find_map(|part| {
-                part.strip_prefix('F')
-                    .and_then(|number| number.parse::<u8>().ok())
-                    .map(HotkeyKey::Function)
-            })
-        })
-        .ok_or_else(|| "hotkey needs a key".to_string())
+    fn is_mouse_button(self) -> bool {
+        matches!(self, Self::Middle | Self::Mouse4 | Self::Mouse5)
+    }
 }
 
 fn mouse_key_from_token(token: &str) -> Option<HotkeyKey> {
     match token.to_ascii_lowercase().as_str() {
-        "middle" | "mouse3" | "mbutton" | "middlemouse" | "mousemiddle" => Some(HotkeyKey::Middle),
-        "mouse4" | "xbutton1" | "x1" | "back" | "browserback" => Some(HotkeyKey::Mouse4),
-        "mouse5" | "xbutton2" | "x2" | "forward" | "browserforward" => Some(HotkeyKey::Mouse5),
+        "middle" => Some(HotkeyKey::Middle),
+        "mouse4" => Some(HotkeyKey::Mouse4),
+        "mouse5" => Some(HotkeyKey::Mouse5),
         _ => None,
     }
 }

@@ -248,12 +248,13 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      every track keeps the original bytes. New audio sessions that appear after recording starts
      are not discovered dynamically yet.
 31. **Mouse hotkeys + selected-track uploads** — Settings > Hotkeys accepts middle mouse,
-     Mouse4, and Mouse5, with optional Ctrl/Alt/Shift, in addition to F1-F11/F13-F24. Keyboard
-     F-key shortcuts still use Tauri's OS global-shortcut registration plus the low-level fallback;
-     mouse-button shortcuts are hook-only through the Windows low-level input hook. The rail now
-     shows the active Save Replay hotkey below RAM. Cloud upload no longer needs FFmpeg for
-     selected audio tracks: every explicit audio selection is stream-copy remuxed into an MP4
-     containing exactly those tracks, including multi-track selections.
+     Mouse4, and Mouse5 when combined with Ctrl/Alt/Shift, in addition to F1-F11/F13-F24.
+     Keyboard F-key shortcuts still use Tauri's OS global-shortcut registration plus the
+     low-level fallback; mouse-button shortcuts are hook-only through an on-demand Windows
+     low-level mouse hook. The rail now shows the active Save Replay hotkey below RAM. Cloud
+     upload no longer needs FFmpeg for selected audio tracks: every explicit audio selection is
+     stream-copy remuxed into an MP4 containing exactly those tracks, including multi-track
+     selections.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -266,10 +267,11 @@ Recent fixes (2026-06-24):
   tray menu/icon events, close-to-tray handling, window event summaries, WebView labels,
   and before/after window state around `Open Clipline` (`visible`, `minimized`, `focused`,
   position, and size). The log rotates to `clipline.old.log` after 1 MiB.
-- Save Replay hotkeys now support middle mouse, Mouse4, and Mouse5, optionally combined with
+- Save Replay hotkeys now support middle mouse, Mouse4, and Mouse5 when combined with
   Ctrl/Alt/Shift. Mouse hotkeys skip the OS global-shortcut registration path and are handled by
-  the low-level input hook; switching between keyboard and mouse hotkeys unregisters/registers
-  only the keyboard shortcut side. The rail shows the current save hotkey below RAM.
+  an on-demand low-level mouse hook; switching between keyboard and mouse hotkeys
+  unregisters/registers only the keyboard shortcut side. The rail shows the current save hotkey
+  below RAM.
 - Cloud upload now always remuxes explicit selected audio tracks instead of mixing multiple
   selections through FFmpeg. Multi-track uploads preserve each selected MP4 audio track, which
   matches the cloud player's current no-track-toggle model and avoids the old

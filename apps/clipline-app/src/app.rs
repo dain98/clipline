@@ -1147,10 +1147,10 @@ fn save_settings<R: Runtime>(
 
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
     let prepared_restart = state.prepare_settings_restart(settings.clone())?;
-    drop(cloud_save_guard);
-    state.finish_prepared_restart(app, prepared_restart)?;
     tray_items.set_hotkey_label(&settings.hotkey)?;
     crate::hotkeys::set_save_hotkey(&settings.hotkey)?;
+    drop(cloud_save_guard);
+    state.finish_prepared_restart(app, prepared_restart)?;
     storage_settings.set_quota_bytes(quota_bytes);
     storage_settings.set_media_dir(media_dir);
     Ok(settings)
