@@ -1,6 +1,6 @@
 fn main() {
-    // The Tauri context only exists for Windows builds (see Cargo.toml).
-    if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "windows" || target_os == "macos" {
         tauri_build::build();
     }
 }

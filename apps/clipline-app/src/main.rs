@@ -1,44 +1,55 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn main() {
-    eprintln!("clipline-app is Windows-only (capture/encode are platform-bound)");
+    eprintln!("clipline-app has a desktop runtime on Windows and macOS only");
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn main() {
     app::run();
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod app;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod cloud;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod cloud_upload;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod game_icon;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod game_plugins;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod games;
 #[cfg(windows)]
 mod hotkeys;
-#[cfg(windows)]
+#[cfg(target_os = "macos")]
+#[path = "hotkeys_macos.rs"]
+mod hotkeys;
+#[cfg(any(windows, target_os = "macos"))]
 mod library;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod markers;
 #[cfg(windows)]
 mod memory;
-#[cfg(windows)]
+#[cfg(target_os = "macos")]
+#[path = "memory_macos.rs"]
+mod memory;
+#[cfg(any(windows, target_os = "macos"))]
+mod platform;
+#[cfg(any(windows, target_os = "macos"))]
 mod poster;
 #[cfg(windows)]
 mod service;
-#[cfg(windows)]
+#[cfg(target_os = "macos")]
+#[path = "service_macos.rs"]
+mod service;
+#[cfg(any(windows, target_os = "macos"))]
 mod settings;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod sound;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod updates;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod util;

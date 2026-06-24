@@ -4,17 +4,14 @@ version = "0.1.10"
 edition.workspace = true
 license.workspace = true
 
-# Tauri (and through it webkit2gtk on Linux) is Windows-gated: capture and
-# encode are platform-bound anyway, and ubuntu CI must build without
-# system webview libraries. Non-Windows targets get a stub main.
-[target.'cfg(windows)'.dependencies]
+# Tauri and the app runtime are enabled on Windows and macOS. Linux CI keeps
+# the stub main so it does not need system webview libraries.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 clipline-capture = { path = "../../crates/clipline-capture" }
 clipline-events = { path = "../../crates/clipline-events" }
 clipline-lol = { path = "../../crates/clipline-lol" }
 clipline-mp4 = { path = "../../crates/clipline-mp4" }
 clipline-storage = { path = "../../crates/clipline-storage" }
-# Pinned to an immutable rev (not a branch): a branch ref isn't reproducible —
-# a force-push or rename silently breaks every build. Bump the rev deliberately.
 clipline-cloud-api = { git = "https://github.com/dain98/clipline-cloud", rev = "8dd49fcf35e5bb9acbf2681cc35c8d161cbfad5d" }
 reqwest = { workspace = true }
 serde = { workspace = true }
@@ -29,6 +26,8 @@ rfd = "0.15"
 png = "0.17"
 base64 = "0.22"
 rodio = { version = "0.17", default-features = false, features = ["vorbis"] }
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
