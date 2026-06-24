@@ -967,7 +967,7 @@ fn delete_credential(target: &str) -> Result<(), String> {
 fn delete_credential(target: &str) -> Result<(), String> {
     match find_generic_password(None, KEYCHAIN_SERVICE, target) {
         Ok((_, item)) => {
-            let _ = item.delete();
+            item.delete();
             Ok(())
         }
         Err(_) => Ok(()),
