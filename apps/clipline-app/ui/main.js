@@ -82,6 +82,10 @@ let currentClip = null;
 let clipsCache = [];
 // Gallery (library home) view state.
 let gallerySource = "local";
+let cloudClipsCache = [];
+let cloudClipsLoaded = false;
+let cloudClipsLoading = false;
+let cloudClipsError = "";
 let galleryFilter = "all";
 let gallerySort = "new";
 let galleryGroup = "smart";
@@ -1769,7 +1773,38 @@ function clipCloudVisibility(record) {
 }
 
 function cloudLibraryRecords() {
-  return PlayerCore.cloudLibraryEntries(cloudSettings().uploads || {}, clipsCache);
+  return PlayerCore.cloudLibraryEntries(cloudSettings().uploads || {}, clipsCache, cloudClipsCache);
+}
+
+function resetCloudClipsCache() {
+  cloudClipsCache = [];
+  cloudClipsLoaded = false;
+  cloudClipsLoading = false;
+  cloudClipsError = "";
+}
+
+async function loadCloudClips({ force = false } = {}) {
+  if (!cloudConnected()) {
+    resetCloudClipsCache();
+    if (gallerySource === "cloud") renderClips();
+    return;
+  }
+  if (cloudClipsLoading) return;
+  if (cloudClipsLoaded && !force) return;
+  cloudClipsLoading = true;
+  cloudClipsError = "";
+  if (gallerySource === "cloud") renderClips();
+  try {
+    const result = await invoke("list_cloud_clips");
+    cloudClipsCache = result && Array.isArray(result.clips) ? result.clips : [];
+    cloudClipsLoaded = true;
+  } catch (e) {
+    cloudClipsError = String(e);
+    cloudClipsLoaded = true;
+  } finally {
+    cloudClipsLoading = false;
+    if (gallerySource === "cloud") renderClips();
+  }
 }
 
 function cloudEntryMatchesSearch(entry) {
@@ -2386,6 +2421,7 @@ function renderClips() {
   });
   if (showingCloud) {
     renderCloudClips();
+    loadCloudClips();
     return;
   }
   // Drop the previous render's pending poster observations before rebuilding;
@@ -2436,6 +2472,20 @@ function renderCloudClips() {
   $("gallery-count").textContent = entries.length
     ? `${filtered.length} of ${entries.length}`
     : "";
+  if (cloudClipsLoading && !entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = "Loading cloud clips...";
+    root.appendChild(empty);
+    return;
+  }
+  if (cloudClipsError && !entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = cloudClipsError;
+    root.appendChild(empty);
+    return;
+  }
   if (!entries.length) {
     const empty = document.createElement("div");
     empty.className = "gallery-empty";
@@ -3620,7 +3670,9 @@ async function connectCloud() {
       },
     });
     $("cloud-connect-status").textContent = "connected";
+    resetCloudClipsCache();
     await reloadSettings();
+    if (gallerySource === "cloud") loadCloudClips({ force: true });
   } catch (e) {
     $("cloud-connect-status").textContent = String(e);
   }
@@ -3631,6 +3683,7 @@ async function disconnectCloud() {
   $("error").textContent = "";
   try {
     await invoke("cloud_disconnect");
+    resetCloudClipsCache();
     await reloadSettings();
   } catch (e) {
     $("cloud-connect-status").textContent = String(e);
@@ -3748,6 +3801,7 @@ async function uploadClipToCloud(clip, request = {}) {
       }
     }
     await refresh();
+    loadCloudClips({ force: true });
   } catch (e) {
     setDeckStatus("");
     $("error").textContent = String(e);
@@ -3838,6 +3892,7 @@ $("gallery-source-tabs").addEventListener("click", (ev) => {
   if (!tab) return;
   gallerySource = tab.dataset.gallerySource === "cloud" ? "cloud" : "local";
   renderClips();
+  if (gallerySource === "cloud") loadCloudClips();
 });
 $("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });
 $("gallery-group").addEventListener("change", (ev) => { galleryGroup = ev.target.value; renderClips(); });

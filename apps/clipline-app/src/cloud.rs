@@ -9,7 +9,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use clipline_cloud_api::{
-    sha256_hex, ClipDetailResponse, CloudApiError, CloudClient, CreateUploadRequest,
+    sha256_hex, ClipDetailResponse, ClipSummaryResponse, CloudApiError, CloudClient,
+    CreateUploadRequest, ListClipsRequest,
 };
 use clipline_events::{ClipMarkers, GameId};
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,7 @@ use crate::util::{last_os_error, unix_now, wide_null};
 const DEFAULT_DEVICE_NAME: &str = "Clipline Desktop";
 const READY_POLL_ATTEMPTS: usize = 30;
 const READY_POLL_DELAY: Duration = Duration::from_secs(1);
+const CLOUD_LIBRARY_PAGE_SIZE: i64 = 100;
 const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
 
@@ -99,10 +101,73 @@ pub struct CloudClipStatusSyncResult {
     pub removed: bool,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct CloudLibraryClip {
+    pub remote_clip_id: String,
+    pub local_clip_id: Option<String>,
+    pub path: String,
+    pub title: String,
+    pub remote_url: String,
+    pub visibility: String,
+    pub upload_status: String,
+    pub updated_at_unix: u64,
+    pub uploaded_at_unix: Option<u64>,
+    pub duration_ms: Option<i64>,
+    pub file_size_bytes: Option<i64>,
+    pub source_type: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CloudLibraryListResult {
+    pub clips: Vec<CloudLibraryClip>,
+}
+
 #[tauri::command]
 pub fn cloud_status(state: tauri::State<RuntimeState>) -> CloudConnectionStatus {
     let settings = state.settings();
     connection_status(&settings.cloud)
+}
+
+#[tauri::command]
+pub async fn list_cloud_clips(
+    state: tauri::State<'_, RuntimeState>,
+) -> Result<CloudLibraryListResult, String> {
+    let settings = state.settings();
+    let cloud = settings.cloud.clone();
+    let token_target = cloud
+        .credential_target
+        .clone()
+        .ok_or_else(|| "connect to Clipline Cloud first".to_string())?;
+    let token = read_credential(&token_target)?;
+    let client = connected_client(&cloud, &token)?;
+
+    let mut page = 1;
+    let mut clips = Vec::new();
+    loop {
+        let response = client
+            .list_clips(&ListClipsRequest {
+                sort: Some("uploaded_at_desc".to_string()),
+                page: Some(page),
+                page_size: Some(CLOUD_LIBRARY_PAGE_SIZE),
+                ..Default::default()
+            })
+            .await
+            .map_err(cloud_error)?;
+        let clip_count = response.clips.len();
+        for clip in response.clips {
+            let local_record = clip
+                .client_clip_id
+                .as_deref()
+                .and_then(|local_clip_id| cloud.uploads.get(local_clip_id));
+            clips.push(cloud_library_clip_from_summary(&cloud, &clip, local_record));
+        }
+        if clip_count < CLOUD_LIBRARY_PAGE_SIZE as usize {
+            break;
+        }
+        page += 1;
+    }
+
+    Ok(CloudLibraryListResult { clips })
 }
 
 #[tauri::command]
@@ -463,6 +528,7 @@ fn create_upload_request(input: UploadRequestInput<'_>) -> Result<CreateUploadRe
     Ok(CreateUploadRequest {
         client_clip_id: Some(input.client_clip_id.to_string()),
         title: upload_title(input.title, input.path),
+        description: None,
         game_name: game.as_ref().map(|game| game.name.clone()),
         game_id: game.as_ref().map(|game| game.id.clone()),
         game_executable: None,
@@ -714,6 +780,33 @@ fn apply_remote_clip_to_record(
     record.updated_at_unix = unix_now();
 }
 
+fn cloud_library_clip_from_summary(
+    cloud: &CloudSettings,
+    clip: &ClipSummaryResponse,
+    local_record: Option<&CloudUploadRecord>,
+) -> CloudLibraryClip {
+    CloudLibraryClip {
+        remote_clip_id: clip.id.clone(),
+        local_clip_id: clip.client_clip_id.clone(),
+        path: local_record
+            .map(|record| record.path.clone())
+            .unwrap_or_default(),
+        title: clip.title.clone(),
+        remote_url: clip
+            .public_url
+            .clone()
+            .or_else(|| cloud_clip_url(cloud, &clip.id))
+            .unwrap_or_default(),
+        visibility: clip.visibility.clone(),
+        upload_status: upload_status_for_summary_clip(clip),
+        updated_at_unix: datetime_to_unix_seconds(clip.updated_at),
+        uploaded_at_unix: clip.uploaded_at.map(datetime_to_unix_seconds),
+        duration_ms: clip.duration_ms,
+        file_size_bytes: clip.file_size_bytes,
+        source_type: clip.source_type.clone(),
+    }
+}
+
 fn upload_status_for_remote_clip(clip: &ClipDetailResponse) -> String {
     if clip.status != "ready" {
         "uploaded_processing".to_string()
@@ -722,6 +815,19 @@ fn upload_status_for_remote_clip(clip: &ClipDetailResponse) -> String {
     } else {
         "uploaded_public".to_string()
     }
+}
+
+fn upload_status_for_summary_clip(clip: &ClipSummaryResponse) -> String {
+    match clip.status.as_str() {
+        "failed" => "failed".to_string(),
+        "ready" if clip.visibility == "private" => "uploaded_private".to_string(),
+        "ready" => "uploaded_public".to_string(),
+        _ => "uploaded_processing".to_string(),
+    }
+}
+
+fn datetime_to_unix_seconds(value: DateTime<Utc>) -> u64 {
+    value.timestamp().max(0) as u64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -890,6 +996,7 @@ fn cloud_error_is_not_found(error: &CloudApiError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clipline_cloud_api::ClipSummaryResponse;
     use clipline_events::ClipAudioTrack;
     use clipline_mp4::{
         AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
@@ -1043,6 +1150,38 @@ mod tests {
             Some("https://share.example.com/c/1")
         );
         assert!(record.error.is_none());
+    }
+
+    #[test]
+    fn cloud_summary_maps_to_library_clip_with_client_id_and_owned_url() {
+        let cloud = CloudSettings {
+            public_url: Some("https://clips.example.com".into()),
+            ..CloudSettings::default()
+        };
+        let local = upload_record("local-1", "D:\\Videos\\known.mp4", "uploaded_public", 10);
+
+        let entry = cloud_library_clip_from_summary(
+            &cloud,
+            &clip_summary(
+                "remote-1",
+                Some("local-1"),
+                "Server Title",
+                "private",
+                "ready",
+                None,
+            ),
+            Some(&local),
+        );
+
+        assert_eq!(entry.remote_clip_id, "remote-1");
+        assert_eq!(entry.local_clip_id.as_deref(), Some("local-1"));
+        assert_eq!(entry.path, "D:\\Videos\\known.mp4");
+        assert_eq!(entry.title, "Server Title");
+        assert_eq!(entry.remote_url, "https://clips.example.com/clip/remote-1");
+        assert_eq!(entry.visibility, "private");
+        assert_eq!(entry.upload_status, "uploaded_private");
+        assert_eq!(entry.source_type.as_deref(), Some("replay"));
+        assert!(entry.updated_at_unix > 0);
     }
 
     #[test]
@@ -1209,6 +1348,7 @@ mod tests {
             id: id.into(),
             client_clip_id: Some("local".into()),
             title: "Clip".into(),
+            description: None,
             game_name: None,
             game_id: None,
             game_executable: None,
@@ -1228,7 +1368,41 @@ mod tests {
             status: status.into(),
             public_share_id: None,
             public_url: public_url.map(str::to_string),
+            view_count: 0,
             markers: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn clip_summary(
+        id: &str,
+        client_clip_id: Option<&str>,
+        title: &str,
+        visibility: &str,
+        status: &str,
+        public_url: Option<&str>,
+    ) -> ClipSummaryResponse {
+        let now = Utc::now();
+        ClipSummaryResponse {
+            id: id.into(),
+            client_clip_id: client_clip_id.map(str::to_string),
+            title: title.into(),
+            description: None,
+            game_name: Some("League of Legends".into()),
+            game_id: Some("league_of_legends".into()),
+            source_type: Some("replay".into()),
+            recorded_at: Some(now),
+            uploaded_at: Some(now),
+            duration_ms: Some(30_000),
+            file_size_bytes: Some(12_345),
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(60.0),
+            visibility: visibility.into(),
+            status: status.into(),
+            public_url: public_url.map(str::to_string),
+            view_count: 0,
             created_at: now,
             updated_at: now,
         }

@@ -4,8 +4,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -1440,6 +1440,7 @@ pub fn run() {
             crate::cloud::cloud_disconnect,
             crate::cloud::upload_clip_to_cloud,
             crate::cloud::sync_cloud_clip_status,
+            crate::cloud::list_cloud_clips,
             crate::library::list_clips,
             crate::library::clip_poster,
             crate::library::delete_clip,

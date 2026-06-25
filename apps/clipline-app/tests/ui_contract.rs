@@ -958,6 +958,9 @@ fn library_has_cloud_source_tab() {
     for required in [
         "let gallerySource = \"local\"",
         "function renderCloudClips()",
+        "let cloudClipsCache = []",
+        "function loadCloudClips",
+        "invoke(\"list_cloud_clips\")",
         "PlayerCore.cloudLibraryEntries",
         "$(\"cloud-gallery-grid\")",
         "querySelectorAll(\"#gallery-source-tabs .source-tab\")",
@@ -978,6 +981,10 @@ fn library_has_cloud_source_tab() {
             "cloud library tab should have stable styling for `{required}`"
         );
     }
+    assert!(
+        app_rs().contains("crate::cloud::list_cloud_clips"),
+        "native command registry must expose list_cloud_clips for the Cloud library tab"
+    );
 }
 
 #[test]

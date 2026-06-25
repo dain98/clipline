@@ -44,11 +44,46 @@ const PlayerCore = (() => {
 
   const clipNameStem = (name) => String(name || "").replace(/\.mp4$/i, "").trim();
 
-  const cloudLibraryEntries = (uploads, localClips = []) => {
+  const cloudLibraryEntries = (uploads, localClips = [], cloudClips = []) => {
     const localPaths = new Set((localClips || []).map((clip) => String(clip && clip.path || "")));
-    return Object.values(uploads || {})
+    const uploadRecords = Object.values(uploads || {});
+    const uploadsByLocalId = new Map(
+      uploadRecords
+        .filter((record) => record && record.local_clip_id)
+        .map((record) => [String(record.local_clip_id), record])
+    );
+    const seenLocalIds = new Set();
+    const seenRemoteIds = new Set();
+    const entries = [];
+
+    for (const clip of cloudClips || []) {
+      if (!clip || !clip.remote_url) continue;
+      const localId = String(clip.local_clip_id || "");
+      const upload = localId ? uploadsByLocalId.get(localId) : null;
+      const path = String(clip.path || (upload && upload.path) || "");
+      const remoteId = String(clip.remote_clip_id || "");
+      if (localId) seenLocalIds.add(localId);
+      if (remoteId) seenRemoteIds.add(remoteId);
+      entries.push({
+        local_clip_id: localId,
+        path,
+        title: String(clip.title || clipNameStem(pathBaseName(path)) || remoteId || "Cloud clip"),
+        remote_url: String(clip.remote_url),
+        visibility: ["public", "unlisted", "private"].includes(clip.visibility)
+          ? clip.visibility
+          : "private",
+        upload_status: String(clip.upload_status || "uploaded_processing"),
+        updated_at_unix: Number(clip.updated_at_unix) || 0,
+        local_available: Boolean(path && localPaths.has(path)),
+        remote_clip_id: remoteId,
+      });
+    }
+
+    entries.push(...uploadRecords
       .filter((record) => {
         if (!record || !record.remote_url) return false;
+        if (record.local_clip_id && seenLocalIds.has(String(record.local_clip_id))) return false;
+        if (record.remote_clip_id && seenRemoteIds.has(String(record.remote_clip_id))) return false;
         const status = String(record.upload_status || "");
         return status !== "failed" && status !== "not_uploaded";
       })
@@ -68,8 +103,9 @@ const PlayerCore = (() => {
           updated_at_unix: Number(record.updated_at_unix) || 0,
           local_available: localPaths.has(path),
         };
-      })
-      .sort((a, b) => b.updated_at_unix - a.updated_at_unix || a.title.localeCompare(b.title));
+      }));
+
+    return entries.sort((a, b) => b.updated_at_unix - a.updated_at_unix || a.title.localeCompare(b.title));
   };
 
   // Round the total before splitting so 59.6 carries to "1:00", not "0:60".
