@@ -261,6 +261,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-25):
+- Connected cloud identity in the rail: when `settings.cloud` has a stored credential target/user,
+  the bottom-left rail shows a compact profile button above Settings. It refreshes the account from
+  `/api/v1/auth/me`, prefers `display_name` over username, fetches `GET /api/v1/me/avatar` with the
+  stored bearer token via the native `cloud_user_avatar` command, and opens the user's cloud profile
+  at `/u/{username}`. A small in-process ETag cache handles avatar 304 responses; 404 or fetch errors
+  keep an initials fallback and disconnect hides the rail identity entirely.
 - Library cloud source tab: the Library header now has Local/Cloud tabs. The desktop pins
   `clipline-cloud-api` to Clipline Cloud `v1.2.18` and uses `CloudClient::list_clips` to fetch the
   authoritative server library (`GET /api/v1/clips`, paged newest-first). Cloud cards still merge

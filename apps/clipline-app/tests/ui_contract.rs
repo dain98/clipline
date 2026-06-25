@@ -162,6 +162,9 @@ fn review_player_owns_all_controls() {
         "id=\"rail-save\"",
         "id=\"rail-library-status\"",
         "id=\"rail-clips-count\"",
+        "id=\"rail-profile\"",
+        "id=\"rail-profile-avatar\"",
+        "id=\"rail-profile-name\"",
         "id=\"rail-settings\"",
         "id=\"confirm-dialog\"",
         "id=\"confirm-accept\"",
@@ -639,6 +642,64 @@ fn rail_shows_save_hotkey() {
     assert!(
         css.contains(".rail-hotkey"),
         "rail hotkey needs stable compact styling"
+    );
+}
+
+#[test]
+fn rail_shows_connected_cloud_identity() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    for required in [
+        "<button id=\"rail-profile\"",
+        "id=\"rail-profile-avatar\"",
+        "id=\"rail-profile-name\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "rail profile markup must include `{required}`"
+        );
+    }
+    for required in [
+        "function syncRailProfile",
+        "function refreshRailProfileIdentity",
+        "function loadRailProfileAvatar",
+        "function openRailProfile",
+        "invoke(\"cloud_user_profile\")",
+        "invoke(\"cloud_user_avatar\")",
+        "invoke(\"open_cloud_user_profile\")",
+        "connected_display_name",
+        "railProfileAvatarKey",
+        "$(\"rail-profile-name\")",
+    ] {
+        assert!(
+            js.contains(required),
+            "main.js must wire cloud rail profile behavior through `{required}`"
+        );
+    }
+    for required in [
+        ".rail-profile",
+        ".rail-profile[hidden]",
+        ".rail-profile-avatar",
+        ".rail-profile-name",
+    ] {
+        assert!(
+            css.contains(required),
+            "rail cloud identity needs stable compact styling for `{required}`"
+        );
+    }
+    assert!(
+        app_rs().contains("crate::cloud::cloud_user_avatar"),
+        "native command registry must expose cloud_user_avatar for the rail profile"
+    );
+    assert!(
+        app_rs().contains("crate::cloud::cloud_user_profile"),
+        "native command registry must expose cloud_user_profile for display-name refresh"
+    );
+    assert!(
+        app_rs().contains("crate::cloud::open_cloud_user_profile"),
+        "native command registry must expose open_cloud_user_profile for the rail profile button"
     );
 }
 

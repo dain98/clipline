@@ -715,6 +715,7 @@ fn preserve_backend_cloud_fields(settings: &mut AppSettings, backend: &AppSettin
     settings.cloud.public_url = backend.cloud.public_url.clone();
     settings.cloud.connected_user_id = backend.cloud.connected_user_id.clone();
     settings.cloud.connected_username = backend.cloud.connected_username.clone();
+    settings.cloud.connected_display_name = backend.cloud.connected_display_name.clone();
     settings.cloud.credential_target = backend.cloud.credential_target.clone();
     settings.cloud.uploads = backend.cloud.uploads.clone();
 }
@@ -1443,6 +1444,9 @@ pub fn run() {
             crate::cloud::list_cloud_clips,
             crate::cloud::cloud_clip_thumbnail,
             crate::cloud::cache_cloud_clip_media,
+            crate::cloud::cloud_user_profile,
+            crate::cloud::cloud_user_avatar,
+            crate::cloud::open_cloud_user_profile,
             crate::cloud::open_cloud_clip_url,
             crate::library::list_clips,
             crate::library::clip_poster,
@@ -1945,6 +1949,7 @@ mod tests {
         frontend.cloud.public_url = Some("https://stale-public.example.com".into());
         frontend.cloud.connected_user_id = Some("stale-user".into());
         frontend.cloud.connected_username = Some("stale-name".into());
+        frontend.cloud.connected_display_name = Some("Stale".into());
         frontend.cloud.credential_target = Some("stale-target".into());
         frontend.cloud.default_visibility = "public".into();
         frontend.cloud.delete_local_after_upload = true;
@@ -1955,6 +1960,7 @@ mod tests {
         backend.cloud.public_url = Some("https://public.example.com".into());
         backend.cloud.connected_user_id = Some("user-1".into());
         backend.cloud.connected_username = Some("dain".into());
+        backend.cloud.connected_display_name = Some("Dain".into());
         backend.cloud.credential_target = Some("clipline:user-1".into());
         backend.cloud.uploads.insert(
             "local-1".into(),
@@ -1981,6 +1987,10 @@ mod tests {
         assert_eq!(
             frontend.cloud.connected_username,
             backend.cloud.connected_username
+        );
+        assert_eq!(
+            frontend.cloud.connected_display_name,
+            backend.cloud.connected_display_name
         );
         assert_eq!(
             frontend.cloud.credential_target,

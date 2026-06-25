@@ -86,6 +86,8 @@ let cloudClipsCache = [];
 let cloudClipsLoaded = false;
 let cloudClipsLoading = false;
 let cloudClipsError = "";
+let railProfileAvatarKey = "";
+let railProfileAvatarRequest = 0;
 let galleryFilter = "all";
 let gallerySort = "new";
 let galleryGroup = "smart";
@@ -485,6 +487,7 @@ function defaultCloudSettings() {
     public_url: null,
     connected_user_id: null,
     connected_username: null,
+    connected_display_name: null,
     credential_target: null,
     default_visibility: "private",
     delete_local_after_upload: false,
@@ -502,8 +505,9 @@ function fillCloudSettings(cloud) {
   $("cloud-delete-local-after-upload").checked = !!cloud.delete_local_after_upload;
   $("cloud-auto-upload-rules").checked = false;
   syncCloudHttpWarning();
+  const displayName = cloudDisplayName(cloud);
   $("cloud-connection-status").textContent = connected
-    ? `Connected as ${cloud.connected_username || cloud.connected_user_id}`
+    ? `Connected as ${displayName}`
     : "Not connected";
   $("cloud-connect-fields").hidden = connected;
   $("cloud-connect").hidden = connected;
@@ -511,6 +515,113 @@ function fillCloudSettings(cloud) {
   $("cloud-disconnect").hidden = !connected;
   $("cloud-disconnect").disabled = !connected;
   $("cloud-connect-status").textContent = "";
+  syncRailProfile(cloud);
+}
+
+function cloudDisplayName(cloud) {
+  return String(
+    cloud.connected_display_name
+    || cloud.connected_username
+    || cloud.connected_user_id
+    || "Cloud"
+  ).trim() || "Cloud";
+}
+
+function railProfileInitials(name) {
+  const parts = String(name || "")
+    .trim()
+    .split(/[\s._-]+/)
+    .filter(Boolean);
+  if (parts.length >= 2) {
+    return `${Array.from(parts[0])[0] || ""}${Array.from(parts[1])[0] || ""}`.toUpperCase();
+  }
+  return (Array.from(parts[0] || "C").slice(0, 2).join("") || "C").toUpperCase();
+}
+
+function setRailProfileFallback(name) {
+  const avatar = $("rail-profile-avatar");
+  const fallback = document.createElement("span");
+  fallback.textContent = railProfileInitials(name);
+  avatar.replaceChildren(fallback);
+}
+
+function setRailProfileImage(dataUrl, name) {
+  const img = document.createElement("img");
+  img.alt = "";
+  img.addEventListener("error", () => setRailProfileFallback(name), { once: true });
+  img.src = dataUrl;
+  $("rail-profile-avatar").replaceChildren(img);
+}
+
+function syncRailProfile(cloud = cloudSettings()) {
+  const connected = Boolean(cloud.connected_user_id && cloud.credential_target);
+  const profile = $("rail-profile");
+  const avatar = $("rail-profile-avatar");
+  const nameEl = $("rail-profile-name");
+  if (!connected) {
+    railProfileAvatarKey = "";
+    railProfileAvatarRequest += 1;
+    profile.hidden = true;
+    profile.title = "";
+    profile.removeAttribute("aria-label");
+    avatar.replaceChildren();
+    nameEl.textContent = "";
+    return;
+  }
+
+  const name = cloudDisplayName(cloud);
+  const key = `${cloud.host_url || ""}|${cloud.connected_user_id || ""}|${cloud.credential_target || ""}`;
+  profile.hidden = false;
+  profile.title = `Clipline Cloud: ${name}`;
+  profile.setAttribute("aria-label", `Open Clipline Cloud profile for ${name}`);
+  nameEl.textContent = name;
+  if (!avatar.querySelector("img")) setRailProfileFallback(name);
+  if (railProfileAvatarKey === key) return;
+
+  railProfileAvatarKey = key;
+  setRailProfileFallback(name);
+  refreshRailProfileIdentity(key);
+  loadRailProfileAvatar(key, name);
+}
+
+async function refreshRailProfileIdentity(key) {
+  try {
+    const profile = await invoke("cloud_user_profile");
+    if (key !== railProfileAvatarKey || !profile) return;
+    const cloud = cloudSettings();
+    cloud.connected_user_id = profile.user_id || cloud.connected_user_id;
+    cloud.connected_username = profile.username || cloud.connected_username;
+    cloud.connected_display_name = profile.display_name || null;
+    if (currentSettings) currentSettings.cloud = cloud;
+    const name = cloudDisplayName(cloud);
+    $("rail-profile").title = `Clipline Cloud: ${name}`;
+    $("rail-profile").setAttribute("aria-label", `Open Clipline Cloud profile for ${name}`);
+    $("rail-profile-name").textContent = name;
+    if (!$("rail-profile-avatar").querySelector("img")) setRailProfileFallback(name);
+    $("cloud-connection-status").textContent = `Connected as ${name}`;
+  } catch (_) {
+    // The saved username remains useful if the identity refresh fails offline.
+  }
+}
+
+async function loadRailProfileAvatar(key, name) {
+  const request = ++railProfileAvatarRequest;
+  try {
+    const dataUrl = await invoke("cloud_user_avatar");
+    if (request !== railProfileAvatarRequest || key !== railProfileAvatarKey || !dataUrl) return;
+    setRailProfileImage(dataUrl, name);
+  } catch (_) {
+    // Keep the initials fallback when the account has no reachable avatar.
+  }
+}
+
+async function openRailProfile() {
+  $("error").textContent = "";
+  try {
+    await invoke("open_cloud_user_profile");
+  } catch (e) {
+    $("error").textContent = String(e);
+  }
 }
 
 function cloudHostUsesInsecureHttp() {
@@ -4225,6 +4336,7 @@ $("keys-dialog").addEventListener("click", (ev) => {
 });
 
 $("rail-save").addEventListener("click", () => invoke("save_replay"));
+$("rail-profile").addEventListener("click", openRailProfile);
 $("rail-settings").addEventListener("click", () => toggleSettings());
 $("settings-close").addEventListener("click", () => toggleSettings(false));
 $("set-hotkey").addEventListener("focus", beginHotkeyCapture);

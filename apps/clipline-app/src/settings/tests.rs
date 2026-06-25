@@ -862,6 +862,23 @@ fn uploaded_processing_status_survives_cloud_settings_normalization() {
 }
 
 #[test]
+fn cloud_settings_normalize_connected_display_name() {
+    let mut cloud = CloudSettings {
+        connected_display_name: Some("  Dain  ".into()),
+        ..CloudSettings::default()
+    };
+
+    cloud.normalize();
+
+    assert_eq!(cloud.connected_display_name.as_deref(), Some("Dain"));
+
+    cloud.connected_display_name = Some("  ".into());
+    cloud.normalize();
+
+    assert_eq!(cloud.connected_display_name, None);
+}
+
+#[test]
 fn disk_replay_requires_acknowledgement_and_folder() {
     let mut settings = AppSettings {
         replay_storage: ReplayStorageSettings {

@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
+use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Utc};
 use clipline_cloud_api::{
     sha256_hex, ClipDetailResponse, ClipSummaryResponse, CloudApiError, CloudClient,
@@ -35,7 +37,9 @@ const READY_POLL_DELAY: Duration = Duration::from_secs(1);
 const CLOUD_LIBRARY_PAGE_SIZE: i64 = 100;
 const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
+const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 static CLOUD_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static CLOUD_USER_AVATAR_CACHE: OnceLock<Mutex<Option<CachedCloudUserAvatar>>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub struct CloudConnectRequest {
@@ -75,10 +79,19 @@ pub struct CloudConnectionStatus {
     pub host_url: String,
     pub public_url: Option<String>,
     pub username: Option<String>,
+    pub display_name: Option<String>,
     pub user_id: Option<String>,
     pub default_visibility: String,
     pub delete_local_after_upload: bool,
     pub auto_upload_rules: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CloudUserProfile {
+    pub user_id: String,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub profile_url: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -156,6 +169,13 @@ struct CloudAssetDownload<'a> {
     version: Option<u64>,
     expected_size_bytes: Option<i64>,
     missing_ok: bool,
+}
+
+#[derive(Clone)]
+struct CachedCloudUserAvatar {
+    key: String,
+    etag: Option<String>,
+    data_url: String,
 }
 
 #[tauri::command]
@@ -259,10 +279,105 @@ pub async fn cache_cloud_clip_media<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn cloud_user_avatar(
+    state: tauri::State<'_, RuntimeState>,
+) -> Result<Option<String>, String> {
+    let (cloud, token) = cloud_asset_context(&state)?;
+    let cache_key = cloud_user_avatar_cache_key(&cloud)?;
+    let cached = cached_cloud_user_avatar(&cache_key);
+    let url = cloud_user_avatar_url(&cloud)?;
+    let mut request = reqwest::Client::new().get(url).bearer_auth(token);
+    if let Some(etag) = cached.as_ref().and_then(|avatar| avatar.etag.as_deref()) {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("download cloud avatar: {e}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        clear_cached_cloud_user_avatar(&cache_key);
+        return Ok(None);
+    }
+    if status == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(cached.map(|avatar| avatar.data_url));
+    }
+    if !status.is_success() {
+        let message = response.text().await.unwrap_or_else(|_| status.to_string());
+        return Err(format!(
+            "download cloud avatar failed with {status}: {message}"
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length as usize > MAX_AVATAR_BYTES)
+    {
+        return Err("cloud avatar is too large".to_string());
+    }
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("read cloud avatar: {e}"))?;
+    let data_url = cloud_user_avatar_data_url(content_type.as_deref(), &bytes)?;
+    store_cached_cloud_user_avatar(CachedCloudUserAvatar {
+        key: cache_key,
+        etag,
+        data_url: data_url.clone(),
+    });
+    Ok(Some(data_url))
+}
+
+#[tauri::command]
+pub async fn cloud_user_profile(
+    state: tauri::State<'_, RuntimeState>,
+) -> Result<CloudUserProfile, String> {
+    let (cloud, token) = cloud_asset_context(&state)?;
+    let client = connected_client(&cloud, &token)?;
+    let response = client.me().await.map_err(cloud_error)?;
+    let profile = cloud_user_profile_from_response(&cloud, &response.user)?;
+    let profile_for_settings = profile.clone();
+    let _settings = state.update_cloud(|cloud| {
+        cloud.connected_user_id = Some(profile_for_settings.user_id.clone());
+        cloud.connected_username = Some(profile_for_settings.username.clone());
+        cloud.connected_display_name = profile_for_settings.display_name.clone();
+    })?;
+    Ok(profile)
+}
+
+#[tauri::command]
+pub fn open_cloud_user_profile(state: tauri::State<RuntimeState>) -> Result<(), String> {
+    let cloud = state.settings().cloud;
+    let username = cloud
+        .connected_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Clipline Cloud username is unknown".to_string())?;
+    let url = cloud_user_profile_url(&cloud, username)?;
+    open_cloud_url(url.as_str(), "cloud user profile")
+}
+
+#[tauri::command]
 pub fn open_cloud_clip_url(url: String) -> Result<(), String> {
     let url = validate_cloud_link_url(&url)?;
+    open_cloud_url(&url, "cloud clip URL")
+}
+
+fn open_cloud_url(url: &str, context: &str) -> Result<(), String> {
     let operation = wide_null(OsStr::new("open"));
-    let target = wide_null(OsStr::new(&url));
+    let target = wide_null(OsStr::new(url));
     let result = unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
@@ -274,9 +389,7 @@ pub fn open_cloud_clip_url(url: String) -> Result<(), String> {
         )
     };
     if result as isize <= 32 {
-        return Err(format!(
-            "open cloud clip URL failed with shell code {result:?}"
-        ));
+        return Err(format!("{context} failed with shell code {result:?}"));
     }
     Ok(())
 }
@@ -396,6 +509,107 @@ fn cloud_clip_asset_url(
         clipline_cloud_api::validate_cloud_host(&cloud.host_url, true).map_err(cloud_error)?;
     base.join(&format!("api/v1/clips/{remote_clip_id}/{asset}"))
         .map_err(|e| format!("cloud asset URL is invalid: {e}"))
+}
+
+fn cloud_user_avatar_url(cloud: &CloudSettings) -> Result<reqwest::Url, String> {
+    let base =
+        clipline_cloud_api::validate_cloud_host(&cloud.host_url, true).map_err(cloud_error)?;
+    base.join("api/v1/me/avatar")
+        .map_err(|e| format!("cloud avatar URL is invalid: {e}"))
+}
+
+fn cloud_user_profile_from_response(
+    cloud: &CloudSettings,
+    user: &clipline_cloud_api::UserResponse,
+) -> Result<CloudUserProfile, String> {
+    let display_name = user
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    Ok(CloudUserProfile {
+        user_id: user.id.clone(),
+        username: user.username.clone(),
+        display_name,
+        profile_url: cloud_user_profile_url(cloud, &user.username)?.to_string(),
+    })
+}
+
+fn cloud_user_profile_url(cloud: &CloudSettings, username: &str) -> Result<reqwest::Url, String> {
+    let username = username.trim();
+    if username.is_empty() {
+        return Err("Clipline Cloud username is unknown".to_string());
+    }
+    let base = cloud.public_url.as_deref().unwrap_or(&cloud.host_url);
+    let mut url = clipline_cloud_api::validate_cloud_host(base, true).map_err(cloud_error)?;
+    url = url
+        .join("u/")
+        .map_err(|e| format!("cloud user profile URL is invalid: {e}"))?;
+    url.path_segments_mut()
+        .map_err(|_| "cloud user profile URL cannot be a base".to_string())?
+        .pop_if_empty()
+        .push(username);
+    Ok(url)
+}
+
+fn cloud_user_avatar_cache_key(cloud: &CloudSettings) -> Result<String, String> {
+    let base =
+        clipline_cloud_api::validate_cloud_host(&cloud.host_url, true).map_err(cloud_error)?;
+    let user_id = cloud
+        .connected_user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Clipline Cloud user is unknown".to_string())?;
+    Ok(format!("{}|{user_id}", base.as_str().trim_end_matches('/')))
+}
+
+fn cloud_user_avatar_data_url(content_type: Option<&str>, bytes: &[u8]) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("cloud avatar returned an empty body".to_string());
+    }
+    if bytes.len() > MAX_AVATAR_BYTES {
+        return Err("cloud avatar is too large".to_string());
+    }
+    let mime = content_type
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("image/jpeg")
+        .to_ascii_lowercase();
+    if !mime.starts_with("image/") {
+        return Err(format!("cloud avatar response is not an image: {mime}"));
+    }
+    Ok(format!(
+        "data:{mime};base64,{}",
+        general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+fn cloud_user_avatar_cache() -> &'static Mutex<Option<CachedCloudUserAvatar>> {
+    CLOUD_USER_AVATAR_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn cached_cloud_user_avatar(key: &str) -> Option<CachedCloudUserAvatar> {
+    cloud_user_avatar_cache()
+        .lock()
+        .ok()
+        .and_then(|avatar| avatar.as_ref().filter(|cached| cached.key == key).cloned())
+}
+
+fn store_cached_cloud_user_avatar(avatar: CachedCloudUserAvatar) {
+    if let Ok(mut cached) = cloud_user_avatar_cache().lock() {
+        *cached = Some(avatar);
+    }
+}
+
+fn clear_cached_cloud_user_avatar(key: &str) {
+    if let Ok(mut cached) = cloud_user_avatar_cache().lock() {
+        if cached.as_ref().is_some_and(|avatar| avatar.key == key) {
+            *cached = None;
+        }
+    }
 }
 
 fn cloud_clip_cache_path(
@@ -621,6 +835,13 @@ pub async fn cloud_connect(
         cloud.public_url = Some(public_url.clone());
         cloud.connected_user_id = Some(connected.user.id.clone());
         cloud.connected_username = Some(connected.user.username.clone());
+        cloud.connected_display_name = connected
+            .user
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         cloud.credential_target = Some(target.clone());
         cloud.default_visibility = visibility.clone();
         if identity_changed {
@@ -650,6 +871,7 @@ pub fn cloud_disconnect(
     let settings = state.update_cloud(|cloud| {
         cloud.connected_user_id = None;
         cloud.connected_username = None;
+        cloud.connected_display_name = None;
         cloud.credential_target = None;
     })?;
     Ok(connection_status(&settings.cloud))
@@ -825,6 +1047,7 @@ fn connection_status(cloud: &CloudSettings) -> CloudConnectionStatus {
         host_url: cloud.host_url.clone(),
         public_url: cloud.public_url.clone(),
         username: cloud.connected_username.clone(),
+        display_name: cloud.connected_display_name.clone(),
         user_id: cloud.connected_user_id.clone(),
         default_visibility: cloud.default_visibility.clone(),
         delete_local_after_upload: cloud.delete_local_after_upload,
@@ -1549,6 +1772,60 @@ mod tests {
         assert!(path.ends_with("remote-1_ABC-media-42.mp4"));
         assert!(cloud_clip_cache_path("../escape", "media", "mp4", None).is_err());
         assert!(cloud_clip_cache_path("remote-1", "../asset", "mp4", None).is_err());
+    }
+
+    #[test]
+    fn cloud_user_avatar_url_uses_api_host() {
+        let cloud = CloudSettings {
+            host_url: "https://clips.example.com/base".into(),
+            ..CloudSettings::default()
+        };
+        let url = cloud_user_avatar_url(&cloud).expect("avatar URL");
+        assert_eq!(
+            url.as_str(),
+            "https://clips.example.com/base/api/v1/me/avatar"
+        );
+    }
+
+    #[test]
+    fn cloud_user_profile_url_uses_public_url_and_escapes_username() {
+        let cloud = CloudSettings {
+            host_url: "https://api.example.com/base".into(),
+            public_url: Some("https://clips.example.com/cloud".into()),
+            ..CloudSettings::default()
+        };
+        let url = cloud_user_profile_url(&cloud, "Dain 98").expect("profile URL");
+        assert_eq!(url.as_str(), "https://clips.example.com/cloud/u/Dain%2098");
+    }
+
+    #[test]
+    fn cloud_connection_status_includes_display_name() {
+        let cloud = CloudSettings {
+            connected_display_name: Some("Dain".into()),
+            connected_username: Some("dain98".into()),
+            ..CloudSettings::default()
+        };
+
+        let status = connection_status(&cloud);
+
+        assert_eq!(status.display_name.as_deref(), Some("Dain"));
+        assert_eq!(status.username.as_deref(), Some("dain98"));
+    }
+
+    #[test]
+    fn cloud_user_avatar_data_url_requires_image_content_type() {
+        assert_eq!(
+            cloud_user_avatar_data_url(Some("image/png"), b"\x01\x02\x03").unwrap(),
+            "data:image/png;base64,AQID"
+        );
+        assert!(
+            cloud_user_avatar_data_url(Some("text/html"), b"<script>").is_err(),
+            "avatar data URLs must only accept image responses"
+        );
+        assert!(
+            cloud_user_avatar_data_url(Some("image/png"), b"").is_err(),
+            "empty avatar bodies should not render as broken images"
+        );
     }
 
     #[test]

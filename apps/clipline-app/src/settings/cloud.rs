@@ -68,6 +68,8 @@ pub struct CloudSettings {
     #[serde(default)]
     pub connected_username: Option<String>,
     #[serde(default)]
+    pub connected_display_name: Option<String>,
+    #[serde(default)]
     pub credential_target: Option<String>,
     #[serde(default = "default_cloud_visibility")]
     pub default_visibility: String,
@@ -86,6 +88,7 @@ impl Default for CloudSettings {
             public_url: None,
             connected_user_id: None,
             connected_username: None,
+            connected_display_name: None,
             credential_target: None,
             default_visibility: default_cloud_visibility(),
             delete_local_after_upload: false,
@@ -116,6 +119,11 @@ impl CloudSettings {
             .filter(|value| !value.is_empty());
         self.connected_username = self
             .connected_username
+            .take()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        self.connected_display_name = self
+            .connected_display_name
             .take()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
