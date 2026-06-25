@@ -21,6 +21,7 @@ $("win-max").addEventListener("click", () => appWindow.toggleMaximize());
 $("win-close").addEventListener("click", requestWindowClose);
 const {
   fmtBytes,
+  fmtLibraryStorageUsage,
   fmtDur,
   fmtTenths,
   fmtAgo,
@@ -1652,7 +1653,8 @@ async function refreshStorage() {
   const s = await invoke("storage_status");
   $("rail-clips-count").textContent = compactCount(s.clip_count);
   $("rail-library-status").title = `${plural(s.clip_count, "clip")} in library`;
-  $("gallery-storage-used").textContent = `· ${fmtBytes(s.total_bytes)}`;
+  $("gallery-storage-used").textContent =
+    `· ${fmtLibraryStorageUsage(s.total_bytes, currentSettings.disk_quota_gb)}`;
 }
 
 function compactCount(count) {

@@ -25,6 +25,15 @@ const PlayerCore = (() => {
     return `${mb.toFixed(1)} MB`;
   };
 
+  const fmtQuotaGb = (quotaGb) => {
+    const value = Number(quotaGb);
+    if (!Number.isFinite(value) || value <= 0) return "no limit";
+    return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)} GB`;
+  };
+
+  const fmtLibraryStorageUsage = (usedBytes, quotaGb) =>
+    `${fmtBytes(usedBytes)} / ${fmtQuotaGb(quotaGb)}`;
+
   // Round the total before splitting so 59.6 carries to "1:00", not "0:60".
   const fmtDur = (s) => {
     if (s == null || !Number.isFinite(s)) return "?";
@@ -829,6 +838,7 @@ const PlayerCore = (() => {
     videoDecodeProbes,
     encoderCodecCaveat,
     fmtBytes,
+    fmtLibraryStorageUsage,
     fmtDur,
     fmtTenths,
     fmtAgo,
