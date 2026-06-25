@@ -630,11 +630,19 @@ fn open_dxgi(
                 .map_err(|e| e.to_string())?
         }
         CaptureSource::DisplayRegion(region) => {
-            let display = clipline_capture::windows::display::display_handle_by_id(
-                region.display_id.as_deref(),
-            )
-            .map_err(|e| e.to_string())?;
-            let crop = crop_for_region(region, &display.info)?;
+            let (display, recovered) =
+                clipline_capture::windows::display::display_handle_by_id_or_primary(
+                    region.display_id.as_deref(),
+                )
+                .map_err(|e| e.to_string())?;
+            let (crop, crop_recovered) =
+                crop_for_region_or_full_display(region, &display.info, recovered)?;
+            if recovered || crop_recovered {
+                eprintln!(
+                    "clipline: capture display {:?} was not usable; using full display {}",
+                    region.display_id, display.info.name
+                );
+            }
             DxgiDuplicationCapture::for_monitor_region_on(
                 device.clone(),
                 display.handle,
@@ -676,11 +684,19 @@ fn open_wgc(
             WgcCapture::primary_monitor_on(device.clone(), clock).map_err(|e| init(&e))
         }
         CaptureSource::DisplayRegion(region) => {
-            let display = clipline_capture::windows::display::display_handle_by_id(
-                region.display_id.as_deref(),
-            )
-            .map_err(|e| init(&e))?;
-            let crop = crop_for_region(region, &display.info)?;
+            let (display, recovered) =
+                clipline_capture::windows::display::display_handle_by_id_or_primary(
+                    region.display_id.as_deref(),
+                )
+                .map_err(|e| init(&e))?;
+            let (crop, crop_recovered) =
+                crop_for_region_or_full_display(region, &display.info, recovered)?;
+            if recovered || crop_recovered {
+                eprintln!(
+                    "clipline: capture display {:?} was not usable; using full display {}",
+                    region.display_id, display.info.name
+                );
+            }
             WgcCapture::for_monitor_region_on(device.clone(), display.handle, clock, crop)
                 .map_err(|e| init(&e))
         }
@@ -1679,6 +1695,27 @@ fn crop_for_region(
     })
 }
 
+fn crop_for_region_or_full_display(
+    region: &CaptureRegion,
+    display: &clipline_capture::windows::display::DisplayInfo,
+    recovered_display: bool,
+) -> Result<(CropRect, bool), String> {
+    if !recovered_display {
+        if let Ok(crop) = crop_for_region(region, display) {
+            return Ok((crop, false));
+        }
+    }
+    Ok((
+        CropRect {
+            x: 0,
+            y: 0,
+            width: display.width,
+            height: display.height,
+        },
+        true,
+    ))
+}
+
 /// Session label from the local wall clock (folder names should match what
 /// the user's file explorer shows, not UTC).
 fn local_session_label(league_match: bool) -> String {
@@ -1814,6 +1851,39 @@ mod tests {
         assert_eq!(
             output_dimensions(5120, 1440, OutputResolution::Source),
             (2560, 720)
+        );
+    }
+
+    #[test]
+    fn missing_display_region_falls_back_to_full_current_display_crop() {
+        let region = CaptureRegion {
+            display_id: Some(r"\\.\DISPLAY-GHOST".into()),
+            x: 1920,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+        let display = clipline_capture::windows::display::DisplayInfo {
+            id: r"\\.\DISPLAY1".into(),
+            name: "DISPLAY1".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            is_primary: true,
+        };
+
+        let (crop, recovered) = crop_for_region_or_full_display(&region, &display, true).unwrap();
+
+        assert!(recovered);
+        assert_eq!(
+            crop,
+            CropRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080
+            }
         );
     }
 
@@ -1971,7 +2041,6 @@ mod tests {
         assert!((first_seconds - 2.0).abs() < 1e-6);
         assert!((second_seconds - 2.0).abs() < 1e-6);
     }
-
 
     #[test]
     fn clips_dir_uses_configured_root_when_creatable() {

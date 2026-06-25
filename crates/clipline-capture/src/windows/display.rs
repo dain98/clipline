@@ -38,6 +38,20 @@ pub fn enumerate_displays() -> Result<Vec<DisplayInfo>, CaptureError> {
 
 pub fn display_handle_by_id(id: Option<&str>) -> Result<DisplayHandle, CaptureError> {
     let displays = enumerate_display_handles()?;
+    select_display_handle(&displays, id)
+}
+
+pub fn display_handle_by_id_or_primary(
+    id: Option<&str>,
+) -> Result<(DisplayHandle, bool), CaptureError> {
+    let displays = enumerate_display_handles()?;
+    select_display_handle_or_primary(&displays, id)
+}
+
+fn select_display_handle(
+    displays: &[DisplayHandle],
+    id: Option<&str>,
+) -> Result<DisplayHandle, CaptureError> {
     if let Some(id) = id.filter(|id| !id.trim().is_empty()) {
         if let Some(display) = displays.iter().find(|display| display.info.id == id) {
             return Ok(display.clone());
@@ -50,6 +64,24 @@ pub fn display_handle_by_id(id: Option<&str>) -> Result<DisplayHandle, CaptureEr
         .or_else(|| displays.first())
         .cloned()
         .ok_or_else(|| CaptureError::Init("no displays found".into()))
+}
+
+fn select_display_handle_or_primary(
+    displays: &[DisplayHandle],
+    id: Option<&str>,
+) -> Result<(DisplayHandle, bool), CaptureError> {
+    match select_display_handle(displays, id) {
+        Ok(display) => Ok((display, false)),
+        Err(e) if id.is_some_and(|id| !id.trim().is_empty()) => {
+            let fallback = select_display_handle(displays, None).map_err(|fallback| {
+                CaptureError::Init(format!(
+                    "{e}; primary display fallback was not available: {fallback}"
+                ))
+            })?;
+            Ok((fallback, true))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn enumerate_display_handles() -> Result<Vec<DisplayHandle>, CaptureError> {
@@ -142,5 +174,75 @@ mod tests {
         };
         assert!(!displays.is_empty());
         assert!(displays.iter().all(|d| d.width > 0 && d.height > 0));
+    }
+
+    #[test]
+    fn select_display_uses_primary_flag_when_no_id_is_saved() {
+        let displays = vec![
+            DisplayHandle {
+                handle: HMONITOR(std::ptr::dangling_mut()),
+                info: DisplayInfo {
+                    id: r"\\.\DISPLAY-GHOST".into(),
+                    name: "DISPLAY-GHOST".into(),
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                    is_primary: false,
+                },
+            },
+            DisplayHandle {
+                handle: HMONITOR(std::ptr::dangling_mut()),
+                info: DisplayInfo {
+                    id: r"\\.\DISPLAY2".into(),
+                    name: "DISPLAY2".into(),
+                    x: 1920,
+                    y: 0,
+                    width: 2560,
+                    height: 1440,
+                    is_primary: true,
+                },
+            },
+        ];
+
+        let selected = select_display_handle(&displays, None).unwrap();
+
+        assert_eq!(selected.info.id, r"\\.\DISPLAY2");
+    }
+
+    #[test]
+    fn select_display_or_primary_recovers_from_missing_saved_id() {
+        let displays = vec![
+            DisplayHandle {
+                handle: HMONITOR(std::ptr::dangling_mut()),
+                info: DisplayInfo {
+                    id: r"\\.\DISPLAY1".into(),
+                    name: "DISPLAY1".into(),
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                    is_primary: true,
+                },
+            },
+            DisplayHandle {
+                handle: HMONITOR(std::ptr::dangling_mut()),
+                info: DisplayInfo {
+                    id: r"\\.\DISPLAY2".into(),
+                    name: "DISPLAY2".into(),
+                    x: 1920,
+                    y: 0,
+                    width: 2560,
+                    height: 1440,
+                    is_primary: false,
+                },
+            },
+        ];
+
+        let (selected, recovered) =
+            select_display_handle_or_primary(&displays, Some(r"\\.\DISPLAY-GHOST")).unwrap();
+
+        assert!(recovered);
+        assert_eq!(selected.info.id, r"\\.\DISPLAY1");
     }
 }

@@ -16,10 +16,10 @@ use windows::Graphics::Capture::{
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
-use windows::Win32::Foundation::{E_FAIL, HWND, POINT, RPC_E_CHANGED_MODE};
+use windows::Win32::Foundation::{E_FAIL, HWND, RPC_E_CHANGED_MODE};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
-use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY};
+use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
@@ -100,16 +100,8 @@ impl WgcCapture {
         device: ID3D11Device,
         clock: RelativeClock,
     ) -> Result<Self, CaptureError> {
-        // SAFETY: plain Win32 call returning a handle (null in headless
-        // sessions — checked below, since CreateForMonitor access-violates
-        // on an invalid HMONITOR instead of returning an error).
-        let hmon = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
-        if hmon.is_invalid() {
-            return Err(CaptureError::Init(
-                "no monitor in this session (headless?)".into(),
-            ));
-        }
-        Self::for_monitor_on(device, hmon, clock)
+        let display = crate::windows::display::display_handle_by_id(None)?;
+        Self::for_monitor_on(device, display.handle, clock)
     }
 
     /// Capture a specific monitor on a caller-provided device and clock.

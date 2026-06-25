@@ -261,6 +261,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-25):
+- Recorder startup display recovery: startup primary-monitor capture now resolves the primary
+  display through the same `EnumDisplayMonitors` path used by Settings instead of
+  `MonitorFromPoint(0,0)`, which could bind to a ghost/wrong monitor on some Windows layouts.
+  Display-region capture also recovers from a missing saved display id or stale region geometry by
+  falling back to the full current primary display instead of letting the recorder thread exit until
+  the user opens Settings and clicks Save.
 - Share/export audio compatibility follow-up: the 0.1.12/0.1.14 remux-only upload behavior could
   hand cloud/Discord a multi-audio-track MP4 where only the first stream was played, producing
   silent uploads or missing mic audio. Cloud uploads now replace two-or-more selected audio tracks
