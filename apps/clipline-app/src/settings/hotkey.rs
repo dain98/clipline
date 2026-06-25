@@ -1,4 +1,4 @@
-//! Hotkey parsing: Ctrl/Alt/Shift + F1-F11/F13-F24 or selected mouse buttons.
+//! Hotkey parsing: optional Ctrl/Alt/Shift + F1-F11/F13-F24 or selected mouse buttons.
 //! F12 is reserved by Windows for debuggers.
 
 use tauri_plugin_global_shortcut::Shortcut;
@@ -66,9 +66,6 @@ fn normalize_hotkey_parts(raw: &str) -> Result<(String, HotkeyKey), String> {
     }
 
     let key = key.ok_or("hotkey needs a key")?;
-    if key.is_mouse_button() && !ctrl && !alt && !shift {
-        return Err("mouse hotkeys need Ctrl, Alt, or Shift".into());
-    }
 
     let mut parts = Vec::new();
     if ctrl {
@@ -102,9 +99,6 @@ impl HotkeyKey {
         }
     }
 
-    fn is_mouse_button(self) -> bool {
-        matches!(self, Self::Middle | Self::Mouse4 | Self::Mouse5)
-    }
 }
 
 fn mouse_key_from_token(token: &str) -> Option<HotkeyKey> {

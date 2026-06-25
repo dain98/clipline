@@ -798,7 +798,7 @@ fn hotkey_recorder_formats_mouse_buttons() {
             &mut ctx,
             "PlayerCore.hotkeyFromMouseEvent({ button: 1, ctrlKey: false, altKey: false, shiftKey: false })"
         ),
-        r#"{"kind":"invalid","message":"Mouse shortcuts need Ctrl, Alt, or Shift."}"#
+        r#"{"kind":"captured","value":"Middle"}"#
     );
 }
 

@@ -376,6 +376,10 @@ mod tests {
 
         let middle = parse_hook_hotkey("Shift+Middle").unwrap();
         assert!(middle.matches(0x04, false, false, true));
+
+        let bare_mouse = parse_hook_hotkey("Mouse4").unwrap();
+        assert!(bare_mouse.matches(0x05, false, false, false));
+        assert!(!bare_mouse.matches(0x05, true, false, false));
     }
 
     #[test]
@@ -389,6 +393,7 @@ mod tests {
         assert!(parse_hook_hotkey("Ctrl+Mouse5")
             .unwrap()
             .requires_mouse_hook());
+        assert!(parse_hook_hotkey("Mouse5").unwrap().requires_mouse_hook());
     }
 
     #[test]

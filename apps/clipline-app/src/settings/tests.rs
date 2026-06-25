@@ -698,6 +698,9 @@ fn parses_mouse_button_hotkeys() {
     assert_eq!(normalize_hotkey("ctrl+mouse4").unwrap(), "Ctrl+Mouse4");
     assert_eq!(normalize_hotkey("alt+mouse5").unwrap(), "Alt+Mouse5");
     assert_eq!(normalize_hotkey("shift+middle").unwrap(), "Shift+Middle");
+    assert_eq!(normalize_hotkey("mouse4").unwrap(), "Mouse4");
+    assert_eq!(normalize_hotkey("Mouse5").unwrap(), "Mouse5");
+    assert_eq!(normalize_hotkey("Middle").unwrap(), "Middle");
 }
 
 #[test]
@@ -707,9 +710,7 @@ fn rejects_non_function_key_hotkeys() {
 }
 
 #[test]
-fn rejects_unsafe_mouse_hotkeys() {
-    assert!(normalize_hotkey("Mouse5").is_err());
-    assert!(normalize_hotkey("Middle").is_err());
+fn rejects_unsupported_mouse_hotkeys() {
     assert!(normalize_hotkey("Mouse1").is_err());
     assert!(normalize_hotkey("RightMouse").is_err());
     assert!(normalize_hotkey("forward").is_err());
