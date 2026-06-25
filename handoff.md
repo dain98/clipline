@@ -265,15 +265,19 @@ Recent fixes (2026-06-25):
   display through the same `EnumDisplayMonitors` path used by Settings instead of
   `MonitorFromPoint(0,0)`, which could bind to a ghost/wrong monitor on some Windows layouts.
   Display-region capture also recovers from a missing saved display id or stale region geometry by
-  falling back to the full current primary display instead of letting the recorder thread exit until
-  the user opens Settings and clicks Save.
+  warning the user and falling back to the full current primary display when the saved display is
+  gone. If the saved display still exists but the region only partially fits, the crop clamps to
+  the visible part instead of silently recording the whole display.
 - Share/export audio compatibility follow-up: the 0.1.12/0.1.14 remux-only upload behavior could
   hand cloud/Discord a multi-audio-track MP4 where only the first stream was played, producing
   silent uploads or missing mic audio. Cloud uploads now replace two-or-more selected audio tracks
   with one native mixed Opus track while stream-copying video, and clipboard copy uses the same
   selected-audio compatibility export under `%APPDATA%\Clipline\share-exports` before setting
   CF_HDROP. This is native `audiopus` decode/mix/re-encode inside `clipline-mp4`; users do not
-  need FFmpeg installed for multi-track upload/share audio.
+  need FFmpeg installed for multi-track upload/share audio. The mixer preserves the source Opus
+  pre-skip, averages overlapping tracks to avoid hard clipping, and streams slot-by-slot instead of
+  buffering all decoded PCM. Share-preview/export cache writes use unique sibling temp files and
+  prune orphaned `.mp4.tmp` files.
 - WebView2 compatibility follow-up for the Windows 10 tester whose Edge/WebView2 registry state
   was missing: Nightly 0.1.14 switches the normal NSIS installer from Tauri's WebView2
   `offlineInstaller` to the small embedded Evergreen bootstrapper, while keeping

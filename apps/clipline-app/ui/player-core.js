@@ -28,7 +28,9 @@ const PlayerCore = (() => {
   const fmtQuotaGb = (quotaGb) => {
     const value = Number(quotaGb);
     if (!Number.isFinite(value) || value <= 0) return "no limit";
-    return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)} GB`;
+    if (Number.isInteger(value)) return `${value.toFixed(0)} GB`;
+    if (value < 0.1) return `${value.toFixed(2)} GB`;
+    return `${value.toFixed(1)} GB`;
   };
 
   const fmtLibraryStorageUsage = (usedBytes, quotaGb) =>

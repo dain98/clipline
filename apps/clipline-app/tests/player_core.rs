@@ -117,6 +117,13 @@ fn library_storage_usage_formats_used_bytes_and_quota() {
         ),
         "512.0 MB / no limit"
     );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.fmtLibraryStorageUsage(10 * 1024 * 1024, 0.01)"
+        ),
+        "10.0 MB / 0.01 GB"
+    );
 }
 
 #[test]

@@ -472,7 +472,7 @@ fn preview_clip_audio_tracks_file_with_mixer(
     let source_bytes = std::fs::read(&source).map_err(|e| format!("read clip: {e}"))?;
     let preview_bytes = remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
         .map_err(|e| e.to_string())?;
-    let tmp = preview.with_extension("mp4.tmp");
+    let tmp = cached_export_tmp_path(&preview)?;
     std::fs::write(&tmp, preview_bytes).map_err(|e| format!("write audio preview: {e}"))?;
     match std::fs::rename(&tmp, &preview) {
         Ok(()) => {}
@@ -535,7 +535,7 @@ fn clipboard_share_path_with_exporter(
     }
 
     let bytes = export_audio(source, mode)?;
-    let tmp = export.with_extension("mp4.tmp");
+    let tmp = share_export_tmp_path(&export)?;
     std::fs::write(&tmp, bytes).map_err(|e| format!("write share export: {e}"))?;
     match std::fs::rename(&tmp, &export) {
         Ok(()) => {}
@@ -596,15 +596,27 @@ fn share_export_path(
     export_dir.join(format!("share-export-{:016x}.mp4", hasher.finish()))
 }
 
+fn share_export_tmp_path(export: &Path) -> Result<PathBuf, String> {
+    cached_export_tmp_path(export)
+}
+
+fn cached_export_tmp_path(target: &Path) -> Result<PathBuf, String> {
+    crate::settings::persistence::sibling_tmp_path(target)
+}
+
 fn prune_old_share_exports(export_dir: &Path) {
     const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+    prune_cached_mp4_files(export_dir, MAX_AGE);
+}
+
+fn prune_cached_mp4_files(export_dir: &Path, max_age: std::time::Duration) {
     let Ok(entries) = std::fs::read_dir(export_dir) else {
         return;
     };
     let now = std::time::SystemTime::now();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("mp4") {
+        if !is_cached_mp4_file(&path) {
             continue;
         }
         let old = entry
@@ -612,11 +624,19 @@ fn prune_old_share_exports(export_dir: &Path) {
             .and_then(|meta| meta.modified())
             .ok()
             .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| age > MAX_AGE);
+            .is_some_and(|age| age >= max_age);
         if old {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+fn is_cached_mp4_file(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("mp4")
+        || path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".mp4.tmp"))
 }
 
 pub(crate) fn mix_audio_tracks_with_ffmpeg(
@@ -627,7 +647,7 @@ pub(crate) fn mix_audio_tracks_with_ffmpeg(
     let ffmpeg = clipline_capture::ffmpeg::locate()
         .ok_or_else(|| "ffmpeg is not available for audio track mixing".to_string())?;
     let filter = ffmpeg_audio_mix_filter(selected_audio_track_indices)?;
-    let tmp = output_path.with_extension("mp4.tmp");
+    let tmp = cached_export_tmp_path(output_path)?;
     let _ = std::fs::remove_file(&tmp);
 
     let mut cmd = Command::new(ffmpeg);
@@ -771,25 +791,7 @@ fn audio_preview_path(
 
 fn prune_old_audio_previews(preview_dir: &Path) {
     const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-    let Ok(entries) = std::fs::read_dir(preview_dir) else {
-        return;
-    };
-    let now = std::time::SystemTime::now();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("mp4") {
-            continue;
-        }
-        let old = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| age > MAX_AGE);
-        if old {
-            let _ = std::fs::remove_file(path);
-        }
-    }
+    prune_cached_mp4_files(preview_dir, MAX_AGE);
 }
 
 #[tauri::command]
@@ -1548,6 +1550,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(chosen, source);
+    }
+
+    #[test]
+    fn share_export_tmp_path_is_unique_per_writer() {
+        let dir = TestDir::new("clipline-library", "share-export-temp");
+        let export = dir.path().join("share-export-abc.mp4");
+
+        let first = share_export_tmp_path(&export).unwrap();
+        let second = share_export_tmp_path(&export).unwrap();
+
+        assert_ne!(first, second);
+        assert_ne!(first, export.with_extension("mp4.tmp"));
+        assert_eq!(first.parent(), export.parent());
+    }
+
+    #[test]
+    fn share_export_prune_removes_orphaned_tmp_files() {
+        let dir = TestDir::new("clipline-library", "share-export-prune-tmp");
+        let export = dir.path().join("share-export-old.mp4");
+        let orphan = dir.path().join("share-export-old.mp4.tmp");
+        std::fs::write(&export, b"old export").unwrap();
+        std::fs::write(&orphan, b"orphan").unwrap();
+
+        prune_cached_mp4_files(dir.path(), std::time::Duration::ZERO);
+
+        assert!(!export.exists());
+        assert!(!orphan.exists());
     }
 
     #[test]
