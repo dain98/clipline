@@ -1651,10 +1651,11 @@ async function refresh() {
 
 async function refreshStorage() {
   const s = await invoke("storage_status");
+  const quotaGb = s.quota_bytes == null ? 0 : Number(s.quota_bytes) / (1024 * 1024 * 1024);
   $("rail-clips-count").textContent = compactCount(s.clip_count);
   $("rail-library-status").title = `${plural(s.clip_count, "clip")} in library`;
   $("gallery-storage-used").textContent =
-    `· ${fmtLibraryStorageUsage(s.total_bytes, currentSettings.disk_quota_gb)}`;
+    `· ${fmtLibraryStorageUsage(s.total_bytes, quotaGb)}`;
 }
 
 function compactCount(count) {

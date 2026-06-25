@@ -928,8 +928,9 @@ fn gallery_header_shows_library_storage_usage() {
     );
     assert!(
         js.contains("$(\"gallery-storage-used\").textContent")
-            && js.contains("fmtLibraryStorageUsage(s.total_bytes, currentSettings.disk_quota_gb)"),
-        "refreshStorage should render total library bytes and configured quota into the gallery header"
+            && js.contains("const quotaGb = s.quota_bytes == null")
+            && js.contains("fmtLibraryStorageUsage(s.total_bytes, quotaGb)"),
+        "refreshStorage should render total library bytes and configured quota from storage_status into the gallery header"
     );
     assert!(
         css.contains(".gallery-storage-used"),
