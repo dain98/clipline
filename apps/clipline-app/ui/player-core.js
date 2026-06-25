@@ -36,6 +36,42 @@ const PlayerCore = (() => {
   const fmtLibraryStorageUsage = (usedBytes, quotaGb) =>
     `${fmtBytes(usedBytes)} / ${fmtQuotaGb(quotaGb)}`;
 
+  const pathBaseName = (path) => {
+    const text = String(path || "").trim();
+    if (!text) return "";
+    return text.split(/[\\/]/).filter(Boolean).pop() || text;
+  };
+
+  const clipNameStem = (name) => String(name || "").replace(/\.mp4$/i, "").trim();
+
+  const cloudLibraryEntries = (uploads, localClips = []) => {
+    const localPaths = new Set((localClips || []).map((clip) => String(clip && clip.path || "")));
+    return Object.values(uploads || {})
+      .filter((record) => {
+        if (!record || !record.remote_url) return false;
+        const status = String(record.upload_status || "");
+        return status !== "failed" && status !== "not_uploaded";
+      })
+      .map((record) => {
+        const path = String(record.path || "");
+        const status = String(record.upload_status || "processing");
+        const visibility = ["public", "unlisted", "private"].includes(record.visibility)
+          ? record.visibility
+          : status === "uploaded_private" ? "private" : "public";
+        return {
+          local_clip_id: String(record.local_clip_id || ""),
+          path,
+          title: clipNameStem(pathBaseName(path)) || String(record.remote_clip_id || "Cloud clip"),
+          remote_url: String(record.remote_url),
+          visibility,
+          upload_status: status,
+          updated_at_unix: Number(record.updated_at_unix) || 0,
+          local_available: localPaths.has(path),
+        };
+      })
+      .sort((a, b) => b.updated_at_unix - a.updated_at_unix || a.title.localeCompare(b.title));
+  };
+
   // Round the total before splitting so 59.6 carries to "1:00", not "0:60".
   const fmtDur = (s) => {
     if (s == null || !Number.isFinite(s)) return "?";
@@ -841,6 +877,7 @@ const PlayerCore = (() => {
     encoderCodecCaveat,
     fmtBytes,
     fmtLibraryStorageUsage,
+    cloudLibraryEntries,
     fmtDur,
     fmtTenths,
     fmtAgo,

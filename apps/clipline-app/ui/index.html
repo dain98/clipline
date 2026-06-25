@@ -62,6 +62,10 @@
           <h1>Library</h1>
           <span id="gallery-count" class="gallery-count"></span>
           <span id="gallery-storage-used" class="gallery-storage-used"></span>
+          <nav id="gallery-source-tabs" class="gallery-source-tabs" aria-label="Library source">
+            <button class="source-tab active" data-gallery-source="local" type="button">Local</button>
+            <button class="source-tab" data-gallery-source="cloud" type="button">Cloud</button>
+          </nav>
           <span class="gallery-spacer"></span>
           <label class="gallery-search">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
@@ -90,6 +94,7 @@
           <button class="g-chip" data-filter="marked" type="button">Has markers</button>
         </div>
         <div id="gallery-grid" class="gallery-grid"></div>
+        <div id="cloud-gallery-grid" class="cloud-gallery-grid" hidden></div>
       </section>
 
       <div id="review-viewer" class="review-viewer">

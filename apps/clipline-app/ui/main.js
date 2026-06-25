@@ -81,6 +81,7 @@ const stageFrame = $("stage-frame");
 let currentClip = null;
 let clipsCache = [];
 // Gallery (library home) view state.
+let gallerySource = "local";
 let galleryFilter = "all";
 let gallerySort = "new";
 let galleryGroup = "smart";
@@ -381,7 +382,7 @@ function fillSettings(s) {
   updateGameDetectionStatus();
   updateCaptureStatus();
   syncUploadClipButton();
-  if (clipsCache.length) renderClips();
+  renderClips();
 }
 
 function readSettings() {
@@ -1767,6 +1768,36 @@ function clipCloudVisibility(record) {
   return record.upload_status === "uploaded_private" ? "private" : "public";
 }
 
+function cloudLibraryRecords() {
+  return PlayerCore.cloudLibraryEntries(cloudSettings().uploads || {}, clipsCache);
+}
+
+function cloudEntryMatchesSearch(entry) {
+  if (!gallerySearch) return true;
+  const hay = [
+    entry.title,
+    entry.path,
+    entry.remote_url,
+    entry.visibility,
+    entry.upload_status,
+  ].join(" ").toLowerCase();
+  return hay.includes(gallerySearch);
+}
+
+function cloudStatusLabel(status) {
+  switch (status) {
+    case "processing":
+    case "uploaded_processing":
+      return "processing";
+    case "uploaded_private":
+      return "private";
+    case "uploaded_public":
+      return "public";
+    default:
+      return String(status || "uploaded").replace(/^uploaded_/, "");
+  }
+}
+
 function clipNameStem(name) {
   return String(name || "").replace(/\.mp4$/i, "").trim();
 }
@@ -1965,6 +1996,77 @@ function cloudVisibilityEl(record) {
   el.title = CLOUD_VISIBILITY_LABELS[visibility];
   el.setAttribute("aria-label", CLOUD_VISIBILITY_LABELS[visibility]);
   el.innerHTML = CLOUD_VISIBILITY_ICONS[visibility]; // static markup, safe
+  return el;
+}
+
+const CLOUD_CARD_ICON =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.2 18h10.2a4.1 4.1 0 0 0 .4-8.2A6.2 6.2 0 0 0 5.9 8.1 5 5 0 0 0 7.2 18zm.2-2a3 3 0 0 1-.5-5.9l.8-.1.3-.8A4.2 4.2 0 0 1 16 10.4l.2 1.2 1.2.1A2.1 2.1 0 0 1 17.4 16H7.4z"/></svg>';
+
+function cloudClipCard(entry) {
+  const el = document.createElement("article");
+  el.className = "card cloud-card";
+  el.title = entry.title;
+
+  const thumb = document.createElement("div");
+  thumb.className = "card-thumb";
+  thumb.style.cssText = thumbGradient({ name: entry.title, session: entry.remote_url });
+  thumb.innerHTML = CLOUD_CARD_ICON; // static markup, safe
+
+  const kindChip = document.createElement("span");
+  kindChip.className = "card-kind session";
+  kindChip.title = "Cloud clip";
+  kindChip.innerHTML =
+    '<svg viewBox="0 0 24 24"><path d="M7.2 18h10.2a4.1 4.1 0 0 0 .4-8.2A6.2 6.2 0 0 0 5.9 8.1 5 5 0 0 0 7.2 18z"/></svg>';
+  const kindLabel = document.createElement("span");
+  kindLabel.textContent = "Cloud";
+  kindChip.appendChild(kindLabel);
+  thumb.appendChild(kindChip);
+
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  const nameRow = document.createElement("div");
+  nameRow.className = "card-name";
+  const name = document.createElement("span");
+  name.className = "t";
+  name.textContent = entry.title;
+  nameRow.appendChild(name);
+  const visibility = cloudVisibilityEl(entry);
+  if (visibility) nameRow.appendChild(visibility);
+
+  const info = document.createElement("div");
+  info.className = "card-sub";
+  const updated = entry.updated_at_unix ? fmtAgo(Date.now() / 1000, entry.updated_at_unix) : "";
+  const parts = [cloudStatusLabel(entry.upload_status)];
+  if (updated) parts.push(updated);
+  parts.push(entry.local_available ? "local copy available" : "cloud only");
+  info.textContent = parts.join(" · ");
+
+  const localState = document.createElement("div");
+  localState.className = "cloud-local-state";
+  localState.textContent = entry.remote_url;
+  localState.title = entry.remote_url;
+
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
+  const open = document.createElement("a");
+  open.className = "primary-link";
+  open.href = entry.remote_url;
+  open.target = "_blank";
+  open.rel = "noopener noreferrer";
+  open.textContent = "Open";
+  open.addEventListener("click", (ev) => ev.stopPropagation());
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.textContent = "Copy link";
+  copy.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    copyCloudUrl(entry);
+  });
+  actions.append(open, copy);
+
+  meta.append(nameRow, info, localState, actions);
+  el.append(thumb, meta);
+  el.addEventListener("click", () => copyCloudUrl(entry));
   return el;
 }
 
@@ -2271,7 +2373,21 @@ function renderClips() {
   // the gallery. (Editor/settings arbitration lives in updateViews.)
   updateViews();
   const root = $("gallery-grid");
+  const cloudRoot = $("cloud-gallery-grid");
   if (!root) return;
+  const showingCloud = gallerySource === "cloud";
+  root.hidden = showingCloud;
+  if (cloudRoot) cloudRoot.hidden = !showingCloud;
+  $("gallery-filter").hidden = showingCloud;
+  $("gallery-group").hidden = showingCloud;
+  $("gallery-sort").hidden = showingCloud;
+  document.querySelectorAll("#gallery-source-tabs .source-tab").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.gallerySource === gallerySource);
+  });
+  if (showingCloud) {
+    renderCloudClips();
+    return;
+  }
   // Drop the previous render's pending poster observations before rebuilding;
   // the detached cards would otherwise linger in the observer.
   if (posterObserver) posterObserver.disconnect();
@@ -2308,6 +2424,33 @@ function renderClips() {
     }
     for (const c of group.clips) root.appendChild(clipCard(c));
   }
+}
+
+function renderCloudClips() {
+  const root = $("cloud-gallery-grid");
+  if (!root) return;
+  if (posterObserver) posterObserver.disconnect();
+  root.replaceChildren();
+  const entries = cloudLibraryRecords();
+  const filtered = entries.filter(cloudEntryMatchesSearch);
+  $("gallery-count").textContent = entries.length
+    ? `${filtered.length} of ${entries.length}`
+    : "";
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = cloudConnected() ? "No cloud clips yet." : "Not connected to Clipline Cloud.";
+    root.appendChild(empty);
+    return;
+  }
+  if (!filtered.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = "No cloud clips match that search.";
+    root.appendChild(empty);
+    return;
+  }
+  for (const entry of filtered) root.appendChild(cloudClipCard(entry));
 }
 
 function showClipContextMenu(ev, clip) {
@@ -3688,6 +3831,12 @@ $("review-back").addEventListener("click", () => closeReview());
 // Gallery (library home) controls.
 $("gallery-search").addEventListener("input", (ev) => {
   gallerySearch = ev.target.value.trim().toLowerCase();
+  renderClips();
+});
+$("gallery-source-tabs").addEventListener("click", (ev) => {
+  const tab = ev.target.closest(".source-tab");
+  if (!tab) return;
+  gallerySource = tab.dataset.gallerySource === "cloud" ? "cloud" : "local";
   renderClips();
 });
 $("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });

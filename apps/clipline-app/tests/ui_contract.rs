@@ -939,6 +939,48 @@ fn gallery_header_shows_library_storage_usage() {
 }
 
 #[test]
+fn library_has_cloud_source_tab() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    for required in [
+        "id=\"gallery-source-tabs\"",
+        "data-gallery-source=\"local\"",
+        "data-gallery-source=\"cloud\"",
+        "id=\"cloud-gallery-grid\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "library markup must include cloud source tab contract `{required}`"
+        );
+    }
+    for required in [
+        "let gallerySource = \"local\"",
+        "function renderCloudClips()",
+        "PlayerCore.cloudLibraryEntries",
+        "$(\"cloud-gallery-grid\")",
+        "querySelectorAll(\"#gallery-source-tabs .source-tab\")",
+    ] {
+        assert!(
+            js.contains(required),
+            "main.js must wire cloud library behavior through `{required}`"
+        );
+    }
+    for required in [
+        ".gallery-source-tabs",
+        ".source-tab.active",
+        ".cloud-gallery-grid",
+        ".cloud-card",
+    ] {
+        assert!(
+            css.contains(required),
+            "cloud library tab should have stable styling for `{required}`"
+        );
+    }
+}
+
+#[test]
 fn games_ui_wires_detection_commands() {
     let js = main_js();
 

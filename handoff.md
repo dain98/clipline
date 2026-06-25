@@ -261,6 +261,11 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-25):
+- Library cloud source tab: the Library header now has Local/Cloud tabs. Cloud is a native
+  in-app view of persisted `settings.cloud.uploads` records with remote URLs, not a full remote
+  Clipline Cloud index; the current `clipline_cloud_api` surface wired in the app supports upload
+  and single-clip status sync, but not listing every server-side clip. Cloud cards show the remote
+  link, visibility/status, whether a local copy is still present, and Open/Copy link actions.
 - Recorder startup display recovery: startup primary-monitor capture now resolves the primary
   display through the same `EnumDisplayMonitors` path used by Settings instead of
   `MonitorFromPoint(0,0)`, which could bind to a ghost/wrong monitor on some Windows layouts.
