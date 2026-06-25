@@ -917,6 +917,28 @@ fn shell_shows_live_memory_usage() {
 }
 
 #[test]
+fn gallery_header_shows_library_storage_usage() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    assert!(
+        html.contains("id=\"gallery-count\"") && html.contains("id=\"gallery-storage-used\""),
+        "gallery header should include storage usage beside the clip count"
+    );
+    assert!(
+        js.contains("$(\"gallery-storage-used\").textContent")
+            && js.contains("const quotaGb = s.quota_bytes == null")
+            && js.contains("fmtLibraryStorageUsage(s.total_bytes, quotaGb)"),
+        "refreshStorage should render total library bytes and configured quota from storage_status into the gallery header"
+    );
+    assert!(
+        css.contains(".gallery-storage-used"),
+        "storage usage should have gallery header metadata styling"
+    );
+}
+
+#[test]
 fn games_ui_wires_detection_commands() {
     let js = main_js();
 
@@ -980,6 +1002,31 @@ fn deck_status_success_toasts_auto_clear() {
             "progress status should stay explicit via `{required}`"
         );
     }
+}
+
+#[test]
+fn clipboard_copy_sends_selected_audio_tracks() {
+    let js = main_js();
+    let app = app_rs();
+    let library = library_rs();
+
+    assert!(
+        library.contains("pub struct CopyClipToClipboardRequest")
+            && library.contains("request: CopyClipToClipboardRequest"),
+        "clipboard command should accept a request object so selected audio can be passed"
+    );
+    assert!(
+        app.contains("crate::library::copy_clip_to_clipboard"),
+        "clipboard command should stay registered with Tauri"
+    );
+    assert!(
+        js.contains("await invoke(\"copy_clip_to_clipboard\", {")
+            && js.contains("request: {")
+            && js.contains("path: currentClip.path")
+            && js.contains("audioTrackIds: clipAudioTracks(currentClip).length")
+            && js.contains("selectedAudioTrackIdsForClip(currentClip)"),
+        "copy should send the current selected audio tracks to the native clipboard exporter"
+    );
 }
 
 #[test]

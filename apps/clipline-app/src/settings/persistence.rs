@@ -18,10 +18,10 @@ use crate::updates::normalize_channel;
 use super::hotkey::normalize_hotkey;
 use super::types::{AudioSettings, CaptureMode, CaptureRegionSettings, ReplayStorageMode};
 use super::validation::{
-    repair_disk_quota_gb, repair_fps, repair_video_quality_from_legacy_bitrate,
-    MAX_BITRATE_MBPS, MAX_REPLAY_WINDOW_S, MIN_BITRATE_MBPS, MIN_REPLAY_WINDOW_S,
+    repair_disk_quota_gb, repair_fps, repair_video_quality_from_legacy_bitrate, MAX_BITRATE_MBPS,
+    MAX_REPLAY_WINDOW_S, MIN_BITRATE_MBPS, MIN_REPLAY_WINDOW_S,
 };
-use super::{AppSettings};
+use super::AppSettings;
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -156,6 +156,10 @@ pub fn icon_cache_dir() -> PathBuf {
 
 pub fn audio_preview_cache_dir() -> PathBuf {
     config_base().join("audio-previews")
+}
+
+pub fn share_export_cache_dir() -> PathBuf {
+    config_base().join("share-exports")
 }
 
 pub fn normalize_media_dir(raw: &str) -> Result<PathBuf, String> {
@@ -331,9 +335,7 @@ pub(crate) fn clamp_u32(value: i64, min: u32, max: u32) -> u32 {
 
 /// Used by `AppSettings::save_to` to tolerate unknown `video_encoder` values
 /// (hand-edit, downgrade) by falling back to Auto.
-pub(crate) fn deserialize_video_encoder<'de, D>(
-    deserializer: D,
-) -> Result<VideoEncoder, D::Error>
+pub(crate) fn deserialize_video_encoder<'de, D>(deserializer: D) -> Result<VideoEncoder, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

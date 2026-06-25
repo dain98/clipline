@@ -32,7 +32,7 @@ pub use games::{GamePluginSettings, GameRecordingMode, GameSettings};
 pub use hotkey::{is_global_shortcut_hotkey, normalize_hotkey, parse_hotkey};
 pub use persistence::{
     audio_preview_cache_dir, icon_cache_dir, normalize_media_dir, normalize_replay_cache_dir,
-    quota_bytes_from_gb, replay_cache_quota_bytes_from_gb, settings_path,
+    quota_bytes_from_gb, replay_cache_quota_bytes_from_gb, settings_path, share_export_cache_dir,
 };
 #[allow(unused_imports)]
 pub use types::{

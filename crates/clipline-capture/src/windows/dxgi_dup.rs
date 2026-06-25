@@ -16,7 +16,7 @@
 use std::time::{Duration, Instant};
 
 use windows::core::{Interface, HRESULT};
-use windows::Win32::Foundation::{E_ACCESSDENIED, POINT};
+use windows::Win32::Foundation::E_ACCESSDENIED;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION, DXGI_MODE_ROTATION_IDENTITY,
@@ -28,7 +28,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_SESSION_DISCONNECTED,
     DXGI_ERROR_UNSUPPORTED, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
 };
-use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY};
+use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::Performance::QueryPerformanceFrequency;
 
 use crate::clock::{qpc_to_ticks_100ns, RelativeClock};
@@ -89,15 +89,8 @@ impl DxgiDuplicationCapture {
         device: ID3D11Device,
         clock: RelativeClock,
     ) -> Result<Self, CaptureError> {
-        // SAFETY: plain Win32 call returning a handle (null in headless
-        // sessions — checked below).
-        let hmon = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
-        if hmon.is_invalid() {
-            return Err(CaptureError::Init(
-                "no monitor in this session (headless?)".into(),
-            ));
-        }
-        Self::for_monitor_on(device, hmon, clock)
+        let display = crate::windows::display::display_handle_by_id(None)?;
+        Self::for_monitor_on(device, display.handle, clock)
     }
 
     /// Duplicate a specific monitor on a caller-provided device and clock.

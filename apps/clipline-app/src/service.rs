@@ -592,6 +592,7 @@ fn open_screen_capture(
     clock: RelativeClock,
     source: &CaptureSource,
     backend: CaptureBackend,
+    events: &Sender<Event>,
 ) -> Result<(LiveBackend, Frame), String> {
     if backend == CaptureBackend::DesktopDuplication
         && matches!(
@@ -599,7 +600,7 @@ fn open_screen_capture(
             CaptureSource::PrimaryMonitor | CaptureSource::DisplayRegion(_)
         )
     {
-        match open_dxgi(device, clock, source) {
+        match open_dxgi(device, clock, source, events) {
             Ok(pair) => return Ok(pair),
             Err(e) => eprintln!(
                 "clipline: Desktop Duplication unavailable ({e}); using Windows Graphics Capture"
@@ -608,7 +609,7 @@ fn open_screen_capture(
     }
 
     let init = |e: &dyn std::fmt::Display| format!("init: {e}");
-    let mut cap = open_wgc(device, clock, source)?;
+    let mut cap = open_wgc(device, clock, source, events)?;
     let first = cap
         .next_frame_timeout(FIRST_FRAME_TIMEOUT)
         .map_err(|e| init(&e))?
@@ -623,6 +624,7 @@ fn open_dxgi(
     device: &ID3D11Device,
     clock: RelativeClock,
     source: &CaptureSource,
+    events: &Sender<Event>,
 ) -> Result<(LiveBackend, Frame), String> {
     let mut cap = match source {
         CaptureSource::PrimaryMonitor => {
@@ -630,11 +632,14 @@ fn open_dxgi(
                 .map_err(|e| e.to_string())?
         }
         CaptureSource::DisplayRegion(region) => {
-            let display = clipline_capture::windows::display::display_handle_by_id(
-                region.display_id.as_deref(),
-            )
-            .map_err(|e| e.to_string())?;
-            let crop = crop_for_region(region, &display.info)?;
+            let (display, recovered) =
+                clipline_capture::windows::display::display_handle_by_id_or_primary(
+                    region.display_id.as_deref(),
+                )
+                .map_err(|e| e.to_string())?;
+            let (crop, crop_recovered) =
+                crop_for_region_or_full_display(region, &display.info, recovered)?;
+            warn_capture_display_recovery(events, region, &display.info, recovered, crop_recovered);
             DxgiDuplicationCapture::for_monitor_region_on(
                 device.clone(),
                 display.handle,
@@ -659,6 +664,7 @@ fn open_wgc(
     device: &ID3D11Device,
     clock: RelativeClock,
     source: &CaptureSource,
+    events: &Sender<Event>,
 ) -> Result<WgcCapture, String> {
     let init = |e: &dyn std::fmt::Display| format!("init: {e}");
     match source {
@@ -676,11 +682,14 @@ fn open_wgc(
             WgcCapture::primary_monitor_on(device.clone(), clock).map_err(|e| init(&e))
         }
         CaptureSource::DisplayRegion(region) => {
-            let display = clipline_capture::windows::display::display_handle_by_id(
-                region.display_id.as_deref(),
-            )
-            .map_err(|e| init(&e))?;
-            let crop = crop_for_region(region, &display.info)?;
+            let (display, recovered) =
+                clipline_capture::windows::display::display_handle_by_id_or_primary(
+                    region.display_id.as_deref(),
+                )
+                .map_err(|e| init(&e))?;
+            let (crop, crop_recovered) =
+                crop_for_region_or_full_display(region, &display.info, recovered)?;
+            warn_capture_display_recovery(events, region, &display.info, recovered, crop_recovered);
             WgcCapture::for_monitor_region_on(device.clone(), display.handle, clock, crop)
                 .map_err(|e| init(&e))
         }
@@ -701,8 +710,13 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     // in for a display/region source, else WGC — and pull the first frame,
     // which fixes the capture size. A DXGI failure (multi-GPU, rotated display,
     // secure desktop on the first frame, …) silently falls back to WGC.
-    let (cap, first) =
-        open_screen_capture(&device, clock, &opts.capture_source, opts.capture_backend)?;
+    let (cap, first) = open_screen_capture(
+        &device,
+        clock,
+        &opts.capture_source,
+        opts.capture_backend,
+        events,
+    )?;
     // Output resolution caps scale down while preserving the captured aspect ratio.
     let FrameData::Gpu(tex) = &first.data else {
         return Err("expected a GPU frame".into());
@@ -1679,6 +1693,101 @@ fn crop_for_region(
     })
 }
 
+fn crop_for_region_or_full_display(
+    region: &CaptureRegion,
+    display: &clipline_capture::windows::display::DisplayInfo,
+    recovered_display: bool,
+) -> Result<(CropRect, bool), String> {
+    if !recovered_display {
+        if let Ok(crop) = crop_for_region(region, display) {
+            return Ok((crop, false));
+        }
+        if let Some(crop) = clamped_region_crop(region, display)? {
+            return Ok((crop, true));
+        }
+    }
+    Ok((
+        CropRect {
+            x: 0,
+            y: 0,
+            width: display.width,
+            height: display.height,
+        },
+        true,
+    ))
+}
+
+fn clamped_region_crop(
+    region: &CaptureRegion,
+    display: &clipline_capture::windows::display::DisplayInfo,
+) -> Result<Option<CropRect>, String> {
+    if region.width < 2 || region.height < 2 {
+        return Err("capture region must be at least 2x2 pixels".into());
+    }
+    let region_left = region.x as i64;
+    let region_top = region.y as i64;
+    let region_right = region_left + region.width as i64;
+    let region_bottom = region_top + region.height as i64;
+    let display_left = display.x as i64;
+    let display_top = display.y as i64;
+    let display_right = display_left + display.width as i64;
+    let display_bottom = display_top + display.height as i64;
+
+    let left = region_left.max(display_left);
+    let top = region_top.max(display_top);
+    let right = region_right.min(display_right);
+    let bottom = region_bottom.min(display_bottom);
+    let width = right - left;
+    let height = bottom - top;
+    if width < 2 || height < 2 {
+        return Ok(None);
+    }
+    Ok(Some(CropRect {
+        x: (left - display_left) as u32,
+        y: (top - display_top) as u32,
+        width: width as u32,
+        height: height as u32,
+    }))
+}
+
+fn capture_display_recovery_warning(
+    region: &CaptureRegion,
+    display: &clipline_capture::windows::display::DisplayInfo,
+    recovered_display: bool,
+    recovered_crop: bool,
+) -> Option<String> {
+    if !recovered_display && !recovered_crop {
+        return None;
+    }
+    let configured = region
+        .display_id
+        .as_deref()
+        .unwrap_or("the configured display");
+    let fallback = if recovered_display {
+        format!("using full display {}", display.name)
+    } else {
+        format!("using the visible part of the region on {}", display.name)
+    };
+    Some(format!(
+        "capture target {configured} is no longer available or no longer fits; {fallback}. Open Settings and save your capture source to update it."
+    ))
+}
+
+fn warn_capture_display_recovery(
+    events: &Sender<Event>,
+    region: &CaptureRegion,
+    display: &clipline_capture::windows::display::DisplayInfo,
+    recovered_display: bool,
+    recovered_crop: bool,
+) {
+    if let Some(message) =
+        capture_display_recovery_warning(region, display, recovered_display, recovered_crop)
+    {
+        eprintln!("clipline: {message}");
+        warn_user(events, message);
+    }
+}
+
 /// Session label from the local wall clock (folder names should match what
 /// the user's file explorer shows, not UTC).
 fn local_session_label(league_match: bool) -> String {
@@ -1814,6 +1923,99 @@ mod tests {
         assert_eq!(
             output_dimensions(5120, 1440, OutputResolution::Source),
             (2560, 720)
+        );
+    }
+
+    #[test]
+    fn missing_display_region_falls_back_to_full_current_display_crop() {
+        let region = CaptureRegion {
+            display_id: Some(r"\\.\DISPLAY-GHOST".into()),
+            x: 1920,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+        let display = clipline_capture::windows::display::DisplayInfo {
+            id: r"\\.\DISPLAY1".into(),
+            name: "DISPLAY1".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            is_primary: true,
+        };
+
+        let (crop, recovered) = crop_for_region_or_full_display(&region, &display, true).unwrap();
+
+        assert!(recovered);
+        assert_eq!(
+            crop,
+            CropRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080
+            }
+        );
+    }
+
+    #[test]
+    fn recovered_capture_display_builds_user_visible_warning() {
+        let region = CaptureRegion {
+            display_id: Some(r"\\.\DISPLAY-GHOST".into()),
+            x: 1920,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+        let display = clipline_capture::windows::display::DisplayInfo {
+            id: r"\\.\DISPLAY1".into(),
+            name: "DISPLAY1".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            is_primary: true,
+        };
+
+        let message = capture_display_recovery_warning(&region, &display, true, false)
+            .expect("recovery warning");
+
+        assert!(message.contains(r"\\.\DISPLAY-GHOST"), "{message}");
+        assert!(message.contains("DISPLAY1"), "{message}");
+        assert!(message.contains("Settings"), "{message}");
+    }
+
+    #[test]
+    fn out_of_bounds_region_clamps_to_visible_display_crop() {
+        let region = CaptureRegion {
+            display_id: Some(r"\\.\DISPLAY1".into()),
+            x: 1000,
+            y: 500,
+            width: 1000,
+            height: 800,
+        };
+        let display = clipline_capture::windows::display::DisplayInfo {
+            id: r"\\.\DISPLAY1".into(),
+            name: "DISPLAY1".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            is_primary: true,
+        };
+
+        let (crop, recovered) = crop_for_region_or_full_display(&region, &display, false).unwrap();
+
+        assert!(recovered);
+        assert_eq!(
+            crop,
+            CropRect {
+                x: 1000,
+                y: 500,
+                width: 920,
+                height: 580
+            }
         );
     }
 
@@ -1971,7 +2173,6 @@ mod tests {
         assert!((first_seconds - 2.0).abs() < 1e-6);
         assert!((second_seconds - 2.0).abs() < 1e-6);
     }
-
 
     #[test]
     fn clips_dir_uses_configured_root_when_creatable() {

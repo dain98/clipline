@@ -21,6 +21,7 @@ $("win-max").addEventListener("click", () => appWindow.toggleMaximize());
 $("win-close").addEventListener("click", requestWindowClose);
 const {
   fmtBytes,
+  fmtLibraryStorageUsage,
   fmtDur,
   fmtTenths,
   fmtAgo,
@@ -1650,8 +1651,11 @@ async function refresh() {
 
 async function refreshStorage() {
   const s = await invoke("storage_status");
+  const quotaGb = s.quota_bytes == null ? 0 : Number(s.quota_bytes) / (1024 * 1024 * 1024);
   $("rail-clips-count").textContent = compactCount(s.clip_count);
   $("rail-library-status").title = `${plural(s.clip_count, "clip")} in library`;
+  $("gallery-storage-used").textContent =
+    `· ${fmtLibraryStorageUsage(s.total_bytes, quotaGb)}`;
 }
 
 function compactCount(count) {
@@ -3406,7 +3410,14 @@ async function copyClipToClipboard() {
   $("error").textContent = "";
   setDeckStatus("");
   try {
-    await invoke("copy_clip_to_clipboard", { path: currentClip.path });
+    await invoke("copy_clip_to_clipboard", {
+      request: {
+        path: currentClip.path,
+        audioTrackIds: clipAudioTracks(currentClip).length
+          ? selectedAudioTrackIdsForClip(currentClip)
+          : null,
+      },
+    });
     setDeckStatus("clip copied to clipboard", { transient: true });
   } catch (e) {
     setDeckStatus("");

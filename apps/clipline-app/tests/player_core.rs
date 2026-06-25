@@ -101,6 +101,32 @@ fn fmt_bytes_switches_units_at_a_gigabyte() {
 }
 
 #[test]
+fn library_storage_usage_formats_used_bytes_and_quota() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.fmtLibraryStorageUsage(8.4 * 1024 * 1024 * 1024, 100)"
+        ),
+        "8.4 GB / 100 GB"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.fmtLibraryStorageUsage(512 * 1024 * 1024, 0)"
+        ),
+        "512.0 MB / no limit"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.fmtLibraryStorageUsage(10 * 1024 * 1024, 0.01)"
+        ),
+        "10.0 MB / 0.01 GB"
+    );
+}
+
+#[test]
 fn setting_duration_labels_are_human_readable() {
     let mut ctx = player_core_context();
     assert_eq!(

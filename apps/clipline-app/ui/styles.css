@@ -1421,7 +1421,12 @@ label span { white-space: nowrap; }
   padding: 16px 22px 12px;
 }
 .gallery-head h1 { font-size: 18px; }
-.gallery-count { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.gallery-count,
+.gallery-storage-used {
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
 .gallery-spacer { flex: 1 1 auto; }
 
 .gallery-search { position: relative; width: min(300px, 32vw); }

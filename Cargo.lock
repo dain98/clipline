@@ -1012,6 +1012,9 @@ dependencies = [
 [[package]]
 name = "clipline-mp4"
 version = "0.1.0"
+dependencies = [
+ "audiopus",
+]
 
 [[package]]
 name = "clipline-storage"
