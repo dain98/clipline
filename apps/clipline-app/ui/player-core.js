@@ -64,7 +64,7 @@ const PlayerCore = (() => {
       const remoteId = String(clip.remote_clip_id || "");
       if (localId) seenLocalIds.add(localId);
       if (remoteId) seenRemoteIds.add(remoteId);
-      entries.push({
+      const entry = {
         local_clip_id: localId,
         path,
         title: String(clip.title || clipNameStem(pathBaseName(path)) || remoteId || "Cloud clip"),
@@ -76,7 +76,12 @@ const PlayerCore = (() => {
         updated_at_unix: Number(clip.updated_at_unix) || 0,
         local_available: Boolean(path && localPaths.has(path)),
         remote_clip_id: remoteId,
-      });
+      };
+      const durationMs = Number(clip.duration_ms);
+      if (Number.isFinite(durationMs)) entry.duration_ms = durationMs;
+      const fileSizeBytes = Number(clip.file_size_bytes);
+      if (Number.isFinite(fileSizeBytes)) entry.file_size_bytes = fileSizeBytes;
+      entries.push(entry);
     }
 
     entries.push(...uploadRecords

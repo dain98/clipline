@@ -265,7 +265,11 @@ Recent fixes (2026-06-25):
   `clipline-cloud-api` to Clipline Cloud `v1.2.18` and uses `CloudClient::list_clips` to fetch the
   authoritative server library (`GET /api/v1/clips`, paged newest-first). Cloud cards still merge
   local upload records by `client_clip_id` so they can show whether a local copy is present, and
-  fall back to persisted `settings.cloud.uploads` rows while the server list is unavailable.
+  fall back to persisted `settings.cloud.uploads` rows while the server list is unavailable. Rows
+  with a matching local file now render as normal playable local clip cards. Cloud-only rows fetch
+  authenticated thumbnails and media through native commands, cache them under
+  `%APPDATA%\Clipline\cloud-cache`, and play the cached MP4 through the existing review player;
+  `Open page` still opens the owned cloud page externally.
 - Recorder startup display recovery: startup primary-monitor capture now resolves the primary
   display through the same `EnumDisplayMonitors` path used by Settings instead of
   `MonitorFromPoint(0,0)`, which could bind to a ghost/wrong monitor on some Windows layouts.

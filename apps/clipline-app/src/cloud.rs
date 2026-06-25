@@ -2,9 +2,10 @@
 //! and per-clip uploads through the first-party API client.
 
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
@@ -14,11 +15,14 @@ use clipline_cloud_api::{
 };
 use clipline_events::{ClipMarkers, GameId};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tokio::io::AsyncWriteExt;
 use windows_sys::Win32::Security::Credentials::{
     CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
     CRED_TYPE_GENERIC,
 };
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 use crate::app::RuntimeState;
 use crate::library::{validate_clip_path, StorageSettings};
@@ -31,6 +35,7 @@ const READY_POLL_DELAY: Duration = Duration::from_secs(1);
 const CLOUD_LIBRARY_PAGE_SIZE: i64 = 100;
 const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
+static CLOUD_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Deserialize)]
 pub struct CloudConnectRequest {
@@ -122,6 +127,37 @@ pub struct CloudLibraryListResult {
     pub clips: Vec<CloudLibraryClip>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CloudClipAssetRequest {
+    pub remote_clip_id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
+    #[serde(default)]
+    pub file_size_bytes: Option<i64>,
+    #[serde(default)]
+    pub updated_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CachedCloudClip {
+    pub path: String,
+    pub name: String,
+    pub size_mb: f64,
+    pub modified_unix: u64,
+    pub duration_s: Option<f64>,
+}
+
+struct CloudAssetDownload<'a> {
+    remote_clip_id: &'a str,
+    asset: &'a str,
+    extension: &'a str,
+    version: Option<u64>,
+    expected_size_bytes: Option<i64>,
+    missing_ok: bool,
+}
+
 #[tauri::command]
 pub fn cloud_status(state: tauri::State<RuntimeState>) -> CloudConnectionStatus {
     let settings = state.settings();
@@ -168,6 +204,299 @@ pub async fn list_cloud_clips(
     }
 
     Ok(CloudLibraryListResult { clips })
+}
+
+#[tauri::command]
+pub async fn cloud_clip_thumbnail<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, RuntimeState>,
+    request: CloudClipAssetRequest,
+) -> Result<Option<String>, String> {
+    let (cloud, token) = cloud_asset_context(&state)?;
+    let Some(path) = download_cloud_asset_to_cache(
+        &cloud,
+        &token,
+        CloudAssetDownload {
+            remote_clip_id: &request.remote_clip_id,
+            asset: "thumbnail",
+            extension: "jpg",
+            version: request.updated_at_unix,
+            expected_size_bytes: None,
+            missing_ok: true,
+        },
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    allow_cloud_cache_asset(&app, &path)?;
+    Ok(Some(path.display().to_string()))
+}
+
+#[tauri::command]
+pub async fn cache_cloud_clip_media<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, RuntimeState>,
+    request: CloudClipAssetRequest,
+) -> Result<CachedCloudClip, String> {
+    let (cloud, token) = cloud_asset_context(&state)?;
+    let path = download_cloud_asset_to_cache(
+        &cloud,
+        &token,
+        CloudAssetDownload {
+            remote_clip_id: &request.remote_clip_id,
+            asset: "media",
+            extension: "mp4",
+            version: request.updated_at_unix,
+            expected_size_bytes: request.file_size_bytes,
+            missing_ok: false,
+        },
+    )
+    .await?
+    .ok_or_else(|| "cloud clip media is not available".to_string())?;
+    allow_cloud_cache_asset(&app, &path)?;
+    cached_cloud_clip_from_path(&path, &request)
+}
+
+#[tauri::command]
+pub fn open_cloud_clip_url(url: String) -> Result<(), String> {
+    let url = validate_cloud_link_url(&url)?;
+    let operation = wide_null(OsStr::new("open"));
+    let target = wide_null(OsStr::new(&url));
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result as isize <= 32 {
+        return Err(format!(
+            "open cloud clip URL failed with shell code {result:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cloud_link_url(input: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(input).map_err(|e| format!("cloud clip URL is invalid: {e}"))?;
+    match url.scheme() {
+        "http" | "https" => Ok(url.to_string()),
+        scheme => Err(format!("cloud clip URL scheme is not supported: {scheme}")),
+    }
+}
+
+fn cloud_asset_context(
+    state: &tauri::State<'_, RuntimeState>,
+) -> Result<(CloudSettings, String), String> {
+    let cloud = state.settings().cloud;
+    let token_target = cloud
+        .credential_target
+        .as_deref()
+        .ok_or_else(|| "Clipline Cloud is not connected".to_string())?;
+    let token = read_credential(token_target)?;
+    Ok((cloud, token))
+}
+
+async fn download_cloud_asset_to_cache(
+    cloud: &CloudSettings,
+    token: &str,
+    request: CloudAssetDownload<'_>,
+) -> Result<Option<PathBuf>, String> {
+    let target = cloud_clip_cache_path(
+        request.remote_clip_id,
+        request.asset,
+        request.extension,
+        request.version,
+    )?;
+    if cached_asset_matches(&target, request.expected_size_bytes) {
+        return Ok(Some(target));
+    }
+    let url = cloud_clip_asset_url(cloud, request.remote_clip_id, request.asset)?;
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("create cloud cache: {e}"))?;
+    }
+
+    let response = reqwest::Client::new()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("download cloud {}: {e}", request.asset))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND && request.missing_ok {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let message = response.text().await.unwrap_or_else(|_| status.to_string());
+        return Err(format!(
+            "download cloud {} failed with {status}: {message}",
+            request.asset
+        ));
+    }
+
+    let tmp = cloud_clip_cache_tmp_path(&target)?;
+    let mut response = response;
+    let mut file = tokio::fs::File::create(&tmp)
+        .await
+        .map_err(|e| format!("create cloud cache file: {e}"))?;
+    let mut written = 0_u64;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("read cloud {}: {e}", request.asset))?
+    {
+        written += chunk.len() as u64;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("write cloud cache file: {e}"))?;
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("flush cloud cache file: {e}"))?;
+    drop(file);
+    if written == 0 {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(format!(
+            "download cloud {} returned an empty body",
+            request.asset
+        ));
+    }
+
+    match tokio::fs::rename(&tmp, &target).await {
+        Ok(()) => Ok(Some(target)),
+        Err(error) if target.exists() => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            if cached_asset_matches(&target, request.expected_size_bytes) {
+                Ok(Some(target))
+            } else {
+                Err(format!("finalize cloud cache file: {error}"))
+            }
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            Err(format!("finalize cloud cache file: {error}"))
+        }
+    }
+}
+
+fn cloud_clip_asset_url(
+    cloud: &CloudSettings,
+    remote_clip_id: &str,
+    asset: &str,
+) -> Result<reqwest::Url, String> {
+    let remote_clip_id = validate_cloud_cache_component(remote_clip_id, "remote clip id")?;
+    let asset = validate_cloud_cache_component(asset, "cloud asset")?;
+    let base =
+        clipline_cloud_api::validate_cloud_host(&cloud.host_url, true).map_err(cloud_error)?;
+    base.join(&format!("api/v1/clips/{remote_clip_id}/{asset}"))
+        .map_err(|e| format!("cloud asset URL is invalid: {e}"))
+}
+
+fn cloud_clip_cache_path(
+    remote_clip_id: &str,
+    asset: &str,
+    extension: &str,
+    version: Option<u64>,
+) -> Result<PathBuf, String> {
+    let remote_clip_id = validate_cloud_cache_component(remote_clip_id, "remote clip id")?;
+    let asset = validate_cloud_cache_component(asset, "cloud asset")?;
+    let extension = validate_cloud_cache_component(extension, "cloud asset extension")?;
+    let version = version.unwrap_or(0);
+    Ok(crate::settings::persistence::config_base()
+        .join("cloud-cache")
+        .join(format!("{remote_clip_id}-{asset}-{version}.{extension}")))
+}
+
+fn validate_cloud_cache_component<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(format!("{label} contains unsupported characters"));
+    }
+    Ok(trimmed)
+}
+
+fn cached_asset_matches(path: &Path, expected_size_bytes: Option<i64>) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return false;
+    }
+    match expected_size_bytes {
+        Some(expected) if expected > 0 => meta.len() == expected as u64,
+        _ => true,
+    }
+}
+
+fn cloud_clip_cache_tmp_path(target: &Path) -> Result<PathBuf, String> {
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "cloud cache target has no filename".to_string())?;
+    let count = CLOUD_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    Ok(target.with_file_name(format!("{file_name}.{}.{}.tmp", std::process::id(), count)))
+}
+
+fn allow_cloud_cache_asset<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), String> {
+    let cache_dir = crate::settings::persistence::config_base().join("cloud-cache");
+    let canonical_dir = cache_dir
+        .canonicalize()
+        .map_err(|e| format!("canonicalize cloud cache {cache_dir:?}: {e}"))?;
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|e| format!("canonicalize cloud cache asset {path:?}: {e}"))?;
+    if !canonical_path.starts_with(&canonical_dir) {
+        return Err(format!(
+            "cloud cache asset {canonical_path:?} escaped cache {canonical_dir:?}"
+        ));
+    }
+    app.asset_protocol_scope()
+        .allow_directory(&canonical_dir, true)
+        .map_err(|e| format!("scope cloud cache for playback: {e}"))
+}
+
+fn cached_cloud_clip_from_path(
+    path: &Path,
+    request: &CloudClipAssetRequest,
+) -> Result<CachedCloudClip, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("read cached cloud clip: {e}"))?;
+    let modified_unix = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or_else(unix_now);
+    let title = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Cloud clip");
+    let name = if title.to_ascii_lowercase().ends_with(".mp4") {
+        title.to_string()
+    } else {
+        format!("{title}.mp4")
+    };
+    Ok(CachedCloudClip {
+        path: path.display().to_string(),
+        name,
+        size_mb: meta.len() as f64 / (1024.0 * 1024.0),
+        modified_unix,
+        duration_s: request
+            .duration_ms
+            .filter(|duration| *duration >= 0)
+            .map(|duration| duration as f64 / 1000.0),
+    })
 }
 
 #[tauri::command]
@@ -1182,6 +1511,44 @@ mod tests {
         assert_eq!(entry.upload_status, "uploaded_private");
         assert_eq!(entry.source_type.as_deref(), Some("replay"));
         assert!(entry.updated_at_unix > 0);
+    }
+
+    #[test]
+    fn cloud_link_url_accepts_only_http_or_https() {
+        assert_eq!(
+            validate_cloud_link_url("https://clips.example.com/clip/remote-1").as_deref(),
+            Ok("https://clips.example.com/clip/remote-1")
+        );
+        assert_eq!(
+            validate_cloud_link_url("http://localhost:8080/clip/remote-1").as_deref(),
+            Ok("http://localhost:8080/clip/remote-1")
+        );
+        assert!(validate_cloud_link_url("file:///C:/Windows/win.ini").is_err());
+        assert!(validate_cloud_link_url("clipline://remote-1").is_err());
+    }
+
+    #[test]
+    fn cloud_clip_asset_url_uses_api_host_and_safe_clip_ids() {
+        let cloud = CloudSettings {
+            host_url: "https://clips.example.com/base".into(),
+            ..CloudSettings::default()
+        };
+        let url = cloud_clip_asset_url(&cloud, "remote-1_ABC", "media").expect("asset URL");
+        assert_eq!(
+            url.as_str(),
+            "https://clips.example.com/base/api/v1/clips/remote-1_ABC/media"
+        );
+        assert!(cloud_clip_asset_url(&cloud, "../escape", "media").is_err());
+        assert!(cloud_clip_asset_url(&cloud, "remote/escape", "thumbnail").is_err());
+    }
+
+    #[test]
+    fn cloud_clip_cache_path_keeps_remote_ids_inside_cache() {
+        let path =
+            cloud_clip_cache_path("remote-1_ABC", "media", "mp4", Some(42)).expect("cache path");
+        assert!(path.ends_with("remote-1_ABC-media-42.mp4"));
+        assert!(cloud_clip_cache_path("../escape", "media", "mp4", None).is_err());
+        assert!(cloud_clip_cache_path("remote-1", "../asset", "mp4", None).is_err());
     }
 
     #[test]

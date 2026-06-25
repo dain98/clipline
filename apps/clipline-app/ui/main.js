@@ -1776,6 +1776,21 @@ function cloudLibraryRecords() {
   return PlayerCore.cloudLibraryEntries(cloudSettings().uploads || {}, clipsCache, cloudClipsCache);
 }
 
+function cloudLocalClipForEntry(entry) {
+  if (!entry || !entry.local_available || !entry.path) return null;
+  return clipsCache.find((clip) => clip && clip.path === entry.path) || null;
+}
+
+function cloudClipAssetRequest(entry) {
+  return {
+    remote_clip_id: String(entry && entry.remote_clip_id || ""),
+    title: entry && entry.title ? String(entry.title) : null,
+    duration_ms: entry && Number.isFinite(Number(entry.duration_ms)) ? Number(entry.duration_ms) : null,
+    file_size_bytes: entry && Number.isFinite(Number(entry.file_size_bytes)) ? Number(entry.file_size_bytes) : null,
+    updated_at_unix: entry && Number.isFinite(Number(entry.updated_at_unix)) ? Number(entry.updated_at_unix) : null,
+  };
+}
+
 function resetCloudClipsCache() {
   cloudClipsCache = [];
   cloudClipsLoaded = false;
@@ -1831,6 +1846,63 @@ function cloudStatusLabel(status) {
     default:
       return String(status || "uploaded").replace(/^uploaded_/, "");
   }
+}
+
+async function openCloudClipUrl(entry) {
+  if (!entry || !entry.remote_url) return;
+  try {
+    await invoke("open_cloud_clip_url", { url: entry.remote_url });
+  } catch (e) {
+    $("error").textContent = String(e);
+    setDeckStatus("could not open cloud clip", { transient: true });
+  }
+}
+
+async function openCloudEntryInApp(entry) {
+  const localClip = cloudLocalClipForEntry(entry);
+  if (localClip) {
+    openClip(localClip);
+    return;
+  }
+  if (!entry || !entry.remote_clip_id) {
+    await openCloudClipUrl(entry);
+    return;
+  }
+  setDeckStatus("downloading cloud clip...");
+  try {
+    const clip = await invoke("cache_cloud_clip_media", {
+      request: cloudClipAssetRequest(entry),
+    });
+    openClip({
+      ...clip,
+      cloud_remote_clip_id: entry.remote_clip_id,
+      cloud_remote_url: entry.remote_url,
+    });
+    setDeckStatus("");
+  } catch (e) {
+    $("error").textContent = String(e);
+    setDeckStatus("could not play cloud clip", { transient: true });
+  }
+}
+
+function observeCloudThumbnail(entry, thumb) {
+  if (!entry || !entry.remote_clip_id) return;
+  const key = `cloud-thumb:${entry.remote_clip_id}:${entry.updated_at_unix || 0}`;
+  const cached = posterCache.get(key);
+  if (cached) {
+    thumb.appendChild(makePosterImg(cached));
+    return;
+  }
+  invoke("cloud_clip_thumbnail", { request: cloudClipAssetRequest(entry) })
+    .then((posterPath) => {
+      if (!posterPath) return;
+      const url = convertFileSrc(posterPath);
+      posterCache.set(key, url);
+      if (thumb.isConnected && !thumb.querySelector(".card-thumb-img")) {
+        thumb.appendChild(makePosterImg(url));
+      }
+    })
+    .catch(() => {});
 }
 
 function clipNameStem(name) {
@@ -2046,6 +2118,11 @@ function cloudClipCard(entry) {
   thumb.className = "card-thumb";
   thumb.style.cssText = thumbGradient({ name: entry.title, session: entry.remote_url });
   thumb.innerHTML = CLOUD_CARD_ICON; // static markup, safe
+  observeCloudThumbnail(entry, thumb);
+
+  const play = document.createElement("div");
+  play.className = "card-play";
+  play.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'; // static markup, safe
 
   const kindChip = document.createElement("span");
   kindChip.className = "card-kind session";
@@ -2083,13 +2160,21 @@ function cloudClipCard(entry) {
 
   const actions = document.createElement("div");
   actions.className = "card-actions";
-  const open = document.createElement("a");
-  open.className = "primary-link";
-  open.href = entry.remote_url;
-  open.target = "_blank";
-  open.rel = "noopener noreferrer";
-  open.textContent = "Open";
-  open.addEventListener("click", (ev) => ev.stopPropagation());
+  const playButton = document.createElement("button");
+  playButton.type = "button";
+  playButton.className = "primary-link";
+  playButton.textContent = "Play";
+  playButton.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    openCloudEntryInApp(entry);
+  });
+  const open = document.createElement("button");
+  open.type = "button";
+  open.textContent = "Open page";
+  open.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    openCloudClipUrl(entry);
+  });
   const copy = document.createElement("button");
   copy.type = "button";
   copy.textContent = "Copy link";
@@ -2097,11 +2182,12 @@ function cloudClipCard(entry) {
     ev.stopPropagation();
     copyCloudUrl(entry);
   });
-  actions.append(open, copy);
+  actions.append(playButton, open, copy);
 
   meta.append(nameRow, info, localState, actions);
+  thumb.appendChild(play);
   el.append(thumb, meta);
-  el.addEventListener("click", () => copyCloudUrl(entry));
+  el.addEventListener("click", () => openCloudEntryInApp(entry));
   return el;
 }
 
@@ -2500,7 +2586,10 @@ function renderCloudClips() {
     root.appendChild(empty);
     return;
   }
-  for (const entry of filtered) root.appendChild(cloudClipCard(entry));
+  for (const entry of filtered) {
+    const localClip = cloudLocalClipForEntry(entry);
+    root.appendChild(localClip ? clipCard(localClip) : cloudClipCard(entry));
+  }
 }
 
 function showClipContextMenu(ev, clip) {
