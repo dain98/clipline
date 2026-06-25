@@ -1,9 +1,12 @@
 //! Keyframe-aligned stream-copy trim for finalized Clipline MP4s.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Cursor, Seek, Write};
 use std::path::Path;
+
+use audiopus::coder::Encoder;
+use audiopus::{Application, Channels, SampleRate};
 
 use crate::walker::{children, find, walk, BoxInfo};
 use crate::{
@@ -144,26 +147,7 @@ pub fn remux_with_selected_audio_tracks(
     selected_audio_track_indices: &[u32],
 ) -> Result<Vec<u8>, TrimError> {
     let movie = parse_movie(input)?;
-    let selected: BTreeSet<usize> = selected_audio_track_indices
-        .iter()
-        .map(|&idx| idx as usize)
-        .collect();
-    if selected.len() != selected_audio_track_indices.len() {
-        return Err(TrimError::InvalidRange(
-            "audio track selection contains duplicates".into(),
-        ));
-    }
-
-    let audio_count = movie
-        .tracks
-        .iter()
-        .filter(|track| matches!(track.cfg, TrackConfig::Audio(_)))
-        .count();
-    if let Some(invalid) = selected.iter().find(|&&idx| idx >= audio_count) {
-        return Err(TrimError::InvalidRange(format!(
-            "audio track index {invalid} is outside the clip's {audio_count} audio tracks"
-        )));
-    }
+    let selected = selected_audio_index_set(&movie, selected_audio_track_indices)?;
 
     let mut tracks = Vec::new();
     let mut selected_samples: Vec<Vec<FragSample>> = Vec::new();
@@ -196,6 +180,209 @@ pub fn remux_with_selected_audio_tracks(
     writer.write_fragment_multi(&refs)?;
     let _ = writer.finalize()?;
     Ok(out.into_inner())
+}
+
+pub fn remux_with_mixed_audio_track(
+    input: &[u8],
+    selected_audio_track_indices: &[u32],
+) -> Result<Vec<u8>, TrimError> {
+    let movie = parse_movie(input)?;
+    let selected = selected_audio_index_set(&movie, selected_audio_track_indices)?;
+    if selected.is_empty() {
+        return remux_with_selected_audio_tracks(input, selected_audio_track_indices);
+    }
+
+    let mut tracks = Vec::new();
+    let mut selected_samples: Vec<Vec<FragSample>> = Vec::new();
+    for track in &movie.tracks {
+        if matches!(track.cfg, TrackConfig::Video(_)) {
+            tracks.push(track.cfg.clone());
+            selected_samples.push(
+                track
+                    .samples
+                    .iter()
+                    .map(|sample| sample.to_frag_sample(input))
+                    .collect::<Result<_, _>>()?,
+            );
+        }
+    }
+
+    let selected_audio_tracks = selected_audio_tracks(&movie, &selected);
+    let mixed_audio_samples = mix_selected_opus_audio_tracks(input, &selected_audio_tracks)?;
+    if !mixed_audio_samples.is_empty() {
+        tracks.push(TrackConfig::Audio(mixed_audio_track_config()?));
+        selected_samples.push(mixed_audio_samples);
+    }
+
+    let mut out = Cursor::new(Vec::new());
+    let mut writer = HybridMp4Writer::new_multi(&mut out, tracks)?;
+    let refs: Vec<&[FragSample]> = selected_samples.iter().map(Vec::as_slice).collect();
+    writer.write_fragment_multi(&refs)?;
+    let _ = writer.finalize()?;
+    Ok(out.into_inner())
+}
+
+fn selected_audio_index_set(
+    movie: &ParsedMovie,
+    selected_audio_track_indices: &[u32],
+) -> Result<BTreeSet<usize>, TrimError> {
+    let selected: BTreeSet<usize> = selected_audio_track_indices
+        .iter()
+        .map(|&idx| idx as usize)
+        .collect();
+    if selected.len() != selected_audio_track_indices.len() {
+        return Err(TrimError::InvalidRange(
+            "audio track selection contains duplicates".into(),
+        ));
+    }
+
+    let audio_count = movie
+        .tracks
+        .iter()
+        .filter(|track| matches!(track.cfg, TrackConfig::Audio(_)))
+        .count();
+    if let Some(invalid) = selected.iter().find(|&&idx| idx >= audio_count) {
+        return Err(TrimError::InvalidRange(format!(
+            "audio track index {invalid} is outside the clip's {audio_count} audio tracks"
+        )));
+    }
+    Ok(selected)
+}
+
+fn selected_audio_tracks<'a>(
+    movie: &'a ParsedMovie,
+    selected: &BTreeSet<usize>,
+) -> Vec<&'a ParsedTrack> {
+    let mut audio_idx = 0usize;
+    let mut tracks = Vec::new();
+    for track in &movie.tracks {
+        if matches!(track.cfg, TrackConfig::Audio(_)) {
+            if selected.contains(&audio_idx) {
+                tracks.push(track);
+            }
+            audio_idx += 1;
+        }
+    }
+    tracks
+}
+
+struct MixedAudioSlot {
+    duration: u32,
+    frames: Vec<Option<Vec<f32>>>,
+}
+
+fn mix_selected_opus_audio_tracks(
+    input: &[u8],
+    selected_audio_tracks: &[&ParsedTrack],
+) -> Result<Vec<FragSample>, TrimError> {
+    let mut slots = BTreeMap::<u64, MixedAudioSlot>::new();
+    for (track_idx, track) in selected_audio_tracks.iter().enumerate() {
+        ensure_mixable_audio_track(track)?;
+        let mut decoder = audiopus::coder::Decoder::new(SampleRate::Hz48000, Channels::Stereo)
+            .map_err(|e| {
+                TrimError::Unsupported(format!("create Opus decoder for audio mix: {e}"))
+            })?;
+        for sample in &track.samples {
+            let decoded = decode_opus_sample(input, sample, &mut decoder)?;
+            let duration = (decoded.len() / 2) as u32;
+            let slot = slots
+                .entry(sample.start_ticks)
+                .or_insert_with(|| MixedAudioSlot {
+                    duration,
+                    frames: vec![None; selected_audio_tracks.len()],
+                });
+            if slot.duration != duration {
+                return Err(TrimError::Unsupported(
+                    "selected audio tracks have mismatched Opus frame durations".into(),
+                ));
+            }
+            slot.frames[track_idx] = Some(decoded);
+        }
+    }
+
+    let encoder = Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio)
+        .map_err(|e| TrimError::Unsupported(format!("create Opus encoder for audio mix: {e}")))?;
+    let mut out = Vec::with_capacity(slots.len());
+    for slot in slots.values() {
+        let mixed = mix_optional_frames(&slot.frames, slot.duration as usize * 2)?;
+        let mut data = vec![0u8; 4000];
+        let len = encoder
+            .encode_float(&mixed, &mut data)
+            .map_err(|e| TrimError::Unsupported(format!("encode mixed Opus audio: {e}")))?;
+        data.truncate(len);
+        out.push(FragSample {
+            data,
+            duration: slot.duration,
+            is_sync: true,
+        });
+    }
+    Ok(out)
+}
+
+fn ensure_mixable_audio_track(track: &ParsedTrack) -> Result<(), TrimError> {
+    match &track.cfg {
+        TrackConfig::Audio(AudioTrackConfig {
+            channels: 2,
+            sample_rate: 48_000,
+            ..
+        }) => Ok(()),
+        TrackConfig::Audio(cfg) => Err(TrimError::Unsupported(format!(
+            "audio mix requires stereo 48 kHz Opus tracks, got {} channel(s) at {} Hz",
+            cfg.channels, cfg.sample_rate
+        ))),
+        TrackConfig::Video(_) => Err(TrimError::Unsupported(
+            "audio mix received a video track".into(),
+        )),
+    }
+}
+
+fn decode_opus_sample(
+    input: &[u8],
+    sample: &SampleRecord,
+    decoder: &mut audiopus::coder::Decoder,
+) -> Result<Vec<f32>, TrimError> {
+    let packet = sample.to_frag_sample(input)?;
+    let mut pcm = vec![0.0f32; 5760 * 2];
+    let frames = decoder
+        .decode_float(Some(packet.data.as_slice()), pcm.as_mut_slice(), false)
+        .map_err(|e| TrimError::Unsupported(format!("decode Opus audio for mix: {e}")))?;
+    pcm.truncate(frames * 2);
+    Ok(pcm)
+}
+
+fn mix_optional_frames(
+    frames: &[Option<Vec<f32>>],
+    frame_len: usize,
+) -> Result<Vec<f32>, TrimError> {
+    let mut mixed = vec![0.0; frame_len];
+    for frame in frames.iter().filter_map(|frame| frame.as_ref()) {
+        if frame.len() != frame_len {
+            return Err(TrimError::Unsupported(
+                "selected audio tracks have mismatched decoded frame lengths".into(),
+            ));
+        }
+        for (out, sample) in mixed.iter_mut().zip(frame.iter().copied()) {
+            *out += sample;
+        }
+    }
+    for sample in &mut mixed {
+        *sample = sample.clamp(-1.0, 1.0);
+    }
+    Ok(mixed)
+}
+
+fn mixed_audio_track_config() -> Result<AudioTrackConfig, TrimError> {
+    let encoder = Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio)
+        .map_err(|e| TrimError::Unsupported(format!("create Opus encoder for audio mix: {e}")))?;
+    let pre_skip = encoder
+        .lookahead()
+        .map_err(|e| TrimError::Unsupported(format!("read Opus lookahead: {e}")))?
+        as u16;
+    Ok(AudioTrackConfig {
+        channels: 2,
+        sample_rate: 48_000,
+        pre_skip,
+    })
 }
 
 fn reject_same_file(source: &Path, target: &Path) -> Result<(), TrimError> {
@@ -967,6 +1154,8 @@ fn fourcc_str(fourcc: &[u8; 4]) -> String {
 mod tests {
     use super::*;
     use crate::{AudioTrackConfig, VideoTrackConfig};
+    use audiopus::coder::{Decoder, Encoder};
+    use audiopus::{Application, Channels, SampleRate};
 
     fn tracks() -> Vec<TrackConfig> {
         vec![
@@ -1007,6 +1196,64 @@ mod tests {
                 is_sync: true,
             })
             .collect()
+    }
+
+    fn opus_audio_packets(amplitude: f32) -> Vec<FragSample> {
+        let encoder =
+            Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio).unwrap();
+        (0..50)
+            .map(|frame_idx| {
+                let mut pcm = Vec::with_capacity(960 * 2);
+                for sample_idx in 0..960 {
+                    let t = (frame_idx * 960 + sample_idx) as f32 / 48_000.0;
+                    let sample = (t * 440.0 * std::f32::consts::TAU).sin() * amplitude;
+                    pcm.extend([sample, sample]);
+                }
+                let mut encoded = vec![0u8; 4000];
+                let len = encoder.encode_float(&pcm, &mut encoded).unwrap();
+                encoded.truncate(len);
+                FragSample {
+                    data: encoded,
+                    duration: 960,
+                    is_sync: true,
+                }
+            })
+            .collect()
+    }
+
+    fn clipline_two_real_opus_audio_fixture() -> Vec<u8> {
+        let mut w =
+            HybridMp4Writer::new_multi(Cursor::new(Vec::new()), tracks_two_audio()).unwrap();
+        let v = video_gop(0);
+        let output = opus_audio_packets(0.20);
+        let mic = opus_audio_packets(0.25);
+        w.write_fragment_multi(&[&v, &output, &mic]).unwrap();
+        w.finalize().unwrap().into_inner()
+    }
+
+    fn decoded_first_audio_rms(input: &[u8]) -> f64 {
+        let movie = parse_movie(input).unwrap();
+        let audio = movie
+            .tracks
+            .iter()
+            .find(|track| matches!(track.cfg, TrackConfig::Audio(_)))
+            .expect("audio track");
+        let sample = audio.samples[0].to_frag_sample(input).unwrap();
+        let mut decoder = Decoder::new(SampleRate::Hz48000, Channels::Stereo).unwrap();
+        let mut pcm = vec![0.0f32; 5760 * 2];
+        let frames = decoder
+            .decode_float(Some(sample.data.as_slice()), pcm.as_mut_slice(), false)
+            .unwrap();
+        pcm.truncate(frames * 2);
+        let energy = pcm
+            .iter()
+            .map(|sample| {
+                let sample = *sample as f64;
+                sample * sample
+            })
+            .sum::<f64>()
+            / pcm.len() as f64;
+        energy.sqrt()
     }
 
     fn clipline_fixture() -> Vec<u8> {
@@ -1238,6 +1485,36 @@ mod tests {
         let input = clipline_two_audio_fixture();
 
         let err = remux_with_selected_audio_tracks(&input, &[2]).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("outside the clip's 2 audio tracks"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn remux_with_mixed_audio_track_replaces_selected_tracks_with_one_audible_track() {
+        let input = clipline_two_real_opus_audio_fixture();
+
+        let out = remux_with_mixed_audio_track(&input, &[0, 1]).unwrap();
+        let movie = parse_movie(&out).unwrap();
+
+        assert_eq!(movie.tracks.len(), 2, "video plus one mixed audio track");
+        assert!(matches!(movie.tracks[0].cfg, TrackConfig::Video(_)));
+        assert!(matches!(movie.tracks[1].cfg, TrackConfig::Audio(_)));
+        assert!(out.windows(6).any(|w| w == b"V00000"));
+        assert!(
+            decoded_first_audio_rms(&out) > 0.15,
+            "mixed output should decode to audible PCM"
+        );
+    }
+
+    #[test]
+    fn remux_with_mixed_audio_track_rejects_invalid_selection() {
+        let input = clipline_two_real_opus_audio_fixture();
+
+        let err = remux_with_mixed_audio_track(&input, &[2]).unwrap_err();
 
         assert!(
             err.to_string()

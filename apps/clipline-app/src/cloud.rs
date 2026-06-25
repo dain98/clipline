@@ -501,6 +501,7 @@ fn normalize_upload_description(description: Option<&str>) -> Option<String> {
 enum UploadAudioSelectionPlan {
     Original,
     Remux(Vec<u32>),
+    Mix(Vec<u32>),
 }
 
 async fn upload_bytes_for_audio_selection_from_path(
@@ -519,6 +520,13 @@ async fn upload_bytes_for_audio_selection_from_path(
             clipline_mp4::remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
                 .map_err(|e| e.to_string())
         }
+        UploadAudioSelectionPlan::Mix(selected_indices) => {
+            let source_bytes = tokio::fs::read(source_path)
+                .await
+                .map_err(|e| format!("read clip: {e}"))?;
+            clipline_mp4::remux_with_mixed_audio_track(&source_bytes, &selected_indices)
+                .map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -532,6 +540,10 @@ fn upload_bytes_for_audio_selection(
         UploadAudioSelectionPlan::Original => Ok(source_bytes),
         UploadAudioSelectionPlan::Remux(selected_indices) => {
             clipline_mp4::remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
+                .map_err(|e| e.to_string())
+        }
+        UploadAudioSelectionPlan::Mix(selected_indices) => {
+            clipline_mp4::remux_with_mixed_audio_track(&source_bytes, &selected_indices)
                 .map_err(|e| e.to_string())
         }
     }
@@ -554,7 +566,11 @@ fn upload_audio_selection_plan(
 
     let selected_indices =
         crate::util::selected_audio_track_indices(markers.unwrap(), selected_audio_track_ids)?;
-    Ok(UploadAudioSelectionPlan::Remux(selected_indices))
+    if selected_indices.len() > 1 {
+        Ok(UploadAudioSelectionPlan::Mix(selected_indices))
+    } else {
+        Ok(UploadAudioSelectionPlan::Remux(selected_indices))
+    }
 }
 
 fn read_clip_game(path: &Path, markers: Option<&ClipMarkers>) -> Option<crate::library::ClipGame> {
@@ -896,27 +912,13 @@ mod tests {
     }
 
     #[test]
-    fn upload_audio_selection_remuxes_multiple_selected_tracks() {
-        let source = two_audio_mp4();
-        let markers = audio_markers();
-        let selected = vec!["output".to_string(), "microphone".to_string()];
-
-        let out =
-            upload_bytes_for_audio_selection(source, Some(&markers), Some(&selected)).unwrap();
-
-        assert!(out.windows(6).any(|w| w == b"V00000"));
-        assert!(out.windows(6).any(|w| w == b"A00000"));
-        assert!(out.windows(6).any(|w| w == b"B00000"));
-    }
-
-    #[test]
-    fn upload_audio_selection_plan_remuxes_without_source_bytes_for_multiple_tracks() {
+    fn upload_audio_selection_plan_mixes_multiple_selected_tracks() {
         let markers = audio_markers();
         let selected = vec!["output".to_string(), "microphone".to_string()];
 
         assert_eq!(
             upload_audio_selection_plan(Some(&markers), Some(&selected)).unwrap(),
-            UploadAudioSelectionPlan::Remux(vec![0, 1])
+            UploadAudioSelectionPlan::Mix(vec![0, 1])
         );
     }
 

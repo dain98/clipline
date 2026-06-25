@@ -243,18 +243,17 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      stack memory. Saved
      replays and full-session recordings write `audio_tracks` metadata into marker sidecars, the
      review deck exposes an expandable track checklist, and the upload dialog lets users choose
-     which tracks to include. Upload selection is stream-copy remuxed through
-     `clipline-mp4::remux_with_selected_audio_tracks` without mutating the source clip; selecting
-     every track keeps the original bytes. New audio sessions that appear after recording starts
-     are not discovered dynamically yet.
+     which tracks to include. Single-track and muted selections are stream-copy remuxed through
+     `clipline-mp4::remux_with_selected_audio_tracks`; multi-track share/upload selections are
+     exported through the native Opus mixer so external players receive one audio stream. New audio
+     sessions that appear after recording starts are not discovered dynamically yet.
 31. **Mouse hotkeys + selected-track uploads** — Settings > Hotkeys accepts middle mouse,
      Mouse4, and Mouse5 when combined with Ctrl/Alt/Shift, in addition to F1-F11/F13-F24.
      Keyboard F-key shortcuts still use Tauri's OS global-shortcut registration plus the
      low-level fallback; mouse-button shortcuts are hook-only through an on-demand Windows
-     low-level mouse hook. The rail now shows the active Save Replay hotkey below RAM. Cloud
-     upload no longer needs FFmpeg for selected audio tracks: every explicit audio selection is
-     stream-copy remuxed into an MP4 containing exactly those tracks, including multi-track
-     selections.
+     low-level mouse hook. The rail now shows the active Save Replay hotkey below RAM. Single-track
+     and muted cloud uploads use lightweight selected-track remuxing; multi-track cloud/share
+     exports now use native Opus mixing so external players hear one normal audio stream.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -262,6 +261,13 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-25):
+- Share/export audio compatibility follow-up: the 0.1.12/0.1.14 remux-only upload behavior could
+  hand cloud/Discord a multi-audio-track MP4 where only the first stream was played, producing
+  silent uploads or missing mic audio. Cloud uploads now replace two-or-more selected audio tracks
+  with one native mixed Opus track while stream-copying video, and clipboard copy uses the same
+  selected-audio compatibility export under `%APPDATA%\Clipline\share-exports` before setting
+  CF_HDROP. This is native `audiopus` decode/mix/re-encode inside `clipline-mp4`; users do not
+  need FFmpeg installed for multi-track upload/share audio.
 - WebView2 compatibility follow-up for the Windows 10 tester whose Edge/WebView2 registry state
   was missing: Nightly 0.1.14 switches the normal NSIS installer from Tauri's WebView2
   `offlineInstaller` to the small embedded Evergreen bootstrapper, while keeping
@@ -301,10 +307,10 @@ Recent fixes (2026-06-24):
   an on-demand low-level mouse hook; switching between keyboard and mouse hotkeys
   unregisters/registers only the keyboard shortcut side. The rail shows the current save hotkey
   below RAM.
-- Cloud upload now always remuxes explicit selected audio tracks instead of mixing multiple
-  selections through FFmpeg. Multi-track uploads preserve each selected MP4 audio track, which
-  matches the cloud player's current no-track-toggle model and avoids the old
-  "ffmpeg is not available for audio track mixing" failure.
+- Cloud upload briefly remuxed explicit selected audio tracks instead of mixing multiple selections
+  through FFmpeg, avoiding the old "ffmpeg is not available for audio track mixing" failure but
+  exposing first-audio-stream playback problems in external players. The 2026-06-25 native-mix
+  follow-up above supersedes that behavior for multi-track selections.
 
 Recent fixes (2026-06-22):
 - Tray "Open Clipline" now uses the same reveal path as a normal foreground launch:
@@ -321,8 +327,10 @@ Recent fixes (2026-06-22):
   visibility/link changes refresh the local upload record, finalized remote deletions clear the
   local cloud badge/link, and temporary 404s for `uploaded_processing` records keep the local
   processing record.
-- Cloud uploads briefly mixed multiple selected audio tracks into one Opus stream, but this was
-  replaced on 2026-06-24 with selected-track remuxing for every explicit upload selection.
+- Cloud uploads briefly mixed multiple selected audio tracks into one Opus stream, this was
+  replaced on 2026-06-24 with selected-track remuxing for every explicit upload selection, and the
+  2026-06-25 native-mix follow-up restored single-stream multi-track uploads without requiring
+  FFmpeg.
 - Debug/Cargo builds now keep Windows startup registration disabled and clear stale debug Run-key
   entries on launch/status checks; installed release builds keep normal startup behavior.
 

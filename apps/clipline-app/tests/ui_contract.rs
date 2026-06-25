@@ -983,6 +983,31 @@ fn deck_status_success_toasts_auto_clear() {
 }
 
 #[test]
+fn clipboard_copy_sends_selected_audio_tracks() {
+    let js = main_js();
+    let app = app_rs();
+    let library = library_rs();
+
+    assert!(
+        library.contains("pub struct CopyClipToClipboardRequest")
+            && library.contains("request: CopyClipToClipboardRequest"),
+        "clipboard command should accept a request object so selected audio can be passed"
+    );
+    assert!(
+        app.contains("crate::library::copy_clip_to_clipboard"),
+        "clipboard command should stay registered with Tauri"
+    );
+    assert!(
+        js.contains("await invoke(\"copy_clip_to_clipboard\", {")
+            && js.contains("request: {")
+            && js.contains("path: currentClip.path")
+            && js.contains("audioTrackIds: clipAudioTracks(currentClip).length")
+            && js.contains("selectedAudioTrackIdsForClip(currentClip)"),
+        "copy should send the current selected audio tracks to the native clipboard exporter"
+    );
+}
+
+#[test]
 fn app_notice_toasts_auto_clear() {
     let js = main_js();
 

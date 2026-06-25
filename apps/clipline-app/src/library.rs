@@ -12,7 +12,9 @@ use std::ptr;
 use std::sync::Mutex;
 
 use clipline_events::{is_timeline_marker, ClipMarker, ClipMarkers, GameId};
-use clipline_mp4::{remux_with_selected_audio_tracks, trim_keyframe_aligned_file};
+use clipline_mp4::{
+    remux_with_mixed_audio_track, remux_with_selected_audio_tracks, trim_keyframe_aligned_file,
+};
 use clipline_storage::storage_status as read_storage_status;
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
 use windows_sys::Win32::System::DataExchange::{CloseClipboard, OpenClipboard, SetClipboardData};
@@ -134,6 +136,13 @@ pub struct AudioPreviewRequest {
     pub path: String,
     #[serde(default, rename = "audioTrackIds")]
     pub audio_track_ids: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct CopyClipToClipboardRequest {
+    pub path: String,
+    #[serde(default, rename = "audioTrackIds")]
+    pub audio_track_ids: Option<Vec<String>>,
 }
 
 #[tauri::command]
@@ -478,6 +487,138 @@ fn preview_clip_audio_tracks_file_with_mixer(
     Ok(preview.display().to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ShareAudioExportMode {
+    Remux(Vec<u32>),
+    Mix(Vec<u32>),
+}
+
+fn clipboard_share_path(
+    source: &Path,
+    selected_audio_track_ids: Option<&[String]>,
+) -> Result<PathBuf, String> {
+    clipboard_share_path_with_exporter(
+        source,
+        selected_audio_track_ids,
+        &crate::settings::share_export_cache_dir(),
+        |source, mode| {
+            let source_bytes = std::fs::read(source).map_err(|e| format!("read clip: {e}"))?;
+            match mode {
+                ShareAudioExportMode::Remux(indices) => {
+                    remux_with_selected_audio_tracks(&source_bytes, &indices)
+                        .map_err(|e| e.to_string())
+                }
+                ShareAudioExportMode::Mix(indices) => {
+                    remux_with_mixed_audio_track(&source_bytes, &indices).map_err(|e| e.to_string())
+                }
+            }
+        },
+    )
+}
+
+fn clipboard_share_path_with_exporter(
+    source: &Path,
+    selected_audio_track_ids: Option<&[String]>,
+    export_dir: &Path,
+    mut export_audio: impl FnMut(&Path, ShareAudioExportMode) -> Result<Vec<u8>, String>,
+) -> Result<PathBuf, String> {
+    let Some(mode) = clipboard_share_export_mode(source, selected_audio_track_ids)? else {
+        return Ok(source.to_path_buf());
+    };
+
+    let meta = std::fs::metadata(source).map_err(|e| format!("read clip metadata: {e}"))?;
+    std::fs::create_dir_all(export_dir).map_err(|e| format!("create share export cache: {e}"))?;
+    prune_old_share_exports(export_dir);
+    let export = share_export_path(export_dir, source, &meta, selected_audio_track_ids, &mode);
+    if export.exists() {
+        return Ok(export);
+    }
+
+    let bytes = export_audio(source, mode)?;
+    let tmp = export.with_extension("mp4.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write share export: {e}"))?;
+    match std::fs::rename(&tmp, &export) {
+        Ok(()) => {}
+        Err(_) if export.exists() => {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("finalize share export: {e}"));
+        }
+    }
+    Ok(export)
+}
+
+fn clipboard_share_export_mode(
+    source: &Path,
+    selected_audio_track_ids: Option<&[String]>,
+) -> Result<Option<ShareAudioExportMode>, String> {
+    let Some(selected_audio_track_ids) = selected_audio_track_ids else {
+        return Ok(None);
+    };
+    let Some(markers) = util::read_markers_raw(source) else {
+        return Ok(None);
+    };
+    let tracks = markers.audio_tracks.as_slice();
+    if tracks.is_empty() {
+        if selected_audio_track_ids.is_empty() {
+            return Ok(Some(ShareAudioExportMode::Remux(Vec::new())));
+        }
+        return Err("this clip has no selectable audio track metadata".into());
+    }
+    let selected_indices = util::selected_audio_track_indices(&markers, selected_audio_track_ids)?;
+    if selected_indices.len() > 1 {
+        Ok(Some(ShareAudioExportMode::Mix(selected_indices)))
+    } else {
+        Ok(Some(ShareAudioExportMode::Remux(selected_indices)))
+    }
+}
+
+fn share_export_path(
+    export_dir: &Path,
+    source: &Path,
+    meta: &std::fs::Metadata,
+    selected_audio_track_ids: Option<&[String]>,
+    mode: &ShareAudioExportMode,
+) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    "share-export-v1".hash(&mut hasher);
+    source.display().to_string().hash(&mut hasher);
+    meta.len().hash(&mut hasher);
+    meta.modified().ok().hash(&mut hasher);
+    mode.hash(&mut hasher);
+    if let Some(ids) = selected_audio_track_ids {
+        for id in ids {
+            id.hash(&mut hasher);
+        }
+    }
+    export_dir.join(format!("share-export-{:016x}.mp4", hasher.finish()))
+}
+
+fn prune_old_share_exports(export_dir: &Path) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+    let Ok(entries) = std::fs::read_dir(export_dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("mp4") {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > MAX_AGE);
+        if old {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 pub(crate) fn mix_audio_tracks_with_ffmpeg(
     source: &Path,
     output_path: &Path,
@@ -611,8 +752,6 @@ fn export_clip_file(source: PathBuf, start_s: f64, end_s: f64) -> Result<Exporte
     })
 }
 
-
-
 fn audio_preview_path(
     preview_dir: &Path,
     source: &Path,
@@ -702,12 +841,18 @@ pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Res
 }
 
 #[tauri::command]
-pub fn copy_clip_to_clipboard(
-    path: String,
-    settings: tauri::State<StorageSettings>,
+pub async fn copy_clip_to_clipboard(
+    request: CopyClipToClipboardRequest,
+    settings: tauri::State<'_, StorageSettings>,
 ) -> Result<(), String> {
-    let target = validate_clip_path(&settings, &path)?;
-    copy_file_to_clipboard(&target)
+    let target = validate_clip_path(&settings, &request.path)?;
+    let audio_track_ids = request.audio_track_ids;
+    tauri::async_runtime::spawn_blocking(move || {
+        let share_path = clipboard_share_path(&target, audio_track_ids.as_deref())?;
+        copy_file_to_clipboard(&share_path)
+    })
+    .await
+    .map_err(|e| format!("copy clip task: {e}"))?
 }
 
 #[tauri::command]
@@ -915,8 +1060,6 @@ impl Drop for ClipboardClose {
         }
     }
 }
-
-
 
 fn filter_timeline_markers(mut markers: ClipMarkers) -> ClipMarkers {
     markers.markers.retain(|m| is_timeline_marker(&m.event));
@@ -1338,6 +1481,73 @@ mod tests {
 
         let err = util::selected_audio_track_indices(&markers, &["discord".into()]).unwrap_err();
         assert!(err.contains("unknown audio track"), "{err}");
+    }
+
+    #[test]
+    fn clipboard_share_export_mixes_multiple_selected_tracks() {
+        let dir = TestDir::new("clipline-library", "clipboard-share-mix");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, b"source mp4").unwrap();
+        let markers = ClipMarkers {
+            recording_start_s: 0.0,
+            duration_s: 10.0,
+            player_summary: None,
+            audio_tracks: vec![
+                ClipAudioTrack {
+                    id: "output".into(),
+                    track_index: 0,
+                    label: "Output Audio".into(),
+                    kind: Some("output".into()),
+                },
+                ClipAudioTrack {
+                    id: "microphone".into(),
+                    track_index: 1,
+                    label: "Microphone".into(),
+                    kind: Some("microphone".into()),
+                },
+            ],
+            markers: Vec::new(),
+        };
+        std::fs::write(
+            source.with_extension("markers.json"),
+            serde_json::to_string(&markers).unwrap(),
+        )
+        .unwrap();
+
+        let selected = vec!["output".to_string(), "microphone".to_string()];
+        let export_dir = dir.path().join("share-exports");
+        let exported = clipboard_share_path_with_exporter(
+            &source,
+            Some(&selected),
+            &export_dir,
+            |input, mode| {
+                assert_eq!(input, source.as_path());
+                assert_eq!(mode, ShareAudioExportMode::Mix(vec![0, 1]));
+                Ok(b"mixed share mp4".to_vec())
+            },
+        )
+        .unwrap();
+
+        assert!(exported.starts_with(&export_dir));
+        assert_eq!(std::fs::read(exported).unwrap(), b"mixed share mp4");
+    }
+
+    #[test]
+    fn clipboard_share_without_audio_selection_uses_original_path() {
+        let dir = TestDir::new("clipline-library", "clipboard-share-original");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, b"source mp4").unwrap();
+
+        let selected = None::<&[String]>;
+        let chosen = clipboard_share_path_with_exporter(
+            &source,
+            selected,
+            &dir.path().join("share"),
+            |_, _| panic!("clipboard copy without explicit audio selection must not export"),
+        )
+        .unwrap();
+
+        assert_eq!(chosen, source);
     }
 
     #[test]

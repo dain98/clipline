@@ -3406,7 +3406,14 @@ async function copyClipToClipboard() {
   $("error").textContent = "";
   setDeckStatus("");
   try {
-    await invoke("copy_clip_to_clipboard", { path: currentClip.path });
+    await invoke("copy_clip_to_clipboard", {
+      request: {
+        path: currentClip.path,
+        audioTrackIds: clipAudioTracks(currentClip).length
+          ? selectedAudioTrackIdsForClip(currentClip)
+          : null,
+      },
+    });
     setDeckStatus("clip copied to clipboard", { transient: true });
   } catch (e) {
     setDeckStatus("");
