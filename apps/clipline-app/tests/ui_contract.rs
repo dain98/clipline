@@ -211,6 +211,9 @@ fn review_player_owns_all_controls() {
         "id=\"region-align-menu\"",
         "id=\"region-display-menu\"",
         "id=\"clip-context-menu\"",
+        "id=\"clip-menu-play\"",
+        "id=\"clip-menu-open-cloud-page\"",
+        "id=\"clip-menu-copy-cloud-link\"",
         "id=\"clip-menu-upload\"",
         "id=\"clip-menu-rename\"",
         "id=\"clip-menu-delete\"",
@@ -860,6 +863,10 @@ fn no_native_browser_dialogs() {
         js.contains("document.addEventListener(\"contextmenu\", (ev) => {")
             && js.contains("ev.preventDefault();")
             && js.contains("showClipContextMenu(ev, c)")
+            && js.contains("showCloudClipContextMenu(ev, entry)")
+            && js.contains("$(\"clip-menu-play\").addEventListener(\"click\"")
+            && js.contains("$(\"clip-menu-open-cloud-page\").addEventListener(\"click\"")
+            && js.contains("$(\"clip-menu-copy-cloud-link\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-upload\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-rename\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-delete\").addEventListener(\"click\"")
@@ -867,6 +874,7 @@ fn no_native_browser_dialogs() {
             && js.contains("await invoke(\"rename_clip\"")
             && app_rs().contains("crate::library::rename_clip")
             && css.contains(".clip-title-edit")
+            && css.contains(".context-menu button[hidden]")
             && css.contains(".context-menu button.danger-text"),
         "native context menus must be suppressed and library rows must expose an app-owned clip menu"
     );
@@ -960,6 +968,7 @@ fn library_has_cloud_source_tab() {
         "function renderCloudClips()",
         "function cloudLocalClipForEntry(entry)",
         "function openCloudEntryInApp(entry)",
+        "function showCloudClipContextMenu(ev, entry)",
         "function observeCloudThumbnail(entry, thumb)",
         "let cloudClipsCache = []",
         "function loadCloudClips",
@@ -969,6 +978,7 @@ fn library_has_cloud_source_tab() {
         "invoke(\"open_cloud_clip_url\"",
         "PlayerCore.cloudLibraryEntries",
         "localClip ? clipCard(localClip) : cloudClipCard(entry)",
+        "showCloudClipContextMenu(ev, entry)",
         "$(\"cloud-gallery-grid\")",
         "querySelectorAll(\"#gallery-source-tabs .source-tab\")",
     ] {
@@ -977,11 +987,16 @@ fn library_has_cloud_source_tab() {
             "main.js must wire cloud library behavior through `{required}`"
         );
     }
+    assert!(
+        !js.contains("actions.className = \"card-actions\""),
+        "cloud-only cards should not render inline Play/Open/Copy buttons"
+    );
     for required in [
         ".gallery-source-tabs",
         ".source-tab.active",
         ".cloud-gallery-grid",
         ".cloud-card",
+        ".cloud-card-placeholder > svg",
     ] {
         assert!(
             css.contains(required),

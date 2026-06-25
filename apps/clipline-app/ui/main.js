@@ -118,6 +118,7 @@ let regionLayout = null;
 let regionDrag = null;
 let regionMenuDisplayId = null;
 let clipContextTarget = null;
+let cloudContextTarget = null;
 let uploadDialogClip = null;
 let selectedAudioTrackIds = new Set();
 let uploadSelectedAudioTrackIds = new Set();
@@ -2117,7 +2118,10 @@ function cloudClipCard(entry) {
   const thumb = document.createElement("div");
   thumb.className = "card-thumb";
   thumb.style.cssText = thumbGradient({ name: entry.title, session: entry.remote_url });
-  thumb.innerHTML = CLOUD_CARD_ICON; // static markup, safe
+  const placeholder = document.createElement("span");
+  placeholder.className = "cloud-card-placeholder";
+  placeholder.innerHTML = CLOUD_CARD_ICON; // static markup, safe
+  thumb.appendChild(placeholder);
   observeCloudThumbnail(entry, thumb);
 
   const play = document.createElement("div");
@@ -2158,36 +2162,11 @@ function cloudClipCard(entry) {
   localState.textContent = entry.remote_url;
   localState.title = entry.remote_url;
 
-  const actions = document.createElement("div");
-  actions.className = "card-actions";
-  const playButton = document.createElement("button");
-  playButton.type = "button";
-  playButton.className = "primary-link";
-  playButton.textContent = "Play";
-  playButton.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    openCloudEntryInApp(entry);
-  });
-  const open = document.createElement("button");
-  open.type = "button";
-  open.textContent = "Open page";
-  open.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    openCloudClipUrl(entry);
-  });
-  const copy = document.createElement("button");
-  copy.type = "button";
-  copy.textContent = "Copy link";
-  copy.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    copyCloudUrl(entry);
-  });
-  actions.append(playButton, open, copy);
-
-  meta.append(nameRow, info, localState, actions);
+  meta.append(nameRow, info, localState);
   thumb.appendChild(play);
   el.append(thumb, meta);
   el.addEventListener("click", () => openCloudEntryInApp(entry));
+  el.addEventListener("contextmenu", (ev) => showCloudClipContextMenu(ev, entry));
   return el;
 }
 
@@ -2597,12 +2576,39 @@ function showClipContextMenu(ev, clip) {
   ev.stopPropagation();
   hideRegionMenu();
   clipContextTarget = clip;
+  cloudContextTarget = null;
   const record = clipCloudRecord(clip);
   const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
   const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
+  $("clip-menu-play").hidden = true;
+  $("clip-menu-open-cloud-page").hidden = true;
+  $("clip-menu-copy-cloud-link").hidden = true;
   const upload = $("clip-menu-upload");
+  upload.hidden = false;
   upload.textContent = uploaded ? "Copy cloud link" : "Upload";
   upload.disabled = busy || (!uploaded && !cloudConnected());
+  $("clip-menu-rename").hidden = false;
+  $("clip-menu-delete").hidden = false;
+  const menu = $("clip-context-menu");
+  menu.hidden = false;
+  positionContextMenu(menu, ev.clientX, ev.clientY);
+}
+
+function showCloudClipContextMenu(ev, entry) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  hideRegionMenu();
+  clipContextTarget = null;
+  cloudContextTarget = entry;
+  $("clip-menu-play").hidden = false;
+  $("clip-menu-play").disabled = false;
+  $("clip-menu-open-cloud-page").hidden = false;
+  $("clip-menu-open-cloud-page").disabled = !entry.remote_url;
+  $("clip-menu-copy-cloud-link").hidden = false;
+  $("clip-menu-copy-cloud-link").disabled = !entry.remote_url;
+  $("clip-menu-upload").hidden = true;
+  $("clip-menu-rename").hidden = true;
+  $("clip-menu-delete").hidden = true;
   const menu = $("clip-context-menu");
   menu.hidden = false;
   positionContextMenu(menu, ev.clientX, ev.clientY);
@@ -2612,6 +2618,7 @@ function hideClipContextMenu() {
   const menu = $("clip-context-menu");
   if (menu) menu.hidden = true;
   clipContextTarget = null;
+  cloudContextTarget = null;
 }
 
 function clipContextRecord() {
@@ -4076,6 +4083,21 @@ document.addEventListener("contextmenu", (ev) => {
   hideClipContextMenu();
 });
 $("clip-context-menu").addEventListener("contextmenu", (ev) => ev.preventDefault());
+$("clip-menu-play").addEventListener("click", () => {
+  const entry = cloudContextTarget;
+  hideClipContextMenu();
+  if (entry) openCloudEntryInApp(entry);
+});
+$("clip-menu-open-cloud-page").addEventListener("click", () => {
+  const entry = cloudContextTarget;
+  hideClipContextMenu();
+  if (entry) openCloudClipUrl(entry);
+});
+$("clip-menu-copy-cloud-link").addEventListener("click", () => {
+  const entry = cloudContextTarget;
+  hideClipContextMenu();
+  if (entry) copyCloudUrl(entry);
+});
 $("clip-menu-upload").addEventListener("click", () => {
   const clip = clipContextTarget;
   const record = clipContextRecord();
