@@ -4013,6 +4013,9 @@ updateViews();
 syncPlayState();
 syncVolume();
 syncAllRangeProgress();
+function reportFrontendReady() {
+  invoke("frontend_ready").catch((e) => console.warn("frontend_ready failed:", e));
+}
 async function loadInitialSettings() {
   await loadGamePlugins();
   let settings = await invoke("get_settings");
@@ -4038,4 +4041,5 @@ afterNextPaint().then(() => {
     ensureVideoEncodersLoaded().catch((e) => $("error").textContent = e);
   }, 750);
 });
+reportFrontendReady();
 setInterval(refreshMemoryUsage, 2000);

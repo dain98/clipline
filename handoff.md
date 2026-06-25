@@ -11,7 +11,7 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-24): a working tray recorder with a first-party review player
+## Current state (2026-06-25): a working tray recorder with a first-party review player
 
 Thirty-one milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
@@ -261,12 +261,28 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > shape is a full-size clapper icon on the left, only for videos that are actually user-created
 > clips, likely after finishing a clearer labeling model.
 
+Recent fixes (2026-06-25):
+- WebView2 compatibility follow-up for the Windows 10 tester whose Edge/WebView2 registry state
+  was missing: Nightly 0.1.14 switches the normal NSIS installer from Tauri's WebView2
+  `offlineInstaller` to the small embedded Evergreen bootstrapper, while keeping
+  `minimumWebview2Version = 120.0.2210.55`. Fresh installs and updates can now fetch/repair the
+  runtime from Microsoft during install instead of carrying the large offline runtime in every
+  Clipline installer. This is not an air-gapped compatibility claim: offline or Microsoft-blocked
+  machines may still need the WebView2 Runtime installed manually.
+- The app now has a native already-broken-install recovery signal. `main.js` invokes
+  `frontend_ready` once JavaScript boots and IPC works; the Rust shell logs `frontend_ready
+  received`. When `open_main_window` reveals the UI, it also probes `is_visible()` explicitly and
+  classifies Tauri's typed `Runtime(FailedToReceiveMessage)` as a dead WebView2 signal. If that
+  getter probe fails or the frontend-ready watchdog expires, Clipline shows one native `rfd`
+  repair dialog per process from a worker thread. This matters because a dead WebView2 frontend
+  cannot trigger the in-app updater; already-broken users need reinstall/manual WebView2 repair.
+
 Recent fixes (2026-06-24):
 - Windows 10 follow-up from Nate's 0.1.12 logs: the recovery-window build also produced
   immediate `failed to receive message from webview` state calls, while Windows 11 works
-  normally. Treat this as WebView2/runtime creation trouble, not a hidden-window bug. The next
-  build removes the `main-recovery-*` churn, keeps revealing the existing `main` handle when
-  getters fail, logs Microsoft Edge WebView2 runtime registry `pv` values at startup, and sets
+  normally. Treat this as WebView2/runtime creation trouble, not a hidden-window bug. Nightly
+  0.1.13 removed the `main-recovery-*` churn, kept revealing the existing `main` handle when
+  getters fail, logged Microsoft Edge WebView2 runtime registry `pv` values at startup, and set
   `minimumWebview2Version = 120.0.2210.55` so Windows 10 installs repair/update stale runtimes.
 - Published Nightly 0.1.12 with the mouse-hotkey, selected-audio-track upload remux, release
   diagnostics, and dead-window recovery work from PR #51.

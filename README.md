@@ -18,7 +18,7 @@ Clipline is a game recorder built around three commitments: **never inject code 
 
 Under the hood it pairs a native **Rust** capture/encode core with a small **Tauri (WebView2)** UI: capture via **Windows.Graphics.Capture**, hardware encoding on **NVENC / AMF / QuickSync** (plus software **AV1**), and a crash‑safe MP4 writer. The result is a ShadowPlay‑style replay buffer with near‑zero gameplay impact — cross‑GPU, open source, and free.
 
-> **Status:** `v0.1.13`, nightly — testing‑grade, not stable. A working tray recorder with a first‑party review/trim player, 31 development milestones deep. Windows‑only. [Download the installer](#-install) or build from source. The installer binary isn't Authenticode code‑signed yet, so Windows SmartScreen will warn on first run — Authenticode signing is [on the roadmap](#-roadmap). (The auto‑updater *is* signed; the two are different — see [Install](#-install).)
+> **Status:** `v0.1.14`, nightly — testing‑grade, not stable. A working tray recorder with a first‑party review/trim player, 31 development milestones deep. Windows‑only. [Download the installer](#-install) or build from source. The installer binary isn't Authenticode code‑signed yet, so Windows SmartScreen will warn on first run — Authenticode signing is [on the roadmap](#-roadmap). (The auto‑updater *is* signed; the two are different — see [Install](#-install).)
 
 <!--
   SCREENSHOTS — drop a visual-first impression here, above the text/badges.
@@ -38,7 +38,9 @@ Under the hood it pairs a native **Rust** capture/encode core with a small **Tau
 
 ## 📥 Install
 
-Download the latest **[nightly installer](https://github.com/dain98/clipline/releases)** (`Clipline_<version>_x64-setup.exe`) and run it. It installs per‑user, starts in the tray, keeps itself up to date on the nightly channel, and bundles the WebView2 runtime for Windows 10 machines that do not already have it. Windows 11 includes WebView2.
+Download the latest **[nightly installer](https://github.com/dain98/clipline/releases)** (`Clipline_<version>_x64-setup.exe`) and run it. It installs per‑user, starts in the tray, and keeps itself up to date on the nightly channel.
+
+On Windows, the standard installer embeds Microsoft's small WebView2 Evergreen bootstrapper. If WebView2 is missing or older than Clipline's minimum supported runtime, the installer may download the current runtime from Microsoft. Offline or Microsoft-blocked machines may need the WebView2 Runtime installed manually first. Windows 11 normally includes WebView2.
 
 **On signing — two different things, only one is done yet:**
 
@@ -126,7 +128,7 @@ The workspace is split into focused crates so platform‑agnostic logic stays te
 ### Requirements
 - **Windows 10 (1803+) or Windows 11**
 - **[Rust](https://rustup.rs/) stable** toolchain (with `clippy`)
-- **[WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/)** — bundled by the installer for Windows 10 machines that do not already have it; preinstalled on Windows 11
+- **[WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/)** — the installer embeds Microsoft's Evergreen bootstrapper and may download/repair the runtime on Windows 10; preinstalled on most Windows 11 machines
 - **FFmpeg** *(optional)* — only needed for **HEVC/AV1** recording and to run the full test suite. H.264 works with no extra dependencies via the OS Media Foundation encoder.
 
 See **[Compatibility & tested configurations](docs/COMPATIBILITY.md)** for the GPU/encoder, Windows‑version, and per‑game support matrix.
@@ -168,7 +170,7 @@ Real device tests (WGC/MFT/WASAPI) self‑skip on CI runners with no GPU/audio h
 
 | Action | Shortcut |
 |---|---|
-| **Save replay** (global) | `Alt+F10` *(rebindable to F‑keys + Ctrl/Alt/Shift in Settings → Hotkeys)* |
+| **Save replay** (global) | `Alt+F10` *(rebindable to F‑keys or Middle/Mouse4/Mouse5 with Ctrl/Alt/Shift in Settings → Hotkeys)* |
 | Play / pause | `Space` or `K` |
 | Back / forward 5 s | `J` / `L` (hold `Shift` for 1 s) |
 | Step / nudge | `←` `→` (10 frames) · `,` `.` (0.1 s) |

@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "clipline-app"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "base64 0.22.1",
  "boa_engine",
@@ -938,6 +938,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-updater",
+ "tauri-runtime",
  "tokio",
  "windows-sys 0.61.2",
 ]

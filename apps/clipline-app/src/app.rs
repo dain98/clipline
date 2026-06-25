@@ -5,6 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -29,7 +30,11 @@ use crate::updates::UpdateChannel;
 
 const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 1_048_576;
 const MAIN_WINDOW_LABEL: &str = "main";
+const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
 static DIAGNOSTIC_LOG: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
+static WEBVIEW_READY_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
+static WEBVIEW_REPAIR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
 
 #[derive(serde::Serialize)]
 struct DisplayInfo {
@@ -219,6 +224,102 @@ fn log_window_state<R: Runtime>(context: &str, window: &WebviewWindow<R>) {
     log_diagnostic(format!("{context}: {}", window_state_summary(window)));
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebviewRepairNoticeReason {
+    GetterFailedToReceiveMessage,
+    FrontendReadyTimeout,
+    OtherGetterError,
+}
+
+fn classify_webview_getter_error(error: &tauri::Error) -> WebviewRepairNoticeReason {
+    match error {
+        tauri::Error::Runtime(tauri_runtime::Error::FailedToReceiveMessage) => {
+            WebviewRepairNoticeReason::GetterFailedToReceiveMessage
+        }
+        _ => WebviewRepairNoticeReason::OtherGetterError,
+    }
+}
+
+fn should_show_webview_repair_notice(
+    reason: WebviewRepairNoticeReason,
+    already_shown: bool,
+) -> bool {
+    !already_shown
+        && matches!(
+            reason,
+            WebviewRepairNoticeReason::GetterFailedToReceiveMessage
+                | WebviewRepairNoticeReason::FrontendReadyTimeout
+        )
+}
+
+fn show_webview_repair_notice_once(reason: WebviewRepairNoticeReason) {
+    if !should_show_webview_repair_notice(
+        reason,
+        WEBVIEW_REPAIR_NOTICE_SHOWN.load(Ordering::Relaxed),
+    ) {
+        return;
+    }
+    if WEBVIEW_REPAIR_NOTICE_SHOWN
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    log_diagnostic(format!("webview2 repair notice shown reason={reason:?}"));
+    let _ = std::thread::Builder::new()
+        .name("clipline-webview2-repair-notice".into())
+        .spawn(move || {
+            let _ = rfd::MessageDialog::new()
+                .set_title("Clipline needs Microsoft WebView2")
+                .set_description(
+                    "Clipline is running, but the Windows WebView2 runtime did not start. \
+Install or repair Microsoft Edge WebView2 Runtime, then reopen Clipline.\n\n\
+You can get it from Microsoft: https://developer.microsoft.com/microsoft-edge/webview2/",
+                )
+                .set_buttons(rfd::MessageButtons::Ok)
+                .show();
+        });
+}
+
+fn probe_webview_after_reveal<R: Runtime>(window: &WebviewWindow<R>, context: &str) {
+    match window.is_visible() {
+        Ok(visible) => log_diagnostic(format!("{context} health probe is_visible=ok({visible})")),
+        Err(e) => {
+            let reason = classify_webview_getter_error(&e);
+            log_diagnostic(format!(
+                "{context} health probe is_visible=err({e}) reason={reason:?}"
+            ));
+            show_webview_repair_notice_once(reason);
+        }
+    }
+}
+
+fn arm_frontend_ready_watchdog() {
+    if FRONTEND_READY.load(Ordering::Acquire) {
+        return;
+    }
+    if WEBVIEW_READY_WATCHDOG_ARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    log_diagnostic("webview readiness watchdog armed");
+    let _ = std::thread::Builder::new()
+        .name("clipline-webview-readiness-watchdog".into())
+        .spawn(|| {
+            std::thread::sleep(WEBVIEW_READY_TIMEOUT);
+            if !FRONTEND_READY.load(Ordering::Acquire) {
+                log_diagnostic("webview readiness watchdog expired before frontend_ready");
+                show_webview_repair_notice_once(WebviewRepairNoticeReason::FrontendReadyTimeout);
+            } else {
+                log_diagnostic("webview readiness watchdog observed frontend_ready");
+            }
+        });
+}
+
 const WEBVIEW2_RUNTIME_CLIENT_GUID: &str = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
 
 fn webview2_runtime_registry_keys() -> [String; 3] {
@@ -274,6 +375,14 @@ fn webview2_runtime_diagnostic() -> String {
 #[tauri::command]
 fn memory_status() -> Result<crate::memory::MemoryStatus, String> {
     crate::memory::current_process_tree_memory()
+}
+
+#[tauri::command]
+fn frontend_ready() {
+    let was_ready = FRONTEND_READY.swap(true, Ordering::AcqRel);
+    if !was_ready {
+        log_diagnostic("frontend_ready received");
+    }
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -1319,6 +1428,7 @@ pub fn run() {
             list_game_windows,
             extract_window_icon,
             memory_status,
+            frontend_ready,
             start_microphone_test,
             stop_microphone_test,
             get_autostart_status,
@@ -1547,6 +1657,8 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
             log_window_state("open existing before reveal", &window);
             let result = reveal_logged_window(&window, "open existing");
             log_window_state("open existing after reveal", &window);
+            probe_webview_after_reveal(&window, "open existing after reveal");
+            arm_frontend_ready_watchdog();
             result
         }
         MainWindowOpenTarget::NewMain => {
@@ -1555,6 +1667,8 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
             log_window_state("open rebuilt before reveal", &window);
             let result = reveal_logged_window(&window, "open rebuilt");
             log_window_state("open rebuilt after reveal", &window);
+            probe_webview_after_reveal(&window, "open rebuilt after reveal");
+            arm_frontend_ready_watchdog();
             result
         }
     }
@@ -2005,6 +2119,36 @@ mod tests {
     fn release_build_autostart_policy_honors_user_choice() {
         assert!(saved_autostart_preference_for_build(true, false, false));
         assert!(!saved_autostart_preference_for_build(false, true, false));
+    }
+
+    #[test]
+    fn webview_repair_notice_is_only_needed_for_dead_webview_signals() {
+        assert!(should_show_webview_repair_notice(
+            WebviewRepairNoticeReason::GetterFailedToReceiveMessage,
+            false,
+        ));
+        assert!(should_show_webview_repair_notice(
+            WebviewRepairNoticeReason::FrontendReadyTimeout,
+            false,
+        ));
+        assert!(!should_show_webview_repair_notice(
+            WebviewRepairNoticeReason::OtherGetterError,
+            false,
+        ));
+        assert!(!should_show_webview_repair_notice(
+            WebviewRepairNoticeReason::GetterFailedToReceiveMessage,
+            true,
+        ));
+    }
+
+    #[test]
+    fn classifies_tauri_runtime_receive_failure_as_dead_webview() {
+        let err = tauri::Error::Runtime(tauri_runtime::Error::FailedToReceiveMessage);
+
+        assert_eq!(
+            classify_webview_getter_error(&err),
+            WebviewRepairNoticeReason::GetterFailedToReceiveMessage
+        );
     }
 
     #[test]

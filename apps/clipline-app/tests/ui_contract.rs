@@ -46,12 +46,32 @@ fn default_capability_only_targets_main_window() {
 }
 
 #[test]
-fn windows_installer_requires_modern_webview2_runtime() {
+fn windows_installer_repairs_webview2_with_bootstrapper() {
     let config = tauri_config();
 
     assert!(
-        config.contains("\"minimumWebview2Version\""),
+        config.contains("\"minimumWebview2Version\": \"120.0.2210.55\""),
         "Windows 10 installs must repair/update stale WebView2 runtimes before Clipline starts"
+    );
+    assert!(
+        config.contains("\"webviewInstallMode\"")
+            && config.contains("\"type\": \"embedBootstrapper\""),
+        "the default NSIS installer should embed the small Evergreen bootstrapper instead of bundling the offline WebView2 installer"
+    );
+}
+
+#[test]
+fn frontend_reports_webview_readiness_to_native_shell() {
+    let app = app_rs();
+    let js = main_js();
+
+    assert!(
+        app.contains("fn frontend_ready()") && app.contains("frontend_ready,"),
+        "Rust shell must expose a lightweight frontend_ready command"
+    );
+    assert!(
+        js.contains("invoke(\"frontend_ready\")"),
+        "main.js must report readiness once the frontend JavaScript boots"
     );
 }
 
