@@ -694,6 +694,19 @@ fn parses_multi_modifier_hotkey() {
 }
 
 #[test]
+fn parses_modified_keyboard_hotkeys() {
+    assert_eq!(normalize_hotkey("ctrl+g").unwrap(), "Ctrl+G");
+    assert_eq!(normalize_hotkey("ctrl+f").unwrap(), "Ctrl+F");
+    assert_eq!(
+        normalize_hotkey("alt+shift+arrowleft").unwrap(),
+        "Alt+Shift+ArrowLeft"
+    );
+    assert_eq!(normalize_hotkey("ctrl+1").unwrap(), "Ctrl+1");
+    assert_eq!(normalize_hotkey("ctrl+space").unwrap(), "Ctrl+Space");
+    assert_eq!(normalize_hotkey("ctrl+slash").unwrap(), "Ctrl+Slash");
+}
+
+#[test]
 fn parses_mouse_button_hotkeys() {
     assert_eq!(normalize_hotkey("ctrl+mouse4").unwrap(), "Ctrl+Mouse4");
     assert_eq!(normalize_hotkey("alt+mouse5").unwrap(), "Alt+Mouse5");
@@ -705,8 +718,18 @@ fn parses_mouse_button_hotkeys() {
 
 #[test]
 fn rejects_non_function_key_hotkeys() {
-    assert!(parse_hotkey("Alt+S").is_err());
+    assert!(normalize_hotkey("S").is_err());
+    assert!(normalize_hotkey("1").is_err());
+    assert!(normalize_hotkey("Slash").is_err());
     assert!(parse_hotkey("F12").is_err());
+}
+
+#[test]
+fn rejects_windows_reserved_hotkeys() {
+    assert!(normalize_hotkey("Alt+Tab").is_err());
+    assert!(normalize_hotkey("Alt+F4").is_err());
+    assert!(normalize_hotkey("Ctrl+Alt+Delete").is_err());
+    assert!(normalize_hotkey("Ctrl+Shift+Esc").is_err());
 }
 
 #[test]

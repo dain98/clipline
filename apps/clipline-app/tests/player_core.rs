@@ -763,6 +763,39 @@ fn hotkey_recorder_formats_modifier_function_keys() {
 }
 
 #[test]
+fn hotkey_recorder_formats_modified_keyboard_keys() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'KeyG', ctrlKey: true, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"Ctrl+G"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'ArrowLeft', ctrlKey: false, altKey: true, shiftKey: true })"
+        ),
+        r#"{"kind":"captured","value":"Alt+Shift+ArrowLeft"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'Digit1', ctrlKey: true, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"Ctrl+1"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'Slash', ctrlKey: true, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"Ctrl+Slash"}"#
+    );
+}
+
+#[test]
 fn hotkey_recorder_formats_mouse_buttons() {
     let mut ctx = player_core_context();
     assert_eq!(
@@ -810,7 +843,7 @@ fn hotkey_recorder_reports_pending_cancel_and_invalid_inputs() {
             &mut ctx,
             "PlayerCore.hotkeyFromKeyEvent({ code: 'ControlLeft', ctrlKey: true })"
         ),
-        r#"{"kind":"pending","message":"Now press an F-key or mouse button."}"#
+        r#"{"kind":"pending","message":"Now press an F-key, mouse button, or keyboard key."}"#
     );
     assert_eq!(
         eval_json(
@@ -838,7 +871,21 @@ fn hotkey_recorder_reports_pending_cancel_and_invalid_inputs() {
             &mut ctx,
             "PlayerCore.hotkeyFromKeyEvent({ code: 'KeyS', ctrlKey: true, altKey: false, shiftKey: false })"
         ),
-        r#"{"kind":"invalid","message":"Use F1-F11 or F13-F24 as the shortcut key."}"#
+        r#"{"kind":"captured","value":"Ctrl+S"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'KeyS', ctrlKey: false, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"invalid","message":"Use Ctrl, Alt, or Shift with this key."}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'Tab', ctrlKey: false, altKey: true, shiftKey: false })"
+        ),
+        r#"{"kind":"invalid","message":"That shortcut is reserved by Windows."}"#
     );
 }
 

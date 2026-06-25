@@ -738,6 +738,51 @@ const PlayerCore = (() => {
     return match ? Number(match[1]) : null;
   };
 
+  const keyboardHotkeyName = (ev) => {
+    const code = String(ev.code || "");
+    const keyMatch = code.match(/^Key([A-Z])$/);
+    if (keyMatch) return keyMatch[1];
+    const digitMatch = code.match(/^Digit([0-9])$/);
+    if (digitMatch) return digitMatch[1];
+    switch (code) {
+      case "ArrowUp":
+      case "ArrowDown":
+      case "ArrowLeft":
+      case "ArrowRight":
+      case "Space":
+      case "Enter":
+      case "Tab":
+      case "Backspace":
+      case "Delete":
+      case "Insert":
+      case "Home":
+      case "End":
+      case "PageUp":
+      case "PageDown":
+      case "Minus":
+      case "Equal":
+      case "BracketLeft":
+      case "BracketRight":
+      case "Backslash":
+      case "Semicolon":
+      case "Quote":
+      case "Comma":
+      case "Period":
+      case "Slash":
+      case "Backquote":
+        return code;
+      default:
+        return null;
+    }
+  };
+
+  const isReservedHotkey = (key, ctrl, alt, shift) => {
+    if (key === "Tab" && alt) return true;
+    if (key === "F4" && alt) return true;
+    if (key === "Delete" && ctrl && alt) return true;
+    return false;
+  };
+
   const hotkeyFromKeyEvent = (ev) => {
     if (ev.code === "Escape" || ev.key === "Escape") return { kind: "cancel" };
     if (
@@ -748,22 +793,36 @@ const PlayerCore = (() => {
       ev.code === "ShiftLeft" ||
       ev.code === "ShiftRight"
     ) {
-      return { kind: "pending", message: "Now press an F-key or mouse button." };
+      return { kind: "pending", message: "Now press an F-key, mouse button, or keyboard key." };
     }
 
     const key = functionKeyNumber(ev);
-    if (!key) {
-      return { kind: "invalid", message: "Use F1-F11 or F13-F24 as the shortcut key." };
+    let hotkeyKey = null;
+    let needsModifier = false;
+    if (key) {
+      if (key === 12) {
+        return { kind: "invalid", message: "F12 is reserved by Windows for debuggers." };
+      }
+      hotkeyKey = `F${key}`;
+    } else {
+      hotkeyKey = keyboardHotkeyName(ev);
+      needsModifier = true;
     }
-    if (key === 12) {
-      return { kind: "invalid", message: "F12 is reserved by Windows for debuggers." };
+    if (!hotkeyKey) {
+      return { kind: "invalid", message: "Use an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key." };
+    }
+    if (needsModifier && !ev.ctrlKey && !ev.altKey && !ev.shiftKey) {
+      return { kind: "invalid", message: "Use Ctrl, Alt, or Shift with this key." };
+    }
+    if (isReservedHotkey(hotkeyKey, ev.ctrlKey, ev.altKey, ev.shiftKey)) {
+      return { kind: "invalid", message: "That shortcut is reserved by Windows." };
     }
 
     const parts = [];
     if (ev.ctrlKey) parts.push("Ctrl");
     if (ev.altKey) parts.push("Alt");
     if (ev.shiftKey) parts.push("Shift");
-    parts.push(`F${key}`);
+    parts.push(hotkeyKey);
     return { kind: "captured", value: parts.join("+") };
   };
 

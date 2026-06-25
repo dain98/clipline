@@ -1128,7 +1128,7 @@ function setHotkeyStatus(message, state = "") {
 function beginHotkeyCapture() {
   hotkeyCaptureActive = true;
   $("set-hotkey").classList.add("recording");
-  setHotkeyStatus("Press an F-key, middle mouse, Mouse4, or Mouse5.", "recording");
+  setHotkeyStatus("Press an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key.", "recording");
 }
 
 function endHotkeyCapture(message = "Click the field to record a new shortcut.", state = "") {
