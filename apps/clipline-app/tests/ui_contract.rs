@@ -14,6 +14,27 @@ fn main_js() -> String {
     fs::read_to_string(path).expect("read ui/main.js")
 }
 
+fn fallback_manifest_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/manifest.rs");
+    fs::read_to_string(path).expect("read src/fallback/manifest.rs")
+}
+
+fn quoted_calls(source: &str, function_name: &str) -> Vec<String> {
+    let needle = format!("{function_name}(\"");
+    let mut values = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find(&needle) {
+        let value_start = start + needle.len();
+        let tail = &rest[value_start..];
+        let end = tail.find('"').expect("quoted call closes");
+        values.push(tail[..end].to_string());
+        rest = &tail[end + 1..];
+    }
+    values.sort();
+    values.dedup();
+    values
+}
+
 fn styles_css() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/styles.css");
     fs::read_to_string(path).expect("read ui/styles.css")
@@ -73,6 +94,36 @@ fn frontend_reports_webview_readiness_to_native_shell() {
         js.contains("invoke(\"frontend_ready\")"),
         "main.js must report readiness once the frontend JavaScript boots"
     );
+}
+
+#[test]
+fn fallback_manifest_covers_every_frontend_command() {
+    let js = main_js();
+    let manifest = fallback_manifest_rs();
+    let commands = quoted_calls(&js, "invoke");
+
+    assert_eq!(commands.len(), 41, "main.js command inventory changed; update this assertion and the fallback manifest together");
+    for command in commands {
+        assert!(
+            manifest.contains(&format!("\"{command}\"")),
+            "fallback manifest must register frontend command {command}"
+        );
+    }
+}
+
+#[test]
+fn fallback_manifest_covers_every_frontend_event_listener() {
+    let js = main_js();
+    let manifest = fallback_manifest_rs();
+    let events = quoted_calls(&js, "listen");
+
+    assert_eq!(events.len(), 8, "main.js event inventory changed; update this assertion and the fallback manifest together");
+    for event in events {
+        assert!(
+            manifest.contains(&format!("\"{event}\"")),
+            "fallback manifest must register frontend event {event}"
+        );
+    }
 }
 
 fn library_rs() -> String {
