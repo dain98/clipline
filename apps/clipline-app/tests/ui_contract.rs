@@ -162,6 +162,9 @@ fn review_player_owns_all_controls() {
         "id=\"rail-save\"",
         "id=\"rail-library-status\"",
         "id=\"rail-clips-count\"",
+        "id=\"rail-profile\"",
+        "id=\"rail-profile-avatar\"",
+        "id=\"rail-profile-name\"",
         "id=\"rail-settings\"",
         "id=\"confirm-dialog\"",
         "id=\"confirm-accept\"",
@@ -211,6 +214,9 @@ fn review_player_owns_all_controls() {
         "id=\"region-align-menu\"",
         "id=\"region-display-menu\"",
         "id=\"clip-context-menu\"",
+        "id=\"clip-menu-play\"",
+        "id=\"clip-menu-open-cloud-page\"",
+        "id=\"clip-menu-copy-cloud-link\"",
         "id=\"clip-menu-upload\"",
         "id=\"clip-menu-rename\"",
         "id=\"clip-menu-delete\"",
@@ -640,6 +646,64 @@ fn rail_shows_save_hotkey() {
 }
 
 #[test]
+fn rail_shows_connected_cloud_identity() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    for required in [
+        "<button id=\"rail-profile\"",
+        "id=\"rail-profile-avatar\"",
+        "id=\"rail-profile-name\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "rail profile markup must include `{required}`"
+        );
+    }
+    for required in [
+        "function syncRailProfile",
+        "function refreshRailProfileIdentity",
+        "function loadRailProfileAvatar",
+        "function openRailProfile",
+        "invoke(\"cloud_user_profile\")",
+        "invoke(\"cloud_user_avatar\")",
+        "invoke(\"open_cloud_user_profile\")",
+        "connected_display_name",
+        "railProfileAvatarKey",
+        "$(\"rail-profile-name\")",
+    ] {
+        assert!(
+            js.contains(required),
+            "main.js must wire cloud rail profile behavior through `{required}`"
+        );
+    }
+    for required in [
+        ".rail-profile",
+        ".rail-profile[hidden]",
+        ".rail-profile-avatar",
+        ".rail-profile-name",
+    ] {
+        assert!(
+            css.contains(required),
+            "rail cloud identity needs stable compact styling for `{required}`"
+        );
+    }
+    assert!(
+        app_rs().contains("crate::cloud::cloud_user_avatar"),
+        "native command registry must expose cloud_user_avatar for the rail profile"
+    );
+    assert!(
+        app_rs().contains("crate::cloud::cloud_user_profile"),
+        "native command registry must expose cloud_user_profile for display-name refresh"
+    );
+    assert!(
+        app_rs().contains("crate::cloud::open_cloud_user_profile"),
+        "native command registry must expose open_cloud_user_profile for the rail profile button"
+    );
+}
+
+#[test]
 fn audio_preview_generation_is_not_eager_on_clip_open() {
     let js = main_js();
     let open_clip_start = js.find("function openClip(clip)").unwrap();
@@ -860,6 +924,10 @@ fn no_native_browser_dialogs() {
         js.contains("document.addEventListener(\"contextmenu\", (ev) => {")
             && js.contains("ev.preventDefault();")
             && js.contains("showClipContextMenu(ev, c)")
+            && js.contains("showCloudClipContextMenu(ev, entry)")
+            && js.contains("$(\"clip-menu-play\").addEventListener(\"click\"")
+            && js.contains("$(\"clip-menu-open-cloud-page\").addEventListener(\"click\"")
+            && js.contains("$(\"clip-menu-copy-cloud-link\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-upload\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-rename\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-delete\").addEventListener(\"click\"")
@@ -867,6 +935,7 @@ fn no_native_browser_dialogs() {
             && js.contains("await invoke(\"rename_clip\"")
             && app_rs().contains("crate::library::rename_clip")
             && css.contains(".clip-title-edit")
+            && css.contains(".context-menu button[hidden]")
             && css.contains(".context-menu button.danger-text"),
         "native context menus must be suppressed and library rows must expose an app-owned clip menu"
     );
@@ -935,6 +1004,82 @@ fn gallery_header_shows_library_storage_usage() {
     assert!(
         css.contains(".gallery-storage-used"),
         "storage usage should have gallery header metadata styling"
+    );
+}
+
+#[test]
+fn library_has_cloud_source_tab() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    for required in [
+        "id=\"gallery-source-tabs\"",
+        "data-gallery-source=\"local\"",
+        "data-gallery-source=\"cloud\"",
+        "id=\"cloud-gallery-grid\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "library markup must include cloud source tab contract `{required}`"
+        );
+    }
+    for required in [
+        "let gallerySource = \"local\"",
+        "function renderCloudClips()",
+        "function cloudLocalClipForEntry(entry)",
+        "function openCloudEntryInApp(entry)",
+        "function showCloudClipContextMenu(ev, entry)",
+        "function observeCloudThumbnail(entry, thumb)",
+        "function loadCloudThumbnail(entry, thumb)",
+        "const cloudThumbnailInflight = new Map()",
+        "posterQueue.set(thumb, { type: \"cloud-thumbnail\", entry })",
+        "let cloudClipsCache = []",
+        "function loadCloudClips",
+        "if (gallerySource === \"cloud\") renderCloudClips();",
+        "if (cloudClipsError && !force) return;",
+        "error.className = \"gallery-empty cloud-error\"",
+        "function isCloudOnlyReviewClip(clip = currentClip)",
+        "function syncReviewLocalActions()",
+        "invoke(\"list_cloud_clips\")",
+        "invoke(\"cache_cloud_clip_media\"",
+        "invoke(\"cloud_clip_thumbnail\"",
+        "invoke(\"open_cloud_clip_url\"",
+        "PlayerCore.cloudLibraryEntries",
+        "localClip ? clipCard(localClip) : cloudClipCard(entry)",
+        "showCloudClipContextMenu(ev, entry)",
+        "$(\"cloud-gallery-grid\")",
+        "querySelectorAll(\"#gallery-source-tabs .source-tab\")",
+    ] {
+        assert!(
+            js.contains(required),
+            "main.js must wire cloud library behavior through `{required}`"
+        );
+    }
+    assert!(
+        !js.contains("actions.className = \"card-actions\""),
+        "cloud-only cards should not render inline Play/Open/Copy buttons"
+    );
+    for required in [
+        ".gallery-source-tabs",
+        ".source-tab.active",
+        ".cloud-gallery-grid",
+        ".cloud-card",
+        ".cloud-card-placeholder > svg",
+        ".gallery-empty.cloud-error",
+    ] {
+        assert!(
+            css.contains(required),
+            "cloud library tab should have stable styling for `{required}`"
+        );
+    }
+    assert!(
+        app_rs().contains("crate::cloud::list_cloud_clips"),
+        "native command registry must expose list_cloud_clips for the Cloud library tab"
+    );
+    assert!(
+        app_rs().contains("crate::cloud::open_cloud_clip_url"),
+        "native command registry must expose open_cloud_clip_url for Cloud card links"
     );
 }
 

@@ -36,6 +36,86 @@ const PlayerCore = (() => {
   const fmtLibraryStorageUsage = (usedBytes, quotaGb) =>
     `${fmtBytes(usedBytes)} / ${fmtQuotaGb(quotaGb)}`;
 
+  const pathBaseName = (path) => {
+    const text = String(path || "").trim();
+    if (!text) return "";
+    return text.split(/[\\/]/).filter(Boolean).pop() || text;
+  };
+
+  const clipNameStem = (name) => String(name || "").replace(/\.mp4$/i, "").trim();
+
+  const cloudLibraryEntries = (uploads, localClips = [], cloudClips = []) => {
+    const localPaths = new Set((localClips || []).map((clip) => String(clip && clip.path || "")));
+    const uploadRecords = Object.values(uploads || {});
+    const uploadsByLocalId = new Map(
+      uploadRecords
+        .filter((record) => record && record.local_clip_id)
+        .map((record) => [String(record.local_clip_id), record])
+    );
+    const seenLocalIds = new Set();
+    const seenRemoteIds = new Set();
+    const entries = [];
+
+    for (const clip of cloudClips || []) {
+      if (!clip || !clip.remote_url) continue;
+      const localId = String(clip.local_clip_id || "");
+      const upload = localId ? uploadsByLocalId.get(localId) : null;
+      const path = String(clip.path || (upload && upload.path) || "");
+      const remoteId = String(clip.remote_clip_id || "");
+      if (localId) seenLocalIds.add(localId);
+      if (remoteId) seenRemoteIds.add(remoteId);
+      const entry = {
+        local_clip_id: localId,
+        path,
+        title: String(clip.title || clipNameStem(pathBaseName(path)) || remoteId || "Cloud clip"),
+        remote_url: String(clip.remote_url),
+        visibility: ["public", "unlisted", "private"].includes(clip.visibility)
+          ? clip.visibility
+          : "private",
+        upload_status: String(clip.upload_status || "uploaded_processing"),
+        updated_at_unix: Number(clip.updated_at_unix) || 0,
+        local_available: Boolean(path && localPaths.has(path)),
+        remote_clip_id: remoteId,
+      };
+      const durationMs = Number(clip.duration_ms);
+      if (Number.isFinite(durationMs)) entry.duration_ms = durationMs;
+      const fileSizeBytes = Number(clip.file_size_bytes);
+      if (Number.isFinite(fileSizeBytes)) entry.file_size_bytes = fileSizeBytes;
+      entries.push(entry);
+    }
+
+    entries.push(...uploadRecords
+      .filter((record) => {
+        if (!record || !record.remote_url) return false;
+        if (record.local_clip_id && seenLocalIds.has(String(record.local_clip_id))) return false;
+        if (record.remote_clip_id && seenRemoteIds.has(String(record.remote_clip_id))) return false;
+        const status = String(record.upload_status || "");
+        return status !== "failed" && status !== "not_uploaded";
+      })
+      .map((record) => {
+        const path = String(record.path || "");
+        const status = String(record.upload_status || "processing");
+        const visibility = ["public", "unlisted", "private"].includes(record.visibility)
+          ? record.visibility
+          : status === "uploaded_private" ? "private" : "public";
+        const entry = {
+          local_clip_id: String(record.local_clip_id || ""),
+          path,
+          title: clipNameStem(pathBaseName(path)) || String(record.remote_clip_id || "Cloud clip"),
+          remote_url: String(record.remote_url),
+          visibility,
+          upload_status: status,
+          updated_at_unix: Number(record.updated_at_unix) || 0,
+          local_available: localPaths.has(path),
+        };
+        const remoteId = String(record.remote_clip_id || "");
+        if (remoteId) entry.remote_clip_id = remoteId;
+        return entry;
+      }));
+
+    return entries.sort((a, b) => b.updated_at_unix - a.updated_at_unix || a.title.localeCompare(b.title));
+  };
+
   // Round the total before splitting so 59.6 carries to "1:00", not "0:60".
   const fmtDur = (s) => {
     if (s == null || !Number.isFinite(s)) return "?";
@@ -661,6 +741,51 @@ const PlayerCore = (() => {
     return match ? Number(match[1]) : null;
   };
 
+  const keyboardHotkeyName = (ev) => {
+    const code = String(ev.code || "");
+    const keyMatch = code.match(/^Key([A-Z])$/);
+    if (keyMatch) return keyMatch[1];
+    const digitMatch = code.match(/^Digit([0-9])$/);
+    if (digitMatch) return digitMatch[1];
+    switch (code) {
+      case "ArrowUp":
+      case "ArrowDown":
+      case "ArrowLeft":
+      case "ArrowRight":
+      case "Space":
+      case "Enter":
+      case "Tab":
+      case "Backspace":
+      case "Delete":
+      case "Insert":
+      case "Home":
+      case "End":
+      case "PageUp":
+      case "PageDown":
+      case "Minus":
+      case "Equal":
+      case "BracketLeft":
+      case "BracketRight":
+      case "Backslash":
+      case "Semicolon":
+      case "Quote":
+      case "Comma":
+      case "Period":
+      case "Slash":
+      case "Backquote":
+        return code;
+      default:
+        return null;
+    }
+  };
+
+  const isReservedHotkey = (key, ctrl, alt, shift) => {
+    if (key === "Tab" && alt) return true;
+    if (key === "F4" && alt) return true;
+    if (key === "Delete" && ctrl && alt) return true;
+    return false;
+  };
+
   const hotkeyFromKeyEvent = (ev) => {
     if (ev.code === "Escape" || ev.key === "Escape") return { kind: "cancel" };
     if (
@@ -671,22 +796,36 @@ const PlayerCore = (() => {
       ev.code === "ShiftLeft" ||
       ev.code === "ShiftRight"
     ) {
-      return { kind: "pending", message: "Now press an F-key or mouse button." };
+      return { kind: "pending", message: "Now press an F-key, mouse button, or keyboard key." };
     }
 
     const key = functionKeyNumber(ev);
-    if (!key) {
-      return { kind: "invalid", message: "Use F1-F11 or F13-F24 as the shortcut key." };
+    let hotkeyKey = null;
+    let needsModifier = false;
+    if (key) {
+      if (key === 12) {
+        return { kind: "invalid", message: "F12 is reserved by Windows for debuggers." };
+      }
+      hotkeyKey = `F${key}`;
+    } else {
+      hotkeyKey = keyboardHotkeyName(ev);
+      needsModifier = true;
     }
-    if (key === 12) {
-      return { kind: "invalid", message: "F12 is reserved by Windows for debuggers." };
+    if (!hotkeyKey) {
+      return { kind: "invalid", message: "Use an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key." };
+    }
+    if (needsModifier && !ev.ctrlKey && !ev.altKey && !ev.shiftKey) {
+      return { kind: "invalid", message: "Use Ctrl, Alt, or Shift with this key." };
+    }
+    if (isReservedHotkey(hotkeyKey, ev.ctrlKey, ev.altKey, ev.shiftKey)) {
+      return { kind: "invalid", message: "That shortcut is reserved by Windows." };
     }
 
     const parts = [];
     if (ev.ctrlKey) parts.push("Ctrl");
     if (ev.altKey) parts.push("Alt");
     if (ev.shiftKey) parts.push("Shift");
-    parts.push(`F${key}`);
+    parts.push(hotkeyKey);
     return { kind: "captured", value: parts.join("+") };
   };
 
@@ -707,9 +846,6 @@ const PlayerCore = (() => {
     const key = mouseButtonHotkeyName(ev.button);
     if (!key) {
       return { kind: "invalid", message: "Use middle, Mouse4, or Mouse5 as a mouse shortcut." };
-    }
-    if (!ev.ctrlKey && !ev.altKey && !ev.shiftKey) {
-      return { kind: "invalid", message: "Mouse shortcuts need Ctrl, Alt, or Shift." };
     }
 
     const parts = [];
@@ -841,6 +977,7 @@ const PlayerCore = (() => {
     encoderCodecCaveat,
     fmtBytes,
     fmtLibraryStorageUsage,
+    cloudLibraryEntries,
     fmtDur,
     fmtTenths,
     fmtAgo,

@@ -106,6 +106,7 @@ fn create_upload_body(
         ));
     };
     map.remove("markers");
+    map.remove("description");
     if let Some(description) = normalized_description(description) {
         map.insert(
             "description".to_string(),
@@ -965,6 +966,7 @@ mod tests {
         CreateUploadRequest {
             client_clip_id: Some("local-1".to_string()),
             title: "clip".to_string(),
+            description: None,
             game_name: None,
             game_id: None,
             game_executable: None,

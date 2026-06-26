@@ -526,6 +526,49 @@ label span { white-space: nowrap; }
 
 .rail-spacer { flex: 1 1 0; }
 
+.rail-profile {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  width: 52px;
+  min-height: 52px;
+  padding: 4px 3px;
+  color: var(--muted);
+}
+.rail-profile[hidden] { display: none; }
+.rail-profile-avatar {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  overflow: hidden;
+  background: #0c1017;
+  color: var(--ok);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.rail-profile-avatar img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.rail-profile-name {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.05;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .dot { width: 10px; height: 10px; border-radius: 50%; background: #4a5160; flex: none; }
 .dot.on {
   background: var(--rec);
@@ -1377,6 +1420,7 @@ label span { white-space: nowrap; }
   background: transparent;
   text-align: left;
 }
+.context-menu button[hidden] { display: none; }
 .context-menu button:hover { background: var(--panel-2); }
 .context-menu button:disabled {
   color: var(--muted);
@@ -1427,6 +1471,27 @@ label span { white-space: nowrap; }
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
+.gallery-source-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.source-tab {
+  height: 26px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.source-tab:hover { color: var(--text); background: transparent; }
+.source-tab.active { color: var(--text); background: #222936; }
 .gallery-spacer { flex: 1 1 auto; }
 
 .gallery-search { position: relative; width: min(300px, 32vw); }
@@ -1442,6 +1507,8 @@ label span { white-space: nowrap; }
   padding: 0 22px 14px;
   border-bottom: 1px solid var(--line);
 }
+.gallery-filter[hidden],
+.gallery-select[hidden] { display: none; }
 .g-chip {
   height: 28px; min-width: 0; padding: 0 12px;
   border-radius: 999px; background: var(--panel-2); color: var(--muted); font-size: 12.5px;
@@ -1451,7 +1518,8 @@ label span { white-space: nowrap; }
 .g-dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
 .g-sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
 
-.gallery-grid {
+.gallery-grid,
+.cloud-gallery-grid {
   min-height: 0;
   overflow-y: auto;
   padding: 14px 22px 28px;
@@ -1465,6 +1533,8 @@ label span { white-space: nowrap; }
   gap: 16px;
   align-content: start;
 }
+.gallery-grid[hidden],
+.cloud-gallery-grid[hidden] { display: none; }
 .gallery-group-head {
   grid-column: 1 / -1;
   display: flex; align-items: baseline; gap: 10px;
@@ -1475,6 +1545,39 @@ label span { white-space: nowrap; }
 .gallery-group-head::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--line); }
 .gallery-group-head .gcount { letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
 .gallery-empty { grid-column: 1 / -1; padding: 50px 20px; text-align: center; color: var(--muted); }
+.gallery-empty.cloud-error {
+  padding: 12px 14px;
+  text-align: left;
+  border: 1px solid rgba(251, 113, 133, 0.26);
+  border-radius: 8px;
+  color: #fecdd3;
+  background: rgba(127, 29, 29, 0.18);
+}
+
+.cloud-card { cursor: default; }
+.cloud-card .card-thumb {
+  display: grid;
+  place-items: center;
+  color: rgba(255,255,255,.58);
+}
+.cloud-card-placeholder {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+}
+.cloud-card-placeholder > svg {
+  position: relative;
+  z-index: 1;
+  width: 46px;
+  height: 46px;
+  fill: currentColor;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,.45));
+}
+.cloud-local-state {
+  color: var(--muted);
+  font-size: 11.5px;
+}
 
 /* ---- clip card ---- */
 .card {

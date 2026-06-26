@@ -49,6 +49,10 @@
           <span>clips</span>
         </div>
         <div class="rail-spacer"></div>
+        <button id="rail-profile" class="rail-profile" type="button" title="Clipline Cloud profile" hidden>
+          <div id="rail-profile-avatar" class="rail-profile-avatar" aria-hidden="true"></div>
+          <div id="rail-profile-name" class="rail-profile-name"></div>
+        </button>
         <button id="rail-settings" title="Settings">
           <svg viewBox="0 0 24 24"><path d="M19.4 13c.04-.33.07-.66.07-1s-.03-.67-.07-1l2.1-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.48 1a7.6 7.6 0 0 0-1.73-1l-.37-2.63A.5.5 0 0 0 13.93 2h-4a.5.5 0 0 0-.5.43l-.37 2.63c-.62.26-1.2.6-1.73 1l-2.48-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .11.64L4.53 11c-.04.33-.07.66-.07 1s.03.67.07 1l-2.1 1.65a.5.5 0 0 0-.12.64l2 3.46c.13.22.39.31.61.22l2.48-1c.53.4 1.1.74 1.73 1l.37 2.63c.04.25.25.43.5.43h4c.25 0 .46-.18.5-.43l.37-2.63a7.6 7.6 0 0 0 1.73-1l2.48 1c.22.09.48 0 .6-.22l2-3.46a.5.5 0 0 0-.11-.64L19.4 13zM11.93 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>
           <span class="rail-label">Settings</span>
@@ -62,6 +66,10 @@
           <h1>Library</h1>
           <span id="gallery-count" class="gallery-count"></span>
           <span id="gallery-storage-used" class="gallery-storage-used"></span>
+          <nav id="gallery-source-tabs" class="gallery-source-tabs" aria-label="Library source">
+            <button class="source-tab active" data-gallery-source="local" type="button">Local</button>
+            <button class="source-tab" data-gallery-source="cloud" type="button">Cloud</button>
+          </nav>
           <span class="gallery-spacer"></span>
           <label class="gallery-search">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
@@ -90,6 +98,7 @@
           <button class="g-chip" data-filter="marked" type="button">Has markers</button>
         </div>
         <div id="gallery-grid" class="gallery-grid"></div>
+        <div id="cloud-gallery-grid" class="cloud-gallery-grid" hidden></div>
       </section>
 
       <div id="review-viewer" class="review-viewer">
@@ -657,11 +666,11 @@
             <div class="setting-row">
               <div class="setting-info">
                 <strong>Save Replay</strong>
-                <span>Global shortcut - use an F-key, or middle/side mouse button with Ctrl/Alt/Shift.</span>
+                <span>Global shortcut - use an F-key, a mouse button, or Ctrl/Alt/Shift plus a keyboard key.</span>
               </div>
               <div class="hotkey-recorder">
                 <input id="set-hotkey" spellcheck="false" readonly inputmode="none" aria-describedby="hotkey-status" />
-                <span id="hotkey-status" class="hint">Click the field, then press F1-F11/F13-F24 or Ctrl/Alt/Shift plus middle mouse, Mouse4, or Mouse5.</span>
+                <span id="hotkey-status" class="hint">Click the field, then press F1-F11/F13-F24, middle mouse, Mouse4, Mouse5, or a modified keyboard key.</span>
               </div>
             </div>
           </div>
@@ -786,6 +795,9 @@
   </dialog>
 
   <div id="clip-context-menu" class="context-menu" hidden>
+    <button id="clip-menu-play" type="button">Play</button>
+    <button id="clip-menu-open-cloud-page" type="button">Open cloud page</button>
+    <button id="clip-menu-copy-cloud-link" type="button">Copy cloud link</button>
     <button id="clip-menu-upload" type="button">Upload</button>
     <button id="clip-menu-rename" type="button">Rename</button>
     <button id="clip-menu-delete" type="button" class="danger-text">Delete</button>

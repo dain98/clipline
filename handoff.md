@@ -261,6 +261,28 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-25):
+- Connected cloud identity in the rail: when `settings.cloud` has a stored credential target/user,
+  the bottom-left rail shows a compact profile button above Settings. It refreshes the account from
+  `/api/v1/auth/me`, prefers `display_name` over username, fetches `GET /api/v1/me/avatar` with the
+  stored bearer token via the native `cloud_user_avatar` command, and opens the user's cloud profile
+  at `/u/{username}`. A small in-process ETag cache handles avatar 304 responses; 404 or fetch errors
+  keep an initials fallback and disconnect hides the rail identity entirely.
+- Library cloud source tab: the Library header now has Local/Cloud tabs. The desktop pins
+  `clipline-cloud-api` to Clipline Cloud `v1.2.18` and uses `CloudClient::list_clips` to fetch the
+  authoritative server library (`GET /api/v1/clips`, paged newest-first). Cloud cards still merge
+  local upload records by `client_clip_id` so they can show whether a local copy is present, and
+  fall back to persisted `settings.cloud.uploads` rows while the server list is unavailable. Rows
+  with a matching local file now render as normal playable local clip cards. Cloud-only rows fetch
+  authenticated thumbnails and media through native commands, cache them under
+  `%APPDATA%\Clipline\cloud-cache`, and play the cached MP4 through the existing review player;
+  `Open page` still opens the owned cloud page externally. PR #53 review follow-up: disconnected
+  Cloud tab rendering no longer recurses, fallback upload rows keep `remote_clip_id` so cloud-only
+  history can play in-app, thumbnails lazy-load through the shared poster observer, transient list
+  errors stay visible without latching the tab permanently loaded, cloud-cache files are
+  account-namespaced/pruned/bounded by size, and cloud-only review playback hides local-file
+  actions while rerouting the header cloud button to copy the cloud link. The Cloud list command
+  still fetches every page before first render; convert it to first-page render + lazy pagination if
+  large cloud libraries become sluggish.
 - Recorder startup display recovery: startup primary-monitor capture now resolves the primary
   display through the same `EnumDisplayMonitors` path used by Settings instead of
   `MonitorFromPoint(0,0)`, which could bind to a ghost/wrong monitor on some Windows layouts.

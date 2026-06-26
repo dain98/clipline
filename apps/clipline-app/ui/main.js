@@ -81,6 +81,13 @@ const stageFrame = $("stage-frame");
 let currentClip = null;
 let clipsCache = [];
 // Gallery (library home) view state.
+let gallerySource = "local";
+let cloudClipsCache = [];
+let cloudClipsLoaded = false;
+let cloudClipsLoading = false;
+let cloudClipsError = "";
+let railProfileAvatarKey = "";
+let railProfileAvatarRequest = 0;
 let galleryFilter = "all";
 let gallerySort = "new";
 let galleryGroup = "smart";
@@ -113,6 +120,7 @@ let regionLayout = null;
 let regionDrag = null;
 let regionMenuDisplayId = null;
 let clipContextTarget = null;
+let cloudContextTarget = null;
 let uploadDialogClip = null;
 let selectedAudioTrackIds = new Set();
 let uploadSelectedAudioTrackIds = new Set();
@@ -381,7 +389,7 @@ function fillSettings(s) {
   updateGameDetectionStatus();
   updateCaptureStatus();
   syncUploadClipButton();
-  if (clipsCache.length) renderClips();
+  renderClips();
 }
 
 function readSettings() {
@@ -479,6 +487,7 @@ function defaultCloudSettings() {
     public_url: null,
     connected_user_id: null,
     connected_username: null,
+    connected_display_name: null,
     credential_target: null,
     default_visibility: "private",
     delete_local_after_upload: false,
@@ -496,8 +505,9 @@ function fillCloudSettings(cloud) {
   $("cloud-delete-local-after-upload").checked = !!cloud.delete_local_after_upload;
   $("cloud-auto-upload-rules").checked = false;
   syncCloudHttpWarning();
+  const displayName = cloudDisplayName(cloud);
   $("cloud-connection-status").textContent = connected
-    ? `Connected as ${cloud.connected_username || cloud.connected_user_id}`
+    ? `Connected as ${displayName}`
     : "Not connected";
   $("cloud-connect-fields").hidden = connected;
   $("cloud-connect").hidden = connected;
@@ -505,6 +515,113 @@ function fillCloudSettings(cloud) {
   $("cloud-disconnect").hidden = !connected;
   $("cloud-disconnect").disabled = !connected;
   $("cloud-connect-status").textContent = "";
+  syncRailProfile(cloud);
+}
+
+function cloudDisplayName(cloud) {
+  return String(
+    cloud.connected_display_name
+    || cloud.connected_username
+    || cloud.connected_user_id
+    || "Cloud"
+  ).trim() || "Cloud";
+}
+
+function railProfileInitials(name) {
+  const parts = String(name || "")
+    .trim()
+    .split(/[\s._-]+/)
+    .filter(Boolean);
+  if (parts.length >= 2) {
+    return `${Array.from(parts[0])[0] || ""}${Array.from(parts[1])[0] || ""}`.toUpperCase();
+  }
+  return (Array.from(parts[0] || "C").slice(0, 2).join("") || "C").toUpperCase();
+}
+
+function setRailProfileFallback(name) {
+  const avatar = $("rail-profile-avatar");
+  const fallback = document.createElement("span");
+  fallback.textContent = railProfileInitials(name);
+  avatar.replaceChildren(fallback);
+}
+
+function setRailProfileImage(dataUrl, name) {
+  const img = document.createElement("img");
+  img.alt = "";
+  img.addEventListener("error", () => setRailProfileFallback(name), { once: true });
+  img.src = dataUrl;
+  $("rail-profile-avatar").replaceChildren(img);
+}
+
+function syncRailProfile(cloud = cloudSettings()) {
+  const connected = Boolean(cloud.connected_user_id && cloud.credential_target);
+  const profile = $("rail-profile");
+  const avatar = $("rail-profile-avatar");
+  const nameEl = $("rail-profile-name");
+  if (!connected) {
+    railProfileAvatarKey = "";
+    railProfileAvatarRequest += 1;
+    profile.hidden = true;
+    profile.title = "";
+    profile.removeAttribute("aria-label");
+    avatar.replaceChildren();
+    nameEl.textContent = "";
+    return;
+  }
+
+  const name = cloudDisplayName(cloud);
+  const key = `${cloud.host_url || ""}|${cloud.connected_user_id || ""}|${cloud.credential_target || ""}`;
+  profile.hidden = false;
+  profile.title = `Clipline Cloud: ${name}`;
+  profile.setAttribute("aria-label", `Open Clipline Cloud profile for ${name}`);
+  nameEl.textContent = name;
+  if (!avatar.querySelector("img")) setRailProfileFallback(name);
+  if (railProfileAvatarKey === key) return;
+
+  railProfileAvatarKey = key;
+  setRailProfileFallback(name);
+  refreshRailProfileIdentity(key);
+  loadRailProfileAvatar(key, name);
+}
+
+async function refreshRailProfileIdentity(key) {
+  try {
+    const profile = await invoke("cloud_user_profile");
+    if (key !== railProfileAvatarKey || !profile) return;
+    const cloud = cloudSettings();
+    cloud.connected_user_id = profile.user_id || cloud.connected_user_id;
+    cloud.connected_username = profile.username || cloud.connected_username;
+    cloud.connected_display_name = profile.display_name || null;
+    if (currentSettings) currentSettings.cloud = cloud;
+    const name = cloudDisplayName(cloud);
+    $("rail-profile").title = `Clipline Cloud: ${name}`;
+    $("rail-profile").setAttribute("aria-label", `Open Clipline Cloud profile for ${name}`);
+    $("rail-profile-name").textContent = name;
+    if (!$("rail-profile-avatar").querySelector("img")) setRailProfileFallback(name);
+    $("cloud-connection-status").textContent = `Connected as ${name}`;
+  } catch (_) {
+    // The saved username remains useful if the identity refresh fails offline.
+  }
+}
+
+async function loadRailProfileAvatar(key, name) {
+  const request = ++railProfileAvatarRequest;
+  try {
+    const dataUrl = await invoke("cloud_user_avatar");
+    if (request !== railProfileAvatarRequest || key !== railProfileAvatarKey || !dataUrl) return;
+    setRailProfileImage(dataUrl, name);
+  } catch (_) {
+    // Keep the initials fallback when the account has no reachable avatar.
+  }
+}
+
+async function openRailProfile() {
+  $("error").textContent = "";
+  try {
+    await invoke("open_cloud_user_profile");
+  } catch (e) {
+    $("error").textContent = String(e);
+  }
 }
 
 function cloudHostUsesInsecureHttp() {
@@ -1122,7 +1239,7 @@ function setHotkeyStatus(message, state = "") {
 function beginHotkeyCapture() {
   hotkeyCaptureActive = true;
   $("set-hotkey").classList.add("recording");
-  setHotkeyStatus("Press an F-key, or Ctrl/Alt/Shift plus middle mouse, Mouse4, or Mouse5.", "recording");
+  setHotkeyStatus("Press an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key.", "recording");
 }
 
 function endHotkeyCapture(message = "Click the field to record a new shortcut.", state = "") {
@@ -1767,6 +1884,181 @@ function clipCloudVisibility(record) {
   return record.upload_status === "uploaded_private" ? "private" : "public";
 }
 
+function cloudLibraryRecords() {
+  return PlayerCore.cloudLibraryEntries(cloudSettings().uploads || {}, clipsCache, cloudClipsCache);
+}
+
+function cloudLocalClipForEntry(entry) {
+  if (!entry || !entry.local_available || !entry.path) return null;
+  return clipsCache.find((clip) => clip && clip.path === entry.path) || null;
+}
+
+function isCloudOnlyReviewClip(clip = currentClip) {
+  return !!(
+    clip
+    && clip.cloud_remote_clip_id
+    && !clipsCache.some((localClip) => localClip && localClip.path === clip.path)
+  );
+}
+
+function cloudClipAssetRequest(entry) {
+  return {
+    remote_clip_id: String(entry && entry.remote_clip_id || ""),
+    title: entry && entry.title ? String(entry.title) : null,
+    duration_ms: entry && Number.isFinite(Number(entry.duration_ms)) ? Number(entry.duration_ms) : null,
+    file_size_bytes: entry && Number.isFinite(Number(entry.file_size_bytes)) ? Number(entry.file_size_bytes) : null,
+    updated_at_unix: entry && Number.isFinite(Number(entry.updated_at_unix)) ? Number(entry.updated_at_unix) : null,
+  };
+}
+
+function resetCloudClipsCache() {
+  cloudClipsCache = [];
+  cloudClipsLoaded = false;
+  cloudClipsLoading = false;
+  cloudClipsError = "";
+}
+
+async function loadCloudClips({ force = false } = {}) {
+  if (!cloudConnected()) {
+    resetCloudClipsCache();
+    if (gallerySource === "cloud") renderCloudClips();
+    return;
+  }
+  if (cloudClipsLoading) return;
+  if (cloudClipsError && !force) return;
+  if (cloudClipsLoaded && !force) return;
+  cloudClipsLoading = true;
+  cloudClipsError = "";
+  if (gallerySource === "cloud") renderClips();
+  try {
+    const result = await invoke("list_cloud_clips");
+    cloudClipsCache = result && Array.isArray(result.clips) ? result.clips : [];
+    cloudClipsLoaded = true;
+  } catch (e) {
+    cloudClipsError = String(e);
+  } finally {
+    cloudClipsLoading = false;
+    if (gallerySource === "cloud") renderClips();
+  }
+}
+
+function cloudEntryMatchesSearch(entry) {
+  if (!gallerySearch) return true;
+  const hay = [
+    entry.title,
+    entry.path,
+    entry.remote_url,
+    entry.visibility,
+    entry.upload_status,
+  ].join(" ").toLowerCase();
+  return hay.includes(gallerySearch);
+}
+
+function cloudStatusLabel(status) {
+  switch (status) {
+    case "processing":
+    case "uploaded_processing":
+      return "processing";
+    case "uploaded_private":
+      return "private";
+    case "uploaded_public":
+      return "public";
+    default:
+      return String(status || "uploaded").replace(/^uploaded_/, "");
+  }
+}
+
+async function openCloudClipUrl(entry) {
+  if (!entry || !entry.remote_url) return;
+  try {
+    await invoke("open_cloud_clip_url", { url: entry.remote_url });
+  } catch (e) {
+    $("error").textContent = String(e);
+    setDeckStatus("could not open cloud clip", { transient: true });
+  }
+}
+
+async function openCloudEntryInApp(entry) {
+  const localClip = cloudLocalClipForEntry(entry);
+  if (localClip) {
+    openClip(localClip);
+    return;
+  }
+  if (!entry || !entry.remote_clip_id) {
+    await openCloudClipUrl(entry);
+    return;
+  }
+  setDeckStatus("downloading cloud clip...");
+  try {
+    const clip = await invoke("cache_cloud_clip_media", {
+      request: cloudClipAssetRequest(entry),
+    });
+    openClip({
+      ...clip,
+      cloud_remote_clip_id: entry.remote_clip_id,
+      cloud_remote_url: entry.remote_url,
+    });
+    setDeckStatus("");
+  } catch (e) {
+    $("error").textContent = String(e);
+    setDeckStatus("could not play cloud clip", { transient: true });
+  }
+}
+
+function cloudThumbnailKey(entry) {
+  return `cloud-thumb:${entry.remote_clip_id}:${entry.updated_at_unix || 0}`;
+}
+
+function loadCloudThumbnail(entry, thumb) {
+  if (!entry || !entry.remote_clip_id) return;
+  const key = cloudThumbnailKey(entry);
+  const cached = posterCache.get(key);
+  if (cached) {
+    if (!thumb.querySelector(".card-thumb-img")) thumb.appendChild(makePosterImg(cached));
+    return;
+  }
+  let pending = cloudThumbnailInflight.get(key);
+  if (!pending) {
+    pending = invoke("cloud_clip_thumbnail", { request: cloudClipAssetRequest(entry) })
+      .then((posterPath) => {
+        if (!posterPath) return null;
+        const url = convertFileSrc(posterPath);
+        posterCache.set(key, url);
+        return url;
+      })
+      .catch(() => null)
+      .finally(() => {
+        cloudThumbnailInflight.delete(key);
+      });
+    cloudThumbnailInflight.set(key, pending);
+  }
+  pending
+    .then((posterPath) => {
+      const url = posterPath;
+      if (!url) return;
+      if (thumb.isConnected && !thumb.querySelector(".card-thumb-img")) {
+        thumb.appendChild(makePosterImg(url));
+      }
+    })
+    .catch(() => {});
+}
+
+function observeCloudThumbnail(entry, thumb) {
+  if (!entry || !entry.remote_clip_id) return;
+  const key = cloudThumbnailKey(entry);
+  const cached = posterCache.get(key);
+  if (cached) {
+    thumb.appendChild(makePosterImg(cached));
+    return;
+  }
+  if (!posterObserver) {
+    loadCloudThumbnail(entry, thumb);
+    return;
+  }
+  posterQueue.set(thumb, { type: "cloud-thumbnail", entry });
+  posterObserver.observe(thumb);
+}
+
 function clipNameStem(name) {
   return String(name || "").replace(/\.mp4$/i, "").trim();
 }
@@ -1968,6 +2260,69 @@ function cloudVisibilityEl(record) {
   return el;
 }
 
+const CLOUD_CARD_ICON =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.2 18h10.2a4.1 4.1 0 0 0 .4-8.2A6.2 6.2 0 0 0 5.9 8.1 5 5 0 0 0 7.2 18zm.2-2a3 3 0 0 1-.5-5.9l.8-.1.3-.8A4.2 4.2 0 0 1 16 10.4l.2 1.2 1.2.1A2.1 2.1 0 0 1 17.4 16H7.4z"/></svg>';
+
+function cloudClipCard(entry) {
+  const el = document.createElement("article");
+  el.className = "card cloud-card";
+  el.title = entry.title;
+
+  const thumb = document.createElement("div");
+  thumb.className = "card-thumb";
+  thumb.style.cssText = thumbGradient({ name: entry.title, session: entry.remote_url });
+  const placeholder = document.createElement("span");
+  placeholder.className = "cloud-card-placeholder";
+  placeholder.innerHTML = CLOUD_CARD_ICON; // static markup, safe
+  thumb.appendChild(placeholder);
+  observeCloudThumbnail(entry, thumb);
+
+  const play = document.createElement("div");
+  play.className = "card-play";
+  play.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'; // static markup, safe
+
+  const kindChip = document.createElement("span");
+  kindChip.className = "card-kind session";
+  kindChip.title = "Cloud clip";
+  kindChip.innerHTML =
+    '<svg viewBox="0 0 24 24"><path d="M7.2 18h10.2a4.1 4.1 0 0 0 .4-8.2A6.2 6.2 0 0 0 5.9 8.1 5 5 0 0 0 7.2 18z"/></svg>';
+  const kindLabel = document.createElement("span");
+  kindLabel.textContent = "Cloud";
+  kindChip.appendChild(kindLabel);
+  thumb.appendChild(kindChip);
+
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  const nameRow = document.createElement("div");
+  nameRow.className = "card-name";
+  const name = document.createElement("span");
+  name.className = "t";
+  name.textContent = entry.title;
+  nameRow.appendChild(name);
+  const visibility = cloudVisibilityEl(entry);
+  if (visibility) nameRow.appendChild(visibility);
+
+  const info = document.createElement("div");
+  info.className = "card-sub";
+  const updated = entry.updated_at_unix ? fmtAgo(Date.now() / 1000, entry.updated_at_unix) : "";
+  const parts = [cloudStatusLabel(entry.upload_status)];
+  if (updated) parts.push(updated);
+  parts.push(entry.local_available ? "local copy available" : "cloud only");
+  info.textContent = parts.join(" · ");
+
+  const localState = document.createElement("div");
+  localState.className = "cloud-local-state";
+  localState.textContent = entry.remote_url;
+  localState.title = entry.remote_url;
+
+  meta.append(nameRow, info, localState);
+  thumb.appendChild(play);
+  el.append(thumb, meta);
+  el.addEventListener("click", () => openCloudEntryInApp(entry));
+  el.addEventListener("contextmenu", (ev) => showCloudClipContextMenu(ev, entry));
+  return el;
+}
+
 // Clip names come from disk; build rows with textContent, never innerHTML.
 const CARD_KIND_LABELS = { replay: "Replay", session: "Session", trim: "Trim" };
 // Marker categories → tint var, matching the timeline glyph colors.
@@ -2016,6 +2371,7 @@ function loadCardPoster(path, thumb) {
 // scrolls near the viewport — otherwise a library of hundreds of clips would
 // queue an extraction for every clip on the first render and peg CPU/disk.
 const posterQueue = new WeakMap();
+const cloudThumbnailInflight = new Map();
 const posterObserver =
   typeof IntersectionObserver === "function"
     ? new IntersectionObserver(
@@ -2024,9 +2380,13 @@ const posterObserver =
             if (!entry.isIntersecting) continue;
             const thumb = entry.target;
             obs.unobserve(thumb);
-            const path = posterQueue.get(thumb);
+            const request = posterQueue.get(thumb);
             posterQueue.delete(thumb);
-            if (path) loadCardPoster(path, thumb);
+            if (typeof request === "string") {
+              loadCardPoster(request, thumb);
+            } else if (request && request.type === "cloud-thumbnail") {
+              loadCloudThumbnail(request.entry, thumb);
+            }
           }
         },
         { rootMargin: "400px 0px" },
@@ -2267,11 +2627,27 @@ function galleryGroups(clips) {
 
 function renderClips() {
   syncUploadClipButton();
+  syncReviewLocalActions();
   // Keep the home in sync: empty library shows the capture preview, otherwise
   // the gallery. (Editor/settings arbitration lives in updateViews.)
   updateViews();
   const root = $("gallery-grid");
+  const cloudRoot = $("cloud-gallery-grid");
   if (!root) return;
+  const showingCloud = gallerySource === "cloud";
+  root.hidden = showingCloud;
+  if (cloudRoot) cloudRoot.hidden = !showingCloud;
+  $("gallery-filter").hidden = showingCloud;
+  $("gallery-group").hidden = showingCloud;
+  $("gallery-sort").hidden = showingCloud;
+  document.querySelectorAll("#gallery-source-tabs .source-tab").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.gallerySource === gallerySource);
+  });
+  if (showingCloud) {
+    renderCloudClips();
+    loadCloudClips();
+    return;
+  }
   // Drop the previous render's pending poster observations before rebuilding;
   // the detached cards would otherwise linger in the observer.
   if (posterObserver) posterObserver.disconnect();
@@ -2310,17 +2686,88 @@ function renderClips() {
   }
 }
 
+function renderCloudClips() {
+  const root = $("cloud-gallery-grid");
+  if (!root) return;
+  if (posterObserver) posterObserver.disconnect();
+  root.replaceChildren();
+  const entries = cloudLibraryRecords();
+  const filtered = entries.filter(cloudEntryMatchesSearch);
+  $("gallery-count").textContent = entries.length
+    ? `${filtered.length} of ${entries.length}`
+    : "";
+  if (cloudClipsLoading && !entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = "Loading cloud clips...";
+    root.appendChild(empty);
+    return;
+  }
+  if (cloudClipsError) {
+    const error = document.createElement("div");
+    error.className = "gallery-empty cloud-error";
+    error.textContent = cloudClipsError;
+    root.appendChild(error);
+    if (!entries.length) return;
+  }
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = cloudConnected() ? "No cloud clips yet." : "Not connected to Clipline Cloud.";
+    root.appendChild(empty);
+    return;
+  }
+  if (!filtered.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = "No cloud clips match that search.";
+    root.appendChild(empty);
+    return;
+  }
+  for (const entry of filtered) {
+    const localClip = cloudLocalClipForEntry(entry);
+    root.appendChild(localClip ? clipCard(localClip) : cloudClipCard(entry));
+  }
+}
+
 function showClipContextMenu(ev, clip) {
   ev.preventDefault();
   ev.stopPropagation();
   hideRegionMenu();
   clipContextTarget = clip;
+  cloudContextTarget = null;
   const record = clipCloudRecord(clip);
   const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
   const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
+  $("clip-menu-play").hidden = true;
+  $("clip-menu-open-cloud-page").hidden = true;
+  $("clip-menu-copy-cloud-link").hidden = true;
   const upload = $("clip-menu-upload");
+  upload.hidden = false;
   upload.textContent = uploaded ? "Copy cloud link" : "Upload";
   upload.disabled = busy || (!uploaded && !cloudConnected());
+  $("clip-menu-rename").hidden = false;
+  $("clip-menu-delete").hidden = false;
+  const menu = $("clip-context-menu");
+  menu.hidden = false;
+  positionContextMenu(menu, ev.clientX, ev.clientY);
+}
+
+function showCloudClipContextMenu(ev, entry) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  hideRegionMenu();
+  clipContextTarget = null;
+  cloudContextTarget = entry;
+  $("clip-menu-play").hidden = false;
+  $("clip-menu-play").disabled = false;
+  $("clip-menu-open-cloud-page").hidden = false;
+  $("clip-menu-open-cloud-page").disabled = !entry.remote_url;
+  $("clip-menu-copy-cloud-link").hidden = false;
+  $("clip-menu-copy-cloud-link").disabled = !entry.remote_url;
+  $("clip-menu-upload").hidden = true;
+  $("clip-menu-rename").hidden = true;
+  $("clip-menu-delete").hidden = true;
   const menu = $("clip-context-menu");
   menu.hidden = false;
   positionContextMenu(menu, ev.clientX, ev.clientY);
@@ -2330,6 +2777,7 @@ function hideClipContextMenu() {
   const menu = $("clip-context-menu");
   if (menu) menu.hidden = true;
   clipContextTarget = null;
+  cloudContextTarget = null;
 }
 
 function clipContextRecord() {
@@ -2345,6 +2793,16 @@ function syncUploadClipButton() {
   const btn = $("upload-clip");
   if (!btn) return;
   const clip = currentClip;
+  btn.hidden = false;
+  if (isCloudOnlyReviewClip(clip)) {
+    btn.title = clip.cloud_remote_url ? "Copy cloud link" : "Cloud page unavailable";
+    btn.classList.toggle("uploaded", !!clip.cloud_remote_url);
+    btn.classList.remove("busy");
+    btn.disabled = !clip.cloud_remote_url;
+    btn.innerHTML =
+      '<svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.5-3.5a3 3 0 1 1 4.2 4.2l-1.5 1.5-1.4-1.4 1.5-1.5a1 1 0 1 0-1.4-1.4L12 13.4a1 1 0 0 1-1.4 0zm2.8-2.8a1 1 0 0 1 0 1.4l-3.5 3.5a3 3 0 1 1-4.2-4.2l1.5-1.5 1.4 1.4-1.5 1.5a1 1 0 1 0 1.4 1.4L12 10.6a1 1 0 0 1 1.4 0z"/></svg>';
+    return;
+  }
   const record = clip ? clipCloudRecord(clip) : null;
   const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
   const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
@@ -2355,6 +2813,15 @@ function syncUploadClipButton() {
   btn.innerHTML = uploaded
     ? '<svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.5-3.5a3 3 0 1 1 4.2 4.2l-1.5 1.5-1.4-1.4 1.5-1.5a1 1 0 1 0-1.4-1.4L12 13.4a1 1 0 0 1-1.4 0zm2.8-2.8a1 1 0 0 1 0 1.4l-3.5 3.5a3 3 0 1 1-4.2-4.2l1.5-1.5 1.4 1.4-1.5 1.5a1 1 0 1 0 1.4 1.4L12 10.6a1 1 0 0 1 1.4 0z"/></svg>'
     : '<svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>';
+}
+
+function syncReviewLocalActions() {
+  const cloudOnly = isCloudOnlyReviewClip();
+  for (const id of ["rename-clip", "open-folder", "copy-clip", "delete-clip"]) {
+    const el = $(id);
+    if (el) el.hidden = cloudOnly;
+  }
+  if (cloudOnly) setClipTitleEditing(false);
 }
 
 function setClipRenameControlsDisabled(disabled) {
@@ -2374,6 +2841,7 @@ function setClipTitleEditing(editing) {
 
 function beginClipRename(clip = currentClip) {
   if (!clip) return;
+  if (isCloudOnlyReviewClip(clip)) return;
   if (!currentClip || currentClip.path !== clip.path) openClip(clip);
   setClipTitleEditing(true);
   $("rename-input").value = (currentClip && currentClip.path === clip.path ? currentClip.name : clip.name) || "";
@@ -2477,6 +2945,7 @@ function isRenameFileLockError(error) {
 async function saveClipRename(ev) {
   ev.preventDefault();
   if (!currentClip || renamePending) return;
+  if (isCloudOnlyReviewClip(currentClip)) return;
   const oldClip = currentClip;
   const oldPath = oldClip.path;
   const nextName = $("rename-input").value.trim();
@@ -2546,6 +3015,8 @@ function openClip(clip) {
   setClipTitleEditing(false);
   $("pname").textContent = clip.name;
   $("pmeta").textContent = `${clip.size_mb.toFixed(1)} MB · ${clip.path}`;
+  syncReviewLocalActions();
+  syncUploadClipButton();
   settingsOpen = false;
   updateViews();
   updateStageFrame();
@@ -2574,6 +3045,8 @@ function closeReview() {
   video.load();
   currentClip = null;
   currentReviewMediaPath = null;
+  syncReviewLocalActions();
+  syncUploadClipButton();
   selectedAudioTrackIds = new Set();
   resetZoom();
   updateViews();
@@ -3378,6 +3851,7 @@ async function installPendingUpdate() {
 }
 
 async function deleteClip(path = currentClip && currentClip.path) {
+  if (currentClip && currentClip.path === path && isCloudOnlyReviewClip(currentClip)) return;
   if (!path) return;
   const name = path.split(/[\\/]/).pop();
   if (!(await confirmDelete(name))) return;
@@ -3397,6 +3871,7 @@ async function deleteClip(path = currentClip && currentClip.path) {
 
 async function openFolder() {
   if (!currentClip) return;
+  if (isCloudOnlyReviewClip(currentClip)) return;
   try {
     await invoke("reveal_clip", { path: currentClip.path });
   } catch (e) {
@@ -3406,6 +3881,7 @@ async function openFolder() {
 
 async function copyClipToClipboard() {
   if (!currentClip) return;
+  if (isCloudOnlyReviewClip(currentClip)) return;
   $("copy-clip").disabled = true;
   $("error").textContent = "";
   setDeckStatus("");
@@ -3477,7 +3953,9 @@ async function connectCloud() {
       },
     });
     $("cloud-connect-status").textContent = "connected";
+    resetCloudClipsCache();
     await reloadSettings();
+    if (gallerySource === "cloud") loadCloudClips({ force: true });
   } catch (e) {
     $("cloud-connect-status").textContent = String(e);
   }
@@ -3488,6 +3966,7 @@ async function disconnectCloud() {
   $("error").textContent = "";
   try {
     await invoke("cloud_disconnect");
+    resetCloudClipsCache();
     await reloadSettings();
   } catch (e) {
     $("cloud-connect-status").textContent = String(e);
@@ -3605,6 +4084,7 @@ async function uploadClipToCloud(clip, request = {}) {
       }
     }
     await refresh();
+    loadCloudClips({ force: true });
   } catch (e) {
     setDeckStatus("");
     $("error").textContent = String(e);
@@ -3689,6 +4169,13 @@ $("review-back").addEventListener("click", () => closeReview());
 $("gallery-search").addEventListener("input", (ev) => {
   gallerySearch = ev.target.value.trim().toLowerCase();
   renderClips();
+});
+$("gallery-source-tabs").addEventListener("click", (ev) => {
+  const tab = ev.target.closest(".source-tab");
+  if (!tab) return;
+  gallerySource = tab.dataset.gallerySource === "cloud" ? "cloud" : "local";
+  renderClips();
+  if (gallerySource === "cloud") loadCloudClips({ force: true });
 });
 $("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });
 $("gallery-group").addEventListener("change", (ev) => { galleryGroup = ev.target.value; renderClips(); });
@@ -3783,6 +4270,21 @@ document.addEventListener("contextmenu", (ev) => {
   hideClipContextMenu();
 });
 $("clip-context-menu").addEventListener("contextmenu", (ev) => ev.preventDefault());
+$("clip-menu-play").addEventListener("click", () => {
+  const entry = cloudContextTarget;
+  hideClipContextMenu();
+  if (entry) openCloudEntryInApp(entry);
+});
+$("clip-menu-open-cloud-page").addEventListener("click", () => {
+  const entry = cloudContextTarget;
+  hideClipContextMenu();
+  if (entry) openCloudClipUrl(entry);
+});
+$("clip-menu-copy-cloud-link").addEventListener("click", () => {
+  const entry = cloudContextTarget;
+  hideClipContextMenu();
+  if (entry) copyCloudUrl(entry);
+});
 $("clip-menu-upload").addEventListener("click", () => {
   const clip = clipContextTarget;
   const record = clipContextRecord();
@@ -3879,6 +4381,10 @@ $("rename-input").addEventListener("keydown", (ev) => {
 });
 $("upload-clip").addEventListener("click", () => {
   if (!currentClip) return;
+  if (isCloudOnlyReviewClip(currentClip)) {
+    copyCloudUrl({ remote_url: currentClip.cloud_remote_url || "" });
+    return;
+  }
   const record = clipCloudRecord(currentClip);
   const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
   if (uploaded) copyCloudUrl(record);
@@ -3910,6 +4416,7 @@ $("keys-dialog").addEventListener("click", (ev) => {
 });
 
 $("rail-save").addEventListener("click", () => invoke("save_replay"));
+$("rail-profile").addEventListener("click", openRailProfile);
 $("rail-settings").addEventListener("click", () => toggleSettings());
 $("settings-close").addEventListener("click", () => toggleSettings(false));
 $("set-hotkey").addEventListener("focus", beginHotkeyCapture);

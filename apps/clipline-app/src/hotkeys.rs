@@ -216,7 +216,12 @@ fn parse_hook_hotkey(raw: &str) -> Result<HookHotkey, String> {
             "Middle" => key_vk = Some(VK_MBUTTON_CODE),
             "Mouse4" => key_vk = Some(VK_XBUTTON1_CODE),
             "Mouse5" => key_vk = Some(VK_XBUTTON2_CODE),
-            _ => return Err("unsupported hotkey part".into()),
+            key => {
+                key_vk = Some(
+                    keyboard_key_vk_code(key)
+                        .ok_or_else(|| format!("unsupported hotkey key: {key}"))?,
+                );
+            }
         }
     }
 
@@ -283,7 +288,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         let keyboard = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
         match message {
             WM_KEYDOWN | WM_SYSKEYDOWN => {
-                if (VK_F1_CODE..=VK_F24_CODE).contains(&keyboard.vkCode) {
+                if is_supported_keyboard_hook_vk(keyboard.vkCode) {
                     dispatch_key_down(keyboard.vkCode, (keyboard.flags & LLKHF_ALTDOWN) != 0);
                 }
             }
@@ -341,6 +346,77 @@ fn release_key(vk_code: u32) {
     }
 }
 
+fn is_supported_keyboard_hook_vk(vk_code: u32) -> bool {
+    (VK_F1_CODE..=VK_F24_CODE).contains(&vk_code)
+        || (0x30..=0x39).contains(&vk_code)
+        || (0x41..=0x5A).contains(&vk_code)
+        || matches!(
+            vk_code,
+            0x08 | 0x09
+                | 0x0D
+                | 0x20
+                | 0x21
+                | 0x22
+                | 0x23
+                | 0x24
+                | 0x25
+                | 0x26
+                | 0x27
+                | 0x28
+                | 0x2D
+                | 0x2E
+                | 0xBA
+                | 0xBB
+                | 0xBC
+                | 0xBD
+                | 0xBE
+                | 0xBF
+                | 0xC0
+                | 0xDB
+                | 0xDC
+                | 0xDD
+                | 0xDE
+        )
+}
+
+fn keyboard_key_vk_code(key: &str) -> Option<u32> {
+    if key.len() == 1 {
+        let c = key.as_bytes()[0];
+        if c.is_ascii_uppercase() || c.is_ascii_digit() {
+            return Some(c as u32);
+        }
+    }
+
+    match key {
+        "Backspace" => Some(0x08),
+        "Tab" => Some(0x09),
+        "Enter" => Some(0x0D),
+        "Space" => Some(0x20),
+        "PageUp" => Some(0x21),
+        "PageDown" => Some(0x22),
+        "End" => Some(0x23),
+        "Home" => Some(0x24),
+        "ArrowLeft" => Some(0x25),
+        "ArrowUp" => Some(0x26),
+        "ArrowRight" => Some(0x27),
+        "ArrowDown" => Some(0x28),
+        "Insert" => Some(0x2D),
+        "Delete" => Some(0x2E),
+        "Semicolon" => Some(0xBA),
+        "Equal" => Some(0xBB),
+        "Comma" => Some(0xBC),
+        "Minus" => Some(0xBD),
+        "Period" => Some(0xBE),
+        "Slash" => Some(0xBF),
+        "Backquote" => Some(0xC0),
+        "BracketLeft" => Some(0xDB),
+        "Backslash" => Some(0xDC),
+        "BracketRight" => Some(0xDD),
+        "Quote" => Some(0xDE),
+        _ => None,
+    }
+}
+
 fn xbutton_vk_code(mouse_data: u32) -> Option<u32> {
     match ((mouse_data >> 16) & 0xffff) as u16 {
         XBUTTON1 => Some(VK_XBUTTON1_CODE),
@@ -367,6 +443,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_modified_keyboard_hotkeys_for_hook_matching() {
+        let letter = parse_hook_hotkey("Ctrl+G").unwrap();
+        assert!(letter.matches(0x47, true, false, false));
+        assert!(!letter.matches(0x47, false, false, false));
+
+        let arrow = parse_hook_hotkey("Alt+Shift+ArrowLeft").unwrap();
+        assert!(arrow.matches(0x25, false, true, true));
+        assert!(!arrow.matches(0x25, false, true, false));
+
+        let slash = parse_hook_hotkey("Ctrl+Slash").unwrap();
+        assert!(slash.matches(0xBF, true, false, false));
+    }
+
+    #[test]
     fn parses_mouse_button_hotkeys_for_hook_matching() {
         let hotkey = parse_hook_hotkey("Ctrl+Mouse5").unwrap();
 
@@ -376,6 +466,10 @@ mod tests {
 
         let middle = parse_hook_hotkey("Shift+Middle").unwrap();
         assert!(middle.matches(0x04, false, false, true));
+
+        let bare_mouse = parse_hook_hotkey("Mouse4").unwrap();
+        assert!(bare_mouse.matches(0x05, false, false, false));
+        assert!(!bare_mouse.matches(0x05, true, false, false));
     }
 
     #[test]
@@ -389,6 +483,16 @@ mod tests {
         assert!(parse_hook_hotkey("Ctrl+Mouse5")
             .unwrap()
             .requires_mouse_hook());
+        assert!(parse_hook_hotkey("Mouse5").unwrap().requires_mouse_hook());
+    }
+
+    #[test]
+    fn keyboard_hook_filter_includes_supported_modified_keys() {
+        assert!(is_supported_keyboard_hook_vk(0x47));
+        assert!(is_supported_keyboard_hook_vk(0x25));
+        assert!(is_supported_keyboard_hook_vk(0xBF));
+        assert!(is_supported_keyboard_hook_vk(VK_F1_CODE));
+        assert!(!is_supported_keyboard_hook_vk(0x1B));
     }
 
     #[test]

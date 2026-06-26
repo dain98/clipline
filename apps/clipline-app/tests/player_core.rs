@@ -78,6 +78,116 @@ fn video_decode_probes_cover_hevc_and_av1_mp4_profiles() {
 }
 
 #[test]
+fn cloud_library_entries_filter_sort_and_mark_local_availability() {
+    let mut ctx = player_core_context();
+    let entries = eval_json(
+        &mut ctx,
+        r#"PlayerCore.cloudLibraryEntries({
+          old: {
+            local_clip_id: 'old',
+            path: 'C:/Clips/old clip.mp4',
+            remote_url: 'https://clips.example.com/old',
+            visibility: 'public',
+            upload_status: 'uploaded_public',
+            updated_at_unix: 10
+          },
+          pending: {
+            local_clip_id: 'pending',
+            path: 'C:/Clips/pending clip.mp4',
+            remote_url: 'https://clips.example.com/pending',
+            visibility: 'private',
+            upload_status: 'processing',
+            updated_at_unix: 30
+          },
+          localGone: {
+            local_clip_id: 'gone',
+            path: 'C:/Clips/gone clip.mp4',
+            remote_url: 'https://clips.example.com/gone',
+            visibility: 'unlisted',
+            upload_status: 'uploaded_processing',
+            updated_at_unix: 20
+          },
+          failed: {
+            local_clip_id: 'failed',
+            path: 'C:/Clips/failed clip.mp4',
+            remote_url: 'https://clips.example.com/failed',
+            upload_status: 'failed',
+            updated_at_unix: 40
+          },
+          localOnly: {
+            local_clip_id: 'local',
+            path: 'C:/Clips/local only.mp4',
+            upload_status: 'not_uploaded',
+            updated_at_unix: 50
+          }
+        }, [
+          { path: 'C:/Clips/pending clip.mp4' },
+          { path: 'C:/Clips/old clip.mp4' }
+        ])"#,
+    );
+
+    assert_eq!(
+        entries,
+        r#"[{"local_clip_id":"pending","path":"C:/Clips/pending clip.mp4","title":"pending clip","remote_url":"https://clips.example.com/pending","visibility":"private","upload_status":"processing","updated_at_unix":30,"local_available":true},{"local_clip_id":"gone","path":"C:/Clips/gone clip.mp4","title":"gone clip","remote_url":"https://clips.example.com/gone","visibility":"unlisted","upload_status":"uploaded_processing","updated_at_unix":20,"local_available":false},{"local_clip_id":"old","path":"C:/Clips/old clip.mp4","title":"old clip","remote_url":"https://clips.example.com/old","visibility":"public","upload_status":"uploaded_public","updated_at_unix":10,"local_available":true}]"#
+    );
+}
+
+#[test]
+fn cloud_library_entries_prefer_authoritative_cloud_list() {
+    let mut ctx = player_core_context();
+    let entries = eval_json(
+        &mut ctx,
+        r#"PlayerCore.cloudLibraryEntries({
+          localKnown: {
+            local_clip_id: 'localKnown',
+            path: 'C:/Clips/local known.mp4',
+            remote_clip_id: 'remote-known-old',
+            remote_url: 'https://clips.example.com/old-known',
+            visibility: 'private',
+            upload_status: 'uploaded_private',
+            updated_at_unix: 10
+          },
+          localOnlyHistory: {
+            local_clip_id: 'localOnlyHistory',
+            path: 'C:/Clips/local history.mp4',
+            remote_clip_id: 'remote-history',
+            remote_url: 'https://clips.example.com/history',
+            visibility: 'public',
+            upload_status: 'uploaded_public',
+            updated_at_unix: 20
+          }
+        }, [
+          { path: 'C:/Clips/local known.mp4' },
+          { path: 'C:/Clips/local history.mp4' }
+        ], [
+          {
+            remote_clip_id: 'remote-known',
+            local_clip_id: 'localKnown',
+            title: 'Server Known',
+            remote_url: 'https://clips.example.com/clip/remote-known',
+            visibility: 'private',
+            upload_status: 'uploaded_private',
+            updated_at_unix: 40
+          },
+          {
+            remote_clip_id: 'remote-cloud-only',
+            local_clip_id: null,
+            title: 'Other Device',
+            remote_url: 'https://clips.example.com/clip/remote-cloud-only',
+            visibility: 'unlisted',
+            upload_status: 'uploaded_public',
+            updated_at_unix: 30
+          }
+        ])"#,
+    );
+
+    assert_eq!(
+        entries,
+        r#"[{"local_clip_id":"localKnown","path":"C:/Clips/local known.mp4","title":"Server Known","remote_url":"https://clips.example.com/clip/remote-known","visibility":"private","upload_status":"uploaded_private","updated_at_unix":40,"local_available":true,"remote_clip_id":"remote-known"},{"local_clip_id":"","path":"","title":"Other Device","remote_url":"https://clips.example.com/clip/remote-cloud-only","visibility":"unlisted","upload_status":"uploaded_public","updated_at_unix":30,"local_available":false,"remote_clip_id":"remote-cloud-only"},{"local_clip_id":"localOnlyHistory","path":"C:/Clips/local history.mp4","title":"local history","remote_url":"https://clips.example.com/history","visibility":"public","upload_status":"uploaded_public","updated_at_unix":20,"local_available":true,"remote_clip_id":"remote-history"}]"#
+    );
+}
+
+#[test]
 fn fmt_tenths_keeps_a_tenth_and_carries() {
     let mut ctx = player_core_context();
     assert_eq!(eval(&mut ctx, "PlayerCore.fmtTenths(0)"), "0:00.0");
@@ -653,6 +763,39 @@ fn hotkey_recorder_formats_modifier_function_keys() {
 }
 
 #[test]
+fn hotkey_recorder_formats_modified_keyboard_keys() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'KeyG', ctrlKey: true, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"Ctrl+G"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'ArrowLeft', ctrlKey: false, altKey: true, shiftKey: true })"
+        ),
+        r#"{"kind":"captured","value":"Alt+Shift+ArrowLeft"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'Digit1', ctrlKey: true, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"Ctrl+1"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'Slash', ctrlKey: true, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"Ctrl+Slash"}"#
+    );
+}
+
+#[test]
 fn hotkey_recorder_formats_mouse_buttons() {
     let mut ctx = player_core_context();
     assert_eq!(
@@ -688,7 +831,7 @@ fn hotkey_recorder_formats_mouse_buttons() {
             &mut ctx,
             "PlayerCore.hotkeyFromMouseEvent({ button: 1, ctrlKey: false, altKey: false, shiftKey: false })"
         ),
-        r#"{"kind":"invalid","message":"Mouse shortcuts need Ctrl, Alt, or Shift."}"#
+        r#"{"kind":"captured","value":"Middle"}"#
     );
 }
 
@@ -700,7 +843,7 @@ fn hotkey_recorder_reports_pending_cancel_and_invalid_inputs() {
             &mut ctx,
             "PlayerCore.hotkeyFromKeyEvent({ code: 'ControlLeft', ctrlKey: true })"
         ),
-        r#"{"kind":"pending","message":"Now press an F-key or mouse button."}"#
+        r#"{"kind":"pending","message":"Now press an F-key, mouse button, or keyboard key."}"#
     );
     assert_eq!(
         eval_json(
@@ -728,7 +871,21 @@ fn hotkey_recorder_reports_pending_cancel_and_invalid_inputs() {
             &mut ctx,
             "PlayerCore.hotkeyFromKeyEvent({ code: 'KeyS', ctrlKey: true, altKey: false, shiftKey: false })"
         ),
-        r#"{"kind":"invalid","message":"Use F1-F11 or F13-F24 as the shortcut key."}"#
+        r#"{"kind":"captured","value":"Ctrl+S"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'KeyS', ctrlKey: false, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"invalid","message":"Use Ctrl, Alt, or Shift with this key."}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'Tab', ctrlKey: false, altKey: true, shiftKey: false })"
+        ),
+        r#"{"kind":"invalid","message":"That shortcut is reserved by Windows."}"#
     );
 }
 
