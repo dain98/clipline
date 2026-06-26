@@ -67,7 +67,7 @@
       return fallbackSubscribe(fallbackConfig, event, handler);
     },
     convertFileSrc(path) {
-      return `${fallbackConfig.baseUrl}/media/${encodeURIComponent(path)}`;
+      return `${fallbackConfig.baseUrl}/media-path?path=${encodeURIComponent(path)}`;
     },
     window: {
       minimize: () => fallbackWindowAction(fallbackConfig, "minimize"),

@@ -989,6 +989,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-runtime",
  "tokio",
+ "tokio-util",
  "windows-sys 0.61.2",
 ]
 
