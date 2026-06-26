@@ -75,7 +75,7 @@ impl StorageSettings {
         }
     }
 
-    fn clips_dir(&self) -> Result<PathBuf, String> {
+    pub(crate) fn clips_dir(&self) -> Result<PathBuf, String> {
         clips_dir(&self.media_dir())
     }
 }
@@ -150,12 +150,12 @@ pub async fn list_clips(
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<Vec<ClipInfo>, String> {
     let dir = settings.clips_dir()?;
-    tauri::async_runtime::spawn_blocking(move || list_clips_from_dir(dir))
+    tauri::async_runtime::spawn_blocking(move || crate::host::library::list_clips_from_dir(dir))
         .await
         .map_err(|e| format!("list clips task: {e}"))?
 }
 
-fn list_clips_from_dir(dir: PathBuf) -> Result<Vec<ClipInfo>, String> {
+pub(crate) fn list_clips_from_dir(dir: PathBuf) -> Result<Vec<ClipInfo>, String> {
     let mut clips = Vec::new();
     push_clips_from(&dir, None, &mut clips)?;
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
@@ -800,12 +800,17 @@ pub async fn storage_status(
 ) -> Result<StorageInfo, String> {
     let dir = settings.clips_dir()?;
     let quota_bytes = settings.quota_bytes();
-    tauri::async_runtime::spawn_blocking(move || storage_status_for_dir(dir, quota_bytes))
-        .await
-        .map_err(|e| format!("storage status task: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::host::library::storage_status_for_dir(dir, quota_bytes)
+    })
+    .await
+    .map_err(|e| format!("storage status task: {e}"))?
 }
 
-fn storage_status_for_dir(dir: PathBuf, quota_bytes: Option<u64>) -> Result<StorageInfo, String> {
+pub(crate) fn storage_status_for_dir(
+    dir: PathBuf,
+    quota_bytes: Option<u64>,
+) -> Result<StorageInfo, String> {
     let status = read_storage_status(&dir, quota_bytes).map_err(|e| e.to_string())?;
     Ok(StorageInfo {
         clip_count: status.clip_count,
@@ -835,11 +840,7 @@ pub(crate) fn validate_clip_path(
 
 #[tauri::command]
 pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
-    let target = validate_clip_path(&settings, &path)?;
-    let dir = target
-        .parent()
-        .ok_or_else(|| "clip has no containing folder".to_string())?;
-    open_folder_path(dir)
+    crate::host::library::reveal_clip(&path, &settings)
 }
 
 #[tauri::command]
@@ -863,7 +864,7 @@ pub fn open_media_folder(settings: tauri::State<StorageSettings>) -> Result<(), 
     open_folder_path(&dir)
 }
 
-fn open_folder_path(dir: &Path) -> Result<(), String> {
+pub(crate) fn open_folder_path(dir: &Path) -> Result<(), String> {
     std::process::Command::new("explorer.exe")
         .arg(dir)
         .spawn()
