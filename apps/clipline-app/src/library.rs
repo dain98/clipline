@@ -858,6 +858,15 @@ pub async fn copy_clip_to_clipboard(
     .map_err(|e| format!("copy clip task: {e}"))?
 }
 
+pub(crate) fn copy_clip_to_clipboard_for_host(
+    request: CopyClipToClipboardRequest,
+    settings: &StorageSettings,
+) -> Result<(), String> {
+    let target = validate_clip_path(settings, &request.path)?;
+    let share_path = clipboard_share_path(&target, request.audio_track_ids.as_deref())?;
+    crate::host::native::copy_file_to_clipboard(&share_path)
+}
+
 #[tauri::command]
 pub fn open_media_folder(settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let dir = settings.clips_dir()?;
@@ -945,7 +954,7 @@ fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, n
     }
 }
 
-fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
+pub(crate) fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
     let payload = dropfiles_payload(path);
     let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, payload.len()) };
     if handle.is_null() {

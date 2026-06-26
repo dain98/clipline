@@ -50,6 +50,26 @@ struct SaveSettingsArgs {
 }
 
 #[derive(serde::Deserialize)]
+struct ChooseFolderArgs {
+    current: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct RevealClipArgs {
+    path: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CopyClipToClipboardArgs {
+    request: crate::library::CopyClipToClipboardRequest,
+}
+
+#[derive(serde::Deserialize)]
+struct OpenCloudClipUrlArgs {
+    url: String,
+}
+
+#[derive(serde::Deserialize)]
 struct ExtractWindowIconArgs {
     #[serde(rename = "exePath")]
     exe_path: String,
@@ -502,6 +522,15 @@ fn parse_command_args<T: serde::de::DeserializeOwned>(
     serde_json::from_value(args).map_err(|e| format!("{command} arguments are invalid: {e}"))
 }
 
+fn storage_settings_from_app(
+    settings: &crate::settings::AppSettings,
+) -> Result<crate::library::StorageSettings, String> {
+    Ok(crate::library::StorageSettings::new(
+        crate::settings::quota_bytes_from_gb(settings.disk_quota_gb)?,
+        settings.media_dir_path()?,
+    ))
+}
+
 pub fn fallback_dispatches_command(command: &str) -> bool {
     matches!(
         command,
@@ -510,6 +539,11 @@ pub fn fallback_dispatches_command(command: &str) -> bool {
             | "set_recording"
             | "get_settings"
             | "save_settings"
+            | "choose_media_folder"
+            | "choose_replay_cache_folder"
+            | "get_autostart_status"
+            | "check_for_updates"
+            | "install_update"
             | "list_displays"
             | "list_audio_devices"
             | "probe_encoders"
@@ -517,6 +551,10 @@ pub fn fallback_dispatches_command(command: &str) -> bool {
             | "list_game_windows"
             | "extract_window_icon"
             | "memory_status"
+            | "reveal_clip"
+            | "copy_clip_to_clipboard"
+            | "open_cloud_user_profile"
+            | "open_cloud_clip_url"
             | "report_decode_support"
             | "start_microphone_test"
             | "stop_microphone_test"
@@ -602,6 +640,35 @@ async fn invoke(
             };
             return command_response(state.host.save_settings(args.settings));
         }
+        "choose_media_folder" => {
+            let args = match parse_command_args::<ChooseFolderArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<Option<String>>(Err(e)),
+            };
+            let settings = state.host.settings();
+            return command_response(
+                crate::app::host_choose_media_folder(&settings, args.current).await,
+            );
+        }
+        "choose_replay_cache_folder" => {
+            let args = match parse_command_args::<ChooseFolderArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<Option<String>>(Err(e)),
+            };
+            let settings = state.host.settings();
+            return command_response(
+                crate::app::host_choose_replay_cache_folder(&settings, args.current).await,
+            );
+        }
+        "get_autostart_status" => {
+            return command_response(state.host.get_autostart_status());
+        }
+        "check_for_updates" => {
+            return command_response(state.host.check_for_updates().await);
+        }
+        "install_update" => {
+            return command_response(state.host.install_update().await);
+        }
         "list_displays" => return command_response(state.host.list_displays()),
         "list_audio_devices" => return command_response(state.host.list_audio_devices()),
         "probe_encoders" => return ok_response(state.host.probe_encoders()),
@@ -615,6 +682,73 @@ async fn invoke(
             return ok_response(crate::app::host_extract_window_icon(args.exe_path));
         }
         "memory_status" => return command_response(crate::app::host_memory_status()),
+        "reveal_clip" => {
+            let args = match parse_command_args::<RevealClipArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<()>(Err(e)),
+            };
+            let settings = match storage_settings_from_app(&state.host.settings()) {
+                Ok(settings) => settings,
+                Err(e) => return command_response::<()>(Err(e)),
+            };
+            let target = match crate::library::validate_clip_path(&settings, &args.path) {
+                Ok(target) => target,
+                Err(e) => return command_response::<()>(Err(e)),
+            };
+            let Some(dir) = target.parent() else {
+                return command_response::<()>(Err("clip has no containing folder".into()));
+            };
+            return command_response(crate::host::native::open_folder(dir));
+        }
+        "copy_clip_to_clipboard" => {
+            let args = match parse_command_args::<CopyClipToClipboardArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<()>(Err(e)),
+            };
+            let settings = match storage_settings_from_app(&state.host.settings()) {
+                Ok(settings) => settings,
+                Err(e) => return command_response::<()>(Err(e)),
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                crate::library::copy_clip_to_clipboard_for_host(args.request, &settings)
+            })
+            .await
+            .map_err(|e| format!("copy clip task: {e}"))
+            .and_then(|result| result);
+            return command_response(result);
+        }
+        "open_cloud_user_profile" => {
+            let settings = state.host.settings();
+            let username = settings
+                .cloud
+                .connected_username
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "Clipline Cloud username is unknown".to_string());
+            let result = username
+                .and_then(|username| {
+                    crate::cloud::cloud_user_profile_url(&settings.cloud, username)
+                })
+                .and_then(|url| {
+                    crate::host::native::open_external_url(url.as_str(), "cloud user profile")
+                });
+            return command_response(result);
+        }
+        "open_cloud_clip_url" => {
+            let args = match parse_command_args::<OpenCloudClipUrlArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<()>(Err(e)),
+            };
+            let url = match crate::cloud::validate_cloud_link_url(&args.url) {
+                Ok(url) => url,
+                Err(e) => return command_response::<()>(Err(e)),
+            };
+            return command_response(crate::host::native::open_external_url(
+                &url,
+                "cloud clip URL",
+            ));
+        }
         "report_decode_support" => {
             let args = match parse_command_args::<ReportDecodeSupportArgs>(&command, args) {
                 Ok(args) => args,
@@ -1003,10 +1137,19 @@ mod tests {
             "list_displays",
             "list_audio_devices",
             "probe_encoders",
+            "choose_media_folder",
+            "choose_replay_cache_folder",
+            "get_autostart_status",
+            "check_for_updates",
+            "install_update",
             "list_game_plugins",
             "list_game_windows",
             "extract_window_icon",
             "memory_status",
+            "reveal_clip",
+            "copy_clip_to_clipboard",
+            "open_cloud_user_profile",
+            "open_cloud_clip_url",
             "report_decode_support",
             "start_microphone_test",
             "stop_microphone_test",
@@ -1069,6 +1212,35 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, serde_json::json!({"ok": true, "value": null}));
+    }
+
+    #[tokio::test]
+    async fn invoke_task15_commands_without_native_side_effects() {
+        let settings = crate::settings::AppSettings {
+            open_on_startup: true,
+            ..crate::settings::AppSettings::default()
+        };
+        let (status, body) = invoke_json(
+            test_state_with_settings(FallbackToken::generate_for_tests(13), settings),
+            "get_autostart_status",
+            "{}",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ok": true, "value": true}));
+
+        let (status, body) = invoke_json(
+            test_state(FallbackToken::generate_for_tests(14)),
+            "open_cloud_clip_url",
+            r#"{"url":"file:///C:/secret.txt"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["ok"], false);
+        assert_eq!(
+            body["error"],
+            "cloud clip URL scheme is not supported: file"
+        );
     }
 
     #[tokio::test]

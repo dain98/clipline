@@ -373,16 +373,16 @@ pub fn open_cloud_user_profile(state: tauri::State<RuntimeState>) -> Result<(), 
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "Clipline Cloud username is unknown".to_string())?;
     let url = cloud_user_profile_url(&cloud, username)?;
-    open_cloud_url(url.as_str(), "cloud user profile")
+    open_cloud_url_for_host(url.as_str(), "cloud user profile")
 }
 
 #[tauri::command]
 pub fn open_cloud_clip_url(url: String) -> Result<(), String> {
     let url = validate_cloud_link_url(&url)?;
-    open_cloud_url(&url, "cloud clip URL")
+    open_cloud_url_for_host(&url, "cloud clip URL")
 }
 
-fn open_cloud_url(url: &str, context: &str) -> Result<(), String> {
+pub(crate) fn open_cloud_url_for_host(url: &str, context: &str) -> Result<(), String> {
     let operation = wide_null(OsStr::new("open"));
     let target = wide_null(OsStr::new(url));
     let result = unsafe {
@@ -401,7 +401,7 @@ fn open_cloud_url(url: &str, context: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_cloud_link_url(input: &str) -> Result<String, String> {
+pub(crate) fn validate_cloud_link_url(input: &str) -> Result<String, String> {
     let url = reqwest::Url::parse(input).map_err(|e| format!("cloud clip URL is invalid: {e}"))?;
     match url.scheme() {
         "http" | "https" => Ok(url.to_string()),
@@ -572,7 +572,10 @@ fn cloud_user_profile_from_response(
     })
 }
 
-fn cloud_user_profile_url(cloud: &CloudSettings, username: &str) -> Result<reqwest::Url, String> {
+pub(crate) fn cloud_user_profile_url(
+    cloud: &CloudSettings,
+    username: &str,
+) -> Result<reqwest::Url, String> {
     let username = username.trim();
     if username.is_empty() {
         return Err("Clipline Cloud username is unknown".to_string());

@@ -2,6 +2,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
+use tauri::Manager;
+
 #[derive(Debug, serde::Serialize)]
 pub struct FallbackCommandResult {
     pub ok: bool,
@@ -35,6 +37,7 @@ impl FallbackCommandResult {
 )]
 pub struct FallbackHostContext {
     settings: Mutex<crate::settings::AppSettings>,
+    app: Mutex<Option<tauri::AppHandle<tauri::Wry>>>,
     events: Arc<crate::host::events::ClientEventHub>,
     decodable_codecs: Mutex<Vec<crate::service::Codec>>,
     mic_test_stop: Mutex<Option<mpsc::Sender<()>>>,
@@ -54,6 +57,7 @@ impl FallbackHostContext {
     ) -> Self {
         Self {
             settings: Mutex::new(settings),
+            app: Mutex::new(None),
             events,
             decodable_codecs: Mutex::new(vec![crate::service::Codec::H264]),
             mic_test_stop: Mutex::new(None),
@@ -63,7 +67,32 @@ impl FallbackHostContext {
         }
     }
 
+    pub fn attach_app_handle(&self, app: tauri::AppHandle<tauri::Wry>) -> Result<(), String> {
+        let mut guard = self
+            .app
+            .lock()
+            .map_err(|_| "fallback app handle lock poisoned".to_string())?;
+        *guard = Some(app);
+        Ok(())
+    }
+
+    fn app_handle(&self) -> Result<tauri::AppHandle<tauri::Wry>, String> {
+        self.app
+            .lock()
+            .map_err(|_| "fallback app handle lock poisoned".to_string())?
+            .clone()
+            .ok_or_else(|| "fallback updater host is not attached".to_string())
+    }
+
+    fn attached_app_handle(&self) -> Option<tauri::AppHandle<tauri::Wry>> {
+        self.app.lock().ok().and_then(|app| app.clone())
+    }
+
     pub fn settings(&self) -> crate::settings::AppSettings {
+        if let Some(app) = self.attached_app_handle() {
+            let state = app.state::<crate::app::RuntimeState>();
+            return crate::app::host_get_settings(&state);
+        }
         self.settings
             .lock()
             .map(|settings| settings.clone())
@@ -74,10 +103,34 @@ impl FallbackHostContext {
         self.events.clone()
     }
 
+    pub async fn check_for_updates(&self) -> Result<crate::app::UpdateCheckResult, String> {
+        let app = self.app_handle()?;
+        let settings = self.settings();
+        crate::app::host_check_for_updates(&app, &settings).await
+    }
+
+    pub async fn install_update(&self) -> Result<(), String> {
+        let app = self.app_handle()?;
+        let state = app.state::<crate::app::RuntimeState>();
+        let update = crate::app::host_update_for_install(&app, &state).await?;
+        self.stop_microphone_test();
+        crate::app::host_install_available_update(&app, &state, update).await
+    }
+
     pub fn save_settings(
         &self,
         mut settings: crate::settings::AppSettings,
     ) -> Result<crate::settings::AppSettings, String> {
+        if let Some(app) = self.attached_app_handle() {
+            let committed = crate::app::host_save_settings(&app, settings)?;
+            let mut guard = self
+                .settings
+                .lock()
+                .map_err(|_| "settings lock poisoned".to_string())?;
+            *guard = committed.clone();
+            return Ok(committed);
+        }
+
         settings.hotkey = crate::settings::normalize_hotkey(&settings.hotkey)?;
         settings.validate()?;
         let media_dir = settings.media_dir_path()?;
@@ -90,6 +143,15 @@ impl FallbackHostContext {
             .map_err(|_| "settings lock poisoned".to_string())?;
         *guard = settings.clone();
         Ok(settings)
+    }
+
+    pub fn get_autostart_status(&self) -> Result<bool, String> {
+        if let Some(app) = self.attached_app_handle() {
+            return crate::app::host_get_autostart_status(&app);
+        }
+        Ok(crate::app::host_persisted_autostart_status(
+            &self.settings(),
+        ))
     }
 
     pub fn list_displays(&self) -> Result<Vec<crate::app::DisplayInfo>, String> {
@@ -105,6 +167,12 @@ impl FallbackHostContext {
     }
 
     pub fn report_decode_support(&self, codecs: &[String]) {
+        if let Some(app) = self.attached_app_handle() {
+            let state = app.state::<crate::app::RuntimeState>();
+            crate::app::host_report_decode_support(&state, codecs);
+            return;
+        }
+
         let mut decodable_codecs = vec![crate::service::Codec::H264];
         for codec in codecs {
             match codec.as_str() {
@@ -213,6 +281,11 @@ impl FallbackHostContext {
     }
 
     pub fn save_replay(&self) -> bool {
+        if let Some(app) = self.attached_app_handle() {
+            let state = app.state::<crate::app::RuntimeState>();
+            return crate::app::host_save_replay(&state);
+        }
+
         let Some(tx) = self.live_service_tx() else {
             return false;
         };
@@ -248,6 +321,11 @@ impl FallbackHostContext {
     }
 
     pub fn set_recording(&self, recording: bool) -> Result<bool, String> {
+        if let Some(app) = self.attached_app_handle() {
+            let state = app.state::<crate::app::RuntimeState>();
+            return crate::app::host_set_recording(&state, app.clone(), recording);
+        }
+
         if recording {
             let mut service_tx = self
                 .service_tx

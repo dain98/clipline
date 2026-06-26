@@ -50,9 +50,34 @@ fn app_rs() -> String {
     fs::read_to_string(path).expect("read src/app.rs")
 }
 
+fn fallback_runtime_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/host/runtime.rs");
+    fs::read_to_string(path).expect("read src/host/runtime.rs")
+}
+
+fn fallback_server_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/server.rs");
+    fs::read_to_string(path).expect("read src/fallback/server.rs")
+}
+
 fn tauri_config() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
     fs::read_to_string(path).expect("read tauri.conf.json")
+}
+
+fn source_after<'a>(source: &'a str, marker: &str) -> &'a str {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing marker {marker}"));
+    &source[start..]
+}
+
+fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+    let tail = source_after(source, start_marker);
+    let end = tail
+        .find(end_marker)
+        .unwrap_or_else(|| panic!("missing marker {end_marker} after {start_marker}"));
+    &tail[..end]
 }
 
 #[test]
@@ -83,6 +108,24 @@ fn windows_installer_repairs_webview2_with_bootstrapper() {
         config.contains("\"webviewInstallMode\"")
             && config.contains("\"type\": \"embedBootstrapper\""),
         "the default NSIS installer should embed the small Evergreen bootstrapper instead of bundling the offline WebView2 installer"
+    );
+}
+
+#[test]
+fn main_window_is_not_created_before_setup() {
+    let config: serde_json::Value =
+        serde_json::from_str(&tauri_config()).expect("tauri.conf.json is valid JSON");
+    let windows = config["app"]["windows"]
+        .as_array()
+        .expect("Tauri app windows are configured");
+    let main_window = windows
+        .first()
+        .expect("Clipline config has a main app window");
+
+    assert_eq!(
+        main_window["create"].as_bool(),
+        Some(false),
+        "fallback startup must be selected during setup before any WebView is created"
     );
 }
 
@@ -149,8 +192,7 @@ fn frontend_uses_host_bridge_instead_of_tauri_directly() {
         "fallback event listener must surface malformed event JSON without throwing"
     );
     assert!(
-        bridge.contains("window action failed: ${action}")
-            && bridge.contains("if (!response.ok)"),
+        bridge.contains("window action failed: ${action}") && bridge.contains("if (!response.ok)"),
         "fallback window actions must reject failed HTTP responses"
     );
     assert!(
@@ -180,7 +222,11 @@ fn fallback_manifest_covers_every_frontend_event_listener() {
     let manifest = fallback_manifest_rs();
     let events = quoted_calls(&js, "listen");
 
-    assert_eq!(events.len(), 8, "main.js event inventory changed; update this assertion and the fallback manifest together");
+    assert_eq!(
+        events.len(),
+        8,
+        "main.js event inventory changed; update this assertion and the fallback manifest together"
+    );
     for event in events {
         assert!(
             manifest.contains(&format!("\"{event}\"")),
@@ -191,10 +237,9 @@ fn fallback_manifest_covers_every_frontend_event_listener() {
 
 #[test]
 fn app_exposes_force_fallback_client_flag() {
-    let startup = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/startup.rs"),
-    )
-    .expect("read fallback startup");
+    let startup =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/startup.rs"))
+            .expect("read fallback startup");
 
     assert!(
         startup.contains("--force-fallback-client"),
@@ -203,24 +248,179 @@ fn app_exposes_force_fallback_client_flag() {
 }
 
 #[test]
-fn app_run_can_launch_fallback_server_before_tauri() {
+fn app_setup_selects_fallback_before_opening_webview() {
     let app = app_rs();
-    let run_start = app.find("pub fn run()").expect("app.rs contains run()");
-    let run = &app[run_start..];
-    let fallback_launch = run
-        .find("launch_forced_fallback_if_requested(&args, settings.clone())")
-        .expect("run() attempts forced fallback launch");
-    let tauri_builder = run
-        .find("tauri::Builder::default()")
-        .expect("run() constructs the Tauri builder");
+    let setup_start = app
+        .find(".setup(move |app|")
+        .expect("app.rs configures setup");
+    let setup = &app[setup_start..];
+    let fallback_launch = setup
+        .find("start_fallback_from_setup")
+        .expect("setup starts forced fallback when requested");
+    let normal_launch = setup
+        .find("if !launched_by_autostart")
+        .expect("setup handles normal non-autostart launch");
+    let open_main = setup
+        .find("open_main_window(app.handle())")
+        .expect("setup opens the main window for normal launches");
 
     assert!(
-        app.contains("fallback_launch_preference") && app.contains("start_fallback_server"),
-        "app startup must be able to launch fallback before depending on a working WebView"
+        fallback_launch < normal_launch && normal_launch < open_main,
+        "setup must choose forced fallback before opening the WebView for normal launches"
+    );
+}
+
+#[test]
+fn fallback_attached_host_delegates_recorder_and_settings_to_tauri_state() {
+    let runtime = fallback_runtime_rs();
+
+    let settings_method = source_between(
+        &runtime,
+        "pub fn settings(&self) -> crate::settings::AppSettings",
+        "pub fn events(&self)",
     );
     assert!(
-        fallback_launch < tauri_builder,
-        "run() must attempt forced fallback before constructing the Tauri WebView"
+        settings_method.contains("app.state::<crate::app::RuntimeState>()")
+            && settings_method.contains("crate::app::host_get_settings"),
+        "attached fallback settings reads must use Tauri RuntimeState to avoid update-channel drift"
+    );
+
+    let save_settings_method = source_between(
+        &runtime,
+        "pub fn save_settings(",
+        "pub fn list_displays(&self)",
+    );
+    assert!(
+        save_settings_method.contains("crate::app::host_save_settings(&app, settings)")
+            && save_settings_method.contains("*guard = committed.clone()"),
+        "attached fallback save_settings must delegate to the shared Tauri settings save path and sync its cache"
+    );
+
+    let report_method = source_between(
+        &runtime,
+        "pub fn report_decode_support(&self, codecs: &[String])",
+        "pub fn start_microphone_test(",
+    );
+    assert!(
+        report_method.contains("crate::app::host_report_decode_support")
+            && report_method.contains("app.state::<crate::app::RuntimeState>()"),
+        "attached fallback decode support must update the Tauri RuntimeState recorder configuration"
+    );
+
+    let save_replay_method = source_between(
+        &runtime,
+        "pub fn save_replay(&self) -> bool",
+        "pub fn recording_active(&self)",
+    );
+    assert!(
+        save_replay_method.contains("crate::app::host_save_replay")
+            && save_replay_method.contains("app.state::<crate::app::RuntimeState>()"),
+        "attached fallback save_replay must request save on the Tauri recorder"
+    );
+
+    let set_recording_method = source_between(
+        &runtime,
+        "pub fn set_recording(&self, recording: bool)",
+        "#[cfg(test)]",
+    );
+    assert!(
+        set_recording_method.contains("crate::app::host_set_recording")
+            && set_recording_method.contains("app.state::<crate::app::RuntimeState>()"),
+        "attached fallback set_recording must control the Tauri recorder instead of starting a local service"
+    );
+}
+
+#[test]
+fn fallback_install_update_uses_tauri_helper_without_local_pre_stop() {
+    let runtime = fallback_runtime_rs();
+    let install_method = source_between(
+        &runtime,
+        "pub async fn install_update(&self) -> Result<(), String>",
+        "pub fn save_settings(",
+    );
+
+    assert!(
+        install_method.contains("crate::app::host_update_for_install(&app, &state).await"),
+        "fallback install_update must prove an update exists through the shared Tauri helper"
+    );
+    assert!(
+        !install_method.contains("set_recording(false)"),
+        "fallback install_update must not stop fallback-local recording before an update is found"
+    );
+    assert!(
+        install_method.find("host_update_for_install")
+            < install_method.find("self.stop_microphone_test()")
+            && install_method.find("self.stop_microphone_test()")
+                < install_method.find("host_install_available_update"),
+        "fallback install_update must stop fallback-local mic tests after update availability is proven and before installer launch"
+    );
+}
+
+#[test]
+fn fallback_autostart_status_uses_tauri_plugin_when_attached() {
+    let app = app_rs();
+    let runtime = fallback_runtime_rs();
+    let server = fallback_server_rs();
+    let status_method = source_between(
+        &runtime,
+        "pub fn get_autostart_status(&self) -> Result<bool, String>",
+        "pub fn list_displays(&self)",
+    );
+    let branch = source_between(
+        &server,
+        "\"get_autostart_status\" => {",
+        "\"check_for_updates\" => {",
+    );
+
+    assert!(
+        app.contains("pub(crate) fn host_get_autostart_status"),
+        "WebView autostart status helper must be reusable by fallback"
+    );
+    assert!(
+        status_method.contains("crate::app::host_get_autostart_status(&app)"),
+        "attached fallback autostart status must query the Tauri autolaunch plugin"
+    );
+    assert!(
+        branch.contains("state.host.get_autostart_status()"),
+        "fallback get_autostart_status dispatch must use host parity logic"
+    );
+}
+
+#[test]
+fn fallback_cloud_links_use_shared_cloud_url_validation() {
+    let cloud = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cloud.rs"))
+        .expect("read src/cloud.rs");
+    let server = fallback_server_rs();
+    let branch = source_between(
+        &server,
+        "\"open_cloud_clip_url\" => {",
+        "\"report_decode_support\" => {",
+    );
+
+    assert!(
+        cloud.contains("pub(crate) fn validate_cloud_link_url"),
+        "cloud clip URL parser must be reusable by fallback and WebView commands"
+    );
+    assert!(
+        branch.contains("crate::cloud::validate_cloud_link_url(&args.url)")
+            && branch.contains("crate::host::native::open_external_url("),
+        "fallback open_cloud_clip_url must validate with the same parser as the WebView command before opening"
+    );
+}
+
+#[test]
+fn fallback_setup_keeps_server_alive_when_browser_launch_fails() {
+    let app = app_rs();
+    let start_fallback = source_between(
+        &app,
+        "fn start_fallback_from_setup(",
+        "fn open_url_in_default_browser(",
+    );
+
+    assert!(
+        start_fallback.contains("if let Err(e) = open_url_in_default_browser(&info.base_url)")
+            && !start_fallback.contains("open_url_in_default_browser(&info.base_url)?"),
+        "default-browser launch failure should be logged without tearing down the fallback server"
     );
 }
 

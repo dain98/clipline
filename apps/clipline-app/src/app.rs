@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use tauri::image::Image;
@@ -71,7 +71,7 @@ struct GameDetectionEvent {
 }
 
 #[derive(serde::Serialize)]
-struct UpdateCheckResult {
+pub(crate) struct UpdateCheckResult {
     channel: UpdateChannel,
     channel_label: &'static str,
     current_version: String,
@@ -760,7 +760,15 @@ fn save_replay(state: tauri::State<RuntimeState>) {
 
 #[tauri::command]
 fn get_autostart_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    host_get_autostart_status(&app)
+}
+
+pub(crate) fn host_get_autostart_status<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
     app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+pub(crate) fn host_persisted_autostart_status(settings: &AppSettings) -> bool {
+    settings.open_on_startup
 }
 
 fn set_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<bool, String> {
@@ -911,8 +919,8 @@ fn should_open_on_tray_click(button: MouseButton, button_state: MouseButtonState
     button == MouseButton::Left && button_state == MouseButtonState::Up
 }
 
-pub(crate) fn host_save_replay(state: &RuntimeState) {
-    state.request_save();
+pub(crate) fn host_save_replay(state: &RuntimeState) -> bool {
+    state.request_save()
 }
 
 pub(crate) fn host_get_settings(state: &RuntimeState) -> AppSettings {
@@ -992,15 +1000,13 @@ fn missing_release_metadata_message(channel: UpdateChannel) -> String {
     )
 }
 
-#[tauri::command]
-async fn check_for_updates<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, RuntimeState>,
+pub(crate) async fn host_check_for_updates<R: Runtime>(
+    app: &AppHandle<R>,
+    settings: &AppSettings,
 ) -> Result<UpdateCheckResult, String> {
-    let settings = state.settings();
     let channel = settings.update_channel;
     let current_version = app.package_info().version.to_string();
-    let (update, status) = check_update_for_channel(&app, channel).await?;
+    let (update, status) = check_update_for_channel(app, channel).await?;
 
     Ok(UpdateCheckResult {
         channel,
@@ -1018,16 +1024,36 @@ async fn check_for_updates<R: Runtime>(
 }
 
 #[tauri::command]
-async fn install_update<R: Runtime>(
+async fn check_for_updates<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, RuntimeState>,
-) -> Result<(), String> {
-    let channel = state.settings().update_channel;
-    let (update, status) = check_update_for_channel(&app, channel).await?;
-    let Some(update) = update else {
-        return Err(status.unwrap_or_else(|| "no update is available".into()));
-    };
+) -> Result<UpdateCheckResult, String> {
+    let settings = state.settings();
+    host_check_for_updates(&app, &settings).await
+}
 
+pub(crate) async fn host_install_update<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &RuntimeState,
+) -> Result<(), String> {
+    let update = host_update_for_install(app, state).await?;
+    host_install_available_update(app, state, update).await
+}
+
+pub(crate) async fn host_update_for_install<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &RuntimeState,
+) -> Result<tauri_plugin_updater::Update, String> {
+    let channel = state.settings().update_channel;
+    let (update, status) = check_update_for_channel(app, channel).await?;
+    update.ok_or_else(|| status.unwrap_or_else(|| "no update is available".into()))
+}
+
+pub(crate) async fn host_install_available_update<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &RuntimeState,
+    update: tauri_plugin_updater::Update,
+) -> Result<(), String> {
     app.state::<MicTestState>().stop();
     state.send(Cmd::Stop { announce: false });
     update
@@ -1037,8 +1063,40 @@ async fn install_update<R: Runtime>(
 }
 
 #[tauri::command]
+async fn install_update<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, RuntimeState>,
+) -> Result<(), String> {
+    host_install_update(&app, &state).await
+}
+
+#[tauri::command]
 fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
     host_get_settings(&state)
+}
+
+pub(crate) async fn host_choose_media_folder(
+    settings: &AppSettings,
+    current: Option<String>,
+) -> Result<Option<String>, String> {
+    let current_dir = current
+        .as_deref()
+        .and_then(|path| crate::settings::normalize_media_dir(path).ok())
+        .filter(|path| path.exists())
+        .or_else(|| settings.media_dir_path().ok())
+        .unwrap_or_else(service::default_clips_dir);
+
+    // Run the native modal off the main thread so recorder status and other
+    // IPC keep flowing while the picker is open.
+    tokio::task::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Media Folder");
+        if current_dir.exists() {
+            dialog = dialog.set_directory(current_dir);
+        }
+        dialog.pick_folder().map(|path| path.display().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1046,17 +1104,23 @@ async fn choose_media_folder(
     state: tauri::State<'_, RuntimeState>,
     current: Option<String>,
 ) -> Result<Option<String>, String> {
+    let settings = state.settings();
+    host_choose_media_folder(&settings, current).await
+}
+
+pub(crate) async fn host_choose_replay_cache_folder(
+    settings: &AppSettings,
+    current: Option<String>,
+) -> Result<Option<String>, String> {
     let current_dir = current
         .as_deref()
-        .and_then(|path| crate::settings::normalize_media_dir(path).ok())
+        .and_then(|path| crate::settings::normalize_replay_cache_dir(path).ok())
         .filter(|path| path.exists())
-        .or_else(|| state.settings().media_dir_path().ok())
+        .or_else(|| settings.media_dir_path().ok())
         .unwrap_or_else(service::default_clips_dir);
 
-    // Run the native modal off the main thread so recorder status and other
-    // IPC keep flowing while the picker is open.
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Media Folder");
+    tokio::task::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Replay Cache Folder");
         if current_dir.exists() {
             dialog = dialog.set_directory(current_dir);
         }
@@ -1071,22 +1135,8 @@ async fn choose_replay_cache_folder(
     state: tauri::State<'_, RuntimeState>,
     current: Option<String>,
 ) -> Result<Option<String>, String> {
-    let current_dir = current
-        .as_deref()
-        .and_then(|path| crate::settings::normalize_replay_cache_dir(path).ok())
-        .filter(|path| path.exists())
-        .or_else(|| state.settings().media_dir_path().ok())
-        .unwrap_or_else(service::default_clips_dir);
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Replay Cache Folder");
-        if current_dir.exists() {
-            dialog = dialog.set_directory(current_dir);
-        }
-        dialog.pick_folder().map(|path| path.display().to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())
+    let settings = state.settings();
+    host_choose_replay_cache_folder(&settings, current).await
 }
 
 #[tauri::command]
@@ -1280,6 +1330,32 @@ fn save_settings<R: Runtime>(
     state: tauri::State<RuntimeState>,
     tray_items: tauri::State<TrayItems<R>>,
     storage_settings: tauri::State<crate::library::StorageSettings>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
+    apply_settings_save(app, &state, &tray_items, &storage_settings, settings)
+}
+
+pub(crate) fn host_save_settings(
+    app: &AppHandle<tauri::Wry>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
+    let state = app.state::<RuntimeState>();
+    let tray_items = app.state::<TrayItems<tauri::Wry>>();
+    let storage_settings = app.state::<crate::library::StorageSettings>();
+    apply_settings_save(
+        app.clone(),
+        &state,
+        &tray_items,
+        &storage_settings,
+        settings,
+    )
+}
+
+fn apply_settings_save<R: Runtime>(
+    app: AppHandle<R>,
+    state: &RuntimeState,
+    tray_items: &TrayItems<R>,
+    storage_settings: &crate::library::StorageSettings,
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
     settings.hotkey = crate::settings::normalize_hotkey(&settings.hotkey)?;
@@ -1387,42 +1463,27 @@ fn save_settings<R: Runtime>(
     Ok(settings)
 }
 
-fn launch_forced_fallback_if_requested(
-    args: &[String],
-    settings: AppSettings,
-) -> Result<bool, String> {
-    let preference = crate::fallback::startup::fallback_launch_preference(
-        args,
-        crate::fallback::startup::WebviewPreflight::Available,
-    );
-    if preference != crate::fallback::startup::FallbackLaunchPreference::StartFallback {
-        return Ok(false);
-    }
-
-    let port = crate::fallback::startup::requested_fallback_port(args);
-    log_diagnostic(format!(
-        "forced fallback launch requested fallback_port={port:?}"
-    ));
-
-    let runtime =
-        tokio::runtime::Runtime::new().map_err(|e| format!("create fallback runtime: {e}"))?;
-    let host = std::sync::Arc::new(crate::host::runtime::FallbackHostContext::new(
-        settings,
-        std::sync::Arc::new(crate::host::events::ClientEventHub::default()),
-    ));
-    let info = runtime.block_on(crate::fallback::server::start_fallback_server(port, host))?;
+fn start_fallback_from_setup(
+    app: &mut tauri::App<tauri::Wry>,
+    host: Arc<crate::host::runtime::FallbackHostContext>,
+    port: Option<u16>,
+) -> Result<(), String> {
+    host.attach_app_handle(app.handle().clone())?;
+    let info =
+        tauri::async_runtime::block_on(crate::fallback::server::start_fallback_server(port, host))?;
     log_diagnostic(format!(
         "forced fallback server started addr={} url={}",
         info.addr, info.base_url
     ));
     eprintln!("Clipline fallback client: {}", info.base_url);
-    open_url_in_default_browser(&info.base_url)?;
-    log_diagnostic("forced fallback URL opened; parking process");
-    eprintln!("Clipline fallback server is running; press Ctrl+C to stop.");
-
-    loop {
-        std::thread::park();
+    if let Err(e) = open_url_in_default_browser(&info.base_url) {
+        log_diagnostic(format!("forced fallback URL open failed: {e}"));
+        eprintln!("open fallback client URL: {e}");
+    } else {
+        log_diagnostic("forced fallback URL opened");
     }
+    eprintln!("Clipline fallback server is running; close Clipline to stop it.");
+    Ok(())
 }
 
 fn open_url_in_default_browser(url: &str) -> Result<(), String> {
@@ -1485,13 +1546,16 @@ pub fn run() {
         settings = AppSettings::default();
     }
 
-    match launch_forced_fallback_if_requested(&args, settings.clone()) {
-        Ok(false) => {}
-        Ok(true) => return,
-        Err(e) => {
-            log_diagnostic(format!("forced fallback launch failed: {e}"));
-            eprintln!("forced fallback launch failed: {e}");
-        }
+    let forced_fallback_requested = crate::fallback::startup::fallback_launch_preference(
+        &args,
+        crate::fallback::startup::WebviewPreflight::Available,
+    )
+        == crate::fallback::startup::FallbackLaunchPreference::StartFallback;
+    let fallback_port = crate::fallback::startup::requested_fallback_port(&args);
+    if forced_fallback_requested {
+        log_diagnostic(format!(
+            "forced fallback launch requested fallback_port={fallback_port:?}"
+        ));
     }
 
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)
@@ -1508,12 +1572,17 @@ pub fn run() {
     );
     let global_hotkey = parse_global_hotkey(&settings.hotkey)
         .unwrap_or_else(|_| Some(parse_hotkey("Alt+F10").unwrap()));
+    let client_events = Arc::new(crate::host::events::ClientEventHub::default());
+    let fallback_host = Arc::new(crate::host::runtime::FallbackHostContext::new(
+        settings.clone(),
+        client_events.clone(),
+    ));
 
     tauri::Builder::default()
         .manage(RuntimeState::new(cmd_tx, settings.clone(), lol_url))
         .manage(MicTestState::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
-        .manage(crate::host::events::ClientEventHub::default())
+        .manage(client_events)
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
@@ -1688,10 +1757,22 @@ pub fn run() {
 
             pump_events(app.handle().clone(), event_rx);
             spawn_game_detector(app.handle().clone());
+            let fallback_client_started = if forced_fallback_requested {
+                if let Err(e) =
+                    start_fallback_from_setup(app, fallback_host.clone(), fallback_port)
+                {
+                    log_diagnostic(format!("forced fallback launch failed: {e}"));
+                    eprintln!("forced fallback launch failed: {e}");
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, e).into());
+                }
+                true
+            } else {
+                false
+            };
 
-            // The main window is created hidden by default so autostart launches
-            // don't flash it. Show it for normal launches.
-            if !launched_by_autostart {
+            // The main window is created manually so fallback can be selected
+            // before WebView2 is touched, and autostart launches stay in tray.
+            if !launched_by_autostart && !fallback_client_started {
                 log_diagnostic("normal launch opening main window");
                 if let Err(e) = open_main_window(app.handle()) {
                     log_diagnostic(format!("normal launch open failed: {e}"));
@@ -1863,7 +1944,7 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>) {
     std::thread::Builder::new()
         .name("clipline-event-pump".into())
         .spawn(move || {
-            let hub = handle.state::<crate::host::events::ClientEventHub>();
+            let hub = handle.state::<Arc<crate::host::events::ClientEventHub>>();
             for event in event_rx {
                 match &event {
                     Event::Status { .. } => {
