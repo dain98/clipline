@@ -261,6 +261,9 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-25):
+- Nightly 0.1.15 contains the Cloud library tab/profile rail work, relaxed hotkey rules, and the
+  PR #53 review follow-ups below. The previous public nightly metadata was 0.1.14, so the app and
+  Tauri package versions were bumped to 0.1.15 for updater eligibility.
 - Connected cloud identity in the rail: when `settings.cloud` has a stored credential target/user,
   the bottom-left rail shows a compact profile button above Settings. It refreshes the account from
   `/api/v1/auth/me`, prefers `display_name` over username, fetches `GET /api/v1/me/avatar` with the
