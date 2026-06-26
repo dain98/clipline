@@ -1,7 +1,8 @@
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use std::net::SocketAddr;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use axum::body::to_bytes;
@@ -21,7 +22,7 @@ const MAX_INVOKE_BODY_BYTES: usize = 1024 * 1024;
 #[derive(Clone)]
 struct FallbackServerState {
     token: FallbackToken,
-    ui_dir: PathBuf,
+    ui_assets: FallbackUiAssets,
     base_url: String,
     media: Arc<MediaRegistry>,
     host: Arc<crate::host::runtime::FallbackHostContext>,
@@ -38,17 +39,146 @@ pub struct FallbackServerInfo {
     pub base_url: String,
 }
 
-fn ui_dir() -> Result<PathBuf, String> {
-    let ui_dir = std::env::current_exe()
-        .map_err(|e| format!("read current exe path: {e}"))?
-        .parent()
-        .ok_or_else(|| "current exe has no parent directory".to_string())?
-        .join("ui");
-    if ui_dir.join("index.html").is_file() {
-        Ok(ui_dir)
-    } else {
-        Err(format!("fallback UI not found at {}", ui_dir.display()))
+#[derive(Clone)]
+enum FallbackUiAssets {
+    Directory(PathBuf),
+    Embedded,
+}
+
+impl FallbackUiAssets {
+    fn index_html(&self) -> Result<String, String> {
+        let bytes = self.asset_bytes("index.html")?;
+        match bytes {
+            Cow::Borrowed(bytes) => std::str::from_utf8(bytes)
+                .map(str::to_string)
+                .map_err(|e| format!("fallback UI index.html is not UTF-8: {e}")),
+            Cow::Owned(bytes) => String::from_utf8(bytes)
+                .map_err(|e| format!("fallback UI index.html is not UTF-8: {e}")),
+        }
     }
+
+    fn asset_bytes(&self, asset: &str) -> Result<Cow<'static, [u8]>, String> {
+        match self {
+            Self::Directory(ui_dir) => std::fs::read(ui_dir.join(asset))
+                .map(Cow::Owned)
+                .map_err(|e| format!("read fallback UI asset {asset:?}: {e}")),
+            Self::Embedded => embedded_ui_asset(asset)
+                .map(Cow::Borrowed)
+                .ok_or_else(|| format!("fallback UI asset {asset:?} is not embedded")),
+        }
+    }
+}
+
+const EMBEDDED_UI_ASSETS: &[(&str, &[u8])] = &[
+    (
+        "index.html",
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/index.html")),
+    ),
+    (
+        "client-bridge.js",
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/client-bridge.js")),
+    ),
+    (
+        "main.js",
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/main.js")),
+    ),
+    (
+        "player-core.js",
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/player-core.js")),
+    ),
+    (
+        "styles.css",
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/styles.css")),
+    ),
+    (
+        "assets/clipline-icon.svg",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/assets/clipline-icon.svg"
+        )),
+    ),
+    (
+        "assets/games/league-of-legends.png",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/assets/games/league-of-legends.png"
+        )),
+    ),
+    (
+        "assets/markers/README.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/assets/markers/README.md"
+        )),
+    ),
+    (
+        "assets/markers/baron.png",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/assets/markers/baron.png"
+        )),
+    ),
+    (
+        "assets/markers/death.png",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/assets/markers/death.png"
+        )),
+    ),
+    (
+        "assets/markers/dragon.png",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/assets/markers/dragon.png"
+        )),
+    ),
+    (
+        "assets/markers/kill.png",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/assets/markers/kill.png"
+        )),
+    ),
+    (
+        "assets/markers/turret.png",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/assets/markers/turret.png"
+        )),
+    ),
+];
+
+fn embedded_ui_asset(asset: &str) -> Option<&'static [u8]> {
+    EMBEDDED_UI_ASSETS
+        .iter()
+        .find_map(|(path, bytes)| (*path == asset).then_some(*bytes))
+}
+
+fn fallback_ui_assets() -> FallbackUiAssets {
+    fallback_ui_assets_from_candidates(fallback_ui_asset_candidates())
+}
+
+fn fallback_ui_asset_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("ui"));
+            candidates.push(parent.join("resources").join("ui"));
+        }
+    }
+    candidates.push(dev_ui_dir());
+    candidates
+}
+
+fn fallback_ui_assets_from_candidates<I>(candidates: I) -> FallbackUiAssets
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    candidates
+        .into_iter()
+        .find(|ui_dir| ui_dir.join("index.html").is_file())
+        .map(FallbackUiAssets::Directory)
+        .unwrap_or(FallbackUiAssets::Embedded)
 }
 
 fn dev_ui_dir() -> PathBuf {
@@ -62,8 +192,7 @@ async fn index(
     if token_guard(&state.token, &token).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let path = state.ui_dir.join("index.html");
-    let Ok(mut html) = std::fs::read_to_string(&path) else {
+    let Ok(mut html) = state.ui_assets.index_html() else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "read index.html").into_response();
     };
     if !html.contains("client-bridge.js") {
@@ -94,11 +223,10 @@ async fn ui_asset(
     if !is_safe_ui_asset_path(&asset) {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let path = state.ui_dir.join(&asset);
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(bytes) = state.ui_assets.asset_bytes(&asset) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let content_type = match path.extension().and_then(|ext| ext.to_str()) {
+    let content_type = match FsPath::new(&asset).extension().and_then(|ext| ext.to_str()) {
         Some("js") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("html") => "text/html; charset=utf-8",
@@ -107,7 +235,7 @@ async fn ui_asset(
         Some("ico") => "image/x-icon",
         _ => "application/octet-stream",
     };
-    let mut response = bytes.into_response();
+    let mut response = bytes.into_owned().into_response();
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -516,10 +644,9 @@ pub async fn start_fallback_server(
     let server_base_url = base_url.clone();
 
     tokio::spawn(async move {
-        let ui_dir = ui_dir().unwrap_or_else(|_| dev_ui_dir());
         let state = Arc::new(FallbackServerState {
             token: server_token,
-            ui_dir,
+            ui_assets: fallback_ui_assets(),
             base_url: server_base_url,
             media: Arc::new(MediaRegistry::default()),
             host,
@@ -565,7 +692,7 @@ mod tests {
     ) -> Arc<FallbackServerState> {
         Arc::new(FallbackServerState {
             token,
-            ui_dir: dev_ui_dir(),
+            ui_assets: FallbackUiAssets::Directory(dev_ui_dir()),
             base_url: "http://127.0.0.1/fallback-token".to_string(),
             media: Arc::new(super::super::media::MediaRegistry::default()),
             host: Arc::new(crate::host::runtime::FallbackHostContext::new(
@@ -610,6 +737,27 @@ mod tests {
             .expect("read response body");
         let json = serde_json::from_slice(&body).expect("response body is JSON");
         (status, json)
+    }
+
+    #[test]
+    fn fallback_ui_assets_fall_back_to_embedded_assets_when_directories_are_missing() {
+        let missing = std::env::temp_dir()
+            .join(format!("clipline-missing-ui-{}", std::process::id()))
+            .join("ui");
+
+        let assets = fallback_ui_assets_from_candidates([missing]);
+
+        assert!(matches!(assets, FallbackUiAssets::Embedded));
+        let html = assets.index_html().expect("embedded index is readable");
+        assert!(html.contains("client-bridge.js"));
+        let bridge = assets
+            .asset_bytes("client-bridge.js")
+            .expect("embedded bridge is readable");
+        assert!(
+            std::str::from_utf8(bridge.as_ref())
+                .expect("bridge is UTF-8")
+                .contains("window.cliplineHost")
+        );
     }
 
     #[tokio::test]

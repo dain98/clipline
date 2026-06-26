@@ -203,6 +203,28 @@ fn app_exposes_force_fallback_client_flag() {
 }
 
 #[test]
+fn app_run_can_launch_fallback_server_before_tauri() {
+    let app = app_rs();
+    let run_start = app.find("pub fn run()").expect("app.rs contains run()");
+    let run = &app[run_start..];
+    let fallback_launch = run
+        .find("launch_forced_fallback_if_requested(&args, settings.clone())")
+        .expect("run() attempts forced fallback launch");
+    let tauri_builder = run
+        .find("tauri::Builder::default()")
+        .expect("run() constructs the Tauri builder");
+
+    assert!(
+        app.contains("fallback_launch_preference") && app.contains("start_fallback_server"),
+        "app startup must be able to launch fallback before depending on a working WebView"
+    );
+    assert!(
+        fallback_launch < tauri_builder,
+        "run() must attempt forced fallback before constructing the Tauri WebView"
+    );
+}
+
+#[test]
 fn fallback_server_serves_shared_ui_assets() {
     let server =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/server.rs"))

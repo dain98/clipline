@@ -1359,6 +1359,65 @@ fn save_settings<R: Runtime>(
     Ok(settings)
 }
 
+fn launch_forced_fallback_if_requested(
+    args: &[String],
+    settings: AppSettings,
+) -> Result<bool, String> {
+    let preference = crate::fallback::startup::fallback_launch_preference(
+        args,
+        crate::fallback::startup::WebviewPreflight::Available,
+    );
+    if preference != crate::fallback::startup::FallbackLaunchPreference::StartFallback {
+        return Ok(false);
+    }
+
+    let port = crate::fallback::startup::requested_fallback_port(args);
+    log_diagnostic(format!(
+        "forced fallback launch requested fallback_port={port:?}"
+    ));
+
+    let runtime =
+        tokio::runtime::Runtime::new().map_err(|e| format!("create fallback runtime: {e}"))?;
+    let host = std::sync::Arc::new(crate::host::runtime::FallbackHostContext::new(
+        settings,
+        std::sync::Arc::new(crate::host::events::ClientEventHub::default()),
+    ));
+    let info = runtime.block_on(crate::fallback::server::start_fallback_server(port, host))?;
+    log_diagnostic(format!(
+        "forced fallback server started addr={} url={}",
+        info.addr, info.base_url
+    ));
+    eprintln!("Clipline fallback client: {}", info.base_url);
+    open_url_in_default_browser(&info.base_url)?;
+    log_diagnostic("forced fallback URL opened; parking process");
+    eprintln!("Clipline fallback server is running; press Ctrl+C to stop.");
+
+    loop {
+        std::thread::park();
+    }
+}
+
+fn open_url_in_default_browser(url: &str) -> Result<(), String> {
+    let operation = crate::util::wide_null(std::ffi::OsStr::new("open"));
+    let target = crate::util::wide_null(std::ffi::OsStr::new(url));
+    let result = unsafe {
+        windows_sys::Win32::UI::Shell::ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        )
+    };
+    if result as isize <= 32 {
+        return Err(format!(
+            "open fallback client URL failed with shell code {result:?}"
+        ));
+    }
+    Ok(())
+}
+
 pub fn run() {
     let mut settings = AppSettings::load_or_default();
     let args: Vec<String> = std::env::args().collect();
@@ -1396,6 +1455,15 @@ pub fn run() {
         log_diagnostic(format!("settings invalid; using defaults: {e}"));
         eprintln!("invalid settings, using defaults: {e}");
         settings = AppSettings::default();
+    }
+
+    match launch_forced_fallback_if_requested(&args, settings.clone()) {
+        Ok(false) => {}
+        Ok(true) => return,
+        Err(e) => {
+            log_diagnostic(format!("forced fallback launch failed: {e}"));
+            eprintln!("forced fallback launch failed: {e}");
+        }
     }
 
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)
