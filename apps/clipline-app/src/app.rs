@@ -37,7 +37,7 @@ static WEBVIEW_READY_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_REPAIR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
 
 #[derive(serde::Serialize)]
-struct DisplayInfo {
+pub(crate) struct DisplayInfo {
     id: String,
     name: String,
     x: i32,
@@ -48,14 +48,14 @@ struct DisplayInfo {
 }
 
 #[derive(serde::Serialize)]
-struct AudioDeviceInfo {
+pub(crate) struct AudioDeviceInfo {
     id: String,
     name: String,
     is_default: bool,
 }
 
 #[derive(serde::Serialize)]
-struct AudioDeviceLists {
+pub(crate) struct AudioDeviceLists {
     outputs: Vec<AudioDeviceInfo>,
     inputs: Vec<AudioDeviceInfo>,
 }
@@ -374,6 +374,10 @@ fn webview2_runtime_diagnostic() -> String {
 
 #[tauri::command]
 fn memory_status() -> Result<crate::memory::MemoryStatus, String> {
+    host_memory_status()
+}
+
+pub(crate) fn host_memory_status() -> Result<crate::memory::MemoryStatus, String> {
     crate::memory::current_process_tree_memory()
 }
 
@@ -1087,6 +1091,10 @@ async fn choose_replay_cache_folder(
 
 #[tauri::command]
 fn list_displays() -> Result<Vec<DisplayInfo>, String> {
+    host_list_displays()
+}
+
+pub(crate) fn host_list_displays() -> Result<Vec<DisplayInfo>, String> {
     clipline_capture::windows::display::enumerate_displays()
         .map_err(|e| e.to_string())
         .map(|displays| {
@@ -1107,6 +1115,10 @@ fn list_displays() -> Result<Vec<DisplayInfo>, String> {
 
 #[tauri::command]
 fn list_audio_devices() -> Result<AudioDeviceLists, String> {
+    host_list_audio_devices()
+}
+
+pub(crate) fn host_list_audio_devices() -> Result<AudioDeviceLists, String> {
     clipline_capture::windows::wasapi::enumerate_audio_devices()
         .map_err(|e| e.to_string())
         .map(|devices| AudioDeviceLists {
@@ -1140,11 +1152,19 @@ fn list_audio_devices() -> Result<AudioDeviceLists, String> {
 /// otherwise freeze the UI since synchronous commands run on the main thread.
 #[tauri::command(async)]
 fn probe_encoders() -> Vec<service::EncoderOption> {
+    host_probe_encoders()
+}
+
+pub(crate) fn host_probe_encoders() -> Vec<service::EncoderOption> {
     service::available_encoder_options()
 }
 
 #[tauri::command]
 fn list_game_windows() -> Vec<GameWindowInfo> {
+    host_list_game_windows()
+}
+
+pub(crate) fn host_list_game_windows() -> Vec<GameWindowInfo> {
     crate::games::list_game_windows()
 }
 
@@ -1152,11 +1172,19 @@ fn list_game_windows() -> Vec<GameWindowInfo> {
 /// Returns `None` when the path has no usable icon.
 #[tauri::command]
 fn extract_window_icon(exe_path: String) -> Option<String> {
+    host_extract_window_icon(exe_path)
+}
+
+pub(crate) fn host_extract_window_icon(exe_path: String) -> Option<String> {
     crate::game_icon::extract_exe_icon_data_url(&exe_path)
 }
 
 #[tauri::command]
 fn list_game_plugins() -> Vec<GamePluginInfo> {
+    host_list_game_plugins()
+}
+
+pub(crate) fn host_list_game_plugins() -> Vec<GamePluginInfo> {
     crate::games::game_plugin_catalog()
 }
 

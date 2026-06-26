@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Debug, serde::Serialize)]
 pub struct FallbackCommandResult {
@@ -35,6 +36,8 @@ impl FallbackCommandResult {
 pub struct FallbackHostContext {
     settings: Mutex<crate::settings::AppSettings>,
     events: Arc<crate::host::events::ClientEventHub>,
+    decodable_codecs: Mutex<Vec<crate::service::Codec>>,
+    mic_test_stop: Mutex<Option<mpsc::Sender<()>>>,
     service_tx: Mutex<Option<mpsc::Sender<crate::service::Cmd>>>,
     service_alive: Arc<AtomicBool>,
     service_generation: Arc<AtomicU64>,
@@ -52,6 +55,8 @@ impl FallbackHostContext {
         Self {
             settings: Mutex::new(settings),
             events,
+            decodable_codecs: Mutex::new(vec![crate::service::Codec::H264]),
+            mic_test_stop: Mutex::new(None),
             service_tx: Mutex::new(None),
             service_alive: Arc::new(AtomicBool::new(false)),
             service_generation: Arc::new(AtomicU64::new(0)),
@@ -67,6 +72,144 @@ impl FallbackHostContext {
 
     pub fn events(&self) -> Arc<crate::host::events::ClientEventHub> {
         self.events.clone()
+    }
+
+    pub fn save_settings(
+        &self,
+        mut settings: crate::settings::AppSettings,
+    ) -> Result<crate::settings::AppSettings, String> {
+        settings.hotkey = crate::settings::normalize_hotkey(&settings.hotkey)?;
+        settings.validate()?;
+        let media_dir = settings.media_dir_path()?;
+        std::fs::create_dir_all(&media_dir)
+            .map_err(|e| format!("create media folder {media_dir:?}: {e}"))?;
+        settings.save()?;
+        let mut guard = self
+            .settings
+            .lock()
+            .map_err(|_| "settings lock poisoned".to_string())?;
+        *guard = settings.clone();
+        Ok(settings)
+    }
+
+    pub fn list_displays(&self) -> Result<Vec<crate::app::DisplayInfo>, String> {
+        crate::app::host_list_displays()
+    }
+
+    pub fn list_audio_devices(&self) -> Result<crate::app::AudioDeviceLists, String> {
+        crate::app::host_list_audio_devices()
+    }
+
+    pub fn probe_encoders(&self) -> Vec<crate::service::EncoderOption> {
+        crate::service::available_encoder_options()
+    }
+
+    pub fn report_decode_support(&self, codecs: &[String]) {
+        let mut decodable_codecs = vec![crate::service::Codec::H264];
+        for codec in codecs {
+            match codec.as_str() {
+                "hevc" if !decodable_codecs.contains(&crate::service::Codec::Hevc) => {
+                    decodable_codecs.push(crate::service::Codec::Hevc);
+                }
+                "av1" if !decodable_codecs.contains(&crate::service::Codec::Av1) => {
+                    decodable_codecs.push(crate::service::Codec::Av1);
+                }
+                _ => {}
+            }
+        }
+        if let Ok(mut guard) = self.decodable_codecs.lock() {
+            *guard = decodable_codecs;
+        }
+    }
+
+    pub fn start_microphone_test(
+        &self,
+        device_id: Option<String>,
+        volume: f64,
+        mono: bool,
+    ) -> Result<(), String> {
+        self.stop_microphone_test();
+        let channels = if mono {
+            clipline_capture::windows::wasapi::WasapiChannelMode::Mono
+        } else {
+            clipline_capture::windows::wasapi::WasapiChannelMode::Stereo
+        };
+        let (stop_tx, stop_rx) = mpsc::channel();
+        {
+            let mut guard = self
+                .mic_test_stop
+                .lock()
+                .map_err(|_| "mic test state lock poisoned".to_string())?;
+            *guard = Some(stop_tx);
+        }
+        let events = self.events.clone();
+        std::thread::Builder::new()
+            .name("clipline-fallback-mic-test".into())
+            .spawn(move || {
+                let run = || -> Result<(), String> {
+                    let clock = clipline_capture::clock::RelativeClock::new(
+                        clipline_capture::windows::qpc_now_ticks_100ns()
+                            .map_err(|e| e.to_string())?,
+                    );
+                    let mut source =
+                        clipline_capture::windows::wasapi::WasapiLoopback::start_microphone(
+                            clock,
+                            device_id.as_deref(),
+                            volume,
+                            channels,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    loop {
+                        if stop_rx.try_recv().is_ok() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(30));
+                        let chunk = source.poll_monitor_chunk().map_err(|e| e.to_string())?;
+                        let samples = chunk
+                            .samples
+                            .into_iter()
+                            .map(|sample| {
+                                let scaled = (sample.clamp(-1.0, 1.0) * 32_768.0).round();
+                                scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                            })
+                            .collect();
+                        events.emit(crate::host::events::ClientEvent::new(
+                            "mic-test",
+                            serde_json::to_value(FallbackMicMonitorEvent {
+                                rms: chunk.level.rms,
+                                peak: chunk.level.peak,
+                                sample_count: chunk.level.sample_count,
+                                samples,
+                            })
+                            .unwrap_or(serde_json::Value::Null),
+                        ));
+                    }
+                    Ok(())
+                };
+                if let Err(e) = run() {
+                    events.emit(crate::host::events::ClientEvent::new(
+                        "mic-test-error",
+                        serde_json::json!(e),
+                    ));
+                    events.emit(crate::host::events::ClientEvent::new(
+                        "mic-test-stopped",
+                        serde_json::Value::Null,
+                    ));
+                }
+            })
+            .map(|_| ())
+            .map_err(|e| format!("spawn fallback microphone test: {e}"))
+    }
+
+    pub fn stop_microphone_test(&self) {
+        match self.mic_test_stop.lock() {
+            Ok(mut guard) => {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(());
+                }
+            }
+            Err(e) => eprintln!("fallback mic test state lock poisoned: {e}"),
+        }
     }
 
     pub fn save_replay(&self) -> bool {
@@ -122,7 +265,13 @@ impl FallbackHostContext {
                     .settings
                     .lock()
                     .map_err(|_| "fallback settings lock poisoned".to_string())?;
-                settings.to_service_options(None)?
+                let mut options = settings.to_service_options(None)?;
+                options.decodable_codecs = self
+                    .decodable_codecs
+                    .lock()
+                    .map_err(|_| "fallback codec state lock poisoned".to_string())?
+                    .clone();
+                options
             };
             let (tx, rx) = crate::service::spawn(options);
             let generation = self.service_generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -162,6 +311,14 @@ impl FallbackHostContext {
             Arc::new(crate::host::events::ClientEventHub::default()),
         )
     }
+}
+
+#[derive(serde::Serialize)]
+struct FallbackMicMonitorEvent {
+    rms: f32,
+    peak: f32,
+    sample_count: usize,
+    samples: Vec<i16>,
 }
 
 fn spawn_event_pump(

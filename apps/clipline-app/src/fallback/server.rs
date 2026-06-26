@@ -44,6 +44,33 @@ pub struct FallbackServerInfo {
     pub base_url: String,
 }
 
+#[derive(serde::Deserialize)]
+struct SaveSettingsArgs {
+    settings: crate::settings::AppSettings,
+}
+
+#[derive(serde::Deserialize)]
+struct ExtractWindowIconArgs {
+    #[serde(rename = "exePath")]
+    exe_path: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ReportDecodeSupportArgs {
+    codecs: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct StartMicrophoneTestArgs {
+    #[serde(rename = "deviceId")]
+    device_id: Option<String>,
+    volume: f64,
+    mono: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct StopMicrophoneTestArgs {}
+
 #[derive(Clone)]
 enum FallbackUiAssets {
     Directory(PathBuf),
@@ -461,6 +488,41 @@ fn command_response<T: serde::Serialize>(result: Result<T, String>) -> Response 
     }
 }
 
+fn ok_response<T: serde::Serialize>(value: T) -> Response {
+    axum::Json(crate::host::runtime::FallbackCommandResult::ok(
+        serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
+    ))
+    .into_response()
+}
+
+fn parse_command_args<T: serde::de::DeserializeOwned>(
+    command: &str,
+    args: serde_json::Value,
+) -> Result<T, String> {
+    serde_json::from_value(args).map_err(|e| format!("{command} arguments are invalid: {e}"))
+}
+
+pub fn fallback_dispatches_command(command: &str) -> bool {
+    matches!(
+        command,
+        "frontend_ready"
+            | "save_replay"
+            | "set_recording"
+            | "get_settings"
+            | "save_settings"
+            | "list_displays"
+            | "list_audio_devices"
+            | "probe_encoders"
+            | "list_game_plugins"
+            | "list_game_windows"
+            | "extract_window_icon"
+            | "memory_status"
+            | "report_decode_support"
+            | "start_microphone_test"
+            | "stop_microphone_test"
+    )
+}
+
 async fn invoke(
     State(state): State<Arc<FallbackServerState>>,
     Path((token, command)): Path<(String, String)>,
@@ -509,12 +571,21 @@ async fn invoke(
                 .into_response();
         }
     };
+    if !fallback_dispatches_command(&command) {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            axum::Json(crate::host::runtime::FallbackCommandResult::err(format!(
+                "fallback command not wired yet: {command}"
+            ))),
+        )
+            .into_response();
+    }
     match command.as_str() {
-        "get_settings" => return command_response(Ok(state.host.settings())),
-        "frontend_ready" => return command_response(Ok(serde_json::Value::Null)),
+        "get_settings" => return ok_response(state.host.settings()),
+        "frontend_ready" => return ok_response(serde_json::Value::Null),
         "save_replay" => {
             let _ = state.host.save_replay();
-            return command_response(Ok(serde_json::Value::Null));
+            return ok_response(serde_json::Value::Null);
         }
         "set_recording" => {
             let Some(recording) = args.get("recording").and_then(serde_json::Value::as_bool) else {
@@ -523,6 +594,52 @@ async fn invoke(
                 ));
             };
             return command_response(state.host.set_recording(recording));
+        }
+        "save_settings" => {
+            let args = match parse_command_args::<SaveSettingsArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<crate::settings::AppSettings>(Err(e)),
+            };
+            return command_response(state.host.save_settings(args.settings));
+        }
+        "list_displays" => return command_response(state.host.list_displays()),
+        "list_audio_devices" => return command_response(state.host.list_audio_devices()),
+        "probe_encoders" => return ok_response(state.host.probe_encoders()),
+        "list_game_plugins" => return ok_response(crate::app::host_list_game_plugins()),
+        "list_game_windows" => return ok_response(crate::app::host_list_game_windows()),
+        "extract_window_icon" => {
+            let args = match parse_command_args::<ExtractWindowIconArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<Option<String>>(Err(e)),
+            };
+            return ok_response(crate::app::host_extract_window_icon(args.exe_path));
+        }
+        "memory_status" => return command_response(crate::app::host_memory_status()),
+        "report_decode_support" => {
+            let args = match parse_command_args::<ReportDecodeSupportArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<serde_json::Value>(Err(e)),
+            };
+            state.host.report_decode_support(&args.codecs);
+            return ok_response(serde_json::Value::Null);
+        }
+        "start_microphone_test" => {
+            let args = match parse_command_args::<StartMicrophoneTestArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<serde_json::Value>(Err(e)),
+            };
+            return command_response(state.host.start_microphone_test(
+                args.device_id,
+                args.volume,
+                args.mono,
+            ));
+        }
+        "stop_microphone_test" => {
+            if let Err(e) = parse_command_args::<StopMicrophoneTestArgs>(&command, args) {
+                return command_response::<serde_json::Value>(Err(e));
+            }
+            state.host.stop_microphone_test();
+            return ok_response(serde_json::Value::Null);
         }
         _ => {}
     }
@@ -861,6 +978,132 @@ mod tests {
             .expect("read response body");
         let json = serde_json::from_slice(&body).expect("response body is JSON");
         (status, json)
+    }
+
+    async fn invoke_json(
+        state: Arc<FallbackServerState>,
+        command: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let token_string = state.token.as_str().to_string();
+        let response = invoke(
+            State(state),
+            Path((token_string, command.to_string())),
+            invoke_request(body),
+        )
+        .await;
+        response_json(response).await
+    }
+
+    #[test]
+    fn dispatch_table_contains_settings_and_probe_commands() {
+        for command in [
+            "get_settings",
+            "save_settings",
+            "list_displays",
+            "list_audio_devices",
+            "probe_encoders",
+            "list_game_plugins",
+            "list_game_windows",
+            "extract_window_icon",
+            "memory_status",
+            "report_decode_support",
+            "start_microphone_test",
+            "stop_microphone_test",
+        ] {
+            assert!(
+                fallback_dispatches_command(command),
+                "missing dispatch for {command}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_routes_low_risk_task14_commands() {
+        let (status, body) = invoke_json(
+            test_state(FallbackToken::generate_for_tests(7)),
+            "list_game_plugins",
+            "{}",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert!(body["value"].is_array());
+
+        let (status, body) = invoke_json(
+            test_state(FallbackToken::generate_for_tests(8)),
+            "extract_window_icon",
+            r#"{"exePath":"C:\\definitely-missing\\clipline-task14-nope.exe"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ok": true, "value": null}));
+
+        let (status, body) = invoke_json(
+            test_state(FallbackToken::generate_for_tests(9)),
+            "memory_status",
+            "{}",
+        )
+        .await;
+        assert!(matches!(status, StatusCode::OK | StatusCode::BAD_REQUEST));
+        assert_ne!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_ne!(
+            body.get("error").and_then(serde_json::Value::as_str),
+            Some("fallback command not wired yet: memory_status")
+        );
+
+        let (status, body) = invoke_json(
+            test_state(FallbackToken::generate_for_tests(10)),
+            "report_decode_support",
+            r#"{"codecs":["hevc","av1"]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ok": true, "value": null}));
+
+        let (status, body) = invoke_json(
+            test_state(FallbackToken::generate_for_tests(11)),
+            "stop_microphone_test",
+            "{}",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ok": true, "value": null}));
+    }
+
+    #[tokio::test]
+    async fn invoke_task14_typed_commands_reject_invalid_args_before_side_effects() {
+        let (status, body) = invoke_json(
+            test_state(FallbackToken::generate_for_tests(7)),
+            "save_settings",
+            "{}",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["ok"], false);
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("error message")
+                .contains("save_settings arguments are invalid"),
+            "unexpected body: {body}"
+        );
+
+        let (status, body) = invoke_json(
+            test_state(FallbackToken::generate_for_tests(8)),
+            "start_microphone_test",
+            "{}",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["ok"], false);
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("error message")
+                .contains("start_microphone_test arguments are invalid"),
+            "unexpected body: {body}"
+        );
     }
 
     #[test]
