@@ -358,12 +358,20 @@ async fn invoke(
         )
             .into_response();
     }
+    match command.as_str() {
+        "frontend_ready" | "save_replay" => {
+            return axum::Json(crate::host::runtime::FallbackCommandResult::ok(
+                serde_json::Value::Null,
+            ))
+            .into_response();
+        }
+        _ => {}
+    }
     (
         StatusCode::NOT_IMPLEMENTED,
-        axum::Json(serde_json::json!({
-            "ok": false,
-            "error": format!("fallback command not wired yet: {command}")
-        })),
+        axum::Json(crate::host::runtime::FallbackCommandResult::err(format!(
+            "fallback command not wired yet: {command}"
+        ))),
     )
         .into_response()
 }

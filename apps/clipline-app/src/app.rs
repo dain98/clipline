@@ -751,7 +751,7 @@ fn active_game_still_configured(settings: &AppSettings, active: Option<&Detected
 
 #[tauri::command]
 fn save_replay(state: tauri::State<RuntimeState>) {
-    state.request_save();
+    host_save_replay(&state);
 }
 
 #[tauri::command]
@@ -907,6 +907,26 @@ fn should_open_on_tray_click(button: MouseButton, button_state: MouseButtonState
     button == MouseButton::Left && button_state == MouseButtonState::Up
 }
 
+pub(crate) fn host_save_replay(state: &RuntimeState) {
+    state.request_save();
+}
+
+pub(crate) fn host_get_settings(state: &RuntimeState) -> AppSettings {
+    state.settings()
+}
+
+pub(crate) fn host_set_recording<R: Runtime>(
+    state: &RuntimeState,
+    app: AppHandle<R>,
+    recording: bool,
+) -> Result<bool, String> {
+    state.set_recording(app, recording)
+}
+
+pub(crate) fn host_report_decode_support(state: &RuntimeState, codecs: &[String]) {
+    state.set_decodable_codecs(codecs);
+}
+
 #[tauri::command]
 fn minimize_main_window<R: Runtime>(
     app: AppHandle<R>,
@@ -928,7 +948,7 @@ fn set_recording<R: Runtime>(
     state: tauri::State<RuntimeState>,
     recording: bool,
 ) -> Result<bool, String> {
-    state.set_recording(app, recording)
+    host_set_recording(&state, app, recording)
 }
 
 async fn check_update_for_channel<R: Runtime>(
@@ -1014,7 +1034,7 @@ async fn install_update<R: Runtime>(
 
 #[tauri::command]
 fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
-    state.settings()
+    host_get_settings(&state)
 }
 
 #[tauri::command]
@@ -1145,7 +1165,7 @@ fn list_game_plugins() -> Vec<GamePluginInfo> {
 /// Takes effect on the next recorder (re)start.
 #[tauri::command]
 fn report_decode_support(state: tauri::State<RuntimeState>, codecs: Vec<String>) {
-    state.set_decodable_codecs(&codecs);
+    host_report_decode_support(&state, &codecs);
 }
 
 #[tauri::command]
