@@ -8,16 +8,21 @@ use std::sync::Arc;
 use axum::body::to_bytes;
 use axum::extract::Request;
 use axum::extract::{Path, RawQuery, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
 use super::media::{MediaKind, MediaRegistry};
-use super::security::{FallbackToken, token_guard};
+use super::security::{token_guard, FallbackToken};
 
 const MAX_INVOKE_BODY_BYTES: usize = 1024 * 1024;
+#[cfg(test)]
+const SSE_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+#[cfg(not(test))]
+const SSE_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+const SSE_HEARTBEAT_COMMENT: &str = ": heartbeat\n\n";
 
 #[derive(Clone)]
 struct FallbackServerState {
@@ -442,6 +447,20 @@ fn range_not_satisfiable_response(file_len: u64) -> Response {
     response
 }
 
+fn command_response<T: serde::Serialize>(result: Result<T, String>) -> Response {
+    match result {
+        Ok(value) => axum::Json(crate::host::runtime::FallbackCommandResult::ok(
+            serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
+        ))
+        .into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(crate::host::runtime::FallbackCommandResult::err(error)),
+        )
+            .into_response(),
+    }
+}
+
 async fn invoke(
     State(state): State<Arc<FallbackServerState>>,
     Path((token, command)): Path<(String, String)>,
@@ -477,28 +496,33 @@ async fn invoke(
         )
             .into_response();
     };
-    if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({
-                "ok": false,
-                "error": "invalid fallback command payload"
-            })),
-        )
-            .into_response();
-    }
-    match command.as_str() {
-        "get_settings" => {
-            return axum::Json(crate::host::runtime::FallbackCommandResult::ok(
-                serde_json::to_value(state.host.settings()).unwrap_or(serde_json::Value::Null),
-            ))
-            .into_response();
+    let args = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(args) => args,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "error": "invalid fallback command payload"
+                })),
+            )
+                .into_response();
         }
-        "frontend_ready" | "save_replay" => {
-            return axum::Json(crate::host::runtime::FallbackCommandResult::ok(
-                serde_json::Value::Null,
-            ))
-            .into_response();
+    };
+    match command.as_str() {
+        "get_settings" => return command_response(Ok(state.host.settings())),
+        "frontend_ready" => return command_response(Ok(serde_json::Value::Null)),
+        "save_replay" => {
+            let _ = state.host.save_replay();
+            return command_response(Ok(serde_json::Value::Null));
+        }
+        "set_recording" => {
+            let Some(recording) = args.get("recording").and_then(serde_json::Value::as_bool) else {
+                return command_response::<bool>(Err(
+                    "set_recording requires boolean recording".to_string()
+                ));
+            };
+            return command_response(state.host.set_recording(recording));
         }
         _ => {}
     }
@@ -524,13 +548,74 @@ async fn events(
             return StatusCode::NOT_FOUND.into_response();
         }
     }
-    let body = "event: status\ndata: {\"recording\":false}\n\n";
+    let filter = event_name_query(query.as_deref()).map(str::to_string);
+    let hub = state.host.events();
+    let (subscriber_id, event_rx) = hub.subscribe_with_id();
+    let (reader, mut writer) = tokio::io::duplex(16 * 1024);
+    let runtime = tokio::runtime::Handle::current();
+    let thread_hub = hub.clone();
+    let stream = std::thread::Builder::new()
+        .name("clipline-fallback-sse".into())
+        .spawn(move || {
+            let mut next_heartbeat = std::time::Instant::now() + SSE_HEARTBEAT_INTERVAL;
+            loop {
+                let timeout = next_heartbeat.saturating_duration_since(std::time::Instant::now());
+                match event_rx.recv_timeout(timeout) {
+                    Ok(event) => {
+                        if filter.as_deref().is_some_and(|name| event.name != name) {
+                            // Keep checking the heartbeat deadline below so filtered streams
+                            // still notice closed clients.
+                        } else if let Some(chunk) = sse_event_chunk(&event) {
+                            if write_sse_chunk(&runtime, &mut writer, &chunk).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+                if std::time::Instant::now() >= next_heartbeat {
+                    if write_sse_chunk(&runtime, &mut writer, SSE_HEARTBEAT_COMMENT).is_err() {
+                        break;
+                    }
+                    next_heartbeat = std::time::Instant::now() + SSE_HEARTBEAT_INTERVAL;
+                }
+            }
+            thread_hub.unsubscribe(subscriber_id);
+        });
+    if let Err(e) = stream {
+        hub.unsubscribe(subscriber_id);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("spawn fallback event stream: {e}"),
+        )
+            .into_response();
+    }
+
+    let body = axum::body::Body::from_stream(ReaderStream::new(reader));
     let mut response = body.into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/event-stream"),
     );
     response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
+}
+
+fn write_sse_chunk(
+    runtime: &tokio::runtime::Handle,
+    writer: &mut tokio::io::DuplexStream,
+    chunk: &str,
+) -> std::io::Result<()> {
+    runtime.block_on(writer.write_all(chunk.as_bytes()))?;
+    runtime.block_on(writer.flush())
+}
+
+fn sse_event_chunk(event: &crate::host::events::ClientEvent) -> Option<String> {
+    let payload = serde_json::to_string(&event.payload).ok()?;
+    Some(format!("event: {}\ndata: {payload}\n\n", event.name))
 }
 
 fn event_name_query(query: Option<&str>) -> Option<&str> {
@@ -679,8 +764,47 @@ pub async fn start_fallback_server(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{Body, to_bytes};
+    use axum::body::{to_bytes, Body, HttpBody};
     use axum::extract::Request;
+    use std::future::poll_fn;
+    use std::time::{Duration, Instant};
+
+    async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        condition()
+    }
+
+    async fn read_sse_body_until(body: Body, needle: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut body = std::pin::pin!(body);
+        let mut text = String::new();
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let frame = tokio::time::timeout(
+                remaining.min(Duration::from_millis(200)),
+                poll_fn(|cx| body.as_mut().poll_frame(cx)),
+            )
+            .await;
+            let frame = match frame {
+                Ok(Some(frame)) => frame.expect("SSE body frame is ok"),
+                Ok(None) => break,
+                Err(_) => continue,
+            };
+            if let Ok(data) = frame.into_data() {
+                text.push_str(std::str::from_utf8(&data).expect("SSE body is UTF-8"));
+                if text.contains(needle) {
+                    break;
+                }
+            }
+        }
+        text
+    }
 
     fn test_state(token: FallbackToken) -> Arc<FallbackServerState> {
         test_state_with_settings(token, crate::settings::AppSettings::default())
@@ -753,11 +877,9 @@ mod tests {
         let bridge = assets
             .asset_bytes("client-bridge.js")
             .expect("embedded bridge is readable");
-        assert!(
-            std::str::from_utf8(bridge.as_ref())
-                .expect("bridge is UTF-8")
-                .contains("window.cliplineHost")
-        );
+        assert!(std::str::from_utf8(bridge.as_ref())
+            .expect("bridge is UTF-8")
+            .contains("window.cliplineHost"));
     }
 
     #[tokio::test]
@@ -820,6 +942,99 @@ mod tests {
         assert_eq!(body["ok"], true);
         assert_eq!(body["value"]["hotkey"], "Ctrl+F8");
         assert!(body["value"].get("secret").is_none());
+    }
+
+    #[tokio::test]
+    async fn invoke_set_recording_rejects_missing_boolean_recording_arg() {
+        let token = FallbackToken::generate_for_tests(7);
+        let token_string = token.as_str().to_string();
+        let response = invoke(
+            State(test_state(token)),
+            Path((token_string, "set_recording".to_string())),
+            invoke_request("{}"),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            serde_json::json!({"ok": false, "error": "set_recording requires boolean recording"})
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_set_recording_false_returns_recording_state() {
+        let token = FallbackToken::generate_for_tests(7);
+        let token_string = token.as_str().to_string();
+        let response = invoke(
+            State(test_state(token)),
+            Path((token_string, "set_recording".to_string())),
+            invoke_request(r#"{"recording":false}"#),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ok": true, "value": false}));
+    }
+
+    #[tokio::test]
+    async fn events_streams_filtered_hub_events() {
+        let token = FallbackToken::generate_for_tests(7);
+        let token_string = token.as_str().to_string();
+        let state = test_state(token);
+        let hub = state.host.events();
+        let response = events(
+            State(state.clone()),
+            Path(token_string),
+            RawQuery(Some("name=saved".to_string())),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/event-stream"
+        );
+
+        hub.emit(crate::host::events::ClientEvent::new(
+            "status",
+            serde_json::json!({"recording": true}),
+        ));
+        hub.emit(crate::host::events::ClientEvent::new(
+            "saved",
+            serde_json::json!({"path": "clip.mp4"}),
+        ));
+        let body = read_sse_body_until(response.into_body(), "event: saved\n").await;
+
+        assert!(body.contains("event: saved\n"));
+        assert!(body.contains(r#"data: {"path":"clip.mp4"}"#));
+        assert!(!body.contains("event: status\n"));
+        assert!(wait_until(|| hub.subscriber_count() == 0).await);
+        drop(state);
+    }
+
+    #[tokio::test]
+    async fn events_drops_idle_subscriber_after_response_is_dropped() {
+        let token = FallbackToken::generate_for_tests(7);
+        let token_string = token.as_str().to_string();
+        let state = test_state(token);
+        let hub = state.host.events();
+        let response = events(
+            State(state),
+            Path(token_string),
+            RawQuery(Some("name=status".to_string())),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(hub.subscriber_count(), 1);
+        drop(response);
+
+        assert!(wait_until(|| hub.subscriber_count() == 0).await);
     }
 
     #[tokio::test]

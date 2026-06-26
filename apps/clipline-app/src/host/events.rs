@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 
@@ -15,22 +16,39 @@ impl ClientEvent {
 
 #[derive(Default)]
 pub struct ClientEventHub {
-    subscribers: Mutex<Vec<Sender<ClientEvent>>>,
+    subscribers: Mutex<Vec<ClientEventSubscriber>>,
+    next_subscriber_id: AtomicU64,
+}
+
+struct ClientEventSubscriber {
+    id: u64,
+    sender: Sender<ClientEvent>,
 }
 
 impl ClientEventHub {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn subscribe(&self) -> Receiver<ClientEvent> {
+        self.subscribe_with_id().1
+    }
+
+    pub fn subscribe_with_id(&self) -> (u64, Receiver<ClientEvent>) {
         let (tx, rx) = mpsc::channel();
+        let id = self.next_subscriber_id.fetch_add(1, Ordering::Relaxed) + 1;
         if let Ok(mut subscribers) = self.subscribers.lock() {
-            subscribers.push(tx);
+            subscribers.push(ClientEventSubscriber { id, sender: tx });
         }
-        rx
+        (id, rx)
+    }
+
+    pub fn unsubscribe(&self, id: u64) {
+        if let Ok(mut subscribers) = self.subscribers.lock() {
+            subscribers.retain(|subscriber| subscriber.id != id);
+        }
     }
 
     pub fn emit(&self, event: ClientEvent) {
         if let Ok(mut subscribers) = self.subscribers.lock() {
-            subscribers.retain(|subscriber| subscriber.send(event.clone()).is_ok());
+            subscribers.retain(|subscriber| subscriber.sender.send(event.clone()).is_ok());
         }
     }
 
