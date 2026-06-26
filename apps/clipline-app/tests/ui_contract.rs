@@ -14,6 +14,11 @@ fn main_js() -> String {
     fs::read_to_string(path).expect("read ui/main.js")
 }
 
+fn client_bridge_js() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/client-bridge.js");
+    fs::read_to_string(path).expect("read ui/client-bridge.js")
+}
+
 fn fallback_manifest_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/manifest.rs");
     fs::read_to_string(path).expect("read src/fallback/manifest.rs")
@@ -93,6 +98,64 @@ fn frontend_reports_webview_readiness_to_native_shell() {
     assert!(
         js.contains("invoke(\"frontend_ready\")"),
         "main.js must report readiness once the frontend JavaScript boots"
+    );
+}
+
+#[test]
+fn frontend_uses_host_bridge_instead_of_tauri_directly() {
+    let html = index_html();
+    let js = main_js();
+    let bridge = client_bridge_js();
+
+    assert!(
+        html.find("client-bridge.js").is_some_and(|bridge_pos| {
+            html.find("main.js")
+                .is_some_and(|main_pos| bridge_pos < main_pos)
+        }),
+        "client-bridge.js must load before main.js"
+    );
+    assert!(
+        bridge.contains("window.cliplineHost"),
+        "bridge must expose window.cliplineHost"
+    );
+    assert!(
+        bridge.contains("close: () => appWindow.close()"),
+        "Tauri bridge close must call the real window close API"
+    );
+    assert!(
+        !bridge.contains("close: () => null"),
+        "Tauri bridge close must not be a no-op placeholder"
+    );
+    assert!(
+        bridge.contains("invoke: (command, args) => tauri.core.invoke(command, args)")
+            && bridge.contains("listen: (event, handler) => tauri.event.listen(event, handler)")
+            && bridge.contains("convertFileSrc: (path) => tauri.core.convertFileSrc(path)"),
+        "Tauri bridge methods must wrap Tauri exports instead of relying on method binding"
+    );
+    assert!(
+        bridge.contains("function showBridgeError(message)")
+            && bridge.contains("function parseJsonText(text, context)"),
+        "fallback bridge must centralize error display and JSON parsing"
+    );
+    assert!(
+        bridge.contains("const text = await response.text()")
+            && bridge.contains("parseJsonText(text, `fallback invoke ${command}`)")
+            && !bridge.contains("response.json().catch"),
+        "fallback invoke must parse response text explicitly and reject malformed JSON"
+    );
+    assert!(
+        bridge.contains("parseJsonText(message.data, `fallback event ${event}`)")
+            && bridge.contains("showBridgeError(error.message)"),
+        "fallback event listener must surface malformed event JSON without throwing"
+    );
+    assert!(
+        bridge.contains("window action failed: ${action}")
+            && bridge.contains("if (!response.ok)"),
+        "fallback window actions must reject failed HTTP responses"
+    );
+    assert!(
+        !js.contains("window.__TAURI__"),
+        "main.js must use window.cliplineHost instead of direct Tauri globals"
     );
 }
 
