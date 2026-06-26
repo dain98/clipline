@@ -189,6 +189,19 @@ fn fallback_manifest_covers_every_frontend_event_listener() {
     }
 }
 
+#[test]
+fn app_exposes_force_fallback_client_flag() {
+    let startup = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/startup.rs"),
+    )
+    .expect("read fallback startup");
+
+    assert!(
+        startup.contains("--force-fallback-client"),
+        "fallback implementation must expose a debug flag for forced fallback runtime testing"
+    );
+}
+
 fn library_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library.rs");
     fs::read_to_string(path).expect("read src/library.rs")
