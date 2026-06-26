@@ -98,7 +98,7 @@ const PlayerCore = (() => {
         const visibility = ["public", "unlisted", "private"].includes(record.visibility)
           ? record.visibility
           : status === "uploaded_private" ? "private" : "public";
-        return {
+        const entry = {
           local_clip_id: String(record.local_clip_id || ""),
           path,
           title: clipNameStem(pathBaseName(path)) || String(record.remote_clip_id || "Cloud clip"),
@@ -108,6 +108,9 @@ const PlayerCore = (() => {
           updated_at_unix: Number(record.updated_at_unix) || 0,
           local_available: localPaths.has(path),
         };
+        const remoteId = String(record.remote_clip_id || "");
+        if (remoteId) entry.remote_clip_id = remoteId;
+        return entry;
       }));
 
     return entries.sort((a, b) => b.updated_at_unix - a.updated_at_unix || a.title.localeCompare(b.title));

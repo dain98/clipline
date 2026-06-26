@@ -38,6 +38,10 @@ const CLOUD_LIBRARY_PAGE_SIZE: i64 = 100;
 const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
 const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
+const CLOUD_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const CLOUD_THUMBNAIL_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const CLOUD_MEDIA_FALLBACK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const CLOUD_MEDIA_SIZE_SLACK_BYTES: u64 = 64 * 1024 * 1024;
 static CLOUD_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static CLOUD_USER_AVATAR_CACHE: OnceLock<Mutex<Option<CachedCloudUserAvatar>>> = OnceLock::new();
 
@@ -168,6 +172,7 @@ struct CloudAssetDownload<'a> {
     extension: &'a str,
     version: Option<u64>,
     expected_size_bytes: Option<i64>,
+    max_size_bytes: u64,
     missing_ok: bool,
 }
 
@@ -242,6 +247,7 @@ pub async fn cloud_clip_thumbnail<R: Runtime>(
             extension: "jpg",
             version: request.updated_at_unix,
             expected_size_bytes: None,
+            max_size_bytes: CLOUD_THUMBNAIL_MAX_BYTES,
             missing_ok: true,
         },
     )
@@ -269,6 +275,7 @@ pub async fn cache_cloud_clip_media<R: Runtime>(
             extension: "mp4",
             version: request.updated_at_unix,
             expected_size_bytes: request.file_size_bytes,
+            max_size_bytes: cloud_media_cache_max_bytes(request.file_size_bytes),
             missing_ok: false,
         },
     )
@@ -419,7 +426,9 @@ async fn download_cloud_asset_to_cache(
     token: &str,
     request: CloudAssetDownload<'_>,
 ) -> Result<Option<PathBuf>, String> {
+    prune_old_cloud_cache_files(&cloud_clip_cache_root_dir(), CLOUD_CACHE_MAX_AGE);
     let target = cloud_clip_cache_path(
+        cloud,
         request.remote_clip_id,
         request.asset,
         request.extension,
@@ -452,6 +461,16 @@ async fn download_cloud_asset_to_cache(
             request.asset
         ));
     }
+    if response
+        .content_length()
+        .is_some_and(|length| length > request.max_size_bytes)
+    {
+        return Err(format!(
+            "download cloud {} is too large (limit {:.1} MB)",
+            request.asset,
+            request.max_size_bytes as f64 / (1024.0 * 1024.0)
+        ));
+    }
 
     let tmp = cloud_clip_cache_tmp_path(&target)?;
     let mut response = response;
@@ -465,6 +484,15 @@ async fn download_cloud_asset_to_cache(
         .map_err(|e| format!("read cloud {}: {e}", request.asset))?
     {
         written += chunk.len() as u64;
+        if written > request.max_size_bytes {
+            drop(file);
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(format!(
+                "download cloud {} is too large (limit {:.1} MB)",
+                request.asset,
+                request.max_size_bytes as f64 / (1024.0 * 1024.0)
+            ));
+        }
         file.write_all(&chunk)
             .await
             .map_err(|e| format!("write cloud cache file: {e}"))?;
@@ -481,8 +509,16 @@ async fn download_cloud_asset_to_cache(
         ));
     }
 
+    if target.exists() && !cached_asset_matches(&target, request.expected_size_bytes) {
+        let _ = tokio::fs::remove_file(cloud_cache_marker_path(&target)).await;
+        let _ = tokio::fs::remove_file(&target).await;
+    }
+
     match tokio::fs::rename(&tmp, &target).await {
-        Ok(()) => Ok(Some(target)),
+        Ok(()) => {
+            write_cloud_cache_marker(&target, written).await?;
+            Ok(Some(target))
+        }
         Err(error) if target.exists() => {
             let _ = tokio::fs::remove_file(&tmp).await;
             if cached_asset_matches(&target, request.expected_size_bytes) {
@@ -613,6 +649,7 @@ fn clear_cached_cloud_user_avatar(key: &str) {
 }
 
 fn cloud_clip_cache_path(
+    cloud: &CloudSettings,
     remote_clip_id: &str,
     asset: &str,
     extension: &str,
@@ -622,9 +659,32 @@ fn cloud_clip_cache_path(
     let asset = validate_cloud_cache_component(asset, "cloud asset")?;
     let extension = validate_cloud_cache_component(extension, "cloud asset extension")?;
     let version = version.unwrap_or(0);
-    Ok(crate::settings::persistence::config_base()
-        .join("cloud-cache")
-        .join(format!("{remote_clip_id}-{asset}-{version}.{extension}")))
+    Ok(
+        cloud_clip_cache_dir(cloud)?
+            .join(format!("{remote_clip_id}-{asset}-{version}.{extension}")),
+    )
+}
+
+fn cloud_clip_cache_dir(cloud: &CloudSettings) -> Result<PathBuf, String> {
+    Ok(cloud_clip_cache_root_dir().join(cloud_cache_namespace(cloud)?))
+}
+
+fn cloud_clip_cache_root_dir() -> PathBuf {
+    crate::settings::persistence::config_base().join("cloud-cache")
+}
+
+fn cloud_cache_namespace(cloud: &CloudSettings) -> Result<String, String> {
+    let base =
+        clipline_cloud_api::validate_cloud_host(&cloud.host_url, true).map_err(cloud_error)?;
+    let account = cloud
+        .connected_user_id
+        .as_deref()
+        .or(cloud.connected_username.as_deref())
+        .or(cloud.credential_target.as_deref())
+        .unwrap_or("anonymous")
+        .trim();
+    let key = format!("{}|{account}", base.as_str().trim_end_matches('/'));
+    Ok(sha256_hex(key.as_bytes())[..16].to_string())
 }
 
 fn validate_cloud_cache_component<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
@@ -646,10 +706,35 @@ fn cached_asset_matches(path: &Path, expected_size_bytes: Option<i64>) -> bool {
     if !meta.is_file() || meta.len() == 0 {
         return false;
     }
+    if cloud_cache_marker_matches(path, meta.len()) {
+        return true;
+    }
     match expected_size_bytes {
         Some(expected) if expected > 0 => meta.len() == expected as u64,
         _ => true,
     }
+}
+
+fn cloud_cache_marker_path(path: &Path) -> PathBuf {
+    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    if extension.is_empty() {
+        path.with_extension("ok")
+    } else {
+        path.with_extension(format!("{extension}.ok"))
+    }
+}
+
+fn cloud_cache_marker_matches(path: &Path, size_bytes: u64) -> bool {
+    std::fs::read_to_string(cloud_cache_marker_path(path))
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        == Some(size_bytes)
+}
+
+async fn write_cloud_cache_marker(path: &Path, size_bytes: u64) -> Result<(), String> {
+    tokio::fs::write(cloud_cache_marker_path(path), size_bytes.to_string())
+        .await
+        .map_err(|e| format!("write cloud cache marker: {e}"))
 }
 
 fn cloud_clip_cache_tmp_path(target: &Path) -> Result<PathBuf, String> {
@@ -659,6 +744,48 @@ fn cloud_clip_cache_tmp_path(target: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "cloud cache target has no filename".to_string())?;
     let count = CLOUD_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     Ok(target.with_file_name(format!("{file_name}.{}.{}.tmp", std::process::id(), count)))
+}
+
+fn cloud_media_cache_max_bytes(expected_size_bytes: Option<i64>) -> u64 {
+    expected_size_bytes
+        .filter(|bytes| *bytes > 0)
+        .map(|bytes| {
+            (bytes as u64)
+                .saturating_mul(2)
+                .saturating_add(CLOUD_MEDIA_SIZE_SLACK_BYTES)
+        })
+        .unwrap_or(CLOUD_MEDIA_FALLBACK_MAX_BYTES)
+}
+
+fn prune_old_cloud_cache_files(cache_dir: &Path, max_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            prune_old_cloud_cache_files(&path, max_age);
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let is_tmp = file_name.ends_with(".tmp");
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= max_age);
+        if is_tmp || old {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn allow_cloud_cache_asset<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), String> {
@@ -1553,6 +1680,7 @@ mod tests {
     use clipline_mp4::{
         AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
     };
+    use clipline_test_utils::TestDir;
     use std::io::Cursor;
 
     #[test]
@@ -1767,11 +1895,75 @@ mod tests {
 
     #[test]
     fn cloud_clip_cache_path_keeps_remote_ids_inside_cache() {
-        let path =
-            cloud_clip_cache_path("remote-1_ABC", "media", "mp4", Some(42)).expect("cache path");
+        let cloud = CloudSettings {
+            host_url: "https://clips.example.com".into(),
+            connected_user_id: Some("user-1".into()),
+            ..CloudSettings::default()
+        };
+        let path = cloud_clip_cache_path(&cloud, "remote-1_ABC", "media", "mp4", Some(42))
+            .expect("cache path");
         assert!(path.ends_with("remote-1_ABC-media-42.mp4"));
-        assert!(cloud_clip_cache_path("../escape", "media", "mp4", None).is_err());
-        assert!(cloud_clip_cache_path("remote-1", "../asset", "mp4", None).is_err());
+        assert!(cloud_clip_cache_path(&cloud, "../escape", "media", "mp4", None).is_err());
+        assert!(cloud_clip_cache_path(&cloud, "remote-1", "../asset", "mp4", None).is_err());
+    }
+
+    #[test]
+    fn cloud_clip_cache_path_is_namespaced_by_account() {
+        let first = CloudSettings {
+            host_url: "https://clips.example.com".into(),
+            connected_user_id: Some("user-1".into()),
+            ..CloudSettings::default()
+        };
+        let second = CloudSettings {
+            host_url: "https://clips.example.com".into(),
+            connected_user_id: Some("user-2".into()),
+            ..CloudSettings::default()
+        };
+
+        let first_path =
+            cloud_clip_cache_path(&first, "remote-1", "media", "mp4", Some(1)).unwrap();
+        let second_path =
+            cloud_clip_cache_path(&second, "remote-1", "media", "mp4", Some(1)).unwrap();
+
+        assert_ne!(first_path.parent(), second_path.parent());
+        assert_eq!(
+            first_path.file_name().and_then(|name| name.to_str()),
+            second_path.file_name().and_then(|name| name.to_str())
+        );
+    }
+
+    #[test]
+    fn cached_asset_marker_accepts_actual_download_size() {
+        let dir = TestDir::new("clipline-cloud", "cached-asset-marker");
+        let asset = dir.path().join("remote-media-42.mp4");
+        std::fs::write(&asset, b"served bytes").unwrap();
+        std::fs::write(cloud_cache_marker_path(&asset), b"12").unwrap();
+
+        assert!(
+            cached_asset_matches(&asset, Some(999)),
+            "a completed cloud-cache download should not be invalidated by a stale server size"
+        );
+    }
+
+    #[test]
+    fn prune_cloud_cache_removes_old_and_tmp_files() {
+        let dir = TestDir::new("clipline-cloud", "cloud-cache-prune");
+        let keep = dir.path().join("keep.mp4");
+        let old = dir.path().join("old.mp4");
+        let tmp = dir.path().join("new.mp4.1.tmp");
+        let nested = dir.path().join("account").join("nested.mp4");
+        std::fs::write(&keep, b"keep").unwrap();
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&tmp, b"tmp").unwrap();
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, b"nested").unwrap();
+
+        prune_old_cloud_cache_files(dir.path(), Duration::ZERO);
+
+        assert!(!old.exists());
+        assert!(!tmp.exists());
+        assert!(!keep.exists());
+        assert!(!nested.exists());
     }
 
     #[test]

@@ -1893,6 +1893,14 @@ function cloudLocalClipForEntry(entry) {
   return clipsCache.find((clip) => clip && clip.path === entry.path) || null;
 }
 
+function isCloudOnlyReviewClip(clip = currentClip) {
+  return !!(
+    clip
+    && clip.cloud_remote_clip_id
+    && !clipsCache.some((localClip) => localClip && localClip.path === clip.path)
+  );
+}
+
 function cloudClipAssetRequest(entry) {
   return {
     remote_clip_id: String(entry && entry.remote_clip_id || ""),
@@ -1913,10 +1921,11 @@ function resetCloudClipsCache() {
 async function loadCloudClips({ force = false } = {}) {
   if (!cloudConnected()) {
     resetCloudClipsCache();
-    if (gallerySource === "cloud") renderClips();
+    if (gallerySource === "cloud") renderCloudClips();
     return;
   }
   if (cloudClipsLoading) return;
+  if (cloudClipsError && !force) return;
   if (cloudClipsLoaded && !force) return;
   cloudClipsLoading = true;
   cloudClipsError = "";
@@ -1927,7 +1936,6 @@ async function loadCloudClips({ force = false } = {}) {
     cloudClipsLoaded = true;
   } catch (e) {
     cloudClipsError = String(e);
-    cloudClipsLoaded = true;
   } finally {
     cloudClipsLoading = false;
     if (gallerySource === "cloud") renderClips();
@@ -1997,24 +2005,58 @@ async function openCloudEntryInApp(entry) {
   }
 }
 
-function observeCloudThumbnail(entry, thumb) {
+function cloudThumbnailKey(entry) {
+  return `cloud-thumb:${entry.remote_clip_id}:${entry.updated_at_unix || 0}`;
+}
+
+function loadCloudThumbnail(entry, thumb) {
   if (!entry || !entry.remote_clip_id) return;
-  const key = `cloud-thumb:${entry.remote_clip_id}:${entry.updated_at_unix || 0}`;
+  const key = cloudThumbnailKey(entry);
   const cached = posterCache.get(key);
   if (cached) {
-    thumb.appendChild(makePosterImg(cached));
+    if (!thumb.querySelector(".card-thumb-img")) thumb.appendChild(makePosterImg(cached));
     return;
   }
-  invoke("cloud_clip_thumbnail", { request: cloudClipAssetRequest(entry) })
+  let pending = cloudThumbnailInflight.get(key);
+  if (!pending) {
+    pending = invoke("cloud_clip_thumbnail", { request: cloudClipAssetRequest(entry) })
+      .then((posterPath) => {
+        if (!posterPath) return null;
+        const url = convertFileSrc(posterPath);
+        posterCache.set(key, url);
+        return url;
+      })
+      .catch(() => null)
+      .finally(() => {
+        cloudThumbnailInflight.delete(key);
+      });
+    cloudThumbnailInflight.set(key, pending);
+  }
+  pending
     .then((posterPath) => {
-      if (!posterPath) return;
-      const url = convertFileSrc(posterPath);
-      posterCache.set(key, url);
+      const url = posterPath;
+      if (!url) return;
       if (thumb.isConnected && !thumb.querySelector(".card-thumb-img")) {
         thumb.appendChild(makePosterImg(url));
       }
     })
     .catch(() => {});
+}
+
+function observeCloudThumbnail(entry, thumb) {
+  if (!entry || !entry.remote_clip_id) return;
+  const key = cloudThumbnailKey(entry);
+  const cached = posterCache.get(key);
+  if (cached) {
+    thumb.appendChild(makePosterImg(cached));
+    return;
+  }
+  if (!posterObserver) {
+    loadCloudThumbnail(entry, thumb);
+    return;
+  }
+  posterQueue.set(thumb, { type: "cloud-thumbnail", entry });
+  posterObserver.observe(thumb);
 }
 
 function clipNameStem(name) {
@@ -2329,6 +2371,7 @@ function loadCardPoster(path, thumb) {
 // scrolls near the viewport — otherwise a library of hundreds of clips would
 // queue an extraction for every clip on the first render and peg CPU/disk.
 const posterQueue = new WeakMap();
+const cloudThumbnailInflight = new Map();
 const posterObserver =
   typeof IntersectionObserver === "function"
     ? new IntersectionObserver(
@@ -2337,9 +2380,13 @@ const posterObserver =
             if (!entry.isIntersecting) continue;
             const thumb = entry.target;
             obs.unobserve(thumb);
-            const path = posterQueue.get(thumb);
+            const request = posterQueue.get(thumb);
             posterQueue.delete(thumb);
-            if (path) loadCardPoster(path, thumb);
+            if (typeof request === "string") {
+              loadCardPoster(request, thumb);
+            } else if (request && request.type === "cloud-thumbnail") {
+              loadCloudThumbnail(request.entry, thumb);
+            }
           }
         },
         { rootMargin: "400px 0px" },
@@ -2580,6 +2627,7 @@ function galleryGroups(clips) {
 
 function renderClips() {
   syncUploadClipButton();
+  syncReviewLocalActions();
   // Keep the home in sync: empty library shows the capture preview, otherwise
   // the gallery. (Editor/settings arbitration lives in updateViews.)
   updateViews();
@@ -2655,12 +2703,12 @@ function renderCloudClips() {
     root.appendChild(empty);
     return;
   }
-  if (cloudClipsError && !entries.length) {
-    const empty = document.createElement("div");
-    empty.className = "gallery-empty";
-    empty.textContent = cloudClipsError;
-    root.appendChild(empty);
-    return;
+  if (cloudClipsError) {
+    const error = document.createElement("div");
+    error.className = "gallery-empty cloud-error";
+    error.textContent = cloudClipsError;
+    root.appendChild(error);
+    if (!entries.length) return;
   }
   if (!entries.length) {
     const empty = document.createElement("div");
@@ -2745,6 +2793,16 @@ function syncUploadClipButton() {
   const btn = $("upload-clip");
   if (!btn) return;
   const clip = currentClip;
+  btn.hidden = false;
+  if (isCloudOnlyReviewClip(clip)) {
+    btn.title = clip.cloud_remote_url ? "Copy cloud link" : "Cloud page unavailable";
+    btn.classList.toggle("uploaded", !!clip.cloud_remote_url);
+    btn.classList.remove("busy");
+    btn.disabled = !clip.cloud_remote_url;
+    btn.innerHTML =
+      '<svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.5-3.5a3 3 0 1 1 4.2 4.2l-1.5 1.5-1.4-1.4 1.5-1.5a1 1 0 1 0-1.4-1.4L12 13.4a1 1 0 0 1-1.4 0zm2.8-2.8a1 1 0 0 1 0 1.4l-3.5 3.5a3 3 0 1 1-4.2-4.2l1.5-1.5 1.4 1.4-1.5 1.5a1 1 0 1 0 1.4 1.4L12 10.6a1 1 0 0 1 1.4 0z"/></svg>';
+    return;
+  }
   const record = clip ? clipCloudRecord(clip) : null;
   const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
   const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
@@ -2755,6 +2813,15 @@ function syncUploadClipButton() {
   btn.innerHTML = uploaded
     ? '<svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.5-3.5a3 3 0 1 1 4.2 4.2l-1.5 1.5-1.4-1.4 1.5-1.5a1 1 0 1 0-1.4-1.4L12 13.4a1 1 0 0 1-1.4 0zm2.8-2.8a1 1 0 0 1 0 1.4l-3.5 3.5a3 3 0 1 1-4.2-4.2l1.5-1.5 1.4 1.4-1.5 1.5a1 1 0 1 0 1.4 1.4L12 10.6a1 1 0 0 1 1.4 0z"/></svg>'
     : '<svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>';
+}
+
+function syncReviewLocalActions() {
+  const cloudOnly = isCloudOnlyReviewClip();
+  for (const id of ["rename-clip", "open-folder", "copy-clip", "delete-clip"]) {
+    const el = $(id);
+    if (el) el.hidden = cloudOnly;
+  }
+  if (cloudOnly) setClipTitleEditing(false);
 }
 
 function setClipRenameControlsDisabled(disabled) {
@@ -2774,6 +2841,7 @@ function setClipTitleEditing(editing) {
 
 function beginClipRename(clip = currentClip) {
   if (!clip) return;
+  if (isCloudOnlyReviewClip(clip)) return;
   if (!currentClip || currentClip.path !== clip.path) openClip(clip);
   setClipTitleEditing(true);
   $("rename-input").value = (currentClip && currentClip.path === clip.path ? currentClip.name : clip.name) || "";
@@ -2877,6 +2945,7 @@ function isRenameFileLockError(error) {
 async function saveClipRename(ev) {
   ev.preventDefault();
   if (!currentClip || renamePending) return;
+  if (isCloudOnlyReviewClip(currentClip)) return;
   const oldClip = currentClip;
   const oldPath = oldClip.path;
   const nextName = $("rename-input").value.trim();
@@ -2946,6 +3015,8 @@ function openClip(clip) {
   setClipTitleEditing(false);
   $("pname").textContent = clip.name;
   $("pmeta").textContent = `${clip.size_mb.toFixed(1)} MB · ${clip.path}`;
+  syncReviewLocalActions();
+  syncUploadClipButton();
   settingsOpen = false;
   updateViews();
   updateStageFrame();
@@ -2974,6 +3045,8 @@ function closeReview() {
   video.load();
   currentClip = null;
   currentReviewMediaPath = null;
+  syncReviewLocalActions();
+  syncUploadClipButton();
   selectedAudioTrackIds = new Set();
   resetZoom();
   updateViews();
@@ -3778,6 +3851,7 @@ async function installPendingUpdate() {
 }
 
 async function deleteClip(path = currentClip && currentClip.path) {
+  if (currentClip && currentClip.path === path && isCloudOnlyReviewClip(currentClip)) return;
   if (!path) return;
   const name = path.split(/[\\/]/).pop();
   if (!(await confirmDelete(name))) return;
@@ -3797,6 +3871,7 @@ async function deleteClip(path = currentClip && currentClip.path) {
 
 async function openFolder() {
   if (!currentClip) return;
+  if (isCloudOnlyReviewClip(currentClip)) return;
   try {
     await invoke("reveal_clip", { path: currentClip.path });
   } catch (e) {
@@ -3806,6 +3881,7 @@ async function openFolder() {
 
 async function copyClipToClipboard() {
   if (!currentClip) return;
+  if (isCloudOnlyReviewClip(currentClip)) return;
   $("copy-clip").disabled = true;
   $("error").textContent = "";
   setDeckStatus("");
@@ -4099,7 +4175,7 @@ $("gallery-source-tabs").addEventListener("click", (ev) => {
   if (!tab) return;
   gallerySource = tab.dataset.gallerySource === "cloud" ? "cloud" : "local";
   renderClips();
-  if (gallerySource === "cloud") loadCloudClips();
+  if (gallerySource === "cloud") loadCloudClips({ force: true });
 });
 $("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });
 $("gallery-group").addEventListener("change", (ev) => { galleryGroup = ev.target.value; renderClips(); });
@@ -4305,6 +4381,10 @@ $("rename-input").addEventListener("keydown", (ev) => {
 });
 $("upload-clip").addEventListener("click", () => {
   if (!currentClip) return;
+  if (isCloudOnlyReviewClip(currentClip)) {
+    copyCloudUrl({ remote_url: currentClip.cloud_remote_url || "" });
+    return;
+  }
   const record = clipCloudRecord(currentClip);
   const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
   if (uploaded) copyCloudUrl(record);

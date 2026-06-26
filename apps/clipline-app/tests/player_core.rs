@@ -183,7 +183,7 @@ fn cloud_library_entries_prefer_authoritative_cloud_list() {
 
     assert_eq!(
         entries,
-        r#"[{"local_clip_id":"localKnown","path":"C:/Clips/local known.mp4","title":"Server Known","remote_url":"https://clips.example.com/clip/remote-known","visibility":"private","upload_status":"uploaded_private","updated_at_unix":40,"local_available":true,"remote_clip_id":"remote-known"},{"local_clip_id":"","path":"","title":"Other Device","remote_url":"https://clips.example.com/clip/remote-cloud-only","visibility":"unlisted","upload_status":"uploaded_public","updated_at_unix":30,"local_available":false,"remote_clip_id":"remote-cloud-only"},{"local_clip_id":"localOnlyHistory","path":"C:/Clips/local history.mp4","title":"local history","remote_url":"https://clips.example.com/history","visibility":"public","upload_status":"uploaded_public","updated_at_unix":20,"local_available":true}]"#
+        r#"[{"local_clip_id":"localKnown","path":"C:/Clips/local known.mp4","title":"Server Known","remote_url":"https://clips.example.com/clip/remote-known","visibility":"private","upload_status":"uploaded_private","updated_at_unix":40,"local_available":true,"remote_clip_id":"remote-known"},{"local_clip_id":"","path":"","title":"Other Device","remote_url":"https://clips.example.com/clip/remote-cloud-only","visibility":"unlisted","upload_status":"uploaded_public","updated_at_unix":30,"local_available":false,"remote_clip_id":"remote-cloud-only"},{"local_clip_id":"localOnlyHistory","path":"C:/Clips/local history.mp4","title":"local history","remote_url":"https://clips.example.com/history","visibility":"public","upload_status":"uploaded_public","updated_at_unix":20,"local_available":true,"remote_clip_id":"remote-history"}]"#
     );
 }
 

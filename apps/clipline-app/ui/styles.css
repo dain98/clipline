@@ -1545,6 +1545,14 @@ label span { white-space: nowrap; }
 .gallery-group-head::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--line); }
 .gallery-group-head .gcount { letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
 .gallery-empty { grid-column: 1 / -1; padding: 50px 20px; text-align: center; color: var(--muted); }
+.gallery-empty.cloud-error {
+  padding: 12px 14px;
+  text-align: left;
+  border: 1px solid rgba(251, 113, 133, 0.26);
+  border-radius: 8px;
+  color: #fecdd3;
+  background: rgba(127, 29, 29, 0.18);
+}
 
 .cloud-card { cursor: default; }
 .cloud-card .card-thumb {
