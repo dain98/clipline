@@ -24,6 +24,7 @@ struct FallbackServerState {
     ui_dir: PathBuf,
     base_url: String,
     media: Arc<MediaRegistry>,
+    host: Arc<crate::host::runtime::FallbackHostContext>,
 }
 
 #[allow(
@@ -359,6 +360,12 @@ async fn invoke(
             .into_response();
     }
     match command.as_str() {
+        "get_settings" => {
+            return axum::Json(crate::host::runtime::FallbackCommandResult::ok(
+                serde_json::to_value(state.host.settings()).unwrap_or(serde_json::Value::Null),
+            ))
+            .into_response();
+        }
         "frontend_ready" | "save_replay" => {
             return axum::Json(crate::host::runtime::FallbackCommandResult::ok(
                 serde_json::Value::Null,
@@ -490,7 +497,10 @@ fn is_safe_ui_asset_path(asset: &str) -> bool {
     dead_code,
     reason = "staged for fallback client integration in later tasks"
 )]
-pub async fn start_fallback_server(port: Option<u16>) -> Result<FallbackServerInfo, String> {
+pub async fn start_fallback_server(
+    port: Option<u16>,
+    host: Arc<crate::host::runtime::FallbackHostContext>,
+) -> Result<FallbackServerInfo, String> {
     let token = FallbackToken::generate()?;
     let addr = SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(0)));
     let listener = tokio::net::TcpListener::bind(addr)
@@ -512,6 +522,7 @@ pub async fn start_fallback_server(port: Option<u16>) -> Result<FallbackServerIn
             ui_dir,
             base_url: server_base_url,
             media: Arc::new(MediaRegistry::default()),
+            host,
         });
         let app = axum::Router::new()
             .route("/{token}", get(index))
@@ -545,11 +556,22 @@ mod tests {
     use axum::extract::Request;
 
     fn test_state(token: FallbackToken) -> Arc<FallbackServerState> {
+        test_state_with_settings(token, crate::settings::AppSettings::default())
+    }
+
+    fn test_state_with_settings(
+        token: FallbackToken,
+        settings: crate::settings::AppSettings,
+    ) -> Arc<FallbackServerState> {
         Arc::new(FallbackServerState {
             token,
             ui_dir: dev_ui_dir(),
             base_url: "http://127.0.0.1/fallback-token".to_string(),
             media: Arc::new(super::super::media::MediaRegistry::default()),
+            host: Arc::new(crate::host::runtime::FallbackHostContext::new(
+                settings,
+                Arc::new(crate::host::events::ClientEventHub::default()),
+            )),
         })
     }
 
@@ -630,11 +652,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invoke_placeholder_does_not_reflect_args() {
+    async fn invoke_get_settings_returns_host_settings_without_reflecting_args() {
         let token = FallbackToken::generate_for_tests(7);
         let token_string = token.as_str().to_string();
+        let settings = crate::settings::AppSettings {
+            hotkey: "Ctrl+F8".to_string(),
+            ..crate::settings::AppSettings::default()
+        };
         let response = invoke(
-            State(test_state(token)),
+            State(test_state_with_settings(token, settings)),
             Path((token_string, "get_settings".to_string())),
             invoke_request(r#"{"secret":"cloud-shaped-value"}"#),
         )
@@ -642,14 +668,10 @@ mod tests {
 
         let (status, body) = response_json(response).await;
 
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(
-            body,
-            serde_json::json!({
-                "ok": false,
-                "error": "fallback command not wired yet: get_settings"
-            })
-        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["value"]["hotkey"], "Ctrl+F8");
+        assert!(body["value"].get("secret").is_none());
     }
 
     #[tokio::test]
