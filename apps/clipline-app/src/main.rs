@@ -27,6 +27,8 @@ mod games;
 #[cfg(windows)]
 mod hotkeys;
 #[cfg(windows)]
+mod host;
+#[cfg(windows)]
 mod library;
 #[cfg(windows)]
 mod markers;

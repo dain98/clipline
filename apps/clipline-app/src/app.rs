@@ -1397,6 +1397,7 @@ pub fn run() {
         .manage(RuntimeState::new(cmd_tx, settings.clone(), lol_url))
         .manage(MicTestState::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
+        .manage(crate::host::events::ClientEventHub::default())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
@@ -1743,22 +1744,44 @@ where
 }
 
 fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>) {
-    std::thread::spawn(move || {
-        for event in event_rx {
-            let _ = match &event {
-                Event::Status { .. } => handle.emit("status", &event),
-                Event::Saved { .. } => handle.emit("saved", &event),
-                Event::Error { message } => handle.emit("error", message.clone()),
-            };
-            if let Event::Saved {
-                full_session: false,
-                ..
-            } = &event
-            {
-                crate::sound::play_replay_saved();
+    std::thread::Builder::new()
+        .name("clipline-event-pump".into())
+        .spawn(move || {
+            let hub = handle.state::<crate::host::events::ClientEventHub>();
+            for event in event_rx {
+                match &event {
+                    Event::Status { .. } => {
+                        hub.emit(crate::host::events::ClientEvent::new(
+                            "status",
+                            serde_json::to_value(&event).unwrap_or(serde_json::Value::Null),
+                        ));
+                        let _ = handle.emit("status", &event);
+                    }
+                    Event::Saved { .. } => {
+                        hub.emit(crate::host::events::ClientEvent::new(
+                            "saved",
+                            serde_json::to_value(&event).unwrap_or(serde_json::Value::Null),
+                        ));
+                        let _ = handle.emit("saved", &event);
+                    }
+                    Event::Error { message } => {
+                        hub.emit(crate::host::events::ClientEvent::new(
+                            "error",
+                            serde_json::json!(message),
+                        ));
+                        let _ = handle.emit("error", message.clone());
+                    }
+                }
+                if let Event::Saved {
+                    full_session: false,
+                    ..
+                } = &event
+                {
+                    crate::sound::play_replay_saved();
+                }
             }
-        }
-    });
+        })
+        .expect("spawn event pump");
 }
 
 fn parse_quota_gb(raw: &str) -> Result<Option<u64>, &'static str> {
