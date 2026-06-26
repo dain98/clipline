@@ -25,8 +25,21 @@ impl FallbackToken {
     }
 
     #[cfg(test)]
-    fn generate_for_tests(seed: u64) -> Self {
+    pub(super) fn generate_for_tests(seed: u64) -> Self {
         Self(base64_url_no_pad(&seed.to_le_bytes()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackAuthError {
+    InvalidToken,
+}
+
+pub fn token_guard(token: &FallbackToken, candidate: &str) -> Result<(), FallbackAuthError> {
+    if token.matches(candidate) {
+        Ok(())
+    } else {
+        Err(FallbackAuthError::InvalidToken)
     }
 }
 
@@ -36,7 +49,7 @@ impl FallbackToken {
 )]
 fn fill_random_bytes(bytes: &mut [u8]) -> Result<(), String> {
     use windows_sys::Win32::Security::Cryptography::{
-        BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
     };
 
     let status = unsafe {
@@ -94,6 +107,17 @@ mod tests {
         );
         assert!(first.matches(first.as_str()));
         assert!(!first.matches(second.as_str()));
+    }
+
+    #[test]
+    fn token_guard_accepts_only_exact_token() {
+        let token = FallbackToken::generate_for_tests(7);
+
+        assert_eq!(token_guard(&token, token.as_str()), Ok(()));
+        assert_eq!(
+            token_guard(&token, "wrong"),
+            Err(FallbackAuthError::InvalidToken)
+        );
     }
 
     #[cfg(windows)]

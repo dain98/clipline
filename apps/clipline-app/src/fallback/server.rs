@@ -2,16 +2,20 @@ use std::net::SocketAddr;
 use std::path::{Component, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::body::to_bytes;
+use axum::extract::Request;
+use axum::extract::{Path, RawQuery, State};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 
-use super::security::FallbackToken;
+use super::security::{FallbackToken, token_guard};
+
+const MAX_INVOKE_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
 struct FallbackServerState {
-    token: String,
+    token: FallbackToken,
     ui_dir: PathBuf,
     base_url: String,
 }
@@ -48,7 +52,7 @@ async fn index(
     State(state): State<Arc<FallbackServerState>>,
     Path(token): Path<String>,
 ) -> Response {
-    if token != state.token {
+    if token_guard(&state.token, &token).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let path = state.ui_dir.join("index.html");
@@ -77,7 +81,7 @@ async fn ui_asset(
     State(state): State<Arc<FallbackServerState>>,
     Path((token, asset)): Path<(String, String)>,
 ) -> Response {
-    if token != state.token {
+    if token_guard(&state.token, &token).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if !is_safe_ui_asset_path(&asset) {
@@ -101,6 +105,90 @@ async fn ui_asset(
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     response
+}
+
+async fn invoke(
+    State(state): State<Arc<FallbackServerState>>,
+    Path((token, command)): Path<(String, String)>,
+    request: Request,
+) -> Response {
+    if token_guard(&state.token, &token).is_err() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "error": "invalid fallback token"
+            })),
+        )
+            .into_response();
+    }
+    if !super::manifest::is_fallback_command(&command) {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "error": format!("unknown command: {command}")
+            })),
+        )
+            .into_response();
+    }
+    let Ok(body) = to_bytes(request.into_body(), MAX_INVOKE_BODY_BYTES).await else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "error": "invalid fallback command payload"
+            })),
+        )
+            .into_response();
+    };
+    if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "error": "invalid fallback command payload"
+            })),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        axum::Json(serde_json::json!({
+            "ok": false,
+            "error": format!("fallback command not wired yet: {command}")
+        })),
+    )
+        .into_response()
+}
+
+async fn events(
+    State(state): State<Arc<FallbackServerState>>,
+    Path(token): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    if token_guard(&state.token, &token).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(name) = event_name_query(query.as_deref()) {
+        if !super::manifest::is_fallback_event(name) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    }
+    let body = "event: status\ndata: {\"recording\":false}\n\n";
+    let mut response = body.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    response
+}
+
+fn event_name_query(query: Option<&str>) -> Option<&str> {
+    query?.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == "name").then_some(value)
+    })
 }
 
 fn is_safe_ui_asset_path(asset: &str) -> bool {
@@ -134,7 +222,7 @@ pub async fn start_fallback_server(port: Option<u16>) -> Result<FallbackServerIn
 
     let token_string = token.as_str().to_string();
     let base_url = format!("http://{addr}/{token_string}");
-    let server_token = token_string.clone();
+    let server_token = token.clone();
     let server_base_url = base_url.clone();
 
     tokio::spawn(async move {
@@ -148,6 +236,8 @@ pub async fn start_fallback_server(port: Option<u16>) -> Result<FallbackServerIn
             .route("/{token}", get(index))
             .route("/{token}/", get(index))
             .route("/{token}/ui/{*asset}", get(ui_asset))
+            .route("/{token}/invoke/{command}", post(invoke))
+            .route("/{token}/events", get(events))
             .route(
                 "/health",
                 get(|| async { axum::Json(serde_json::json!({"ok": true})) }),
@@ -163,4 +253,97 @@ pub async fn start_fallback_server(port: Option<u16>) -> Result<FallbackServerIn
         token: token_string,
         base_url,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::extract::Request;
+
+    fn test_state(token: FallbackToken) -> Arc<FallbackServerState> {
+        Arc::new(FallbackServerState {
+            token,
+            ui_dir: dev_ui_dir(),
+            base_url: "http://127.0.0.1/fallback-token".to_string(),
+        })
+    }
+
+    fn invoke_request(body: &str) -> Request {
+        Request::builder()
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from(body.to_string()))
+            .expect("build invoke request")
+    }
+
+    async fn response_json(response: Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json = serde_json::from_slice(&body).expect("response body is JSON");
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn invoke_rejects_invalid_token_before_parsing_body() {
+        let token = FallbackToken::generate_for_tests(7);
+        let response = invoke(
+            State(test_state(token)),
+            Path(("wrong".to_string(), "get_settings".to_string())),
+            invoke_request("not json"),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body,
+            serde_json::json!({"ok": false, "error": "invalid fallback token"})
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_returns_controlled_error_for_valid_token_malformed_json() {
+        let token = FallbackToken::generate_for_tests(7);
+        let token_string = token.as_str().to_string();
+        let response = invoke(
+            State(test_state(token)),
+            Path((token_string, "get_settings".to_string())),
+            invoke_request("not json"),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            serde_json::json!({"ok": false, "error": "invalid fallback command payload"})
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_placeholder_does_not_reflect_args() {
+        let token = FallbackToken::generate_for_tests(7);
+        let token_string = token.as_str().to_string();
+        let response = invoke(
+            State(test_state(token)),
+            Path((token_string, "get_settings".to_string())),
+            invoke_request(r#"{"secret":"cloud-shaped-value"}"#),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "ok": false,
+                "error": "fallback command not wired yet: get_settings"
+            })
+        );
+    }
 }
