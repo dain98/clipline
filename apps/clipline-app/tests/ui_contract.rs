@@ -202,6 +202,42 @@ fn app_exposes_force_fallback_client_flag() {
     );
 }
 
+#[test]
+fn fallback_server_serves_shared_ui_assets() {
+    let server =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/server.rs"))
+            .expect("read fallback server");
+
+    assert!(
+        server.contains("index.html"),
+        "fallback server must serve the shared index.html"
+    );
+    assert!(
+        server.contains(".route(\"/{token}\", get(index))"),
+        "fallback server base URL must serve the shared index without a trailing slash"
+    );
+    assert!(
+        server.contains("client-bridge.js"),
+        "fallback server must serve the shared client bridge"
+    );
+    assert!(
+        server.contains("__CLIPLINE_FALLBACK__"),
+        "fallback index must inject fallback bridge config"
+    );
+    assert!(
+        server.contains("/{token}/ui/{*asset}"),
+        "fallback server must serve nested UI assets"
+    );
+    assert!(
+        server.contains("std::path::Path::new(asset)")
+            && server.contains(".components()")
+            && server.contains("Component::Prefix(_)")
+            && server.contains("Component::RootDir")
+            && server.contains("Component::ParentDir"),
+        "fallback UI asset paths must reject Windows drive prefixes, absolute roots, and parent traversal"
+    );
+}
+
 fn library_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library.rs");
     fs::read_to_string(path).expect("read src/library.rs")
