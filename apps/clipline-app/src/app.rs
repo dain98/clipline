@@ -870,6 +870,7 @@ where
 
 fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     app.state::<MicTestState>().stop();
+    let _ = app.emit("suspend-review-playback", ());
     log_diagnostic(format!(
         "send main window to tray webviews={}",
         webview_labels(app)

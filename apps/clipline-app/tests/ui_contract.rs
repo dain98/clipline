@@ -823,6 +823,48 @@ fn open_clip_clears_previous_playback_loop_and_pending_seek() {
 }
 
 #[test]
+fn close_to_tray_suspends_review_playback() {
+    let app = app_rs();
+    let js = main_js();
+    let tray_start = app
+        .find("fn send_main_window_to_tray")
+        .expect("send-to-tray helper");
+    let tray_end = app[tray_start..]
+        .find("fn quit_app")
+        .map(|offset| tray_start + offset)
+        .expect("quit helper follows tray helper");
+    let tray_helper = &app[tray_start..tray_end];
+    let suspend_start = js
+        .find("function suspendReviewPlayback()")
+        .expect("frontend suspend helper");
+    let close_review_start = js.find("function closeReview()").unwrap();
+    let suspend_helper = &js[suspend_start..close_review_start];
+
+    assert!(
+        tray_helper.contains("emit(\"suspend-review-playback\""),
+        "native close-to-tray must tell the WebView to stop clip playback before hiding it"
+    );
+    assert!(
+        js.contains("listen(\"suspend-review-playback\"") && js.contains("suspendReviewPlayback"),
+        "frontend must listen for the native close-to-tray suspend event"
+    );
+    assert!(
+        suspend_helper.contains("audioPreviewSeq += 1;")
+            && suspend_helper.contains("cancelAnimationFrame(rafId);")
+            && suspend_helper.contains("video.pause();")
+            && suspend_helper.contains("video.removeAttribute(\"src\");")
+            && suspend_helper.contains("video.load();"),
+        "suspending playback must cancel preview work, stop the RAF loop, and unload the video"
+    );
+    assert!(
+        suspend_helper.contains("currentClip = null;")
+            && suspend_helper.contains("currentReviewMediaPath = null;")
+            && suspend_helper.contains("updateViews();"),
+        "suspending playback must also leave the editor state so reopening from tray cannot show a src-less current clip"
+    );
+}
+
+#[test]
 fn initial_settings_tab_state_matches_visible_section() {
     let html = index_html();
     let tabs_start = html.find("id=\"settings-tabs\"").expect("settings tabs");
@@ -883,6 +925,83 @@ fn initial_settings_tab_state_matches_visible_section() {
         vec![active_tab],
         "only the active settings tab's section should be visible before first interaction"
     );
+}
+
+#[test]
+fn settings_tabs_preserve_unsaved_draft_until_save() {
+    let js = main_js();
+    let tab_handler_start = js
+        .find("document.querySelectorAll(\"#settings-tabs .tab\")")
+        .expect("settings tab handler");
+    let timeline_start = js[tab_handler_start..]
+        .find("$(\"timeline\")")
+        .map(|offset| tab_handler_start + offset)
+        .expect("timeline handler follows settings tabs");
+    let tab_handler = &js[tab_handler_start..timeline_start];
+    let save_handler_start = js
+        .find("$(\"settings-save\").addEventListener")
+        .expect("settings save handler");
+    let video_start = js[save_handler_start..]
+        .find("video.addEventListener")
+        .map(|offset| save_handler_start + offset)
+        .expect("video handlers follow settings save");
+    let save_handler = &js[save_handler_start..video_start];
+    let sync_start = js
+        .find("function syncSettingsDraftFromForm()")
+        .expect("settings draft sync helper");
+    let fill_start = js[sync_start..]
+        .find("function fillSettings")
+        .map(|offset| sync_start + offset)
+        .expect("fillSettings follows settings draft sync helper");
+    let sync_helper = &js[sync_start..fill_start];
+
+    assert!(
+        js.contains("let settingsDraft = null;")
+            && js.contains("function settingsFormSource()")
+            && js.contains("function syncSettingsDraftFromForm()"),
+        "settings must keep an explicit unsaved draft while the settings page is open"
+    );
+    assert!(
+        tab_handler.contains("syncSettingsDraftFromForm();"),
+        "switching tabs must snapshot edits before the current section is hidden"
+    );
+    assert!(
+        save_handler.contains("settings: syncSettingsDraftFromForm()"),
+        "Save Settings must submit the accumulated draft, not only the visible tab state"
+    );
+    assert!(
+        sync_helper.contains("settingsDraft = readSettings();")
+            && !sync_helper.contains("return settingsDraft || {};"),
+        "Save Settings must fall back to a full form snapshot, not {{}}, when settings are not loaded yet"
+    );
+    assert!(
+        js.contains("settings-page\").addEventListener(\"input\", () => syncSettingsDraftFromForm())")
+            && js.contains("settings-page\").addEventListener(\"change\", () => syncSettingsDraftFromForm())"),
+        "settings form edits must continuously refresh the draft before async tab renderers repaint controls"
+    );
+    assert!(
+        js.contains("const audio = settingsFormSource().audio || defaultAudioSettings();")
+            && js.contains("const selected = settingsFormSource().video_encoder || \"auto\";")
+            && js.contains("function captureSettingsValue(settings = settingsFormSource())"),
+        "async settings renderers must use the draft as their source while settings are being edited"
+    );
+
+    for renderer in [
+        "function renderCaptureTargetSelect()",
+        "function renderAudioDeviceSelects()",
+        "function renderVideoEncoderSelect()",
+    ] {
+        let start = js.find(renderer).expect("settings option renderer");
+        let end = js[start + renderer.len()..]
+            .find("\nfunction ")
+            .map(|offset| start + renderer.len() + offset)
+            .expect("next function follows renderer");
+        let body = &js[start..end];
+        assert!(
+            !body.contains("syncSettingsDraftFromForm()"),
+            "settings option renderers must not re-read stale DOM state while fillSettings is repainting"
+        );
+    }
 }
 
 #[test]

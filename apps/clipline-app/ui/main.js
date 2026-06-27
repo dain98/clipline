@@ -94,6 +94,7 @@ let galleryGroup = "smart";
 let gallerySearch = "";
 const posterCache = new Map();
 let currentSettings = null;
+let settingsDraft = null;
 let recordingActive = false;
 let fullSessionRecordingActive = false;
 let displays = [];
@@ -326,6 +327,19 @@ function updateStageFrame() {
 
 /* ---- sidebar: status, settings, library ---- */
 
+function cloneSettings(settings) {
+  return settings ? JSON.parse(JSON.stringify(settings)) : null;
+}
+
+function settingsFormSource() {
+  return settingsDraft || currentSettings || {};
+}
+
+function syncSettingsDraftFromForm() {
+  settingsDraft = readSettings();
+  return settingsDraft;
+}
+
 function fillSettings(s) {
   const audio = { ...defaultAudioSettings(), ...(s.audio || {}) };
   const replayStorage = { ...defaultReplayStorageSettings(), ...(s.replay_storage || {}) };
@@ -345,6 +359,7 @@ function fillSettings(s) {
       custom_games: customGames.map((game) => ({ ...game })),
     },
   };
+  settingsDraft = cloneSettings(currentSettings);
   regionState = s.capture_region ?? regionState;
   captureTargetDirty = false;
   renderCaptureTargetSelect();
@@ -395,17 +410,17 @@ function fillSettings(s) {
 function readSettings() {
   const replay = Number($("set-replay").value);
   const capture = selectedCaptureSettings();
+  const source = settingsFormSource();
   const preserveLegacyWindow =
     !captureTargetDirty
-    && currentSettings
-    && currentSettings.capture_mode === "window_title"
-    && String(currentSettings.window_title || "").trim().length > 0;
+    && source.capture_mode === "window_title"
+    && String(source.window_title || "").trim().length > 0;
   return {
     capture_mode: preserveLegacyWindow ? "window_title" : capture.capture_mode,
     capture_backend: $("set-backend").value,
-    window_title: preserveLegacyWindow ? currentSettings.window_title : "",
+    window_title: preserveLegacyWindow ? source.window_title : "",
     capture_region: preserveLegacyWindow
-      ? (currentSettings.capture_region || capture.capture_region)
+      ? (source.capture_region || capture.capture_region)
       : capture.capture_region,
     games: {
       auto_detect: $("set-games-auto-detect").checked,
@@ -639,8 +654,9 @@ function syncCloudHttpWarning() {
 }
 
 function readCloudSettings() {
-  const existing = currentSettings && currentSettings.cloud
-    ? currentSettings.cloud
+  const source = settingsFormSource();
+  const existing = source.cloud
+    ? source.cloud
     : defaultCloudSettings();
   return {
     ...existing,
@@ -723,9 +739,10 @@ function gamePluginSetting(plugin) {
 }
 
 function readGamePluginSettings() {
+  const source = settingsFormSource();
   const next = {
     ...normalizeGamePluginSettingsMap(
-      currentSettings && currentSettings.games ? currentSettings.games.plugins : {}
+      source.games ? source.games.plugins : {}
     ),
   };
   for (const plugin of gamePlugins) {
@@ -861,7 +878,7 @@ function isFullDisplayRegion(region, display) {
     && Number(region.height) === display.height;
 }
 
-function captureSettingsValue(settings = currentSettings) {
+function captureSettingsValue(settings = settingsFormSource()) {
   if (settings && settings.capture_mode === "display_region") {
     const display = displays.find((item) => isFullDisplayRegion(settings.capture_region, item));
     return display ? displayCaptureValue(display) : "display_region";
@@ -1029,14 +1046,14 @@ function fillDeviceSelect(id, devices, defaultLabel, selectedId) {
 }
 
 function renderAudioDeviceSelects() {
-  const audio = currentSettings && currentSettings.audio ? currentSettings.audio : defaultAudioSettings();
+  const audio = settingsFormSource().audio || defaultAudioSettings();
   fillDeviceSelect("set-output-device", audioDevices.outputs, "Default output device", audio.output_device_id);
   fillDeviceSelect("set-mic-device", audioDevices.inputs, "Default microphone", audio.mic_device_id);
 }
 
 function renderVideoEncoderSelect() {
   const select = $("set-encoder");
-  const selected = currentSettings && currentSettings.video_encoder ? currentSettings.video_encoder : "auto";
+  const selected = settingsFormSource().video_encoder || "auto";
   select.replaceChildren();
   const automatic = document.createElement("option");
   automatic.value = "auto";
@@ -2935,6 +2952,29 @@ async function releaseVideoFileHandle() {
   await afterNextPaint();
 }
 
+function suspendReviewPlayback() {
+  setClipTitleEditing(false);
+  audioPreviewSeq += 1;
+  cancelAnimationFrame(rafId);
+  rafId = 0;
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  currentClip = null;
+  currentReviewMediaPath = null;
+  selectedAudioTrackIds = new Set();
+  resetZoom();
+  syncReviewLocalActions();
+  syncUploadClipButton();
+  updateViews();
+  syncPlayState();
+  setDeckStatus("");
+  $("stage-note").textContent = "";
+  $("marker-layer").replaceChildren();
+  renderAudioTrackPanel();
+  renderClips();
+}
+
 function isRenameFileLockError(error) {
   const text = String(error).toLowerCase();
   return text.includes("access is denied")
@@ -4138,6 +4178,8 @@ listen("mic-test-stopped", () => {
   if (micTestRunning) stopMicTestUi("stopped");
 });
 
+listen("suspend-review-playback", () => suspendReviewPlayback());
+
 listen("game-detection", (e) => {
   activeDetectedGame = e.payload || null;
   updateCaptureStatus();
@@ -4314,7 +4356,7 @@ $("settings-save").addEventListener("click", async () => {
   $("settings-status").textContent = "";
   $("error").textContent = "";
   try {
-    const saved = await invoke("save_settings", { settings: readSettings() });
+    const saved = await invoke("save_settings", { settings: syncSettingsDraftFromForm() });
     fillSettings(saved);
     $("settings-status").textContent = "saved";
     await refresh();
@@ -4419,6 +4461,8 @@ $("rail-save").addEventListener("click", () => invoke("save_replay"));
 $("rail-profile").addEventListener("click", openRailProfile);
 $("rail-settings").addEventListener("click", () => toggleSettings());
 $("settings-close").addEventListener("click", () => toggleSettings(false));
+$("settings-page").addEventListener("input", () => syncSettingsDraftFromForm());
+$("settings-page").addEventListener("change", () => syncSettingsDraftFromForm());
 $("set-hotkey").addEventListener("focus", beginHotkeyCapture);
 $("set-hotkey").addEventListener("click", beginHotkeyCapture);
 $("set-hotkey").addEventListener("keydown", recordHotkey);
@@ -4432,6 +4476,7 @@ $("set-hotkey").addEventListener("blur", () => {
 
 document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
   tab.addEventListener("click", () => {
+    syncSettingsDraftFromForm();
     document
       .querySelectorAll("#settings-tabs .tab")
       .forEach((t) => t.classList.toggle("active", t === tab));

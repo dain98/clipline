@@ -261,6 +261,14 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-27):
+- Close-to-tray now emits a frontend playback-suspend event before hiding the WebView, so review
+  audio/video and pending preview work stop instead of continuing behind the tray session.
+- Settings now keep an explicit unsaved draft while the settings page is open. Tab switches and
+  async device/display/encoder refreshes read from that draft, so saving at the end preserves edits
+  made across multiple settings tabs.
+- Replay clips cut from the middle of an Opus stream now write audio tracks with zero `dOps`
+  pre-skip, avoiding the tiny start-of-clip audio drop that only belongs at the original stream
+  beginning.
 - Runtime memory/duplicate-instance guard: Task Manager reports of many Clipline rows were partly
   WebView2 child process labeling, but duplicate top-level `clipline-app.exe` processes were also
   allowed. The Tauri shell now registers `tauri-plugin-single-instance` before autostart so normal
