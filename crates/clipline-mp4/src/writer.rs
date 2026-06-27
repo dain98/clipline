@@ -558,10 +558,7 @@ mod tests {
             TrackConfig::Audio(audio_cfg()),
             &[(50, 960, true), (50, 960, true), (50, 960, true)],
         );
-        assert!(
-            state.stss().is_none(),
-            "all-sync track omits stss per spec"
-        );
+        assert!(state.stss().is_none(), "all-sync track omits stss per spec");
     }
 
     #[test]
@@ -691,8 +688,7 @@ mod tests {
 
     #[test]
     fn write_fragment_multi_rejects_track_count_mismatch() {
-        let mut w =
-            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        let mut w = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
         let s1 = gop(0);
         let s2 = gop(3);
         let err = w.write_fragment_multi(&[&s1, &s2]);
@@ -701,8 +697,7 @@ mod tests {
 
     #[test]
     fn write_fragment_multi_no_ops_on_all_empty() {
-        let mut w =
-            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        let mut w = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
         let before = w.w.position();
         w.write_fragment_multi(&[&[]]).unwrap();
         assert_eq!(w.w.position(), before, "nothing written for empty samples");
@@ -751,8 +746,7 @@ mod tests {
 
     #[test]
     fn write_fragment_multi_from_source_rejects_track_count_mismatch() {
-        let mut w =
-            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        let mut w = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
         let source_data = vec![0u8; 100];
         let mut source = Cursor::new(source_data);
         let samples = [SourceSample {
@@ -767,8 +761,7 @@ mod tests {
 
     #[test]
     fn write_fragment_multi_from_source_no_ops_on_all_empty() {
-        let mut w =
-            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        let mut w = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
         let mut source = Cursor::new(Vec::<u8>::new());
         let before = w.w.position();
         let empty: &[SourceSample] = &[];
@@ -779,8 +772,7 @@ mod tests {
 
     #[test]
     fn finalize_produces_ftyp_mdat_moov_layout() {
-        let mut w =
-            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        let mut w = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
         w.write_fragment(&gop(0)).unwrap();
         let buf = w.finalize().unwrap().into_inner();
         let boxes = walk(&buf);
@@ -821,8 +813,7 @@ mod tests {
 
     #[test]
     fn sequence_number_increments_per_fragment() {
-        let mut w =
-            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        let mut w = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
         assert_eq!(w.next_sequence, 1);
         w.write_fragment(&gop(0)).unwrap();
         assert_eq!(w.next_sequence, 2);
@@ -832,8 +823,7 @@ mod tests {
 
     #[test]
     fn next_decode_time_advances_by_sample_durations() {
-        let mut w =
-            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        let mut w = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
         w.write_fragment(&gop(0)).unwrap();
         // 3 samples × 3000 duration each
         assert_eq!(w.tracks[0].next_decode_time, 9000);

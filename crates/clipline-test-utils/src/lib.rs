@@ -16,10 +16,8 @@ impl TestDir {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "{prefix}-{name}-{}-{unique}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("{prefix}-{name}-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }

@@ -684,14 +684,8 @@ mod tests {
         let joined = rc.join(" ");
         assert!(joined.contains("-b:v 6000000"));
         assert!(joined.contains("-preset 8"));
-        assert!(
-            !joined.contains("-maxrate"),
-            "SVT-AV1 rejects -maxrate"
-        );
-        assert!(
-            !joined.contains("-bufsize"),
-            "SVT-AV1 rejects -bufsize"
-        );
+        assert!(!joined.contains("-maxrate"), "SVT-AV1 rejects -maxrate");
+        assert!(!joined.contains("-bufsize"), "SVT-AV1 rejects -bufsize");
     }
 
     #[test]

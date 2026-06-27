@@ -11,11 +11,11 @@ use crate::service::{
     AudioChannelMode, AudioOptions, CaptureRegion, OutputResolution, ReplayStorageOptions,
 };
 
-use super::validation::{MAX_AUDIO_VOLUME, MAX_CAPTURE_REGION_SIDE, MIN_CAPTURE_REGION_SIDE};
 use super::persistence::{
     bool_field, clamp_u32, deserialize_field, f64_field, i32_field, integer_field,
     normalize_replay_cache_dir, optional_string_field, replay_cache_quota_bytes_from_gb,
 };
+use super::validation::{MAX_AUDIO_VOLUME, MAX_CAPTURE_REGION_SIDE, MIN_CAPTURE_REGION_SIDE};
 
 pub const MAX_ICON_DATA_URL_LEN: usize = 256 * 1024;
 
@@ -144,7 +144,8 @@ impl AudioSettings {
             mic_volume: f64_field(object, "mic_volume")
                 .map(|value| value.clamp(0.0, MAX_AUDIO_VOLUME))
                 .unwrap_or(defaults.mic_volume),
-            mic_channels: deserialize_field(object, "mic_channels").unwrap_or(defaults.mic_channels),
+            mic_channels: deserialize_field(object, "mic_channels")
+                .unwrap_or(defaults.mic_channels),
         }
     }
 

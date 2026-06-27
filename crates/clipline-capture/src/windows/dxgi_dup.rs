@@ -187,12 +187,13 @@ impl DxgiDuplicationCapture {
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
         // SAFETY: dupl is live; out-params are valid for the call's duration.
-        let acquired = unsafe { self.dupl.AcquireNextFrame(timeout_ms, &mut info, &mut resource) };
+        let acquired = unsafe {
+            self.dupl
+                .AcquireNextFrame(timeout_ms, &mut info, &mut resource)
+        };
         match acquired {
             Ok(()) => self.frame_held = true,
-            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
-                return Ok(AcquireOutcome::WaitedOut)
-            }
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(AcquireOutcome::WaitedOut),
             Err(e) if is_access_lost(e.code()) => {
                 // Mode change, UAC/secure desktop, session lock. Recreate the
                 // duplication and let the caller retry — never drop the engine.
@@ -200,7 +201,9 @@ impl DxgiDuplicationCapture {
                 return Ok(AcquireOutcome::RetryImmediately);
             }
             Err(e) if e.code() == DXGI_ERROR_DEVICE_REMOVED => {
-                return Err(CaptureError::DeviceLost(format!("DXGI device removed: {e}")))
+                return Err(CaptureError::DeviceLost(format!(
+                    "DXGI device removed: {e}"
+                )))
             }
             Err(e) => return Err(CaptureError::DeviceLost(format!("AcquireNextFrame: {e}"))),
         }
@@ -252,7 +255,8 @@ impl DxgiDuplicationCapture {
         let Some(crop) = crop else {
             return Ok(AcquireOutcome::RetryImmediately);
         };
-        let copy = d3d11::create_bgra_texture(&self.device, crop.width, crop.height).map_err(dev)?;
+        let copy =
+            d3d11::create_bgra_texture(&self.device, crop.width, crop.height).map_err(dev)?;
         d3d11::copy_texture_region(
             &self.context,
             &copy,
@@ -495,15 +499,18 @@ mod tests {
             height: 80,
         };
         let clock = RelativeClock::new(crate::windows::qpc_now_ticks_100ns().expect("qpc"));
-        let mut cap =
-            match DxgiDuplicationCapture::for_monitor_region_on(device, display.handle, clock, crop)
-            {
-                Ok(cap) => cap,
-                Err(e) => {
-                    eprintln!("SKIP: duplication unavailable: {e}");
-                    return;
-                }
-            };
+        let mut cap = match DxgiDuplicationCapture::for_monitor_region_on(
+            device,
+            display.handle,
+            clock,
+            crop,
+        ) {
+            Ok(cap) => cap,
+            Err(e) => {
+                eprintln!("SKIP: duplication unavailable: {e}");
+                return;
+            }
+        };
         match cap.next_frame_timeout(Duration::from_secs(5)) {
             Ok(Some(frame)) => {
                 let FrameData::Gpu(tex) = &frame.data else {

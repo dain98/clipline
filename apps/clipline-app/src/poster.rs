@@ -61,7 +61,14 @@ fn generate_poster(ffmpeg: &Path, clip: &Path, poster: &Path, seek_s: f64) -> Re
     suppress_console(&mut cmd);
     // Input-side `-ss` is a fast keyframe seek — fine for a thumbnail.
     let output = cmd
-        .args(["-hide_banner", "-nostdin", "-y", "-ss", &seek_arg(seek_s), "-i"])
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-ss",
+            &seek_arg(seek_s),
+            "-i",
+        ])
         .arg(clip)
         .args([
             "-frames:v",
