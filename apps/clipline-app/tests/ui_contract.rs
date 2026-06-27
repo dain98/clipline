@@ -423,13 +423,15 @@ fn fallback_external_validation_script_captures_webview2_removed_gate() {
         "$CliplineExe",
         "$EvidencePath",
         "$UseDebugMissingPreflight",
+        "$IncludeGlobalHotkeyProbe",
         "--fallback-port",
         "--debug-webview2-preflight",
         "missing",
         "Clipline fallback client:",
         "startup fallback server started",
-        "native save hotkey initialized",
+        "native save hotkey ready",
         "fallback native save hotkey available",
+        "fallback unfocused native save hotkey",
         "fallback frontend_ready received",
         "fallback browser frontend_ready",
         "setup start launched_by_autostart=",
@@ -454,6 +456,17 @@ fn fallback_external_validation_script_captures_webview2_removed_gate() {
         "text/event-stream",
         ": heartbeat",
         "fallback event stream smoke",
+        "Convert-HotkeyToProbeInput",
+        "Send-GlobalHotkeyProbe -Hotkey",
+        "clipline-hotkey-probe",
+        "Send-GlobalHotkeyProbe",
+        "SetForegroundWindow",
+        "Wait-ForegroundWindow",
+        "GetForegroundWindow",
+        "foreground_window_handle",
+        "Stop-Process -Id $focusedProcess.Id",
+        "notepad.exe",
+        "native save hotkey triggered",
         "Invoke-RestMethod",
         "FileShare]::ReadWrite",
         "Remove-Item -LiteralPath $diagnosticLogPath",
@@ -466,6 +479,57 @@ fn fallback_external_validation_script_captures_webview2_removed_gate() {
             "fallback validation script must include {required}"
         );
     }
+}
+
+#[test]
+fn native_save_hook_reports_real_keyboard_hook_readiness() {
+    let app = app_rs();
+    let hotkeys = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/hotkeys.rs"))
+        .expect("read hotkeys");
+    let install_hook = source_between(
+        &hotkeys,
+        "pub fn install_save_hook",
+        "pub fn set_save_hotkey",
+    );
+    let keyboard_hook = source_between(&hotkeys, "fn run_keyboard_hook", "fn run_mouse_hook");
+
+    assert!(
+        install_hook.contains("ready_rx")
+            && install_hook.contains("recv_timeout")
+            && install_hook.contains("run_keyboard_hook(ready_tx)"),
+        "install_save_hook must wait until the low-level keyboard hook reports OS readiness"
+    );
+    let publish_index = install_hook
+        .find("publish_save_hook(state.clone())")
+        .expect("install_save_hook publishes hook state before installing OS hook");
+    let keyboard_start_index = install_hook
+        .find("run_keyboard_hook(ready_tx)")
+        .expect("install_save_hook starts keyboard hook thread");
+    assert!(
+        publish_index < keyboard_start_index && install_hook.contains("clear_save_hook(&state)"),
+        "hook state must be visible before OS callbacks can fire and rolled back on install failure"
+    );
+    assert!(
+        keyboard_hook.contains("SetWindowsHookExW")
+            && keyboard_hook.contains("ready_tx.send(Ok(")
+            && keyboard_hook.contains("ready_tx.send(Err("),
+        "keyboard hook thread must report SetWindowsHookExW success or failure"
+    );
+    assert!(
+        app.contains("native save hotkey ready hotkey={}"),
+        "app setup must only log native save hotkey readiness after the OS hook is installed"
+    );
+}
+
+#[test]
+fn native_save_hotkey_trigger_is_diagnostic_logged() {
+    let app = app_rs();
+
+    assert!(
+        app.contains("let accepted = app.state::<RuntimeState>().request_save();")
+            && app.contains("native save hotkey triggered accepted={accepted}"),
+        "native hotkey callback must log when an unfocused/global keypress reaches the recorder"
+    );
 }
 
 #[test]

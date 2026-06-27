@@ -1834,7 +1834,8 @@ pub fn run() {
             if let Err(e) = crate::hotkeys::install_save_hook(&settings.hotkey, {
                 let app = app.handle().clone();
                 move || {
-                    app.state::<RuntimeState>().request_save();
+                    let accepted = app.state::<RuntimeState>().request_save();
+                    log_diagnostic(format!("native save hotkey triggered accepted={accepted}"));
                 }
             }) {
                 let message = format!("low-level save hotkey unavailable: {e}");
@@ -1842,7 +1843,7 @@ pub fn run() {
                 emit_client_event(app.handle(), "error", message);
             } else {
                 log_diagnostic(format!(
-                    "native save hotkey initialized hotkey={}",
+                    "native save hotkey ready hotkey={}",
                     settings.hotkey
                 ));
             }

@@ -3058,7 +3058,7 @@ Real WebView2-removed Windows 10 validation still remains external.
 **Execution note (2026-06-27 native hotkey fallback):** The fallback browser does not own global
 keyboard focus. Save Replay remains native-owned because the Tauri setup path registers Clipline's
 global shortcut and low-level Windows save hook before starting the fallback server. Added a
-diagnostic success line (`native save hotkey initialized`) and updated the external validation
+diagnostic success line (`native save hotkey ready`) and updated the external validation
 harness to require that line before `startup fallback server started`; the evidence JSON now
 includes `fallback native save hotkey available`. Local harness run on port 47651 passed with
 debug-missing WebView2 preflight, shared UI, invoke smoke, media range smoke, SSE heartbeat, and
@@ -3073,6 +3073,15 @@ auto-opened browser ran `client-bridge.js` and `main.js` far enough to call the 
 Local harness run on port 47652 passed with debug-missing WebView2 preflight, native-hotkey
 availability, browser readiness, invoke smoke, media range smoke, and SSE heartbeat. Real
 WebView2-removed Windows 10 validation still remains external.
+
+**Execution note (2026-06-27 unfocused hotkey probe):** Strengthened the native hotkey proof again
+after noticing that `native save hotkey ready` must mean the OS hook thread reported
+`SetWindowsHookExW` success, not just that setup spawned the hook thread. The keyboard hook now
+reports readiness through the same channel pattern as the mouse hook, and the native callback logs
+`native save hotkey triggered accepted=...` when a global keypress reaches the recorder. The external
+validation harness now accepts `-IncludeGlobalHotkeyProbe`, briefly focuses Notepad, sends the
+configured Save Replay hotkey from fallback `get_settings`, and records
+`fallback unfocused native save hotkey` only after that trigger diagnostic appears.
 
 ---
 

@@ -8,6 +8,7 @@ param(
     [switch]$UseDebugMissingPreflight,
     [switch]$ForceFallback,
     [switch]$IncludeSaveReplay,
+    [switch]$IncludeGlobalHotkeyProbe,
     [switch]$KeepRunning
 )
 
@@ -351,6 +352,244 @@ function Wait-TextFileContains {
     throw "Timed out waiting for $Name to contain expected text: $Needle"
 }
 
+function Convert-HotkeyToProbeInput {
+    param([string]$Hotkey)
+
+    $modifiers = [System.Collections.Generic.List[string]]::new()
+    $key = $null
+    foreach ($part in @($Hotkey -split "\+")) {
+        switch ($part) {
+            "Ctrl" { $modifiers.Add("Ctrl"); continue }
+            "Alt" { $modifiers.Add("Alt"); continue }
+            "Shift" { $modifiers.Add("Shift"); continue }
+            default {
+                if ($key) {
+                    throw "global hotkey probe could not parse multiple keys in $Hotkey"
+                }
+                $key = $part
+            }
+        }
+    }
+
+    if (!$key) {
+        throw "global hotkey probe could not parse key in $Hotkey"
+    }
+
+    $keyboardMap = @{
+        Backspace = 0x08
+        Tab = 0x09
+        Enter = 0x0D
+        Space = 0x20
+        PageUp = 0x21
+        PageDown = 0x22
+        End = 0x23
+        Home = 0x24
+        ArrowLeft = 0x25
+        ArrowUp = 0x26
+        ArrowRight = 0x27
+        ArrowDown = 0x28
+        Insert = 0x2D
+        Delete = 0x2E
+        Semicolon = 0xBA
+        Equal = 0xBB
+        Comma = 0xBC
+        Minus = 0xBD
+        Period = 0xBE
+        Slash = 0xBF
+        Backquote = 0xC0
+        BracketLeft = 0xDB
+        Backslash = 0xDC
+        BracketRight = 0xDD
+        Quote = 0xDE
+    }
+
+    if ($key -match '^F([1-9]|1[0-9]|2[0-4])$') {
+        return [pscustomobject]@{
+            Kind = "keyboard"
+            Modifiers = $modifiers.ToArray()
+            KeyVk = 0x70 + [int]$Matches[1] - 1
+            Hotkey = $Hotkey
+        }
+    }
+    if ($key.Length -eq 1 -and $key -match '^[A-Z0-9]$') {
+        return [pscustomobject]@{
+            Kind = "keyboard"
+            Modifiers = $modifiers.ToArray()
+            KeyVk = [int][char]$key
+            Hotkey = $Hotkey
+        }
+    }
+    if ($keyboardMap.ContainsKey($key)) {
+        return [pscustomobject]@{
+            Kind = "keyboard"
+            Modifiers = $modifiers.ToArray()
+            KeyVk = [int]$keyboardMap[$key]
+            Hotkey = $Hotkey
+        }
+    }
+    if ($key -in @("Middle", "Mouse4", "Mouse5")) {
+        return [pscustomobject]@{
+            Kind = "mouse"
+            Modifiers = $modifiers.ToArray()
+            MouseButton = $key
+            Hotkey = $Hotkey
+        }
+    }
+
+    throw "global hotkey probe does not support configured hotkey: $Hotkey"
+}
+
+function Send-ProbeInput {
+    param([object]$ProbeInput)
+
+    $modifierVk = @{
+        Ctrl = 0x11
+        Alt = 0x12
+        Shift = 0x10
+    }
+    $modifiers = @($ProbeInput.Modifiers)
+    foreach ($modifier in $modifiers) {
+        [CliplineHotkeyProbe.Native]::KeyDown([byte]$modifierVk[$modifier])
+    }
+    try {
+        if ($ProbeInput.Kind -eq "keyboard") {
+            [CliplineHotkeyProbe.Native]::KeyDown([byte]$ProbeInput.KeyVk)
+            [CliplineHotkeyProbe.Native]::KeyUp([byte]$ProbeInput.KeyVk)
+        } else {
+            [CliplineHotkeyProbe.Native]::MouseClick([string]$ProbeInput.MouseButton)
+        }
+    }
+    finally {
+        for ($i = $modifiers.Count - 1; $i -ge 0; $i--) {
+            [CliplineHotkeyProbe.Native]::KeyUp([byte]$modifierVk[$modifiers[$i]])
+        }
+    }
+}
+
+function Send-GlobalHotkeyProbe {
+    param(
+        [string]$Hotkey,
+        [int]$TimeoutSeconds
+    )
+
+    if (-not ("CliplineHotkeyProbe.Native" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace CliplineHotkeyProbe {
+    public static class Native {
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+        [DllImport("user32.dll")]
+        private static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+
+        private const uint KEYEVENTF_KEYUP = 0x0002;
+        private const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+        private const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
+        private const uint MOUSEEVENTF_XDOWN = 0x0080;
+        private const uint MOUSEEVENTF_XUP = 0x0100;
+        private const uint XBUTTON1 = 0x0001;
+        private const uint XBUTTON2 = 0x0002;
+
+        public static void KeyDown(byte vk) {
+            keybd_event(vk, 0, 0, UIntPtr.Zero);
+        }
+
+        public static void KeyUp(byte vk) {
+            keybd_event(vk, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        }
+
+        public static void MouseClick(string button) {
+            if (button == "Middle") {
+                mouse_event(MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, UIntPtr.Zero);
+                mouse_event(MOUSEEVENTF_MIDDLEUP, 0, 0, 0, UIntPtr.Zero);
+                return;
+            }
+            uint data = button == "Mouse5" ? XBUTTON2 : XBUTTON1;
+            mouse_event(MOUSEEVENTF_XDOWN, 0, 0, data, UIntPtr.Zero);
+            mouse_event(MOUSEEVENTF_XUP, 0, 0, data, UIntPtr.Zero);
+        }
+    }
+}
+"@
+    }
+
+    $probeInput = Convert-HotkeyToProbeInput -Hotkey $Hotkey
+    $probePath = Join-Path $env:TEMP ("clipline-hotkey-probe-{0}.txt" -f ([guid]::NewGuid().ToString("N")))
+    Set-Content -LiteralPath $probePath -Value "" -Encoding ASCII
+    $probeFileName = [System.IO.Path]::GetFileName($probePath)
+    $notepad = Start-Process -FilePath "notepad.exe" -ArgumentList @($probePath) -PassThru
+    $focusedProcess = $null
+    try {
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        do {
+            Start-Sleep -Milliseconds 200
+            $focusedProcess = Get-Process -Name "Notepad" -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.MainWindowHandle -ne [IntPtr]::Zero -and
+                    $_.MainWindowTitle.Contains($probeFileName)
+                } |
+                Select-Object -First 1
+        } while (!$focusedProcess -and (Get-Date) -lt $deadline)
+
+        if (!$focusedProcess) {
+            throw "Timed out waiting for notepad.exe to expose the clipline-hotkey-probe window"
+        }
+
+        $foregroundHandle = Wait-ForegroundWindow -WindowHandle $focusedProcess.MainWindowHandle -TimeoutSeconds $TimeoutSeconds
+        Start-Sleep -Milliseconds 300
+        Send-ProbeInput -ProbeInput $probeInput
+        return @{
+            configured_hotkey = $Hotkey
+            input_kind = $probeInput.Kind
+            foreground_process_id = $focusedProcess.Id
+            foreground_window_title = $focusedProcess.MainWindowTitle
+            foreground_window_handle = $foregroundHandle.ToInt64()
+        }
+    }
+    finally {
+        if ($focusedProcess) {
+            Stop-Process -Id $focusedProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        Get-Process -Name "Notepad" -ErrorAction SilentlyContinue |
+            Where-Object { $_.MainWindowTitle.Contains($probeFileName) } |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+        if ($notepad -and !$notepad.HasExited) {
+            Stop-Process -Id $notepad.Id -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $probePath -PathType Leaf) {
+            Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Wait-ForegroundWindow {
+    param(
+        [IntPtr]$WindowHandle,
+        [int]$TimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        [CliplineHotkeyProbe.Native]::SetForegroundWindow($WindowHandle) | Out-Null
+        Start-Sleep -Milliseconds 100
+        $foreground = [CliplineHotkeyProbe.Native]::GetForegroundWindow()
+        if ($foreground -eq $WindowHandle) {
+            return $foreground
+        }
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Timed out waiting for notepad.exe to become the foreground window for the global hotkey probe"
+}
+
 $checks = [System.Collections.ArrayList]::new()
 $process = $null
 $stdoutPath = Join-Path $env:TEMP ("clipline-fallback-validation-{0}.out.log" -f ([guid]::NewGuid().ToString("N")))
@@ -399,17 +638,28 @@ try {
     $diagnosticText = Wait-TextFileContains $diagnosticLogPath "fallback frontend_ready received" "diagnostic log" $TimeoutSeconds
     Assert-TextContains $diagnosticText "setup start launched_by_autostart=" "diagnostic log"
     Assert-TextContains $diagnosticText "startup fallback server started" "diagnostic log"
-    Assert-TextContains $diagnosticText "native save hotkey initialized" "diagnostic log"
+    Assert-TextContains $diagnosticText "native save hotkey ready" "diagnostic log"
     Assert-TextContains $diagnosticText "fallback frontend_ready received" "diagnostic log"
     Assert-TextContains $diagnosticText "webviews=[]" "diagnostic log"
     Assert-TextBefore $diagnosticText "setup start launched_by_autostart=" "startup fallback server started" "diagnostic log"
-    Assert-TextBefore $diagnosticText "native save hotkey initialized" "startup fallback server started" "diagnostic log"
+    Assert-TextBefore $diagnosticText "native save hotkey ready" "startup fallback server started" "diagnostic log"
     Assert-TextBefore $diagnosticText "startup fallback server started" "fallback frontend_ready received" "diagnostic log"
     Assert-TextNotContains $diagnosticText "normal launch opening main window" "diagnostic log"
     Assert-TextNotContains $diagnosticText "open_main_window start" "diagnostic log"
     Add-Check $checks "fallback starts before WebView creation" $true @{ log = $diagnosticLogPath }
     Add-Check $checks "fallback native save hotkey available" $true @{ log = $diagnosticLogPath }
     Add-Check $checks "fallback browser frontend_ready" $true @{ log = $diagnosticLogPath }
+
+    if ($IncludeGlobalHotkeyProbe) {
+        $probeSettings = Invoke-FallbackCommand -BaseUrl $baseUrl -Command "get_settings"
+        $hotkey = [string]$probeSettings.hotkey
+        if (!$hotkey) {
+            throw "fallback settings did not include a configured Save Replay hotkey"
+        }
+        $hotkeyProbe = Send-GlobalHotkeyProbe -Hotkey $hotkey -TimeoutSeconds $TimeoutSeconds
+        $diagnosticText = Wait-TextFileContains $diagnosticLogPath "native save hotkey triggered" "diagnostic log" $TimeoutSeconds
+        Add-Check $checks "fallback unfocused native save hotkey" $true $hotkeyProbe
+    }
 
     if ($UseDebugMissingPreflight) {
         Assert-TextContains $diagnosticText "debug WebView2 preflight override applied" "diagnostic log"
