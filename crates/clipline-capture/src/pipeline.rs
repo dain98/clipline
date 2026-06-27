@@ -176,6 +176,16 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         for pkt in self.encoder.finish()? {
             self.push_encoded_packet(pkt)?;
         }
+        if self.pending.is_empty()
+            && self.video_start_pts_s.is_none()
+            && self.pre_keyframe_bytes > 0
+        {
+            return Err(EncodeError::Backend(format!(
+                "encoder ended before producing an initial keyframe ({} bytes were dropped before the first keyframe)",
+                self.pre_keyframe_bytes
+            ))
+            .into());
+        }
         if !self.pending.is_empty() {
             let end = self
                 .pending
@@ -722,6 +732,25 @@ mod tests {
             err.to_string().contains("keyframe") && err.to_string().contains("budget"),
             "error should explain the keyframe/budget guard, got {err}"
         );
+    }
+
+    #[test]
+    fn short_stream_without_initial_keyframe_is_reported() {
+        let mut rec = Recorder::new(
+            MockCapture::new(1, 30),
+            NeverKeyframeEncoder::new(30),
+            usize::MAX,
+        );
+
+        let err = rec
+            .run_to_end()
+            .expect_err("short unkeyframed stream should fail");
+
+        assert!(
+            err.to_string().contains("keyframe") && err.to_string().contains("ended"),
+            "error should explain that the stream ended before an initial keyframe, got {err}"
+        );
+        assert_eq!(rec.ring().unwrap().len(), 0);
     }
 
     #[test]

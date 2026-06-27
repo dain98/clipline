@@ -23,8 +23,8 @@ use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
-    AppSettings, CaptureMode, GameRecordingMode, is_global_shortcut_hotkey, parse_hotkey,
-    quota_bytes_from_gb,
+    is_global_shortcut_hotkey, parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode,
+    GameRecordingMode,
 };
 use crate::updates::UpdateChannel;
 
@@ -446,9 +446,18 @@ struct PreparedRuntimeRestart {
 }
 
 impl RuntimeState {
-    fn new(tx: Sender<Cmd>, settings: AppSettings, lol_url: Option<String>) -> Self {
+    fn new(settings: AppSettings, lol_url: Option<String>) -> Self {
+        Self::from_parts(None, settings, lol_url)
+    }
+
+    #[cfg(test)]
+    fn with_sender(tx: Sender<Cmd>, settings: AppSettings, lol_url: Option<String>) -> Self {
+        Self::from_parts(Some(tx), settings, lol_url)
+    }
+
+    fn from_parts(tx: Option<Sender<Cmd>>, settings: AppSettings, lol_url: Option<String>) -> Self {
         Self(Mutex::new(RuntimeInner {
-            tx: Some(tx),
+            tx,
             settings,
             lol_url,
             active_game: None,
@@ -789,7 +798,11 @@ fn saved_autostart_preference_for_build(
     previous: bool,
     debug_build: bool,
 ) -> bool {
-    if debug_build { previous } else { requested }
+    if debug_build {
+        previous
+    } else {
+        requested
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1381,16 +1394,11 @@ pub fn run() {
         .unwrap_or_else(|_| service::default_clips_dir());
     let scope_dir = media_dir.clone();
     let audio_preview_scope_dir = crate::settings::audio_preview_cache_dir();
-    let (cmd_tx, event_rx) = service::spawn(
-        settings
-            .to_service_options(lol_url.clone())
-            .unwrap_or_else(|_| ServiceOptions::default()),
-    );
     let global_hotkey = parse_global_hotkey(&settings.hotkey)
         .unwrap_or_else(|_| Some(parse_hotkey("Alt+F10").unwrap()));
 
     tauri::Builder::default()
-        .manage(RuntimeState::new(cmd_tx, settings.clone(), lol_url))
+        .manage(RuntimeState::new(settings.clone(), lol_url))
         .manage(MicTestState::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
@@ -1577,7 +1585,14 @@ pub fn run() {
                 .build(app)?;
             log_diagnostic(format!("tray build complete webviews={}", webview_labels(app.handle())));
 
-            pump_events(app.handle().clone(), event_rx);
+            if let Err(e) = app
+                .state::<RuntimeState>()
+                .start_recording(app.handle().clone())
+            {
+                let message = format!("recorder startup failed: {e}");
+                eprintln!("{message}");
+                let _ = app.handle().emit("error", message);
+            }
             spawn_game_detector(app.handle().clone());
 
             // The main window is created hidden by default so autostart launches
@@ -1875,7 +1890,7 @@ mod tests {
     #[test]
     fn request_save_debounces_only_immediate_duplicate_triggers() {
         let (tx, rx) = mpsc::channel();
-        let state = RuntimeState::new(tx, AppSettings::default(), None);
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
 
         assert!(state.request_save());
         assert!(matches!(rx.try_recv(), Ok(Cmd::Save)));
@@ -2141,6 +2156,39 @@ mod tests {
     fn release_build_autostart_policy_honors_user_choice() {
         assert!(saved_autostart_preference_for_build(true, false, false));
         assert!(!saved_autostart_preference_for_build(false, true, false));
+    }
+
+    #[test]
+    fn native_shell_starts_recorder_after_single_instance_accepts_process() {
+        let app = include_str!("app.rs");
+        let run_start = app.find("pub fn run()").expect("run function should exist");
+        let run_body = &app[run_start..];
+        let run_end = run_body
+            .find("\nfn spawn_game_detector")
+            .expect("run function should be followed by spawn_game_detector");
+        let run_body = &run_body[..run_end];
+        let single_instance = run_body
+            .find("tauri_plugin_single_instance::init")
+            .expect("single-instance plugin should be installed");
+        let setup = run_body
+            .find(".setup(move |app|")
+            .expect("app setup should be registered");
+        let recorder_start = run_body
+            .find("start_recording(app.handle().clone())")
+            .expect("setup should start the recorder after plugins are installed");
+
+        assert!(
+            single_instance < setup,
+            "single-instance plugin must be installed before setup runs"
+        );
+        assert!(
+            setup < recorder_start,
+            "initial recorder startup must happen from setup after single-instance registration"
+        );
+        assert!(
+            !run_body[..single_instance].contains("service::spawn("),
+            "run() must not spawn the recorder before single-instance can reject a duplicate launch"
+        );
     }
 
     #[test]
