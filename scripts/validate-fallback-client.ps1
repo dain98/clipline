@@ -115,6 +115,122 @@ function Invoke-FallbackCommand {
     return $response.value
 }
 
+function Invoke-WebRequestNoRedirect {
+    param([string]$Uri)
+
+    try {
+        return Invoke-WebRequest -Uri $Uri -UseBasicParsing -MaximumRedirection 0 -ErrorAction Stop
+    }
+    catch {
+        $response = $_.Exception.Response
+        if ($response) {
+            return [pscustomobject]@{
+                StatusCode = [int]$response.StatusCode
+                Headers = $response.Headers
+            }
+        }
+        throw
+    }
+}
+
+function Header-Value {
+    param(
+        [object]$Headers,
+        [string]$Name
+    )
+
+    if ($Headers -is [System.Net.WebHeaderCollection]) {
+        return $Headers[$Name]
+    }
+    $value = $Headers[$Name]
+    if ($value -is [array]) {
+        return $value[0]
+    }
+    return $value
+}
+
+function Invoke-WebRequestFirstByte {
+    param([string]$Uri)
+
+    $Range = "bytes=0-0"
+    $request = [System.Net.HttpWebRequest]::Create($Uri)
+    $request.Method = "GET"
+    $request.AddRange(0, 0)
+    $response = $request.GetResponse()
+    try {
+        $stream = $response.GetResponseStream()
+        try {
+            $buffer = New-Object byte[] 1
+            $bytesRead = $stream.Read($buffer, 0, 1)
+        }
+        finally {
+            if ($stream) {
+                $stream.Dispose()
+            }
+        }
+        return [pscustomobject]@{
+            StatusCode = [int]$response.StatusCode
+            Headers = $response.Headers
+            BytesRead = $bytesRead
+            RequestedRange = $Range
+        }
+    }
+    finally {
+        $response.Dispose()
+    }
+}
+
+function Test-FallbackMediaPlayback {
+    param(
+        [string]$BaseUrl,
+        [object]$Clips
+    )
+
+    $clip = @($Clips) | Where-Object { $_ -and $_.path } | Select-Object -First 1
+    if (!$clip) {
+        return @{ skipped = "skipped: no clips available" }
+    }
+
+    $clipPath = [string]$clip.path
+    $encodedPath = [System.Uri]::EscapeDataString($clipPath)
+    $redirect = Invoke-WebRequestNoRedirect -Uri "$BaseUrl/media-path?path=$encodedPath"
+    if ([int]$redirect.StatusCode -ne 307) {
+        throw "fallback media-path returned $($redirect.StatusCode), expected 307"
+    }
+
+    $mediaUrl = [string](Header-Value $redirect.Headers "Location")
+    if (!$mediaUrl) {
+        throw "fallback media-path did not include a Location header"
+    }
+    if (!$mediaUrl.StartsWith("$BaseUrl/media/", [System.StringComparison]::Ordinal)) {
+        throw "fallback media-path returned non-opaque media URL: $mediaUrl"
+    }
+    $clipName = [System.IO.Path]::GetFileName($clipPath)
+    if ($clipName -and $mediaUrl.Contains($clipName)) {
+        throw "fallback media URL leaked the clip file name"
+    }
+
+    $media = Invoke-WebRequestFirstByte -Uri $mediaUrl
+    if ([int]$media.StatusCode -ne 206) {
+        throw "fallback media range request returned $($media.StatusCode), expected 206"
+    }
+    if ([int]$media.BytesRead -ne 1) {
+        throw "fallback media range response returned $($media.BytesRead) bytes, expected 1"
+    }
+    $contentRange = [string](Header-Value $media.Headers "Content-Range")
+    if (!$contentRange.StartsWith("bytes 0-0/", [System.StringComparison]::Ordinal)) {
+        throw "fallback media range response had unexpected Content-Range: $contentRange"
+    }
+
+    return @{
+        clip_name = $clipName
+        media_status = [int]$media.StatusCode
+        requested_range = $media.RequestedRange
+        content_range = $contentRange
+        media_url = $mediaUrl
+    }
+}
+
 function Assert-TextContains {
     param(
         [string]$Text,
@@ -230,12 +346,19 @@ try {
         "/invoke/memory_status"
     )
     $commandResults = @{}
+    $clips = $null
     foreach ($endpoint in $commandEndpoints) {
         $command = ($endpoint -split "/")[-1]
         $value = Invoke-FallbackCommand -BaseUrl $baseUrl -Command $command
+        if ($command -eq "list_clips") {
+            $clips = $value
+        }
         $commandResults[$command] = if ($null -eq $value) { "null" } else { $value.GetType().FullName }
     }
     Add-Check $checks "fallback invoke smoke" $true $commandResults
+
+    $mediaDetails = Test-FallbackMediaPlayback -BaseUrl $baseUrl -Clips $clips
+    Add-Check $checks "fallback media playback smoke" $true $mediaDetails
 
     if ($IncludeSaveReplay) {
         Invoke-FallbackCommand -BaseUrl $baseUrl -Command "save_replay" | Out-Null

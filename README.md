@@ -44,7 +44,7 @@ On Windows, the standard installer embeds Microsoft's small WebView2 Evergreen b
 
 If WebView2 is unavailable or broken, Clipline starts a local browser fallback that uses the same first-party UI through a tokenized `127.0.0.1` connection. The fallback is intended for Windows 10 machines where WebView2 cannot be kept installed; it still requires a normal browser for the UI.
 
-To validate the fallback on a WebView2-removed Windows 10 machine, run `scripts\validate-fallback-client.ps1 -CliplineExe <path-to-Clipline.exe>`. On a dev machine that still has WebView2, add `-UseDebugMissingPreflight` to exercise the same startup fallback path and write an evidence JSON.
+To validate the fallback on a WebView2-removed Windows 10 machine, run `scripts\validate-fallback-client.ps1 -CliplineExe <path-to-Clipline.exe>`. On a dev machine that still has WebView2, add `-UseDebugMissingPreflight` to exercise the same startup fallback path and write an evidence JSON. When clips are present, the evidence includes a `/media-path` redirect plus a ranged `/media/{id}` playback probe.
 
 **On signing — two different things, only one is done yet:**
 
