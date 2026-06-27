@@ -3026,6 +3026,12 @@ tokenized URL served the shared UI with HTTP 200, and fallback invokes for `get_
 `list_clips` (45 clips), and `storage_status` returned `ok`. Nate/real WebView2-removed Windows 10
 validation still remains external.
 
+**Execution note (2026-06-27 titlebar follow-up):** The fallback bridge already sent browser
+titlebar actions to `/window/{action}`, but the server did not have a matching route. Added a
+token-guarded route for `minimize`, `toggle_maximize`, and `close` as successful no-ops so the
+browser fallback titlebar controls do not surface fallback-only 404 bridge errors. The route rejects
+unknown actions and invalid tokens.
+
 ---
 
 ## Self-Review Notes

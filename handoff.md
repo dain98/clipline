@@ -330,7 +330,10 @@ Recent fixes (2026-06-25):
   status returned `ok`. The browser client serves the same first-party UI through a tokenized
   `127.0.0.1` loopback URL, source-contract tests guard parity over every frontend `invoke` command
   and `listen` event, and fallback media routes are path-validated and range-capable for review
-  playback. Nate/real WebView2-removed Windows 10 validation still remains external.
+  playback. A follow-up fixed the fallback titlebar route: `minimize`, `toggle_maximize`, and
+  `close` now hit a token-guarded `/window/{action}` endpoint that succeeds as a browser-safe no-op
+  instead of surfacing a fallback-only 404. Nate/real WebView2-removed Windows 10 validation still
+  remains external.
 
 Recent fixes (2026-06-24):
 - Windows 10 follow-up from Nate's 0.1.12 logs: the recovery-window build also produced

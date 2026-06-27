@@ -423,6 +423,19 @@ async fn media(
     }
 }
 
+async fn window_action(
+    State(state): State<Arc<FallbackServerState>>,
+    Path((token, action)): Path<(String, String)>,
+) -> Response {
+    if token_guard(&state.token, &token).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match action.as_str() {
+        "minimize" | "toggle_maximize" | "close" => ok_response(serde_json::Value::Null),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 enum MediaRead {
     Full {
         file: File,
@@ -1195,6 +1208,7 @@ pub async fn start_fallback_server(
             .route("/{token}/media/{id}", get(media))
             .route("/{token}/invoke/{command}", post(invoke))
             .route("/{token}/events", get(events))
+            .route("/{token}/window/{action}", post(window_action))
             .route(
                 "/health",
                 get(|| async { axum::Json(serde_json::json!({"ok": true})) }),
@@ -1351,6 +1365,49 @@ mod tests {
         )
         .await;
         response_json(response).await
+    }
+
+    #[tokio::test]
+    async fn fallback_window_action_routes_accept_titlebar_actions() {
+        let host = Arc::new(crate::host::runtime::FallbackHostContext::new(
+            crate::settings::AppSettings::default(),
+            Arc::new(crate::host::events::ClientEventHub::default()),
+        ));
+        let server = start_fallback_server(None, host)
+            .await
+            .expect("start fallback server");
+        let client = reqwest::Client::new();
+
+        for action in ["minimize", "toggle_maximize", "close"] {
+            let response = client
+                .post(format!("{}/window/{action}", server.base_url))
+                .send()
+                .await
+                .unwrap_or_else(|error| panic!("post fallback window action {action}: {error}"));
+
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::OK,
+                "fallback window action {action} should not surface a bridge error"
+            );
+        }
+
+        let response = client
+            .post(format!("{}/window/not_real", server.base_url))
+            .send()
+            .await
+            .expect("post fallback unknown window action");
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+        let wrong_token_url = server
+            .base_url
+            .replace(&server.token, "wrong-fallback-token");
+        let response = client
+            .post(format!("{wrong_token_url}/window/minimize"))
+            .send()
+            .await
+            .expect("post fallback window action with wrong token");
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
     }
 
     #[test]
