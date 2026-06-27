@@ -336,7 +336,6 @@ function settingsFormSource() {
 }
 
 function syncSettingsDraftFromForm() {
-  if (!currentSettings) return settingsDraft || {};
   settingsDraft = readSettings();
   return settingsDraft;
 }
@@ -894,7 +893,6 @@ function displayLabel(display) {
 }
 
 function renderCaptureTargetSelect() {
-  if (settingsOpen) syncSettingsDraftFromForm();
   const select = $("set-capture");
   const desired = captureSettingsValue();
   select.replaceChildren();
@@ -1048,14 +1046,12 @@ function fillDeviceSelect(id, devices, defaultLabel, selectedId) {
 }
 
 function renderAudioDeviceSelects() {
-  if (settingsOpen) syncSettingsDraftFromForm();
   const audio = settingsFormSource().audio || defaultAudioSettings();
   fillDeviceSelect("set-output-device", audioDevices.outputs, "Default output device", audio.output_device_id);
   fillDeviceSelect("set-mic-device", audioDevices.inputs, "Default microphone", audio.mic_device_id);
 }
 
 function renderVideoEncoderSelect() {
-  if (settingsOpen) syncSettingsDraftFromForm();
   const select = $("set-encoder");
   const selected = settingsFormSource().video_encoder || "auto";
   select.replaceChildren();
@@ -2957,14 +2953,26 @@ async function releaseVideoFileHandle() {
 }
 
 function suspendReviewPlayback() {
+  setClipTitleEditing(false);
   audioPreviewSeq += 1;
   cancelAnimationFrame(rafId);
   rafId = 0;
   video.pause();
   video.removeAttribute("src");
   video.load();
+  currentClip = null;
   currentReviewMediaPath = null;
+  selectedAudioTrackIds = new Set();
+  resetZoom();
+  syncReviewLocalActions();
+  syncUploadClipButton();
+  updateViews();
   syncPlayState();
+  setDeckStatus("");
+  $("stage-note").textContent = "";
+  $("marker-layer").replaceChildren();
+  renderAudioTrackPanel();
+  renderClips();
 }
 
 function isRenameFileLockError(error) {

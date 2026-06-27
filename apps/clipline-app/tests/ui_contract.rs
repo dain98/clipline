@@ -829,6 +829,12 @@ fn close_to_tray_suspends_review_playback() {
             && suspend_helper.contains("video.load();"),
         "suspending playback must cancel preview work, stop the RAF loop, and unload the video"
     );
+    assert!(
+        suspend_helper.contains("currentClip = null;")
+            && suspend_helper.contains("currentReviewMediaPath = null;")
+            && suspend_helper.contains("updateViews();"),
+        "suspending playback must also leave the editor state so reopening from tray cannot show a src-less current clip"
+    );
 }
 
 #[test]
@@ -913,6 +919,14 @@ fn settings_tabs_preserve_unsaved_draft_until_save() {
         .map(|offset| save_handler_start + offset)
         .expect("video handlers follow settings save");
     let save_handler = &js[save_handler_start..video_start];
+    let sync_start = js
+        .find("function syncSettingsDraftFromForm()")
+        .expect("settings draft sync helper");
+    let fill_start = js[sync_start..]
+        .find("function fillSettings")
+        .map(|offset| sync_start + offset)
+        .expect("fillSettings follows settings draft sync helper");
+    let sync_helper = &js[sync_start..fill_start];
 
     assert!(
         js.contains("let settingsDraft = null;")
@@ -929,6 +943,11 @@ fn settings_tabs_preserve_unsaved_draft_until_save() {
         "Save Settings must submit the accumulated draft, not only the visible tab state"
     );
     assert!(
+        sync_helper.contains("settingsDraft = readSettings();")
+            && !sync_helper.contains("return settingsDraft || {};"),
+        "Save Settings must fall back to a full form snapshot, not {{}}, when settings are not loaded yet"
+    );
+    assert!(
         js.contains("settings-page\").addEventListener(\"input\", () => syncSettingsDraftFromForm())")
             && js.contains("settings-page\").addEventListener(\"change\", () => syncSettingsDraftFromForm())"),
         "settings form edits must continuously refresh the draft before async tab renderers repaint controls"
@@ -939,6 +958,23 @@ fn settings_tabs_preserve_unsaved_draft_until_save() {
             && js.contains("function captureSettingsValue(settings = settingsFormSource())"),
         "async settings renderers must use the draft as their source while settings are being edited"
     );
+
+    for renderer in [
+        "function renderCaptureTargetSelect()",
+        "function renderAudioDeviceSelects()",
+        "function renderVideoEncoderSelect()",
+    ] {
+        let start = js.find(renderer).expect("settings option renderer");
+        let end = js[start + renderer.len()..]
+            .find("\nfunction ")
+            .map(|offset| start + renderer.len() + offset)
+            .expect("next function follows renderer");
+        let body = &js[start..end];
+        assert!(
+            !body.contains("syncSettingsDraftFromForm()"),
+            "settings option renderers must not re-read stale DOM state while fillSettings is repainting"
+        );
+    }
 }
 
 #[test]
