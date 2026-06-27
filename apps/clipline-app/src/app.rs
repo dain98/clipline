@@ -164,7 +164,7 @@ fn format_diagnostic_log_line(
     )
 }
 
-fn log_diagnostic(message: impl AsRef<str>) {
+pub(crate) fn log_diagnostic(message: impl AsRef<str>) {
     let line = format_diagnostic_log_line(chrono::Utc::now(), std::process::id(), message.as_ref());
     if let Ok(mut log) = diagnostic_log().lock() {
         if let Some(file) = log.as_mut() {

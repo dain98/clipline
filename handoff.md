@@ -337,7 +337,9 @@ Recent fixes (2026-06-25):
   `-UseDebugMissingPreflight` on a dev box to generate evidence JSON for the same startup path. When
   the browser fallback opens, the native Clipline process remains the recorder/tray host and still
   owns Save Replay through the global/low-level hotkey path; the harness now requires a diagnostic
-  that the native save hotkey initialized before the fallback server starts. When clips exist, the
+  that the native save hotkey initialized before the fallback server starts. It also waits for the
+  auto-opened browser to execute the shared UI and invoke fallback `frontend_ready`, so evidence now
+  distinguishes a real browser boot from raw localhost route availability. When clips exist, the
   harness also proves browser media playback via an opaque `/media-path` redirect and a ranged
   `/media/{id}` request, and it verifies the fallback `/events` SSE stream reaches a heartbeat.
   Nate/real WebView2-removed Windows 10 validation still remains external.

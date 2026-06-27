@@ -3064,6 +3064,16 @@ includes `fallback native save hotkey available`. Local harness run on port 4765
 debug-missing WebView2 preflight, shared UI, invoke smoke, media range smoke, SSE heartbeat, and
 native-hotkey availability. Real WebView2-removed Windows 10 validation still remains external.
 
+**Execution note (2026-06-27 fallback browser readiness):** Strengthened the external validation
+harness so it no longer treats HTTP route availability as proof that the browser fallback loaded.
+The fallback `frontend_ready` invoke now writes `fallback frontend_ready received` to the shared
+diagnostic log, and `scripts\validate-fallback-client.ps1` waits for that line after discovering the
+tokenized URL. The evidence JSON now includes `fallback browser frontend_ready`, proving the
+auto-opened browser ran `client-bridge.js` and `main.js` far enough to call the fallback bridge.
+Local harness run on port 47652 passed with debug-missing WebView2 preflight, native-hotkey
+availability, browser readiness, invoke smoke, media range smoke, and SSE heartbeat. Real
+WebView2-removed Windows 10 validation still remains external.
+
 ---
 
 ## Self-Review Notes

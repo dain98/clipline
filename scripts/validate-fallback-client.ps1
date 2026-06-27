@@ -331,6 +331,26 @@ function Assert-TextBefore {
     }
 }
 
+function Wait-TextFileContains {
+    param(
+        [string]$Path,
+        [string]$Needle,
+        [string]$Name,
+        [int]$TimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $text = Read-TextFile $Path
+        if ($text.Contains($Needle)) {
+            return $text
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Timed out waiting for $Name to contain expected text: $Needle"
+}
+
 $checks = [System.Collections.ArrayList]::new()
 $process = $null
 $stdoutPath = Join-Path $env:TEMP ("clipline-fallback-validation-{0}.out.log" -f ([guid]::NewGuid().ToString("N")))
@@ -376,17 +396,20 @@ try {
     }
     Add-Check $checks "discover fallback URL" $true @{ url = $baseUrl }
 
-    $diagnosticText = Read-TextFile $diagnosticLogPath
+    $diagnosticText = Wait-TextFileContains $diagnosticLogPath "fallback frontend_ready received" "diagnostic log" $TimeoutSeconds
     Assert-TextContains $diagnosticText "setup start launched_by_autostart=" "diagnostic log"
     Assert-TextContains $diagnosticText "startup fallback server started" "diagnostic log"
     Assert-TextContains $diagnosticText "native save hotkey initialized" "diagnostic log"
+    Assert-TextContains $diagnosticText "fallback frontend_ready received" "diagnostic log"
     Assert-TextContains $diagnosticText "webviews=[]" "diagnostic log"
     Assert-TextBefore $diagnosticText "setup start launched_by_autostart=" "startup fallback server started" "diagnostic log"
     Assert-TextBefore $diagnosticText "native save hotkey initialized" "startup fallback server started" "diagnostic log"
+    Assert-TextBefore $diagnosticText "startup fallback server started" "fallback frontend_ready received" "diagnostic log"
     Assert-TextNotContains $diagnosticText "normal launch opening main window" "diagnostic log"
     Assert-TextNotContains $diagnosticText "open_main_window start" "diagnostic log"
     Add-Check $checks "fallback starts before WebView creation" $true @{ log = $diagnosticLogPath }
     Add-Check $checks "fallback native save hotkey available" $true @{ log = $diagnosticLogPath }
+    Add-Check $checks "fallback browser frontend_ready" $true @{ log = $diagnosticLogPath }
 
     if ($UseDebugMissingPreflight) {
         Assert-TextContains $diagnosticText "debug WebView2 preflight override applied" "diagnostic log"

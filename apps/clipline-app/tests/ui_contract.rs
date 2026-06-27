@@ -430,6 +430,8 @@ fn fallback_external_validation_script_captures_webview2_removed_gate() {
         "startup fallback server started",
         "native save hotkey initialized",
         "fallback native save hotkey available",
+        "fallback frontend_ready received",
+        "fallback browser frontend_ready",
         "setup start launched_by_autostart=",
         "webviews=[]",
         "normal launch opening main window",
@@ -464,6 +466,29 @@ fn fallback_external_validation_script_captures_webview2_removed_gate() {
             "fallback validation script must include {required}"
         );
     }
+}
+
+#[test]
+fn fallback_frontend_ready_records_browser_boot_diagnostic() {
+    let app = app_rs();
+    let server =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/server.rs"))
+            .expect("read fallback server");
+    let invoke = source_between(&server, "async fn invoke(", "async fn events(");
+    let frontend_ready_branch = source_between(
+        invoke,
+        "\"frontend_ready\" =>",
+        "        \"save_replay\" =>",
+    );
+
+    assert!(
+        app.contains("pub(crate) fn log_diagnostic("),
+        "fallback server must be able to write browser readiness into the shared diagnostic log"
+    );
+    assert!(
+        frontend_ready_branch.contains("crate::app::log_diagnostic(\"fallback frontend_ready received\")"),
+        "fallback frontend_ready must prove that the auto-opened browser ran the shared UI JavaScript"
+    );
 }
 
 #[test]

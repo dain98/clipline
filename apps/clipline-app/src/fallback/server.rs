@@ -671,7 +671,10 @@ async fn invoke(
         // The fallback UI runs in the user's browser, not a Clipline-owned native window.
         // Treat native minimize as a successful no-op so shared frontend controls can stay wired.
         "minimize_main_window" => return ok_response(serde_json::Value::Null),
-        "frontend_ready" => return ok_response(serde_json::Value::Null),
+        "frontend_ready" => {
+            crate::app::log_diagnostic("fallback frontend_ready received");
+            return ok_response(serde_json::Value::Null);
+        }
         "save_replay" => {
             let _ = state.host.save_replay();
             return ok_response(serde_json::Value::Null);
