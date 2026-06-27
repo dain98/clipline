@@ -2,6 +2,59 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+impl ByteRange {
+    pub fn len(self) -> u64 {
+        self.end - self.start + 1
+    }
+}
+
+pub fn parse_range_header(header: &str, file_len: u64) -> Option<ByteRange> {
+    if file_len == 0 {
+        return None;
+    }
+    let raw = header.strip_prefix("bytes=")?;
+    if raw.contains(',') {
+        return None;
+    }
+    let (start, end) = raw.split_once('-')?;
+    if start.is_empty() {
+        let suffix_len = end.parse::<u64>().ok()?;
+        if suffix_len == 0 {
+            return None;
+        }
+        let len = suffix_len.min(file_len);
+        return Some(ByteRange {
+            start: file_len - len,
+            end: file_len - 1,
+        });
+    }
+
+    let start = start.parse::<u64>().ok()?;
+    if start >= file_len {
+        return None;
+    }
+    if end.is_empty() {
+        return Some(ByteRange {
+            start,
+            end: file_len - 1,
+        });
+    }
+    let end = end.parse::<u64>().ok()?;
+    if start > end {
+        return None;
+    }
+    Some(ByteRange {
+        start,
+        end: end.min(file_len - 1),
+    })
+}
+
 #[allow(
     dead_code,
     reason = "non-clip media kinds are reserved for later fallback registration tasks"
@@ -86,6 +139,37 @@ impl MediaRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_single_byte_range() {
+        assert_eq!(
+            parse_range_header("bytes=10-19", 100).unwrap(),
+            ByteRange { start: 10, end: 19 }
+        );
+        assert!(parse_range_header("items=10-19", 100).is_none());
+        assert_eq!(
+            parse_range_header("bytes=90-120", 100),
+            Some(ByteRange { start: 90, end: 99 })
+        );
+    }
+
+    #[test]
+    fn parse_range_header_accepts_open_ended_and_suffix_ranges() {
+        assert_eq!(
+            parse_range_header("bytes=100-", 1000),
+            Some(ByteRange {
+                start: 100,
+                end: 999
+            })
+        );
+        assert_eq!(
+            parse_range_header("bytes=-500", 1000),
+            Some(ByteRange {
+                start: 500,
+                end: 999
+            })
+        );
+    }
 
     #[test]
     fn media_registry_returns_stable_opaque_ids() {

@@ -154,6 +154,23 @@ impl FallbackHostContext {
         ))
     }
 
+    pub fn update_cloud_record_paths(&self, old_path: &str, new_path: &str) -> Result<(), String> {
+        if old_path == new_path {
+            return Ok(());
+        }
+        if let Some(app) = self.attached_app_handle() {
+            let state = app.state::<crate::app::RuntimeState>();
+            return crate::library::update_cloud_record_paths_for_host(&state, old_path, new_path);
+        }
+
+        let mut settings = self
+            .settings
+            .lock()
+            .map_err(|_| "settings lock poisoned".to_string())?;
+        crate::library::update_cloud_record_paths_in_cloud(&mut settings.cloud, old_path, new_path);
+        Ok(())
+    }
+
     pub fn list_displays(&self) -> Result<Vec<crate::app::DisplayInfo>, String> {
         crate::app::host_list_displays()
     }

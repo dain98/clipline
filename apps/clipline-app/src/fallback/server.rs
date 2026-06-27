@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
-use super::media::{MediaKind, MediaRegistry};
+use super::media::{parse_range_header, ByteRange, MediaKind, MediaRegistry};
 use super::security::{token_guard, FallbackToken};
 
 const MAX_INVOKE_BODY_BYTES: usize = 1024 * 1024;
@@ -62,6 +62,30 @@ struct RevealClipArgs {
 #[derive(serde::Deserialize)]
 struct CopyClipToClipboardArgs {
     request: crate::library::CopyClipToClipboardRequest,
+}
+
+#[derive(serde::Deserialize)]
+struct ClipPathArgs {
+    path: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RenameClipArgs {
+    path: String,
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportClipArgs {
+    path: String,
+    start_s: f64,
+    end_s: f64,
+}
+
+#[derive(serde::Deserialize)]
+struct AudioPreviewArgs {
+    request: crate::library::AudioPreviewRequest,
 }
 
 #[derive(serde::Deserialize)]
@@ -305,7 +329,18 @@ async fn media_path(
     let Ok(path) = media_path_query(query.as_deref()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let Ok(id) = state.media.register(path, MediaKind::Clip) else {
+    let settings = match storage_settings_from_app(&state.host.settings()) {
+        Ok(settings) => settings,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let validated = match crate::host::library::validate_media_path(&settings, &path) {
+        Ok(validated) => validated,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let Ok(id) = state
+        .media
+        .register(validated.path, fallback_media_kind(validated.kind))
+    else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let location = format!("{}/media/{id}", state.base_url);
@@ -315,6 +350,15 @@ async fn media_path(
     let mut response = StatusCode::TEMPORARY_REDIRECT.into_response();
     response.headers_mut().insert(header::LOCATION, location);
     response
+}
+
+fn fallback_media_kind(kind: crate::host::library::HostMediaKind) -> MediaKind {
+    match kind {
+        crate::host::library::HostMediaKind::Clip => MediaKind::Clip,
+        crate::host::library::HostMediaKind::Poster => MediaKind::Poster,
+        crate::host::library::HostMediaKind::AudioPreview => MediaKind::AudioPreview,
+        crate::host::library::HostMediaKind::CloudCache => MediaKind::CloudCache,
+    }
 }
 
 async fn media(
@@ -359,18 +403,6 @@ async fn media(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ByteRange {
-    start: u64,
-    end: u64,
-}
-
-impl ByteRange {
-    fn len(self) -> u64 {
-        self.end - self.start + 1
-    }
-}
-
 enum MediaRead {
     Full {
         file: File,
@@ -405,7 +437,7 @@ fn read_media_file_blocking(
     let mut file = File::open(&path).map_err(|_| MediaReadError::NotFound)?;
     let file_len = file.metadata().map_err(|_| MediaReadError::NotFound)?.len();
     if let Some(range_header) = range_header {
-        let Some(range) = parse_byte_range(range_header, file_len) else {
+        let Some(range) = parse_range_header(range_header, file_len) else {
             return Err(MediaReadError::RangeNotSatisfiable { file_len });
         };
         file.seek(SeekFrom::Start(range.start))
@@ -418,41 +450,6 @@ fn read_media_file_blocking(
     }
 
     Ok(MediaRead::Full { file, file_len })
-}
-
-fn parse_byte_range(header_value: &str, file_len: u64) -> Option<ByteRange> {
-    if file_len == 0 {
-        return None;
-    }
-    let range = header_value.strip_prefix("bytes=")?;
-    if range.contains(',') {
-        return None;
-    }
-    let (start, end) = range.split_once('-')?;
-    if start.is_empty() {
-        let suffix_len = end.parse::<u64>().ok()?;
-        if suffix_len == 0 {
-            return None;
-        }
-        let len = suffix_len.min(file_len);
-        return Some(ByteRange {
-            start: file_len - len,
-            end: file_len - 1,
-        });
-    }
-
-    let start = start.parse::<u64>().ok()?;
-    if start >= file_len {
-        return None;
-    }
-    if end.is_empty() {
-        return Some(ByteRange {
-            start,
-            end: file_len - 1,
-        });
-    }
-    let end = end.parse::<u64>().ok()?.min(file_len - 1);
-    (end >= start).then_some(ByteRange { start, end })
 }
 
 fn media_file_response(
@@ -551,6 +548,13 @@ pub fn fallback_dispatches_command(command: &str) -> bool {
             | "list_game_windows"
             | "extract_window_icon"
             | "memory_status"
+            | "list_clips"
+            | "clip_poster"
+            | "preview_clip_audio_tracks"
+            | "delete_clip"
+            | "rename_clip"
+            | "export_clip"
+            | "storage_status"
             | "reveal_clip"
             | "copy_clip_to_clipboard"
             | "open_cloud_user_profile"
@@ -682,6 +686,128 @@ async fn invoke(
             return ok_response(crate::app::host_extract_window_icon(args.exe_path));
         }
         "memory_status" => return command_response(crate::app::host_memory_status()),
+        "list_clips" => {
+            let settings = match storage_settings_from_app(&state.host.settings()) {
+                Ok(settings) => settings,
+                Err(e) => return command_response::<Vec<crate::library::ClipInfo>>(Err(e)),
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                let dir = settings.clips_dir()?;
+                crate::host::library::list_clips_from_dir(dir)
+            })
+            .await
+            .map_err(|e| format!("list clips task: {e}"))
+            .and_then(|result| result);
+            return command_response(result);
+        }
+        "clip_poster" => {
+            let args = match parse_command_args::<ClipPathArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<String>(Err(e)),
+            };
+            let settings = match storage_settings_from_app(&state.host.settings()) {
+                Ok(settings) => settings,
+                Err(e) => return command_response::<String>(Err(e)),
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                crate::library::clip_poster_for_host(args.path, &settings)
+            })
+            .await
+            .map_err(|e| format!("clip poster task: {e}"))
+            .and_then(|result| result);
+            return command_response(result);
+        }
+        "preview_clip_audio_tracks" => {
+            let args = match parse_command_args::<AudioPreviewArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<String>(Err(e)),
+            };
+            let settings = match storage_settings_from_app(&state.host.settings()) {
+                Ok(settings) => settings,
+                Err(e) => return command_response::<String>(Err(e)),
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                crate::library::preview_clip_audio_tracks_for_host(args.request, &settings)
+            })
+            .await
+            .map_err(|e| format!("audio preview task: {e}"))
+            .and_then(|result| result);
+            return command_response(result);
+        }
+        "delete_clip" => {
+            let args = match parse_command_args::<ClipPathArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<()>(Err(e)),
+            };
+            let settings = match storage_settings_from_app(&state.host.settings()) {
+                Ok(settings) => settings,
+                Err(e) => return command_response::<()>(Err(e)),
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                crate::library::delete_clip_for_host(args.path, &settings)
+            })
+            .await
+            .map_err(|e| format!("delete clip task: {e}"))
+            .and_then(|result| result);
+            return command_response(result);
+        }
+        "rename_clip" => {
+            let args = match parse_command_args::<RenameClipArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<crate::library::RenamedClipInfo>(Err(e)),
+            };
+            let old_path = args.path.clone();
+            let settings = match storage_settings_from_app(&state.host.settings()) {
+                Ok(settings) => settings,
+                Err(e) => return command_response::<crate::library::RenamedClipInfo>(Err(e)),
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                crate::library::rename_clip_for_host(args.path, args.name, &settings)
+            })
+            .await
+            .map_err(|e| format!("rename clip task: {e}"))
+            .and_then(|result| result);
+            if let Ok(renamed) = &result {
+                if let Err(error) = state
+                    .host
+                    .update_cloud_record_paths(&old_path, &renamed.path)
+                {
+                    eprintln!("update fallback cloud records after rename: {error}");
+                }
+            }
+            return command_response(result);
+        }
+        "export_clip" => {
+            let args = match parse_command_args::<ExportClipArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<crate::library::ExportedClipInfo>(Err(e)),
+            };
+            let settings = match storage_settings_from_app(&state.host.settings()) {
+                Ok(settings) => settings,
+                Err(e) => return command_response::<crate::library::ExportedClipInfo>(Err(e)),
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                crate::library::export_clip_for_host(args.path, args.start_s, args.end_s, &settings)
+            })
+            .await
+            .map_err(|e| format!("export clip task: {e}"))
+            .and_then(|result| result);
+            return command_response(result);
+        }
+        "storage_status" => {
+            let settings = match storage_settings_from_app(&state.host.settings()) {
+                Ok(settings) => settings,
+                Err(e) => return command_response::<crate::library::StorageInfo>(Err(e)),
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                let dir = settings.clips_dir()?;
+                crate::host::library::storage_status_for_dir(dir, settings.quota_bytes())
+            })
+            .await
+            .map_err(|e| format!("storage status task: {e}"))
+            .and_then(|result| result);
+            return command_response(result);
+        }
         "reveal_clip" => {
             let args = match parse_command_args::<RevealClipArgs>(&command, args) {
                 Ok(args) => args,
@@ -1105,6 +1231,30 @@ mod tests {
         path
     }
 
+    fn test_temp_dir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "clipline-fallback-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).expect("create test temp dir");
+        path
+    }
+
+    fn settings_with_media_dir(media_dir: &std::path::Path) -> crate::settings::AppSettings {
+        crate::settings::AppSettings {
+            media_dir: media_dir.display().to_string(),
+            ..crate::settings::AppSettings::default()
+        }
+    }
+
+    fn media_path_raw_query(path: &std::path::Path) -> String {
+        format!("path={}", path.display())
+    }
+
     async fn response_json(response: Response) -> (StatusCode, serde_json::Value) {
         let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX)
@@ -1146,6 +1296,13 @@ mod tests {
             "list_game_windows",
             "extract_window_icon",
             "memory_status",
+            "list_clips",
+            "clip_poster",
+            "preview_clip_audio_tracks",
+            "delete_clip",
+            "rename_clip",
+            "export_clip",
+            "storage_status",
             "reveal_clip",
             "copy_clip_to_clipboard",
             "open_cloud_user_profile",
@@ -1471,14 +1628,19 @@ mod tests {
     async fn media_path_redirects_registered_path_to_opaque_media_url() {
         let token = FallbackToken::generate_for_tests(7);
         let token_string = token.as_str().to_string();
+        let media_dir = test_temp_dir("media-path-valid");
+        let clip = media_dir.join("secret.mp4");
+        std::fs::write(&clip, b"clip").expect("write valid clip");
         let response = media_path(
-            State(test_state(token)),
-            Path(token_string),
-            RawQuery(Some(
-                "path=C%3A%5CVideos%5CClipline%5Csecret.mp4".to_string(),
+            State(test_state_with_settings(
+                token,
+                settings_with_media_dir(&media_dir),
             )),
+            Path(token_string),
+            RawQuery(Some(media_path_raw_query(&clip))),
         )
         .await;
+        let _ = std::fs::remove_dir_all(media_dir);
 
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         let location = response
@@ -1492,18 +1654,165 @@ mod tests {
         assert!(!location.contains("secret"));
     }
 
-    #[test]
-    fn parse_byte_range_accepts_closed_range() {
+    #[tokio::test]
+    async fn media_path_rejects_paths_outside_configured_library() {
+        let token = FallbackToken::generate_for_tests(7);
+        let token_string = token.as_str().to_string();
+        let media_dir = test_temp_dir("media-path-library");
+        let outside_dir = test_temp_dir("media-path-outside");
+        let outside = outside_dir.join("secret.mp4");
+        std::fs::write(&outside, b"clip").expect("write outside clip");
+
+        let response = media_path(
+            State(test_state_with_settings(
+                token,
+                settings_with_media_dir(&media_dir),
+            )),
+            Path(token_string),
+            RawQuery(Some(media_path_raw_query(&outside))),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(media_dir);
+        let _ = std::fs::remove_dir_all(outside_dir);
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().get(header::LOCATION).is_none());
+    }
+
+    #[tokio::test]
+    async fn invoke_task16_library_commands_without_native_side_effects() {
+        let media_dir = test_temp_dir("library-commands");
+        let outside_dir = test_temp_dir("library-commands-outside");
+        let outside = outside_dir.join("outside.mp4");
+        std::fs::write(&outside, b"clip").expect("write outside clip");
+        let state = test_state_with_settings(
+            FallbackToken::generate_for_tests(16),
+            settings_with_media_dir(&media_dir),
+        );
+
+        let (status, body) = invoke_json(state.clone(), "list_clips", "{}").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert!(body["value"].as_array().is_some_and(Vec::is_empty));
+
+        let (status, body) = invoke_json(state.clone(), "storage_status", "{}").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+
+        for (command, body) in [
+            (
+                "clip_poster",
+                serde_json::json!({ "path": outside.display().to_string() }).to_string(),
+            ),
+            (
+                "preview_clip_audio_tracks",
+                serde_json::json!({
+                    "request": {
+                        "path": outside.display().to_string(),
+                        "audioTrackIds": []
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "delete_clip",
+                serde_json::json!({ "path": outside.display().to_string() }).to_string(),
+            ),
+            (
+                "rename_clip",
+                serde_json::json!({
+                    "path": outside.display().to_string(),
+                    "name": "renamed.mp4"
+                })
+                .to_string(),
+            ),
+            (
+                "export_clip",
+                serde_json::json!({
+                    "path": outside.display().to_string(),
+                    "startS": 0.0,
+                    "endS": 1.0
+                })
+                .to_string(),
+            ),
+        ] {
+            let (status, body) = invoke_json(state.clone(), command, &body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{command}: {body}");
+            assert_eq!(body["ok"], false, "{command}: {body}");
+            assert_ne!(
+                body.get("error").and_then(serde_json::Value::as_str),
+                Some(format!("fallback command not wired yet: {command}").as_str()),
+                "{command}: {body}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(media_dir);
+        let _ = std::fs::remove_dir_all(outside_dir);
+    }
+
+    #[tokio::test]
+    async fn invoke_rename_clip_updates_cloud_record_path() {
+        let media_dir = test_temp_dir("library-rename-cloud-record");
+        let clip = media_dir.join("tracked.mp4");
+        std::fs::write(&clip, b"clip").expect("write tracked clip");
+        let mut settings = settings_with_media_dir(&media_dir);
+        settings.cloud.uploads.insert(
+            "tracked".into(),
+            crate::settings::CloudUploadRecord {
+                local_clip_id: "tracked".into(),
+                path: clip.display().to_string(),
+                remote_clip_id: Some("remote-1".into()),
+                remote_url: None,
+                visibility: "private".into(),
+                upload_status: "uploaded".into(),
+                error: None,
+                updated_at_unix: 1,
+            },
+        );
+        let state = test_state_with_settings(FallbackToken::generate_for_tests(17), settings);
+        let body = serde_json::json!({
+            "path": clip.display().to_string(),
+            "name": "renamed.mp4"
+        })
+        .to_string();
+        let renamed = media_dir.join("renamed.mp4");
+
+        let (status, body) = invoke_json(state.clone(), "rename_clip", &body).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
         assert_eq!(
-            parse_byte_range("bytes=0-99", 1000),
+            body["value"]["path"],
+            serde_json::Value::String(renamed.display().to_string())
+        );
+        assert!(!clip.exists());
+        assert!(renamed.exists());
+        assert_eq!(
+            state
+                .host
+                .settings()
+                .cloud
+                .uploads
+                .get("tracked")
+                .expect("cloud upload record remains present")
+                .path,
+            renamed.display().to_string()
+        );
+        let _ = std::fs::remove_dir_all(media_dir);
+    }
+
+    #[test]
+    fn parse_range_header_accepts_closed_range() {
+        assert_eq!(
+            parse_range_header("bytes=0-99", 1000),
             Some(ByteRange { start: 0, end: 99 })
         );
     }
 
     #[test]
-    fn parse_byte_range_accepts_open_ended_range() {
+    fn parse_range_header_accepts_open_ended_range() {
         assert_eq!(
-            parse_byte_range("bytes=100-", 1000),
+            parse_range_header("bytes=100-", 1000),
             Some(ByteRange {
                 start: 100,
                 end: 999
@@ -1512,9 +1821,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_byte_range_accepts_suffix_range() {
+    fn parse_range_header_accepts_suffix_range() {
         assert_eq!(
-            parse_byte_range("bytes=-500", 1000),
+            parse_range_header("bytes=-500", 1000),
             Some(ByteRange {
                 start: 500,
                 end: 999
@@ -1523,12 +1832,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_byte_range_rejects_invalid_or_multi_range_inputs() {
-        assert_eq!(parse_byte_range("bytes=99-0", 1000), None);
-        assert_eq!(parse_byte_range("bytes=0-99,200-299", 1000), None);
-        assert_eq!(parse_byte_range("items=0-99", 1000), None);
-        assert_eq!(parse_byte_range("bytes=-0", 1000), None);
-        assert_eq!(parse_byte_range("bytes=1000-", 1000), None);
+    fn parse_range_header_rejects_invalid_or_multi_range_inputs() {
+        assert_eq!(parse_range_header("bytes=99-0", 1000), None);
+        assert_eq!(parse_range_header("bytes=0-99,200-299", 1000), None);
+        assert_eq!(parse_range_header("items=0-99", 1000), None);
+        assert_eq!(parse_range_header("bytes=-0", 1000), None);
+        assert_eq!(parse_range_header("bytes=1000-", 1000), None);
     }
 
     #[tokio::test]
@@ -1611,6 +1920,38 @@ mod tests {
         assert_eq!(headers.get(header::CONTENT_LENGTH).unwrap(), "10");
         assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), "video/mp4");
         assert_eq!(&body[..], &contents[10..20]);
+    }
+
+    #[tokio::test]
+    async fn media_serves_oversized_bounded_range_response() {
+        let token = FallbackToken::generate_for_tests(7);
+        let token_string = token.as_str().to_string();
+        let state = test_state(token);
+        let contents = b"small media";
+        let file_path = media_fixture(contents);
+        let id = state
+            .media
+            .register(file_path.clone(), super::super::media::MediaKind::Clip)
+            .expect("register media fixture");
+
+        let response = media(
+            State(state),
+            Path((token_string, id)),
+            media_request(Some("bytes=0-65535")),
+        )
+        .await;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read media body");
+        let _ = std::fs::remove_file(file_path);
+
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(headers.get(header::CONTENT_RANGE).unwrap(), "bytes 0-10/11");
+        assert_eq!(headers.get(header::ACCEPT_RANGES).unwrap(), "bytes");
+        assert_eq!(headers.get(header::CONTENT_LENGTH).unwrap(), "11");
+        assert_eq!(&body[..], contents);
     }
 
     #[tokio::test]

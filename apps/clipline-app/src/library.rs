@@ -253,12 +253,22 @@ pub async fn clip_poster(
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<String, String> {
     let target = validate_clip_path(&settings, &path)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let seek_s = poster_seek_seconds(&target);
-        crate::poster::ensure_poster(&target, seek_s).map(|poster| poster.display().to_string())
-    })
-    .await
-    .map_err(|e| format!("clip poster task: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || ensure_clip_poster(target))
+        .await
+        .map_err(|e| format!("clip poster task: {e}"))?
+}
+
+pub(crate) fn clip_poster_for_host(
+    path: String,
+    settings: &StorageSettings,
+) -> Result<String, String> {
+    let target = validate_clip_path(settings, &path)?;
+    ensure_clip_poster(target)
+}
+
+fn ensure_clip_poster(target: PathBuf) -> Result<String, String> {
+    let seek_s = poster_seek_seconds(&target);
+    crate::poster::ensure_poster(&target, seek_s).map(|poster| poster.display().to_string())
 }
 
 /// The frame to grab a poster from: the first timeline marker (the action
@@ -286,7 +296,15 @@ fn poster_seek_seconds(clip: &Path) -> f64 {
 
 #[tauri::command]
 pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
-    let target = validate_clip_path(&settings, &path)?;
+    delete_clip_for_host(path, &settings)
+}
+
+pub(crate) fn delete_clip_for_host(path: String, settings: &StorageSettings) -> Result<(), String> {
+    let target = validate_clip_path(settings, &path)?;
+    delete_clip_files(&target)
+}
+
+fn delete_clip_files(target: &Path) -> Result<(), String> {
     std::fs::remove_file(&target).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(target.with_extension("markers.json"));
     let _ = std::fs::remove_file(crate::poster::poster_path(&target));
@@ -309,8 +327,20 @@ pub async fn rename_clip(
     .await
     .map_err(|e| format!("rename clip task: {e}"))??;
 
-    update_cloud_record_paths(&state, &path, &renamed.path);
+    if let Err(error) = update_cloud_record_paths_for_host(&state, &path, &renamed.path) {
+        eprintln!("update cloud records after rename: {error}");
+    }
     Ok(renamed)
+}
+
+pub(crate) fn rename_clip_for_host(
+    path: String,
+    name: String,
+    settings: &StorageSettings,
+) -> Result<RenamedClipInfo, String> {
+    let source = validate_clip_path(settings, &path)?;
+    let target_name = normalized_clip_file_name(&name)?;
+    rename_clip_files(source, path, target_name)
 }
 
 fn rename_clip_files(
@@ -382,6 +412,16 @@ pub async fn export_clip(
         .map_err(|e| format!("export clip task: {e}"))?
 }
 
+pub(crate) fn export_clip_for_host(
+    path: String,
+    start_s: f64,
+    end_s: f64,
+    settings: &StorageSettings,
+) -> Result<ExportedClipInfo, String> {
+    let source = validate_clip_path(settings, &path)?;
+    export_clip_file(source, start_s, end_s)
+}
+
 #[tauri::command]
 pub async fn preview_clip_audio_tracks<R: Runtime>(
     app: AppHandle<R>,
@@ -396,6 +436,14 @@ pub async fn preview_clip_audio_tracks<R: Runtime>(
     .map_err(|e| format!("audio preview task: {e}"))??;
     allow_audio_preview_asset(&app, Path::new(&path))?;
     Ok(path)
+}
+
+pub(crate) fn preview_clip_audio_tracks_for_host(
+    request: AudioPreviewRequest,
+    settings: &StorageSettings,
+) -> Result<String, String> {
+    let source = validate_clip_path(settings, &request.path)?;
+    preview_clip_audio_tracks_file(source, request.path, request.audio_track_ids)
 }
 
 fn allow_audio_preview_asset<R: Runtime>(app: &AppHandle<R>, preview: &Path) -> Result<(), String> {
@@ -939,18 +987,30 @@ fn display_renamed_clip_path(old_path: &str, name: &str, fallback_parent: &Path)
         .to_string()
 }
 
-fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, new_path: &str) {
+pub(crate) fn update_cloud_record_paths_for_host(
+    state: &crate::app::RuntimeState,
+    old_path: &str,
+    new_path: &str,
+) -> Result<(), String> {
+    if old_path == new_path {
+        return Ok(());
+    }
+    state.update_cloud(|cloud| update_cloud_record_paths_in_cloud(cloud, old_path, new_path))?;
+    Ok(())
+}
+
+pub(crate) fn update_cloud_record_paths_in_cloud(
+    cloud: &mut crate::settings::CloudSettings,
+    old_path: &str,
+    new_path: &str,
+) {
     if old_path == new_path {
         return;
     }
-    if let Err(error) = state.update_cloud(|cloud| {
-        for record in cloud.uploads.values_mut() {
-            if record.path == old_path {
-                record.path = new_path.to_string();
-            }
+    for record in cloud.uploads.values_mut() {
+        if record.path == old_path {
+            record.path = new_path.to_string();
         }
-    }) {
-        eprintln!("update cloud records after rename: {error}");
     }
 }
 
