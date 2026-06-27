@@ -8,8 +8,12 @@
 
   const tauri = window.__TAURI__;
   const fallbackConfig = window.__CLIPLINE_FALLBACK__;
+  const fallbackEventHandlers = new Map();
+  let fallbackEventSource = null;
+  let fallbackEventSourceBaseUrl = null;
 
   if (tauri) {
+    document.documentElement.dataset.hostMode = "tauri";
     const appWindow = tauri.window.getCurrentWindow();
     window.cliplineHost = {
       mode: "tauri",
@@ -29,6 +33,7 @@
     requireTauri();
   }
 
+  document.documentElement.dataset.hostMode = "fallback";
   window.cliplineHost = {
     mode: "fallback",
     invoke(command, args = {}) {
@@ -88,21 +93,51 @@
   }
 
   function fallbackSubscribe(config, event, handler) {
-    const source = new EventSource(`${config.baseUrl}/events?name=${encodeURIComponent(event)}`);
-    source.addEventListener(event, (message) => {
-      let payload;
-      try {
-        payload = parseJsonText(message.data, `fallback event ${event}`);
-      } catch (error) {
-        showBridgeError(error.message);
-        return;
+    const source = ensureFallbackEventSource(config);
+    let entry = fallbackEventHandlers.get(event);
+    if (!entry) {
+      const handlers = new Set();
+      const listener = (message) => {
+        let payload;
+        try {
+          payload = parseJsonText(message.data, `fallback event ${event}`);
+        } catch (error) {
+          showBridgeError(error.message);
+          return;
+        }
+        for (const activeHandler of Array.from(handlers)) {
+          activeHandler({ event, payload });
+        }
+      };
+      entry = { handlers, listener };
+      fallbackEventHandlers.set(event, entry);
+      source.addEventListener(event, listener);
+    }
+    entry.handlers.add(handler);
+    return Promise.resolve(() => {
+      const current = fallbackEventHandlers.get(event);
+      if (!current) return;
+      current.handlers.delete(handler);
+      if (!current.handlers.size) {
+        source.removeEventListener(event, current.listener);
+        fallbackEventHandlers.delete(event);
       }
-      handler({ event, payload });
     });
-    source.onerror = () => {
+  }
+
+  function ensureFallbackEventSource(config) {
+    if (fallbackEventSource && fallbackEventSourceBaseUrl === config.baseUrl) {
+      return fallbackEventSource;
+    }
+    if (fallbackEventSource) {
+      fallbackEventSource.close();
+    }
+    fallbackEventSourceBaseUrl = config.baseUrl;
+    fallbackEventSource = new EventSource(`${config.baseUrl}/events`);
+    fallbackEventSource.onerror = () => {
       showBridgeError("Clipline fallback event stream disconnected");
     };
-    return Promise.resolve(() => source.close());
+    return fallbackEventSource;
   }
 
   function showBridgeError(message) {

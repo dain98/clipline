@@ -67,6 +67,10 @@ fn app_rs() -> String {
     fs::read_to_string(path).expect("read src/app.rs")
 }
 
+fn compact_source(source: &str) -> String {
+    source.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 fn fallback_runtime_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/host/runtime.rs");
     fs::read_to_string(path).expect("read src/host/runtime.rs")
@@ -248,6 +252,71 @@ fn frontend_uses_host_bridge_instead_of_tauri_directly() {
     assert!(
         !js.contains("window.__TAURI__"),
         "main.js must use window.cliplineHost instead of direct Tauri globals"
+    );
+}
+
+#[test]
+fn fallback_bridge_uses_one_shared_event_stream() {
+    let bridge = client_bridge_js();
+
+    assert!(
+        bridge.contains("let fallbackEventSource")
+            && bridge.contains("const fallbackEventHandlers = new Map()"),
+        "fallback bridge must share one EventSource across all frontend listeners"
+    );
+    assert!(
+        !bridge.contains("/events?name="),
+        "fallback bridge must not open one filtered SSE connection per listener"
+    );
+}
+
+#[test]
+fn fallback_event_hub_receives_app_level_game_and_error_events() {
+    let app = app_rs();
+    let compact_app = compact_source(&app);
+
+    assert!(
+        app.contains("fn emit_client_event"),
+        "app-level events must have a helper that mirrors Tauri emits into ClientEventHub"
+    );
+    assert!(
+        compact_app
+            .matches("emit_client_event(&app,\"game-detection\"")
+            .count()
+            >= 2,
+        "game detection lifecycle events must reach fallback SSE clients"
+    );
+    assert!(
+        compact_app
+            .matches("emit_client_event(&app,\"error\"")
+            .count()
+            + compact_app
+                .matches("emit_client_event(app.handle(),\"error\"")
+                .count()
+            >= 3,
+        "app-level errors must reach fallback SSE clients"
+    );
+}
+
+#[test]
+fn fallback_browser_mode_uses_browser_chrome_instead_of_fake_titlebar() {
+    let bridge = client_bridge_js();
+    let styles = styles_css();
+
+    assert!(
+        bridge.contains(r#"document.documentElement.dataset.hostMode = "tauri""#),
+        "Tauri bridge mode must mark the DOM as native-window hosted"
+    );
+    assert!(
+        bridge.contains(r#"document.documentElement.dataset.hostMode = "fallback""#),
+        "fallback bridge mode must mark the DOM as browser hosted"
+    );
+    assert!(
+        styles.contains(r#"html[data-host-mode="fallback"]"#)
+            && styles.contains("--titlebar-h: 0px")
+            && styles.contains(r#"html[data-host-mode="fallback"] .titlebar"#)
+            && styles.contains("display: none"),
+        "fallback browser mode must hide the fake frameless titlebar and let browser chrome own window controls"
     );
 }
 
@@ -566,6 +635,28 @@ fn fallback_setup_keeps_server_alive_when_browser_launch_fails() {
         setup_fallback
             .contains(r#"launch_fallback_client(host, port, "startup fallback", false)?"#),
         "default-browser launch failure should be logged without tearing down the fallback server"
+    );
+    assert!(
+        app.contains("fn show_fallback_browser_launch_notice")
+            && app.contains("fallback_browser_launch_notice_message")
+            && app.contains(r#"show_fallback_browser_launch_notice(&info.base_url, &e)"#),
+        "startup fallback browser launch failure must show the user the fallback URL instead of only logging it"
+    );
+
+    let launch = source_between(
+        &app,
+        "fn launch_fallback_client(",
+        "fn open_url_in_default_browser(",
+    );
+    let show_notice = launch
+        .find(r#"show_fallback_browser_launch_notice(&info.base_url, &e)"#)
+        .expect("fallback launch failure shows URL notice");
+    let error_return = launch
+        .find("if open_failure_is_error")
+        .expect("fallback launch can treat URL open failure as error");
+    assert!(
+        show_notice < error_return,
+        "dead-WebView fallback launch failures should show the fallback URL before returning an error"
     );
 }
 

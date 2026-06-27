@@ -548,6 +548,12 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 **Tauri (v2)**
 - The webview **silently no-ops** (no events, no invoke) without
   `capabilities/default.json` granting `core:default`.
+- The WebView2-free browser fallback shares the normal UI through `client-bridge.js`: fallback mode
+  sets `html[data-host-mode="fallback"]`, hides the fake frameless titlebar so browser chrome owns
+  window controls, keeps one shared SSE `EventSource`, mirrors app-level `game-detection`/`error`
+  emits into `ClientEventHub`, and shows a native dialog with the fallback URL if fallback starts
+  but Windows cannot open the default browser. Real WebView2-removed Windows 10 validation is still
+  the release gate.
 - The assetProtocol scope **does not resolve `$VIDEO`** — use plain globs. With configurable
   media folders the scope is currently `**/*.mp4`; diagnose media errors via a `video.onerror`
   handler because error code 4 usually means the scope rejected the request, not a codec problem.

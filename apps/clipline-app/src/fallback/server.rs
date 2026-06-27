@@ -1829,6 +1829,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn events_without_filter_streams_all_fallback_event_names() {
+        let token = FallbackToken::generate_for_tests(7);
+        let token_string = token.as_str().to_string();
+        let state = test_state(token);
+        let hub = state.host.events();
+        let response = events(State(state.clone()), Path(token_string), RawQuery(None)).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/event-stream"
+        );
+
+        hub.emit(crate::host::events::ClientEvent::new(
+            "saved",
+            serde_json::json!({"path": "clip.mp4"}),
+        ));
+        hub.emit(crate::host::events::ClientEvent::new(
+            "status",
+            serde_json::json!({"recording": true}),
+        ));
+        let body = read_sse_body_until(response.into_body(), "event: status\n").await;
+
+        assert!(body.contains("event: saved\n"));
+        assert!(body.contains(r#"data: {"path":"clip.mp4"}"#));
+        assert!(body.contains("event: status\n"));
+        assert!(body.contains(r#"data: {"recording":true}"#));
+        assert!(wait_until(|| hub.subscriber_count() == 0).await);
+        drop(state);
+    }
+
+    #[tokio::test]
     async fn events_drops_idle_subscriber_after_response_is_dropped() {
         let token = FallbackToken::generate_for_tests(7);
         let token_string = token.as_str().to_string();

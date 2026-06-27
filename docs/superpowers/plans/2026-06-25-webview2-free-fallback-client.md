@@ -3032,6 +3032,17 @@ token-guarded route for `minimize`, `toggle_maximize`, and `close` as successful
 browser fallback titlebar controls do not surface fallback-only 404 bridge errors. The route rejects
 unknown actions and invalid tokens.
 
+**Execution note (2026-06-27 browser fallback hardening):** Follow-up review found that the browser
+fallback still opened one SSE connection per frontend `listen()` call, app-level `game-detection`
+and `error` emits bypassed the fallback event hub, the fake frameless titlebar looked active in a
+normal browser, and startup fallback could be stranded if Windows failed to open the default
+browser. Added contract tests and fixes so the fallback bridge shares one EventSource, app-level
+game/error events mirror into `ClientEventHub`, fallback mode marks the DOM and hides the fake
+titlebar so browser chrome owns window controls, and browser-launch failures show a native dialog
+containing the fallback URL for both startup fallback and dead-WebView fallback attempts. Added
+server coverage for unfiltered `/events` streaming multiple fallback event names over one SSE
+connection. Nate/real WebView2-removed Windows 10 validation still remains external.
+
 ---
 
 ## Self-Review Notes

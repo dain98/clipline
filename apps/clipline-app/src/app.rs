@@ -284,6 +284,47 @@ You can get it from Microsoft: https://developer.microsoft.com/microsoft-edge/we
         });
 }
 
+fn fallback_browser_launch_notice_message(url: &str, error: &str) -> String {
+    let log_path = diagnostic_log_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unavailable".to_string());
+    format!(
+        "Clipline started its WebView2-free fallback client, but Windows could not open your default browser automatically.\n\n\
+Copy this URL into a browser to open Clipline:\n{url}\n\n\
+Launch error: {error}\n\n\
+Diagnostic log: {log_path}",
+    )
+}
+
+fn show_fallback_browser_launch_notice(url: &str, error: &str) {
+    let description = fallback_browser_launch_notice_message(url, error);
+    log_diagnostic(format!(
+        "fallback browser launch notice shown url={url} error={error}"
+    ));
+    let _ = std::thread::Builder::new()
+        .name("clipline-fallback-browser-notice".into())
+        .spawn(move || {
+            let _ = rfd::MessageDialog::new()
+                .set_title("Open Clipline in your browser")
+                .set_description(description)
+                .set_buttons(rfd::MessageButtons::Ok)
+                .show();
+        });
+}
+
+fn emit_client_event<R, T>(app: &AppHandle<R>, event: &'static str, payload: T)
+where
+    R: Runtime,
+    T: serde::Serialize + Clone,
+{
+    let hub = app.state::<Arc<crate::host::events::ClientEventHub>>();
+    hub.emit(crate::host::events::ClientEvent::new(
+        event,
+        serde_json::to_value(payload.clone()).unwrap_or(serde_json::Value::Null),
+    ));
+    let _ = app.emit(event, payload);
+}
+
 fn webview_health_signal_for_repair_reason(
     reason: WebviewRepairNoticeReason,
 ) -> Option<WebviewHealthSignal> {
@@ -661,7 +702,11 @@ impl RuntimeState {
             pump_events(app.clone(), rx);
         }
         if prepared.cleared_active_game {
-            let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
+            emit_client_event(
+                &app,
+                "game-detection",
+                GameDetectionEvent::from_detected(None),
+            );
         }
         Ok(())
     }
@@ -816,7 +861,7 @@ impl RuntimeState {
             pump_events(app.clone(), rx);
         }
         if emit_event {
-            let _ = app.emit("game-detection", event);
+            emit_client_event(&app, "game-detection", event);
         }
         Ok(())
     }
@@ -1532,7 +1577,7 @@ fn apply_settings_save<R: Runtime>(
             ) {
                 let message = format!("global save hotkey still unavailable: {e}");
                 eprintln!("{message}");
-                let _ = app.emit("error", message);
+                emit_client_event(&app, "error", message);
             }
         }
     }
@@ -1598,6 +1643,7 @@ fn launch_fallback_client(
     if let Err(e) = open_url_in_default_browser(&info.base_url) {
         log_diagnostic(format!("{diagnostic_context} URL open failed: {e}"));
         eprintln!("open fallback client URL: {e}");
+        show_fallback_browser_launch_notice(&info.base_url, &e);
         if open_failure_is_error {
             return Err(e);
         }
@@ -1782,7 +1828,7 @@ pub fn run() {
                     let message =
                         format!("global save hotkey unavailable; continuing without it: {e}");
                     eprintln!("{message}");
-                    let _ = app.handle().emit("error", message);
+                    emit_client_event(app.handle(), "error", message);
                 }
             }
             if let Err(e) = crate::hotkeys::install_save_hook(&settings.hotkey, {
@@ -1793,7 +1839,7 @@ pub fn run() {
             }) {
                 let message = format!("low-level save hotkey unavailable: {e}");
                 eprintln!("{message}");
-                let _ = app.handle().emit("error", message);
+                emit_client_event(app.handle(), "error", message);
             }
             // Bound the asset protocol to the configured media folder so clips
             // under a custom root play back, while the static config scope stays
@@ -1972,7 +2018,7 @@ fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
                     Ok(()) => last_error = None,
                     Err(e) if last_error.as_deref() != Some(e.as_str()) => {
                         last_error = Some(e.clone());
-                        let _ = app.emit("error", format!("game detection: {e}"));
+                        emit_client_event(&app, "error", format!("game detection: {e}"));
                     }
                     Err(_) => {}
                 }
