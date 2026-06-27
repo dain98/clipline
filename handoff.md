@@ -314,9 +314,15 @@ Recent fixes (2026-06-25):
   `frontend_ready` once JavaScript boots and IPC works; the Rust shell logs `frontend_ready
   received`. When `open_main_window` reveals the UI, it also probes `is_visible()` explicitly and
   classifies Tauri's typed `Runtime(FailedToReceiveMessage)` as a dead WebView2 signal. If that
-  getter probe fails or the frontend-ready watchdog expires, Clipline shows one native `rfd`
-  repair dialog per process from a worker thread. This matters because a dead WebView2 frontend
-  cannot trigger the in-app updater; already-broken users need reinstall/manual WebView2 repair.
+  getter probe fails or the frontend-ready watchdog expires, Clipline attempts to launch the
+  tokenized localhost fallback browser client first, then shows one native `rfd` repair dialog per
+  process only if fallback launch fails. This matters because a dead WebView2 frontend cannot
+  trigger the in-app updater; already-broken users need fallback access or reinstall/manual WebView2
+  repair.
+- WebView2-free fallback client plan is now in execution: dead WebView2 startup will launch the
+  shared UI through a tokenized localhost browser fallback instead of stopping at a repair-only
+  dialog. Full parity is guarded by source-contract tests over every `invoke` command and `listen`
+  event.
 
 Recent fixes (2026-06-24):
 - Windows 10 follow-up from Nate's 0.1.12 logs: the recovery-window build also produced

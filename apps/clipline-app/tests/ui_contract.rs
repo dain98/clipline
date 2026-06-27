@@ -411,15 +411,14 @@ fn fallback_cloud_links_use_shared_cloud_url_validation() {
 #[test]
 fn fallback_setup_keeps_server_alive_when_browser_launch_fails() {
     let app = app_rs();
-    let start_fallback = source_between(
+    let setup_fallback = source_between(
         &app,
         "fn start_fallback_from_setup(",
-        "fn open_url_in_default_browser(",
+        "fn launch_fallback_client(",
     );
 
     assert!(
-        start_fallback.contains("if let Err(e) = open_url_in_default_browser(&info.base_url)")
-            && !start_fallback.contains("open_url_in_default_browser(&info.base_url)?"),
+        setup_fallback.contains(r#"launch_fallback_client(host, port, "forced fallback", false)?"#),
         "default-browser launch failure should be logged without tearing down the fallback server"
     );
 }

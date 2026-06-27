@@ -18,6 +18,20 @@ pub enum FallbackLaunchPreference {
     StartFallback,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebviewHealthSignal {
+    GetterFailedToReceiveMessage,
+    FrontendReadyTimeout,
+    FallbackLaunchFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebviewFailureAction {
+    StartFallback,
+    ShowNativeDiagnostic,
+    Ignore,
+}
+
 #[allow(
     dead_code,
     reason = "used by fallback runtime tasks after the startup decision contract is introduced"
@@ -43,6 +57,20 @@ pub fn requested_fallback_port(args: &[String]) -> Option<u16> {
     args.windows(2)
         .find(|window| window[0] == "--fallback-port")
         .and_then(|window| window[1].parse::<u16>().ok())
+}
+
+pub fn launch_decision_after_webview_health(
+    signal: WebviewHealthSignal,
+    fallback_already_started: bool,
+) -> WebviewFailureAction {
+    if fallback_already_started {
+        return WebviewFailureAction::Ignore;
+    }
+    match signal {
+        WebviewHealthSignal::GetterFailedToReceiveMessage
+        | WebviewHealthSignal::FrontendReadyTimeout => WebviewFailureAction::StartFallback,
+        WebviewHealthSignal::FallbackLaunchFailed => WebviewFailureAction::ShowNativeDiagnostic,
+    }
 }
 
 #[cfg(test)]
@@ -129,5 +157,43 @@ mod tests {
         ];
 
         assert_eq!(requested_fallback_port(&args), None);
+    }
+
+    #[test]
+    fn dead_webview_health_signal_selects_fallback() {
+        assert_eq!(
+            launch_decision_after_webview_health(
+                WebviewHealthSignal::GetterFailedToReceiveMessage,
+                false
+            ),
+            WebviewFailureAction::StartFallback
+        );
+        assert_eq!(
+            launch_decision_after_webview_health(WebviewHealthSignal::FrontendReadyTimeout, false),
+            WebviewFailureAction::StartFallback
+        );
+    }
+
+    #[test]
+    fn fallback_failure_shows_repair_notice() {
+        assert_eq!(
+            launch_decision_after_webview_health(WebviewHealthSignal::FallbackLaunchFailed, false),
+            WebviewFailureAction::ShowNativeDiagnostic
+        );
+    }
+
+    #[test]
+    fn already_started_health_signal_is_ignored() {
+        assert_eq!(
+            launch_decision_after_webview_health(
+                WebviewHealthSignal::GetterFailedToReceiveMessage,
+                true
+            ),
+            WebviewFailureAction::Ignore
+        );
+        assert_eq!(
+            launch_decision_after_webview_health(WebviewHealthSignal::FrontendReadyTimeout, true),
+            WebviewFailureAction::Ignore
+        );
     }
 }

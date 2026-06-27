@@ -21,6 +21,7 @@ use tauri_plugin_updater::UpdaterExt;
 
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
+use crate::fallback::startup::{WebviewFailureAction, WebviewHealthSignal};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     is_global_shortcut_hotkey, parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode,
@@ -35,6 +36,7 @@ static DIAGNOSTIC_LOG: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_READY_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_REPAIR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+static FALLBACK_CLIENT_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(serde::Serialize)]
 pub(crate) struct DisplayInfo {
@@ -282,7 +284,89 @@ You can get it from Microsoft: https://developer.microsoft.com/microsoft-edge/we
         });
 }
 
-fn probe_webview_after_reveal<R: Runtime>(window: &WebviewWindow<R>, context: &str) {
+fn webview_health_signal_for_repair_reason(
+    reason: WebviewRepairNoticeReason,
+) -> Option<WebviewHealthSignal> {
+    match reason {
+        WebviewRepairNoticeReason::GetterFailedToReceiveMessage => {
+            Some(WebviewHealthSignal::GetterFailedToReceiveMessage)
+        }
+        WebviewRepairNoticeReason::FrontendReadyTimeout => {
+            Some(WebviewHealthSignal::FrontendReadyTimeout)
+        }
+        WebviewRepairNoticeReason::OtherGetterError => None,
+    }
+}
+
+fn start_fallback_or_show_notice(
+    app: &AppHandle<tauri::Wry>,
+    reason: WebviewRepairNoticeReason,
+) {
+    let Some(signal) = webview_health_signal_for_repair_reason(reason) else {
+        show_webview_repair_notice_once(reason);
+        return;
+    };
+
+    let action = crate::fallback::startup::launch_decision_after_webview_health(
+        signal,
+        FALLBACK_CLIENT_STARTED.load(Ordering::Acquire),
+    );
+    match action {
+        WebviewFailureAction::Ignore => {
+            log_diagnostic(format!(
+                "webview health fallback launch ignored signal={signal:?}"
+            ));
+        }
+        WebviewFailureAction::ShowNativeDiagnostic => {
+            show_webview_repair_notice_once(reason);
+        }
+        WebviewFailureAction::StartFallback => {
+            if FALLBACK_CLIENT_STARTED
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                log_diagnostic(format!(
+                    "webview health fallback launch lost duplicate race signal={signal:?}"
+                ));
+                return;
+            }
+
+            log_diagnostic(format!(
+                "webview health fallback launch starting signal={signal:?}"
+            ));
+            if let Err(e) = start_fallback_from_app_handle(app, signal) {
+                log_diagnostic(format!(
+                    "webview health fallback launch failed signal={signal:?}: {e}"
+                ));
+                eprintln!("dead WebView2 fallback launch failed: {e}");
+                if crate::fallback::startup::launch_decision_after_webview_health(
+                    WebviewHealthSignal::FallbackLaunchFailed,
+                    false,
+                ) == WebviewFailureAction::ShowNativeDiagnostic
+                {
+                    show_webview_repair_notice_once(reason);
+                }
+            }
+        }
+    }
+}
+
+fn start_fallback_from_app_handle(
+    app: &AppHandle<tauri::Wry>,
+    signal: WebviewHealthSignal,
+) -> Result<(), String> {
+    let host = app.state::<Arc<crate::host::runtime::FallbackHostContext>>();
+    host.attach_app_handle(app.clone())?;
+    let host = Arc::clone(host.inner());
+    let diagnostic_context = format!("dead webview fallback signal={signal:?}");
+    launch_fallback_client(host, None, &diagnostic_context, true)
+}
+
+fn probe_webview_after_reveal(
+    app: &AppHandle<tauri::Wry>,
+    window: &WebviewWindow<tauri::Wry>,
+    context: &str,
+) {
     match window.is_visible() {
         Ok(visible) => log_diagnostic(format!("{context} health probe is_visible=ok({visible})")),
         Err(e) => {
@@ -290,12 +374,12 @@ fn probe_webview_after_reveal<R: Runtime>(window: &WebviewWindow<R>, context: &s
             log_diagnostic(format!(
                 "{context} health probe is_visible=err({e}) reason={reason:?}"
             ));
-            show_webview_repair_notice_once(reason);
+            start_fallback_or_show_notice(app, reason);
         }
     }
 }
 
-fn arm_frontend_ready_watchdog() {
+fn arm_frontend_ready_watchdog(app: AppHandle<tauri::Wry>) {
     if FRONTEND_READY.load(Ordering::Acquire) {
         return;
     }
@@ -309,11 +393,14 @@ fn arm_frontend_ready_watchdog() {
     log_diagnostic("webview readiness watchdog armed");
     let _ = std::thread::Builder::new()
         .name("clipline-webview-readiness-watchdog".into())
-        .spawn(|| {
+        .spawn(move || {
             std::thread::sleep(WEBVIEW_READY_TIMEOUT);
             if !FRONTEND_READY.load(Ordering::Acquire) {
                 log_diagnostic("webview readiness watchdog expired before frontend_ready");
-                show_webview_repair_notice_once(WebviewRepairNoticeReason::FrontendReadyTimeout);
+                start_fallback_or_show_notice(
+                    &app,
+                    WebviewRepairNoticeReason::FrontendReadyTimeout,
+                );
             } else {
                 log_diagnostic("webview readiness watchdog observed frontend_ready");
             }
@@ -1469,18 +1556,32 @@ fn start_fallback_from_setup(
     port: Option<u16>,
 ) -> Result<(), String> {
     host.attach_app_handle(app.handle().clone())?;
+    launch_fallback_client(host, port, "forced fallback", false)?;
+    FALLBACK_CLIENT_STARTED.store(true, Ordering::Release);
+    Ok(())
+}
+
+fn launch_fallback_client(
+    host: Arc<crate::host::runtime::FallbackHostContext>,
+    port: Option<u16>,
+    diagnostic_context: &str,
+    open_failure_is_error: bool,
+) -> Result<(), String> {
     let info =
         tauri::async_runtime::block_on(crate::fallback::server::start_fallback_server(port, host))?;
     log_diagnostic(format!(
-        "forced fallback server started addr={} url={}",
+        "{diagnostic_context} server started addr={} url={}",
         info.addr, info.base_url
     ));
     eprintln!("Clipline fallback client: {}", info.base_url);
     if let Err(e) = open_url_in_default_browser(&info.base_url) {
-        log_diagnostic(format!("forced fallback URL open failed: {e}"));
+        log_diagnostic(format!("{diagnostic_context} URL open failed: {e}"));
         eprintln!("open fallback client URL: {e}");
+        if open_failure_is_error {
+            return Err(e);
+        }
     } else {
-        log_diagnostic("forced fallback URL opened");
+        log_diagnostic(format!("{diagnostic_context} URL opened"));
     }
     eprintln!("Clipline fallback server is running; close Clipline to stop it.");
     Ok(())
@@ -1583,6 +1684,7 @@ pub fn run() {
         .manage(MicTestState::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
         .manage(client_events)
+        .manage(fallback_host.clone())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
@@ -1850,7 +1952,7 @@ fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
         .expect("spawn game detector thread");
 }
 
-fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+fn open_main_window(app: &AppHandle<tauri::Wry>) -> Result<(), String> {
     log_diagnostic(format!(
         "open_main_window start webviews={}",
         webview_labels(app)
@@ -1863,8 +1965,8 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
             log_window_state("open existing before reveal", &window);
             let result = reveal_logged_window(&window, "open existing");
             log_window_state("open existing after reveal", &window);
-            probe_webview_after_reveal(&window, "open existing after reveal");
-            arm_frontend_ready_watchdog();
+            probe_webview_after_reveal(app, &window, "open existing after reveal");
+            arm_frontend_ready_watchdog(app.clone());
             result
         }
         MainWindowOpenTarget::NewMain => {
@@ -1873,17 +1975,17 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
             log_window_state("open rebuilt before reveal", &window);
             let result = reveal_logged_window(&window, "open rebuilt");
             log_window_state("open rebuilt after reveal", &window);
-            probe_webview_after_reveal(&window, "open rebuilt after reveal");
-            arm_frontend_ready_watchdog();
+            probe_webview_after_reveal(app, &window, "open rebuilt after reveal");
+            arm_frontend_ready_watchdog(app.clone());
             result
         }
     }
 }
 
-fn build_main_window<R: Runtime>(
-    app: &AppHandle<R>,
+fn build_main_window(
+    app: &AppHandle<tauri::Wry>,
     label: &str,
-) -> Result<WebviewWindow<R>, String> {
+) -> Result<WebviewWindow<tauri::Wry>, String> {
     let mut config = app
         .config()
         .app
