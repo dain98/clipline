@@ -552,6 +552,7 @@ pub fn fallback_dispatches_command(command: &str) -> bool {
     matches!(
         command,
         "frontend_ready"
+            | "minimize_main_window"
             | "save_replay"
             | "set_recording"
             | "get_settings"
@@ -654,6 +655,9 @@ async fn invoke(
     }
     match command.as_str() {
         "get_settings" => return ok_response(state.host.settings()),
+        // The fallback UI runs in the user's browser, not a Clipline-owned native window.
+        // Treat native minimize as a successful no-op so shared frontend controls can stay wired.
+        "minimize_main_window" => return ok_response(serde_json::Value::Null),
         "frontend_ready" => return ok_response(serde_json::Value::Null),
         "save_replay" => {
             let _ = state.host.save_replay();

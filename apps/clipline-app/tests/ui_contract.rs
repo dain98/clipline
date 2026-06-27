@@ -40,6 +40,23 @@ fn quoted_calls(source: &str, function_name: &str) -> Vec<String> {
     values
 }
 
+fn quoted_manifest_array(source: &str, array_name: &str) -> Vec<String> {
+    let marker = format!("pub const {array_name}: &[&str] = &[");
+    let start = source.find(&marker).expect("manifest array exists") + marker.len();
+    let tail = &source[start..];
+    let end = tail.find("];").expect("manifest array closes");
+    tail[..end]
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim().trim_end_matches(',');
+            trimmed
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 fn styles_css() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/styles.css");
     fs::read_to_string(path).expect("read ui/styles.css")
@@ -78,6 +95,39 @@ fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> 
         .find(end_marker)
         .unwrap_or_else(|| panic!("missing marker {end_marker} after {start_marker}"));
     &tail[..end]
+}
+
+fn quoted_strings(source: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find('"') {
+        let tail = &rest[start + 1..];
+        let Some(end) = tail.find('"') else {
+            break;
+        };
+        values.push(tail[..end].to_string());
+        rest = &tail[end + 1..];
+    }
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn quoted_match_arm_values(match_source: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for line in match_source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("_ =>") {
+            break;
+        }
+        let pattern = trimmed.split("=>").next().unwrap_or(trimmed).trim();
+        if pattern.starts_with('"') || pattern.starts_with("| \"") {
+            values.extend(quoted_strings(pattern));
+        }
+    }
+    values.sort();
+    values.dedup();
+    values
 }
 
 #[test]
@@ -231,6 +281,43 @@ fn fallback_manifest_covers_every_frontend_event_listener() {
         assert!(
             manifest.contains(&format!("\"{event}\"")),
             "fallback manifest must register frontend event {event}"
+        );
+    }
+}
+
+#[test]
+fn every_fallback_manifest_command_has_dispatch_branch() {
+    let manifest = fallback_manifest_rs();
+    let server = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/server.rs"),
+    )
+    .expect("read fallback server");
+
+    let commands = quoted_manifest_array(&manifest, "FALLBACK_COMMANDS");
+    assert_eq!(
+        commands.len(),
+        41,
+        "fallback command manifest inventory changed"
+    );
+
+    let predicate = source_between(
+        &server,
+        "pub fn fallback_dispatches_command(command: &str) -> bool {",
+        "async fn invoke(",
+    );
+    let predicate_commands = quoted_strings(predicate);
+    let invoke = source_between(&server, "async fn invoke(", "async fn events(");
+    let match_arms = source_between(invoke, "match command.as_str() {", "        _ => {}");
+    let match_commands = quoted_match_arm_values(match_arms);
+
+    for command in commands {
+        assert!(
+            predicate_commands.contains(&command),
+            "fallback dispatch predicate must mention manifest command {command}"
+        );
+        assert!(
+            match_commands.contains(&command),
+            "fallback invoke match must branch manifest command {command}"
         );
     }
 }
@@ -402,9 +489,34 @@ fn fallback_cloud_links_use_shared_cloud_url_validation() {
         "cloud clip URL parser must be reusable by fallback and WebView commands"
     );
     assert!(
-        branch.contains("crate::cloud::validate_cloud_link_url(&args.url)")
-            && branch.contains("crate::host::native::open_external_url("),
-        "fallback open_cloud_clip_url must validate with the same parser as the WebView command before opening"
+        branch.contains("crate::cloud::host_open_cloud_clip_url(args.url)"),
+        "fallback open_cloud_clip_url dispatch must route through the shared host helper"
+    );
+
+    let host_helper = source_between(
+        &cloud,
+        "pub(crate) fn host_open_cloud_clip_url(url: String) -> Result<(), String> {",
+        "fn open_cloud_clip_url_for_host(url: String) -> Result<(), String> {",
+    );
+    assert!(
+        host_helper.contains("open_cloud_clip_url_for_host(url)"),
+        "fallback host helper must delegate to the shared cloud clip opener"
+    );
+
+    let opener = source_between(
+        &cloud,
+        "fn open_cloud_clip_url_for_host(url: String) -> Result<(), String> {",
+        "pub(crate) fn open_cloud_url_for_host(url: &str, context: &str) -> Result<(), String> {",
+    );
+    let validate = opener
+        .find("let url = validate_cloud_link_url(&url)?")
+        .expect("cloud clip opener validates URL first");
+    let open = opener
+        .find("crate::host::native::open_external_url(&url, \"cloud clip URL\")")
+        .expect("cloud clip opener uses shared native URL opener");
+    assert!(
+        validate < open,
+        "cloud clip opener must validate with the shared parser before opening"
     );
 }
 
