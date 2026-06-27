@@ -260,6 +260,16 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > shape is a full-size clapper icon on the left, only for videos that are actually user-created
 > clips, likely after finishing a clearer labeling model.
 
+Recent fixes (2026-06-27):
+- Close-to-tray now emits a frontend playback-suspend event before hiding the WebView, so review
+  audio/video and pending preview work stop instead of continuing behind the tray session.
+- Settings now keep an explicit unsaved draft while the settings page is open. Tab switches and
+  async device/display/encoder refreshes read from that draft, so saving at the end preserves edits
+  made across multiple settings tabs.
+- Replay clips cut from the middle of an Opus stream now write audio tracks with zero `dOps`
+  pre-skip, avoiding the tiny start-of-clip audio drop that only belongs at the original stream
+  beginning.
+
 Recent fixes (2026-06-25):
 - Nightly 0.1.15 contains the Cloud library tab/profile rail work, relaxed hotkey rules, and the
   PR #53 review follow-ups below. The previous public nightly metadata was 0.1.14, so the app and

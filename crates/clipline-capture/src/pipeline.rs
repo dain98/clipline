@@ -323,10 +323,17 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             ));
         }
         let video_cfg = self.encoder.track_config();
+        let reset_audio_pre_skip = !self.replay_starts_at_stream_origin(&segments);
         let audio_cfgs: Vec<_> = self
             .audio_sources
             .iter()
-            .map(|s| s.track_config())
+            .map(|s| {
+                let mut cfg = s.track_config();
+                if reset_audio_pre_skip {
+                    cfg.pre_skip = 0;
+                }
+                cfg
+            })
             .collect();
         let mut track_cfgs = vec![TrackConfig::Video(video_cfg.clone())];
         for cfg in &audio_cfgs {
@@ -341,6 +348,14 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         }
         let end_pts = segments.last().expect("non-empty").pts_end_s();
         Ok((writer.finalize()?, end_pts))
+    }
+
+    fn replay_starts_at_stream_origin(&self, segments: &[Segment]) -> bool {
+        let Some(first) = segments.first() else {
+            return false;
+        };
+        let origin = self.video_start_pts_s.unwrap_or(first.pts_start_s);
+        (first.pts_start_s - origin).abs() <= 1e-9
     }
 
     fn save_window_segments(
@@ -681,6 +696,59 @@ mod tests {
         let kids = children(&buf, moov);
         let traks = kids.iter().filter(|b| &b.fourcc == b"trak").count();
         assert_eq!(traks, 3, "video plus two audio tracks");
+    }
+
+    fn first_opus_pre_skip(buf: &[u8]) -> u16 {
+        let fourcc = buf
+            .windows(4)
+            .position(|window| window == b"dOps")
+            .expect("dOps box");
+        let p = fourcc + 4;
+        u16::from_be_bytes(buf[p + 2..p + 4].try_into().expect("pre-skip bytes"))
+    }
+
+    #[test]
+    fn save_replay_from_stream_start_keeps_opus_pre_skip() {
+        use crate::mock::MockAudioSource;
+
+        let mut rec = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        )
+        .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+
+        rec.run_to_end().unwrap();
+        let (buf, _) = rec
+            .save_replay(std::io::Cursor::new(Vec::new()), 10.0, None)
+            .map(|(w, end)| (w.into_inner(), end))
+            .expect("replay from stream start");
+
+        assert_eq!(first_opus_pre_skip(&buf), 312);
+    }
+
+    #[test]
+    fn save_replay_from_middle_resets_opus_pre_skip() {
+        use crate::mock::MockAudioSource;
+
+        let mut rec = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        )
+        .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+
+        rec.run_to_end().unwrap();
+        let (buf, _) = rec
+            .save_replay(std::io::Cursor::new(Vec::new()), 1.5, None)
+            .map(|(w, end)| (w.into_inner(), end))
+            .expect("replay from middle");
+
+        assert_eq!(
+            first_opus_pre_skip(&buf),
+            0,
+            "mid-stream replay clips must not ask players to discard the first Opus samples"
+        );
     }
 
     #[test]
