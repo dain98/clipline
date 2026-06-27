@@ -1638,8 +1638,16 @@ pub fn run() {
         diagnostic_log_path()
     ));
     let webview2_runtime_versions = webview2_runtime_registry_versions();
-    let webview_preflight = webview2_runtime_preflight(&webview2_runtime_versions);
+    let mut webview_preflight = webview2_runtime_preflight(&webview2_runtime_versions);
     log_diagnostic(webview2_runtime_diagnostic(&webview2_runtime_versions));
+    if let Some(debug_preflight) =
+        crate::fallback::startup::debug_webview2_preflight_override(&args)
+    {
+        log_diagnostic(format!(
+            "debug WebView2 preflight override applied real_preflight={webview_preflight:?} effective_preflight={debug_preflight:?}"
+        ));
+        webview_preflight = debug_preflight;
+    }
     let mut lol_url = None::<String>;
     if let Some(i) = args.iter().position(|a| a == "--window") {
         if let Some(title) = args.get(i + 1) {

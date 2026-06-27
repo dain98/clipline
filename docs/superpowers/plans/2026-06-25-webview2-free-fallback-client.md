@@ -3015,6 +3015,17 @@ probe into startup fallback selection so missing runtime registry entries can se
 before creating the WebView. Nate/real WebView2-removed Windows 10 validation was not available
 locally and remains external validation.
 
+**Execution note (2026-06-27 follow-up):** Added hidden
+`--debug-webview2-preflight missing|available` startup override for deterministic local validation
+of the missing-registry startup path without uninstalling WebView2. Runtime validation command:
+`cargo run -p clipline-app -- --debug-webview2-preflight missing --fallback-port 47651`.
+This command was run locally: the log showed the real registry preflight was `Available`, the
+effective preflight was overridden to `Missing`, setup started with `webviews=[]`, and the
+`startup fallback` server opened on `127.0.0.1:47651` before any normal WebView launch. The
+tokenized URL served the shared UI with HTTP 200, and fallback invokes for `get_settings`,
+`list_clips` (45 clips), and `storage_status` returned `ok`. Nate/real WebView2-removed Windows 10
+validation still remains external.
+
 ---
 
 ## Self-Review Notes

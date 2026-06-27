@@ -321,10 +321,16 @@ Recent fixes (2026-06-25):
   repair.
 - WebView2-free fallback client status (2026-06-27): missing WebView2 preflight and dead
   WebView2 health signals now select the fallback client automatically, with
-  `--force-fallback-client` available for local/runtime testing. The browser client serves the
-  same first-party UI through a tokenized `127.0.0.1` loopback URL, source-contract tests guard
-  parity over every frontend `invoke` command and `listen` event, and fallback media routes are
-  path-validated and range-capable for review playback.
+  `--force-fallback-client` available for local/runtime testing. To exercise the same startup path
+  as a missing WebView2 registry preflight on a dev box that still has WebView2 installed, run
+  `cargo run -p clipline-app -- --debug-webview2-preflight missing --fallback-port 47651`. The
+  debug-missing command was validated locally: the real preflight logged `Available`, the effective
+  preflight became `Missing`, setup had `webviews=[]`, the `startup fallback` server opened before
+  any normal WebView launch, and tokenized HTTP invokes for settings, clip listing, and storage
+  status returned `ok`. The browser client serves the same first-party UI through a tokenized
+  `127.0.0.1` loopback URL, source-contract tests guard parity over every frontend `invoke` command
+  and `listen` event, and fallback media routes are path-validated and range-capable for review
+  playback. Nate/real WebView2-removed Windows 10 validation still remains external.
 
 Recent fixes (2026-06-24):
 - Windows 10 follow-up from Nate's 0.1.12 logs: the recovery-window build also produced

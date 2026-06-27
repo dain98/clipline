@@ -341,8 +341,14 @@ fn app_setup_selects_fallback_before_opening_webview() {
         .expect("app.rs exposes run entrypoint");
     let run = &app[run_start..];
     let preflight = run
-        .find("let webview_preflight = webview2_runtime_preflight")
+        .find("webview_preflight = webview2_runtime_preflight")
         .expect("run computes WebView2 runtime preflight before fallback selection");
+    let diagnostic = run
+        .find("log_diagnostic(webview2_runtime_diagnostic(&webview2_runtime_versions))")
+        .expect("run logs real WebView2 registry diagnostics before applying debug overrides");
+    let preflight_override = run
+        .find("debug_webview2_preflight_override(&args)")
+        .expect("run applies debug WebView2 preflight override before fallback selection");
     let preference_call = source_between(
         run,
         "let startup_fallback_requested =",
@@ -373,6 +379,10 @@ fn app_setup_selects_fallback_before_opening_webview() {
     assert!(
         preflight < preference,
         "startup fallback selection must use registry preflight instead of hard-coding WebView2 availability"
+    );
+    assert!(
+        preflight < diagnostic && diagnostic < preflight_override && preflight_override < preference,
+        "debug WebView2 preflight override must apply after real registry logging and before startup fallback selection"
     );
     assert!(
         fallback_launch < normal_launch && normal_launch < open_main,

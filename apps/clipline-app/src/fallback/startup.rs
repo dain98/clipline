@@ -49,6 +49,19 @@ pub fn fallback_launch_preference(
     }
 }
 
+pub fn debug_webview2_preflight_override(args: &[String]) -> Option<WebviewPreflight> {
+    let value = args
+        .windows(2)
+        .find(|window| window[0] == "--debug-webview2-preflight")
+        .map(|window| window[1].as_str())?;
+
+    match value {
+        "missing" => Some(WebviewPreflight::Missing),
+        "available" => Some(WebviewPreflight::Available),
+        _ => None,
+    }
+}
+
 #[allow(
     dead_code,
     reason = "used by fallback runtime tasks after the startup decision contract is introduced"
@@ -105,6 +118,62 @@ mod tests {
             fallback_launch_preference(&args, WebviewPreflight::Available),
             FallbackLaunchPreference::UseTauri
         );
+    }
+
+    #[test]
+    fn debug_webview2_preflight_override_reads_missing_value() {
+        let args = vec![
+            "clipline-app.exe".to_string(),
+            "--debug-webview2-preflight".to_string(),
+            "missing".to_string(),
+        ];
+
+        assert_eq!(
+            debug_webview2_preflight_override(&args),
+            Some(WebviewPreflight::Missing)
+        );
+    }
+
+    #[test]
+    fn debug_webview2_preflight_override_reads_available_value() {
+        let args = vec![
+            "clipline-app.exe".to_string(),
+            "--debug-webview2-preflight".to_string(),
+            "available".to_string(),
+        ];
+
+        assert_eq!(
+            debug_webview2_preflight_override(&args),
+            Some(WebviewPreflight::Available)
+        );
+    }
+
+    #[test]
+    fn debug_webview2_preflight_override_returns_none_when_flag_absent() {
+        let args = vec!["clipline-app.exe".to_string()];
+
+        assert_eq!(debug_webview2_preflight_override(&args), None);
+    }
+
+    #[test]
+    fn debug_webview2_preflight_override_returns_none_for_invalid_value() {
+        let args = vec![
+            "clipline-app.exe".to_string(),
+            "--debug-webview2-preflight".to_string(),
+            "stale".to_string(),
+        ];
+
+        assert_eq!(debug_webview2_preflight_override(&args), None);
+    }
+
+    #[test]
+    fn debug_webview2_preflight_override_returns_none_for_trailing_flag() {
+        let args = vec![
+            "clipline-app.exe".to_string(),
+            "--debug-webview2-preflight".to_string(),
+        ];
+
+        assert_eq!(debug_webview2_preflight_override(&args), None);
     }
 
     #[test]
