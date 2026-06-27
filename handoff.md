@@ -11,7 +11,7 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-25): a working tray recorder with a first-party review player
+## Current state (2026-06-27): a working tray recorder with a first-party review player
 
 Thirty-one milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
@@ -269,6 +269,15 @@ Recent fixes (2026-06-27):
 - Replay clips cut from the middle of an Opus stream now write audio tracks with zero `dOps`
   pre-skip, avoiding the tiny start-of-clip audio drop that only belongs at the original stream
   beginning.
+- Runtime memory/duplicate-instance guard: Task Manager reports of many Clipline rows were partly
+  WebView2 child process labeling, but duplicate top-level `clipline-app.exe` processes were also
+  allowed. The Tauri shell now registers `tauri-plugin-single-instance` before autostart so normal
+  duplicate launches reveal the existing window and `--autostart` duplicates stay quiet. The
+  recorder also byte-budgets the pending GOP before ring insertion (capped at 64 MiB), drops
+  leading non-keyframes until the first keyframe, and errors clearly if an encoder stops producing
+  keyframes instead of accumulating packets indefinitely. Verified with focused `ui_contract` and
+  `pipeline` regressions, `cargo test --workspace`, fresh-cache clippy, and a debug runtime
+  duplicate-launch probe.
 
 Recent fixes (2026-06-25):
 - Nightly 0.1.15 contains the Cloud library tab/profile rail work, relaxed hotkey rules, and the

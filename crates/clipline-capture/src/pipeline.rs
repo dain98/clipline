@@ -10,6 +10,8 @@ use crate::traits::{
     AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket, Encoder,
 };
 
+const MAX_PENDING_GOP_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
     #[error(transparent)]
@@ -71,6 +73,9 @@ pub struct Recorder<C: CaptureEngine, E: Encoder> {
     encoder: E,
     ring: ReplayStorage,
     pending: Vec<EncodedPacket>,
+    pending_bytes: usize,
+    pending_byte_budget: usize,
+    pre_keyframe_bytes: usize,
     audio_sources: Vec<Box<dyn AudioSource>>,
     pending_audio: Vec<Vec<AudioPacket>>,
     /// pts of the first video packet — the recording's timeline start.
@@ -87,6 +92,9 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             encoder,
             ring: ReplayStorage::Memory(ReplayRing::new(max_buffer_bytes)),
             pending: Vec::new(),
+            pending_bytes: 0,
+            pending_byte_budget: pending_byte_budget(max_buffer_bytes),
+            pre_keyframe_bytes: 0,
             audio_sources: Vec::new(),
             pending_audio: Vec::new(),
             video_start_pts_s: None,
@@ -99,6 +107,10 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         encoder: E,
         storage: ReplayStorageConfig,
     ) -> io::Result<Self> {
+        let storage_max_bytes = match &storage {
+            ReplayStorageConfig::Memory { max_bytes } => *max_bytes,
+            ReplayStorageConfig::Disk { max_bytes, .. } => *max_bytes,
+        };
         let ring = match storage {
             ReplayStorageConfig::Memory { max_bytes } => {
                 ReplayStorage::Memory(ReplayRing::new(max_bytes))
@@ -112,6 +124,9 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             encoder,
             ring,
             pending: Vec::new(),
+            pending_bytes: 0,
+            pending_byte_budget: pending_byte_budget(storage_max_bytes),
+            pre_keyframe_bytes: 0,
             audio_sources: Vec::new(),
             pending_audio: Vec::new(),
             video_start_pts_s: None,
@@ -150,13 +165,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             pending.extend(src.poll_packets(frame.pts_s)?);
         }
         for pkt in self.encoder.encode(&frame)? {
-            if self.video_start_pts_s.is_none() {
-                self.video_start_pts_s = Some(pkt.pts_s);
-            }
-            if pkt.is_keyframe && !self.pending.is_empty() {
-                self.seal_pending(pkt.pts_s)?;
-            }
-            self.pending.push(pkt);
+            self.push_encoded_packet(pkt)?;
         }
         Ok(true)
     }
@@ -165,10 +174,17 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
     /// end, seal the trailing partial GOP.
     pub fn finish_stream(&mut self) -> Result<(), PipelineError> {
         for pkt in self.encoder.finish()? {
-            if pkt.is_keyframe && !self.pending.is_empty() {
-                self.seal_pending(pkt.pts_s)?;
-            }
-            self.pending.push(pkt);
+            self.push_encoded_packet(pkt)?;
+        }
+        if self.pending.is_empty()
+            && self.video_start_pts_s.is_none()
+            && self.pre_keyframe_bytes > 0
+        {
+            return Err(EncodeError::Backend(format!(
+                "encoder ended before producing an initial keyframe ({} bytes were dropped before the first keyframe)",
+                self.pre_keyframe_bytes
+            ))
+            .into());
         }
         if !self.pending.is_empty() {
             let end = self
@@ -379,6 +395,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
 
     fn seal_pending(&mut self, boundary_pts_s: f64) -> Result<(), PipelineError> {
         let packets = std::mem::take(&mut self.pending);
+        self.pending_bytes = 0;
         let pts_start_s = packets[0].pts_s;
         let starts_with_keyframe = packets[0].is_keyframe;
         // ddoc §6: the timeline follows capture stamps, not encoder cadence
@@ -457,6 +474,40 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         Ok(())
     }
 
+    fn push_encoded_packet(&mut self, pkt: EncodedPacket) -> Result<(), PipelineError> {
+        if self.video_start_pts_s.is_none() {
+            if !pkt.is_keyframe {
+                self.pre_keyframe_bytes = self.pre_keyframe_bytes.saturating_add(pkt.data.len());
+                if self.pre_keyframe_bytes > self.pending_byte_budget {
+                    return Err(EncodeError::Backend(format!(
+                        "encoder did not produce an initial keyframe before pending packet budget was exceeded ({} > {} bytes)",
+                        self.pre_keyframe_bytes, self.pending_byte_budget
+                    ))
+                    .into());
+                }
+                return Ok(());
+            }
+            self.video_start_pts_s = Some(pkt.pts_s);
+            self.pre_keyframe_bytes = 0;
+        }
+
+        if pkt.is_keyframe && !self.pending.is_empty() {
+            self.seal_pending(pkt.pts_s)?;
+        }
+
+        let next_pending_bytes = self.pending_bytes.saturating_add(pkt.data.len());
+        if next_pending_bytes > self.pending_byte_budget {
+            return Err(EncodeError::Backend(format!(
+                "encoder did not produce a keyframe before pending GOP budget was exceeded ({} > {} bytes)",
+                next_pending_bytes, self.pending_byte_budget
+            ))
+            .into());
+        }
+        self.pending_bytes = next_pending_bytes;
+        self.pending.push(pkt);
+        Ok(())
+    }
+
     fn queue_full_session_segment(&mut self, seg: Segment) {
         let Some(sink) = &mut self.full_session else {
             return;
@@ -479,6 +530,10 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             sink.send_error = Some(format!("full session writer stopped: {e}"));
         }
     }
+}
+
+fn pending_byte_budget(max_buffer_bytes: usize) -> usize {
+    max_buffer_bytes.clamp(1, MAX_PENDING_GOP_BYTES)
 }
 
 fn spawn_full_session_writer(
@@ -615,7 +670,40 @@ fn segment_fragment_refs<'a>(
 mod tests {
     use super::*;
     use crate::mock::{MockCapture, MockEncoder};
+    use crate::traits::{EncodedPacket, Frame};
+    use clipline_mp4::VideoTrackConfig;
     use clipline_test_utils::TestDir;
+
+    struct NeverKeyframeEncoder {
+        fps: u32,
+    }
+
+    impl NeverKeyframeEncoder {
+        fn new(fps: u32) -> Self {
+            Self { fps }
+        }
+    }
+
+    impl Encoder for NeverKeyframeEncoder {
+        fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
+            Ok(vec![EncodedPacket {
+                data: vec![0xEE; 128],
+                pts_s: frame.pts_s,
+                duration_s: 1.0 / self.fps as f64,
+                is_keyframe: false,
+            }])
+        }
+
+        fn track_config(&self) -> VideoTrackConfig {
+            VideoTrackConfig::h264(
+                128,
+                128,
+                90_000,
+                vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+                vec![0x68, 0xEE, 0x38, 0x80],
+            )
+        }
+    }
 
     #[test]
     fn groups_packets_into_gop_aligned_segments() {
@@ -645,6 +733,39 @@ mod tests {
         assert_eq!(ring.len(), 2);
         let first = ring.segments().next().unwrap();
         assert!((first.pts_start_s - 1.0).abs() < 1e-6, "GOP at t=0 evicted");
+    }
+
+    #[test]
+    fn pending_packets_are_byte_budgeted_when_keyframes_never_arrive() {
+        let mut rec = Recorder::new(MockCapture::new(20, 30), NeverKeyframeEncoder::new(30), 512);
+
+        let err = rec
+            .run_to_end()
+            .expect_err("unkeyframed stream should fail");
+
+        assert!(
+            err.to_string().contains("keyframe") && err.to_string().contains("budget"),
+            "error should explain the keyframe/budget guard, got {err}"
+        );
+    }
+
+    #[test]
+    fn short_stream_without_initial_keyframe_is_reported() {
+        let mut rec = Recorder::new(
+            MockCapture::new(1, 30),
+            NeverKeyframeEncoder::new(30),
+            usize::MAX,
+        );
+
+        let err = rec
+            .run_to_end()
+            .expect_err("short unkeyframed stream should fail");
+
+        assert!(
+            err.to_string().contains("keyframe") && err.to_string().contains("ended"),
+            "error should explain that the stream ended before an initial keyframe, got {err}"
+        );
+        assert_eq!(rec.ring().unwrap().len(), 0);
     }
 
     #[test]
