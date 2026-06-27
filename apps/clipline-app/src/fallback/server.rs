@@ -94,6 +94,26 @@ struct OpenCloudClipUrlArgs {
 }
 
 #[derive(serde::Deserialize)]
+struct CloudConnectArgs {
+    request: crate::cloud::CloudConnectRequest,
+}
+
+#[derive(serde::Deserialize)]
+struct CloudClipAssetArgs {
+    request: crate::cloud::CloudClipAssetRequest,
+}
+
+#[derive(serde::Deserialize)]
+struct SyncCloudClipStatusArgs {
+    request: crate::cloud::SyncCloudClipStatusRequest,
+}
+
+#[derive(serde::Deserialize)]
+struct UploadClipToCloudArgs {
+    request: crate::cloud::UploadClipCommandRequest,
+}
+
+#[derive(serde::Deserialize)]
 struct ExtractWindowIconArgs {
     #[serde(rename = "exePath")]
     exe_path: String,
@@ -555,10 +575,20 @@ pub fn fallback_dispatches_command(command: &str) -> bool {
             | "rename_clip"
             | "export_clip"
             | "storage_status"
+            | "cloud_status"
+            | "cloud_connect"
+            | "cloud_disconnect"
+            | "list_cloud_clips"
+            | "cloud_clip_thumbnail"
+            | "cache_cloud_clip_media"
+            | "cloud_user_profile"
+            | "cloud_user_avatar"
             | "reveal_clip"
             | "copy_clip_to_clipboard"
             | "open_cloud_user_profile"
             | "open_cloud_clip_url"
+            | "sync_cloud_clip_status"
+            | "upload_clip_to_cloud"
             | "report_decode_support"
             | "start_microphone_test"
             | "stop_microphone_test"
@@ -808,6 +838,48 @@ async fn invoke(
             .and_then(|result| result);
             return command_response(result);
         }
+        "cloud_status" => return ok_response(crate::cloud::host_cloud_status(&state.host)),
+        "cloud_connect" => {
+            let args = match parse_command_args::<CloudConnectArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => {
+                    return command_response::<crate::cloud::CloudConnectionStatus>(Err(e));
+                }
+            };
+            return command_response(
+                crate::cloud::host_cloud_connect(&state.host, args.request).await,
+            );
+        }
+        "cloud_disconnect" => {
+            return command_response(crate::cloud::host_cloud_disconnect(&state.host));
+        }
+        "list_cloud_clips" => {
+            return command_response(crate::cloud::host_list_cloud_clips(&state.host).await);
+        }
+        "cloud_clip_thumbnail" => {
+            let args = match parse_command_args::<CloudClipAssetArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<Option<String>>(Err(e)),
+            };
+            return command_response(
+                crate::cloud::host_cloud_clip_thumbnail(&state.host, args.request).await,
+            );
+        }
+        "cache_cloud_clip_media" => {
+            let args = match parse_command_args::<CloudClipAssetArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<crate::cloud::CachedCloudClip>(Err(e)),
+            };
+            return command_response(
+                crate::cloud::host_cache_cloud_clip_media(&state.host, args.request).await,
+            );
+        }
+        "cloud_user_profile" => {
+            return command_response(crate::cloud::host_cloud_user_profile(&state.host).await);
+        }
+        "cloud_user_avatar" => {
+            return command_response(crate::cloud::host_cloud_user_avatar(&state.host).await);
+        }
         "reveal_clip" => {
             let args = match parse_command_args::<RevealClipArgs>(&command, args) {
                 Ok(args) => args,
@@ -844,36 +916,34 @@ async fn invoke(
             return command_response(result);
         }
         "open_cloud_user_profile" => {
-            let settings = state.host.settings();
-            let username = settings
-                .cloud
-                .connected_username
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "Clipline Cloud username is unknown".to_string());
-            let result = username
-                .and_then(|username| {
-                    crate::cloud::cloud_user_profile_url(&settings.cloud, username)
-                })
-                .and_then(|url| {
-                    crate::host::native::open_external_url(url.as_str(), "cloud user profile")
-                });
-            return command_response(result);
+            return command_response(crate::cloud::host_open_cloud_user_profile(&state.host));
         }
         "open_cloud_clip_url" => {
             let args = match parse_command_args::<OpenCloudClipUrlArgs>(&command, args) {
                 Ok(args) => args,
                 Err(e) => return command_response::<()>(Err(e)),
             };
-            let url = match crate::cloud::validate_cloud_link_url(&args.url) {
-                Ok(url) => url,
-                Err(e) => return command_response::<()>(Err(e)),
+            return command_response(crate::cloud::host_open_cloud_clip_url(args.url));
+        }
+        "sync_cloud_clip_status" => {
+            let args = match parse_command_args::<SyncCloudClipStatusArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => {
+                    return command_response::<crate::cloud::CloudClipStatusSyncResult>(Err(e));
+                }
             };
-            return command_response(crate::host::native::open_external_url(
-                &url,
-                "cloud clip URL",
-            ));
+            return command_response(
+                crate::cloud::host_sync_cloud_clip_status(&state.host, args.request).await,
+            );
+        }
+        "upload_clip_to_cloud" => {
+            let args = match parse_command_args::<UploadClipToCloudArgs>(&command, args) {
+                Ok(args) => args,
+                Err(e) => return command_response::<crate::cloud::CloudUploadResult>(Err(e)),
+            };
+            return command_response(
+                crate::cloud::host_upload_clip_to_cloud(&state.host, args.request).await,
+            );
         }
         "report_decode_support" => {
             let args = match parse_command_args::<ReportDecodeSupportArgs>(&command, args) {
@@ -1316,6 +1386,114 @@ mod tests {
                 "missing dispatch for {command}"
             );
         }
+    }
+
+    #[test]
+    fn dispatch_table_contains_cloud_commands() {
+        for command in [
+            "cloud_status",
+            "cloud_connect",
+            "cloud_disconnect",
+            "list_cloud_clips",
+            "cloud_clip_thumbnail",
+            "cache_cloud_clip_media",
+            "cloud_user_profile",
+            "cloud_user_avatar",
+            "open_cloud_user_profile",
+            "open_cloud_clip_url",
+            "sync_cloud_clip_status",
+            "upload_clip_to_cloud",
+        ] {
+            assert!(
+                fallback_dispatches_command(command),
+                "missing dispatch for {command}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_sync_cloud_clip_status_accepts_request_envelope() {
+        let clip_path = "D:\\Videos\\Clipline\\missing.mp4";
+        let body = serde_json::json!({
+            "request": {
+                "path": clip_path,
+            }
+        })
+        .to_string();
+
+        let (status, body) = invoke_json(
+            test_state(FallbackToken::generate_for_tests(31)),
+            "sync_cloud_clip_status",
+            &body,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "ok": true,
+                "value": {
+                    "path": clip_path,
+                    "record": null,
+                    "removed": false,
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_cloud_request_envelopes_reach_host_validation() {
+        let (status, body) = invoke_json(
+            test_state(FallbackToken::generate_for_tests(32)),
+            "cloud_connect",
+            r#"{"request":{"host_url":"http://127.0.0.1:9","username":"u","password":"p","plain_http_confirmed":true}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_error_is_not_parse_failure(&body, "host_url");
+
+        for (token, command) in [(33, "cloud_clip_thumbnail"), (34, "cache_cloud_clip_media")] {
+            let (status, body) = invoke_json(
+                test_state(FallbackToken::generate_for_tests(token)),
+                command,
+                r#"{"request":{"remote_clip_id":"remote-1"}}"#,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"], "Clipline Cloud is not connected");
+        }
+
+        let media_dir = test_temp_dir("cloud-upload-envelope");
+        let clip = media_dir.join("upload.mp4");
+        std::fs::write(&clip, b"not a real mp4").expect("write upload fixture");
+        let settings = settings_with_media_dir(&media_dir);
+        let body = serde_json::json!({
+            "request": {
+                "path": clip.display().to_string(),
+            }
+        })
+        .to_string();
+        let (status, body) = invoke_json(
+            test_state_with_settings(FallbackToken::generate_for_tests(35), settings),
+            "upload_clip_to_cloud",
+            &body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "connect to Clipline Cloud first");
+    }
+
+    fn assert_error_is_not_parse_failure(body: &serde_json::Value, field: &str) {
+        let error = body["error"].as_str().expect("error is a string");
+        assert!(
+            !error.contains("arguments are invalid") && !error.contains("missing field"),
+            "expected host validation error, got parse error: {error}"
+        );
+        assert!(
+            !error.contains(field),
+            "expected error not to complain about field {field}: {error}"
+        );
     }
 
     #[tokio::test]

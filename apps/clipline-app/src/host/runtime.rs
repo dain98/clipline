@@ -84,7 +84,7 @@ impl FallbackHostContext {
             .ok_or_else(|| "fallback updater host is not attached".to_string())
     }
 
-    fn attached_app_handle(&self) -> Option<tauri::AppHandle<tauri::Wry>> {
+    pub(crate) fn attached_app_handle(&self) -> Option<tauri::AppHandle<tauri::Wry>> {
         self.app.lock().ok().and_then(|app| app.clone())
     }
 
@@ -101,6 +101,40 @@ impl FallbackHostContext {
 
     pub fn events(&self) -> Arc<crate::host::events::ClientEventHub> {
         self.events.clone()
+    }
+
+    pub fn storage_settings(&self) -> Result<crate::library::StorageSettings, String> {
+        let settings = self.settings();
+        Ok(crate::library::StorageSettings::new(
+            crate::settings::quota_bytes_from_gb(settings.disk_quota_gb)?,
+            settings.media_dir_path()?,
+        ))
+    }
+
+    pub fn update_cloud<F>(&self, update: F) -> Result<crate::settings::AppSettings, String>
+    where
+        F: FnOnce(&mut crate::settings::CloudSettings),
+    {
+        if let Some(app) = self.attached_app_handle() {
+            let state = app.state::<crate::app::RuntimeState>();
+            let updated = state.update_cloud(update)?;
+            let mut guard = self
+                .settings
+                .lock()
+                .map_err(|_| "settings lock poisoned".to_string())?;
+            *guard = updated.clone();
+            return Ok(updated);
+        }
+
+        let mut guard = self
+            .settings
+            .lock()
+            .map_err(|_| "settings lock poisoned".to_string())?;
+        update(&mut guard.cloud);
+        guard.cloud.normalize();
+        let updated = guard.clone();
+        updated.save()?;
+        Ok(updated)
     }
 
     pub async fn check_for_updates(&self) -> Result<crate::app::UpdateCheckResult, String> {
@@ -131,16 +165,17 @@ impl FallbackHostContext {
             return Ok(committed);
         }
 
+        let mut guard = self
+            .settings
+            .lock()
+            .map_err(|_| "settings lock poisoned".to_string())?;
+        preserve_backend_cloud_fields(&mut settings, &guard);
         settings.hotkey = crate::settings::normalize_hotkey(&settings.hotkey)?;
         settings.validate()?;
         let media_dir = settings.media_dir_path()?;
         std::fs::create_dir_all(&media_dir)
             .map_err(|e| format!("create media folder {media_dir:?}: {e}"))?;
         settings.save()?;
-        let mut guard = self
-            .settings
-            .lock()
-            .map_err(|_| "settings lock poisoned".to_string())?;
         *guard = settings.clone();
         Ok(settings)
     }
@@ -408,6 +443,19 @@ impl FallbackHostContext {
     }
 }
 
+fn preserve_backend_cloud_fields(
+    settings: &mut crate::settings::AppSettings,
+    backend: &crate::settings::AppSettings,
+) {
+    settings.cloud.host_url = backend.cloud.host_url.clone();
+    settings.cloud.public_url = backend.cloud.public_url.clone();
+    settings.cloud.connected_user_id = backend.cloud.connected_user_id.clone();
+    settings.cloud.connected_username = backend.cloud.connected_username.clone();
+    settings.cloud.connected_display_name = backend.cloud.connected_display_name.clone();
+    settings.cloud.credential_target = backend.cloud.credential_target.clone();
+    settings.cloud.uploads = backend.cloud.uploads.clone();
+}
+
 #[derive(serde::Serialize)]
 struct FallbackMicMonitorEvent {
     rms: f32,
@@ -462,6 +510,7 @@ fn spawn_event_pump(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clipline_test_utils::TestDir;
     use std::time::{Duration, Instant};
 
     fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
@@ -473,6 +522,29 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         condition()
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
     }
 
     #[test]
@@ -496,6 +568,69 @@ mod tests {
         let context = FallbackHostContext::for_tests(crate::settings::AppSettings::default());
 
         assert!(!context.save_replay());
+    }
+
+    #[test]
+    fn detached_save_settings_preserves_backend_cloud_fields() {
+        let appdata = TestDir::new("clipline-host-runtime", "detached-save-cloud");
+        let _appdata_guard = EnvVarGuard::set("APPDATA", appdata.path());
+
+        let context = FallbackHostContext::for_tests(crate::settings::AppSettings::default());
+        context
+            .update_cloud(|cloud| {
+                cloud.host_url = "https://cloud.example.com".into();
+                cloud.public_url = Some("https://public.example.com".into());
+                cloud.connected_user_id = Some("user-1".into());
+                cloud.connected_username = Some("dain".into());
+                cloud.connected_display_name = Some("Dain".into());
+                cloud.credential_target = Some("clipline:user-1".into());
+                cloud.uploads.insert(
+                    "local-1".into(),
+                    crate::settings::CloudUploadRecord {
+                        local_clip_id: "local-1".into(),
+                        path: "D:\\Videos\\Clipline\\clip.mp4".into(),
+                        remote_clip_id: Some("remote-1".into()),
+                        remote_url: Some("https://public.example.com/remote-1".into()),
+                        visibility: "private".into(),
+                        upload_status: "uploaded_private".into(),
+                        error: None,
+                        updated_at_unix: 42,
+                    },
+                );
+            })
+            .expect("seed backend cloud state");
+
+        let mut frontend = crate::settings::AppSettings::default();
+        frontend.cloud.default_visibility = "public".into();
+        frontend.cloud.delete_local_after_upload = true;
+        frontend.cloud.auto_upload_rules = true;
+
+        let saved = context
+            .save_settings(frontend)
+            .expect("save frontend settings");
+
+        assert_eq!(saved.cloud.host_url, "https://cloud.example.com");
+        assert_eq!(
+            saved.cloud.public_url.as_deref(),
+            Some("https://public.example.com")
+        );
+        assert_eq!(saved.cloud.connected_user_id.as_deref(), Some("user-1"));
+        assert_eq!(saved.cloud.connected_username.as_deref(), Some("dain"));
+        assert_eq!(saved.cloud.connected_display_name.as_deref(), Some("Dain"));
+        assert_eq!(
+            saved.cloud.credential_target.as_deref(),
+            Some("clipline:user-1")
+        );
+        assert_eq!(
+            saved.cloud.uploads.get("local-1").map(|record| (
+                record.remote_clip_id.as_deref(),
+                record.upload_status.as_str()
+            )),
+            Some((Some("remote-1"), "uploaded_private"))
+        );
+        assert_eq!(saved.cloud.default_visibility, "public");
+        assert!(saved.cloud.delete_local_after_upload);
+        assert!(saved.cloud.auto_upload_rules);
     }
 
     #[test]
