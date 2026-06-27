@@ -288,10 +288,9 @@ fn fallback_manifest_covers_every_frontend_event_listener() {
 #[test]
 fn every_fallback_manifest_command_has_dispatch_branch() {
     let manifest = fallback_manifest_rs();
-    let server = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/server.rs"),
-    )
-    .expect("read fallback server");
+    let server =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/server.rs"))
+            .expect("read fallback server");
 
     let commands = quoted_manifest_array(&manifest, "FALLBACK_COMMANDS");
     assert_eq!(
@@ -337,6 +336,21 @@ fn app_exposes_force_fallback_client_flag() {
 #[test]
 fn app_setup_selects_fallback_before_opening_webview() {
     let app = app_rs();
+    let run_start = app
+        .find("pub fn run()")
+        .expect("app.rs exposes run entrypoint");
+    let run = &app[run_start..];
+    let preflight = run
+        .find("let webview_preflight = webview2_runtime_preflight")
+        .expect("run computes WebView2 runtime preflight before fallback selection");
+    let preference_call = source_between(
+        run,
+        "let startup_fallback_requested =",
+        "== crate::fallback::startup::FallbackLaunchPreference::StartFallback",
+    );
+    let preference = run
+        .find("let startup_fallback_requested =")
+        .expect("run computes startup fallback selection");
     let setup_start = app
         .find(".setup(move |app|")
         .expect("app.rs configures setup");
@@ -352,8 +366,17 @@ fn app_setup_selects_fallback_before_opening_webview() {
         .expect("setup opens the main window for normal launches");
 
     assert!(
+        preference_call.contains("fallback_launch_preference(&args, webview_preflight)")
+            && !preference_call.contains("WebviewPreflight::Available"),
+        "run must pass the computed WebView2 preflight to fallback selection"
+    );
+    assert!(
+        preflight < preference,
+        "startup fallback selection must use registry preflight instead of hard-coding WebView2 availability"
+    );
+    assert!(
         fallback_launch < normal_launch && normal_launch < open_main,
-        "setup must choose forced fallback before opening the WebView for normal launches"
+        "setup must choose startup fallback before opening the WebView for normal launches"
     );
 }
 
@@ -530,7 +553,8 @@ fn fallback_setup_keeps_server_alive_when_browser_launch_fails() {
     );
 
     assert!(
-        setup_fallback.contains(r#"launch_fallback_client(host, port, "forced fallback", false)?"#),
+        setup_fallback
+            .contains(r#"launch_fallback_client(host, port, "startup fallback", false)?"#),
         "default-browser launch failure should be logged without tearing down the fallback server"
     );
 }

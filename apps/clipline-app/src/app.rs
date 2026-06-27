@@ -19,9 +19,9 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_updater::UpdaterExt;
 
+use crate::fallback::startup::{WebviewFailureAction, WebviewHealthSignal};
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
-use crate::fallback::startup::{WebviewFailureAction, WebviewHealthSignal};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     is_global_shortcut_hotkey, parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode,
@@ -298,10 +298,7 @@ fn webview_health_signal_for_repair_reason(
     }
 }
 
-fn start_fallback_or_show_notice(
-    app: &AppHandle<tauri::Wry>,
-    reason: WebviewRepairNoticeReason,
-) {
+fn start_fallback_or_show_notice(app: &AppHandle<tauri::Wry>, reason: WebviewRepairNoticeReason) {
     let Some(signal) = webview_health_signal_for_repair_reason(reason) else {
         show_webview_repair_notice_once(reason);
         return;
@@ -448,11 +445,35 @@ fn query_registry_pv(key: &str) -> Option<String> {
     parse_reg_pv_output(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn webview2_runtime_diagnostic() -> String {
-    let entries = webview2_runtime_registry_keys()
+fn webview2_runtime_registry_versions() -> Vec<(String, Option<String>)> {
+    webview2_runtime_registry_keys()
         .into_iter()
         .map(|key| {
-            let version = query_registry_pv(&key).unwrap_or_else(|| "missing".to_string());
+            let version = query_registry_pv(&key);
+            (key, version)
+        })
+        .collect()
+}
+
+fn webview2_runtime_preflight(
+    versions: &[(String, Option<String>)],
+) -> crate::fallback::startup::WebviewPreflight {
+    if versions.iter().any(|(_, version)| {
+        version
+            .as_deref()
+            .is_some_and(|version| !version.trim().is_empty())
+    }) {
+        crate::fallback::startup::WebviewPreflight::Available
+    } else {
+        crate::fallback::startup::WebviewPreflight::Missing
+    }
+}
+
+fn webview2_runtime_diagnostic(versions: &[(String, Option<String>)]) -> String {
+    let entries = versions
+        .iter()
+        .map(|(key, version)| {
+            let version = version.as_deref().unwrap_or("missing");
             format!("{key}={version}")
         })
         .collect::<Vec<_>>();
@@ -1556,7 +1577,7 @@ fn start_fallback_from_setup(
     port: Option<u16>,
 ) -> Result<(), String> {
     host.attach_app_handle(app.handle().clone())?;
-    launch_fallback_client(host, port, "forced fallback", false)?;
+    launch_fallback_client(host, port, "startup fallback", false)?;
     FALLBACK_CLIENT_STARTED.store(true, Ordering::Release);
     Ok(())
 }
@@ -1616,7 +1637,9 @@ pub fn run() {
         env!("CARGO_PKG_VERSION"),
         diagnostic_log_path()
     ));
-    log_diagnostic(webview2_runtime_diagnostic());
+    let webview2_runtime_versions = webview2_runtime_registry_versions();
+    let webview_preflight = webview2_runtime_preflight(&webview2_runtime_versions);
+    log_diagnostic(webview2_runtime_diagnostic(&webview2_runtime_versions));
     let mut lol_url = None::<String>;
     if let Some(i) = args.iter().position(|a| a == "--window") {
         if let Some(title) = args.get(i + 1) {
@@ -1647,15 +1670,13 @@ pub fn run() {
         settings = AppSettings::default();
     }
 
-    let forced_fallback_requested = crate::fallback::startup::fallback_launch_preference(
-        &args,
-        crate::fallback::startup::WebviewPreflight::Available,
-    )
-        == crate::fallback::startup::FallbackLaunchPreference::StartFallback;
+    let startup_fallback_requested =
+        crate::fallback::startup::fallback_launch_preference(&args, webview_preflight)
+            == crate::fallback::startup::FallbackLaunchPreference::StartFallback;
     let fallback_port = crate::fallback::startup::requested_fallback_port(&args);
-    if forced_fallback_requested {
+    if startup_fallback_requested {
         log_diagnostic(format!(
-            "forced fallback launch requested fallback_port={fallback_port:?}"
+            "startup fallback launch requested webview_preflight={webview_preflight:?} fallback_port={fallback_port:?}"
         ));
     }
 
@@ -1859,12 +1880,12 @@ pub fn run() {
 
             pump_events(app.handle().clone(), event_rx);
             spawn_game_detector(app.handle().clone());
-            let fallback_client_started = if forced_fallback_requested {
+            let fallback_client_started = if startup_fallback_requested {
                 if let Err(e) =
                     start_fallback_from_setup(app, fallback_host.clone(), fallback_port)
                 {
-                    log_diagnostic(format!("forced fallback launch failed: {e}"));
-                    eprintln!("forced fallback launch failed: {e}");
+                    log_diagnostic(format!("startup fallback launch failed: {e}"));
+                    eprintln!("startup fallback launch failed: {e}");
                     return Err(std::io::Error::other(e).into());
                 }
                 true
@@ -2537,6 +2558,34 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         assert_eq!(
             parse_reg_pv_output(output).as_deref(),
             Some("120.0.2210.55")
+        );
+    }
+
+    #[test]
+    fn webview2_preflight_is_missing_when_all_runtime_versions_are_absent() {
+        let versions = [
+            ("hklm-wow6432".to_string(), None),
+            ("hklm".to_string(), None),
+            ("hkcu".to_string(), None),
+        ];
+
+        assert_eq!(
+            webview2_runtime_preflight(&versions),
+            crate::fallback::startup::WebviewPreflight::Missing
+        );
+    }
+
+    #[test]
+    fn webview2_preflight_is_available_when_any_runtime_version_exists() {
+        let versions = [
+            ("hklm-wow6432".to_string(), None),
+            ("hklm".to_string(), Some("120.0.2210.55".to_string())),
+            ("hkcu".to_string(), None),
+        ];
+
+        assert_eq!(
+            webview2_runtime_preflight(&versions),
+            crate::fallback::startup::WebviewPreflight::Available
         );
     }
 

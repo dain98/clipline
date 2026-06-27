@@ -3008,10 +3008,12 @@ mechanical Rust lint cleanups in `apps/clipline-app/src/app.rs`,
 normal WebView2 launch with a fresh `frontend_ready received` log entry and no fresh fallback log
 lines, then a forced fallback launch on port 47651. The forced fallback URL loaded the shared UI in
 a browser, opened Settings and Storage, returned `ok` for `get_settings`, `list_clips`,
-`storage_status`, `memory_status`, and `save_replay`, listed 44 clips after saving a replay, and
-served a real clip through tokenized media routes with `206` range support while rejecting an
-outside path. Nate/real WebView2-removed Windows 10 validation was not available locally and
-remains external validation.
+`storage_status`, `memory_status`, and `save_replay`, the `list_clips` HTTP invoke returned 44
+clips after saving a replay, and a real clip was served through tokenized media routes with `206`
+range support while rejecting an outside path. A follow-up fix wired the logged WebView2 registry
+probe into startup fallback selection so missing runtime registry entries can select fallback
+before creating the WebView. Nate/real WebView2-removed Windows 10 validation was not available
+locally and remains external validation.
 
 ---
 
