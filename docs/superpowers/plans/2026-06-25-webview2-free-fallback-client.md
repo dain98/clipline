@@ -3000,6 +3000,19 @@ git status --short --branch
 
 Expected: only unrelated pre-existing untracked files remain, such as `.claude/`, unless the user has added other work.
 
+**Execution note (2026-06-27):** Task 20 local validation ran `cargo test --workspace`
+successfully, then ran `cargo clean -p clipline-app` followed by
+`cargo clippy --workspace --all-targets -- -D warnings`; clippy failed on four existing Rust lint
+errors in `apps/clipline-app/src/app.rs`, `apps/clipline-app/src/cloud.rs`, and
+`apps/clipline-app/src/library.rs` outside this docs-only task. Runtime smoke covered a normal
+WebView2 launch with a fresh `frontend_ready received` log entry and no fresh fallback log lines,
+then a forced fallback launch on port 47651. The forced fallback URL loaded the shared UI in a
+browser, opened Settings and Storage, returned `ok` for `get_settings`, `list_clips`,
+`storage_status`, `memory_status`, and `save_replay`, listed 44 clips after saving a replay, and
+served a real clip through tokenized media routes with `206` range support while rejecting an
+outside path. Nate/real WebView2-removed Windows 10 validation was not available locally and
+remains external validation.
+
 ---
 
 ## Self-Review Notes

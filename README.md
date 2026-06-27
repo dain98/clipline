@@ -42,6 +42,8 @@ Download the latest **[nightly installer](https://github.com/dain98/clipline/rel
 
 On Windows, the standard installer embeds Microsoft's small WebView2 Evergreen bootstrapper. If WebView2 is missing or older than Clipline's minimum supported runtime, the installer may download the current runtime from Microsoft. Offline or Microsoft-blocked machines may need the WebView2 Runtime installed manually first. Windows 11 normally includes WebView2.
 
+If WebView2 is unavailable or broken, Clipline starts a local browser fallback that uses the same first-party UI through a tokenized `127.0.0.1` connection. The fallback is intended for Windows 10 machines where WebView2 cannot be kept installed; it still requires a normal browser for the UI.
+
 **On signing — two different things, only one is done yet:**
 
 - ✅ **The auto‑updater is signed.** Every update bundle carries a cryptographic signature that's verified against a public key committed in the repo before it's applied, so the update channel is tamper‑resistant.

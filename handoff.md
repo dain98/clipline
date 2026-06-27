@@ -319,10 +319,12 @@ Recent fixes (2026-06-25):
   process only if fallback launch fails. This matters because a dead WebView2 frontend cannot
   trigger the in-app updater; already-broken users need fallback access or reinstall/manual WebView2
   repair.
-- WebView2-free fallback client plan is now in execution: dead WebView2 startup will launch the
-  shared UI through a tokenized localhost browser fallback instead of stopping at a repair-only
-  dialog. Full parity is guarded by source-contract tests over every `invoke` command and `listen`
-  event.
+- WebView2-free fallback client status (2026-06-27): missing WebView2 preflight and dead
+  WebView2 health signals now select the fallback client automatically, with
+  `--force-fallback-client` available for local/runtime testing. The browser client serves the
+  same first-party UI through a tokenized `127.0.0.1` loopback URL, source-contract tests guard
+  parity over every frontend `invoke` command and `listen` event, and fallback media routes are
+  path-validated and range-capable for review playback.
 
 Recent fixes (2026-06-24):
 - Windows 10 follow-up from Nate's 0.1.12 logs: the recovery-window build also produced
