@@ -314,9 +314,37 @@ Recent fixes (2026-06-25):
   `frontend_ready` once JavaScript boots and IPC works; the Rust shell logs `frontend_ready
   received`. When `open_main_window` reveals the UI, it also probes `is_visible()` explicitly and
   classifies Tauri's typed `Runtime(FailedToReceiveMessage)` as a dead WebView2 signal. If that
-  getter probe fails or the frontend-ready watchdog expires, Clipline shows one native `rfd`
-  repair dialog per process from a worker thread. This matters because a dead WebView2 frontend
-  cannot trigger the in-app updater; already-broken users need reinstall/manual WebView2 repair.
+  getter probe fails or the frontend-ready watchdog expires, Clipline attempts to launch the
+  tokenized localhost fallback browser client first, then shows one native `rfd` repair dialog per
+  process only if fallback launch fails. This matters because a dead WebView2 frontend cannot
+  trigger the in-app updater; already-broken users need fallback access or reinstall/manual WebView2
+  repair.
+- WebView2-free fallback client status (2026-06-27): missing WebView2 preflight and dead
+  WebView2 health signals now select the fallback client automatically, with
+  `--force-fallback-client` available for local/runtime testing. To exercise the same startup path
+  as a missing WebView2 registry preflight on a dev box that still has WebView2 installed, run
+  `cargo run -p clipline-app -- --debug-webview2-preflight missing --fallback-port 47651`. The
+  debug-missing command was validated locally: the real preflight logged `Available`, the effective
+  preflight became `Missing`, setup had `webviews=[]`, the `startup fallback` server opened before
+  any normal WebView launch, and tokenized HTTP invokes for settings, clip listing, and storage
+  status returned `ok`. The browser client serves the same first-party UI through a tokenized
+  `127.0.0.1` loopback URL, source-contract tests guard parity over every frontend `invoke` command
+  and `listen` event, and fallback media routes are path-validated and range-capable for review
+  playback. A follow-up fixed the fallback titlebar route: `minimize`, `toggle_maximize`, and
+  `close` now hit a token-guarded `/window/{action}` endpoint that succeeds as a browser-safe no-op
+  instead of surfacing a fallback-only 404. `scripts\validate-fallback-client.ps1` is the external
+  validation harness for Nate/VM: pass `-CliplineExe <path>` on a WebView2-removed machine, or add
+  `-UseDebugMissingPreflight` on a dev box to generate evidence JSON for the same startup path. When
+  the browser fallback opens, the native Clipline process remains the recorder/tray host and still
+  owns Save Replay through the global/low-level hotkey path; the harness now requires a diagnostic
+  that the native save hotkey is OS-ready before the fallback server starts. With
+  `-IncludeGlobalHotkeyProbe`, it briefly focuses Notepad and verifies the configured Save Replay
+  hotkey reaches the native hook while Clipline/browser is unfocused. It also waits for the
+  auto-opened browser to execute the shared UI and invoke fallback `frontend_ready`, so evidence now
+  distinguishes a real browser boot from raw localhost route availability. When clips exist, the
+  harness also proves browser media playback via an opaque `/media-path` redirect and a ranged
+  `/media/{id}` request, and it verifies the fallback `/events` SSE stream reaches a heartbeat.
+  Nate/real WebView2-removed Windows 10 validation still remains external.
 
 Recent fixes (2026-06-24):
 - Windows 10 follow-up from Nate's 0.1.12 logs: the recovery-window build also produced
@@ -531,6 +559,12 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 **Tauri (v2)**
 - The webview **silently no-ops** (no events, no invoke) without
   `capabilities/default.json` granting `core:default`.
+- The WebView2-free browser fallback shares the normal UI through `client-bridge.js`: fallback mode
+  sets `html[data-host-mode="fallback"]`, hides the fake frameless titlebar so browser chrome owns
+  window controls, keeps one shared SSE `EventSource`, mirrors app-level `game-detection`/`error`
+  emits into `ClientEventHub`, and shows a native dialog with the fallback URL if fallback starts
+  but Windows cannot open the default browser. Real WebView2-removed Windows 10 validation is still
+  the release gate.
 - The assetProtocol scope **does not resolve `$VIDEO`** — use plain globs. With configurable
   media folders the scope is currently `**/*.mp4`; diagnose media errors via a `video.onerror`
   handler because error code 4 usually means the scope rejected the request, not a codec problem.

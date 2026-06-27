@@ -75,7 +75,7 @@ impl StorageSettings {
         }
     }
 
-    fn clips_dir(&self) -> Result<PathBuf, String> {
+    pub(crate) fn clips_dir(&self) -> Result<PathBuf, String> {
         clips_dir(&self.media_dir())
     }
 }
@@ -150,12 +150,12 @@ pub async fn list_clips(
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<Vec<ClipInfo>, String> {
     let dir = settings.clips_dir()?;
-    tauri::async_runtime::spawn_blocking(move || list_clips_from_dir(dir))
+    tauri::async_runtime::spawn_blocking(move || crate::host::library::list_clips_from_dir(dir))
         .await
         .map_err(|e| format!("list clips task: {e}"))?
 }
 
-fn list_clips_from_dir(dir: PathBuf) -> Result<Vec<ClipInfo>, String> {
+pub(crate) fn list_clips_from_dir(dir: PathBuf) -> Result<Vec<ClipInfo>, String> {
     let mut clips = Vec::new();
     push_clips_from(&dir, None, &mut clips)?;
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
@@ -253,12 +253,22 @@ pub async fn clip_poster(
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<String, String> {
     let target = validate_clip_path(&settings, &path)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let seek_s = poster_seek_seconds(&target);
-        crate::poster::ensure_poster(&target, seek_s).map(|poster| poster.display().to_string())
-    })
-    .await
-    .map_err(|e| format!("clip poster task: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || ensure_clip_poster(target))
+        .await
+        .map_err(|e| format!("clip poster task: {e}"))?
+}
+
+pub(crate) fn clip_poster_for_host(
+    path: String,
+    settings: &StorageSettings,
+) -> Result<String, String> {
+    let target = validate_clip_path(settings, &path)?;
+    ensure_clip_poster(target)
+}
+
+fn ensure_clip_poster(target: PathBuf) -> Result<String, String> {
+    let seek_s = poster_seek_seconds(&target);
+    crate::poster::ensure_poster(&target, seek_s).map(|poster| poster.display().to_string())
 }
 
 /// The frame to grab a poster from: the first timeline marker (the action
@@ -286,10 +296,18 @@ fn poster_seek_seconds(clip: &Path) -> f64 {
 
 #[tauri::command]
 pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
-    let target = validate_clip_path(&settings, &path)?;
-    std::fs::remove_file(&target).map_err(|e| e.to_string())?;
+    delete_clip_for_host(path, &settings)
+}
+
+pub(crate) fn delete_clip_for_host(path: String, settings: &StorageSettings) -> Result<(), String> {
+    let target = validate_clip_path(settings, &path)?;
+    delete_clip_files(&target)
+}
+
+fn delete_clip_files(target: &Path) -> Result<(), String> {
+    std::fs::remove_file(target).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(target.with_extension("markers.json"));
-    let _ = std::fs::remove_file(crate::poster::poster_path(&target));
+    let _ = std::fs::remove_file(crate::poster::poster_path(target));
     Ok(())
 }
 
@@ -309,8 +327,20 @@ pub async fn rename_clip(
     .await
     .map_err(|e| format!("rename clip task: {e}"))??;
 
-    update_cloud_record_paths(&state, &path, &renamed.path);
+    if let Err(error) = update_cloud_record_paths_for_host(&state, &path, &renamed.path) {
+        eprintln!("update cloud records after rename: {error}");
+    }
     Ok(renamed)
+}
+
+pub(crate) fn rename_clip_for_host(
+    path: String,
+    name: String,
+    settings: &StorageSettings,
+) -> Result<RenamedClipInfo, String> {
+    let source = validate_clip_path(settings, &path)?;
+    let target_name = normalized_clip_file_name(&name)?;
+    rename_clip_files(source, path, target_name)
 }
 
 fn rename_clip_files(
@@ -382,6 +412,16 @@ pub async fn export_clip(
         .map_err(|e| format!("export clip task: {e}"))?
 }
 
+pub(crate) fn export_clip_for_host(
+    path: String,
+    start_s: f64,
+    end_s: f64,
+    settings: &StorageSettings,
+) -> Result<ExportedClipInfo, String> {
+    let source = validate_clip_path(settings, &path)?;
+    export_clip_file(source, start_s, end_s)
+}
+
 #[tauri::command]
 pub async fn preview_clip_audio_tracks<R: Runtime>(
     app: AppHandle<R>,
@@ -396,6 +436,14 @@ pub async fn preview_clip_audio_tracks<R: Runtime>(
     .map_err(|e| format!("audio preview task: {e}"))??;
     allow_audio_preview_asset(&app, Path::new(&path))?;
     Ok(path)
+}
+
+pub(crate) fn preview_clip_audio_tracks_for_host(
+    request: AudioPreviewRequest,
+    settings: &StorageSettings,
+) -> Result<String, String> {
+    let source = validate_clip_path(settings, &request.path)?;
+    preview_clip_audio_tracks_file(source, request.path, request.audio_track_ids)
 }
 
 fn allow_audio_preview_asset<R: Runtime>(app: &AppHandle<R>, preview: &Path) -> Result<(), String> {
@@ -800,12 +848,17 @@ pub async fn storage_status(
 ) -> Result<StorageInfo, String> {
     let dir = settings.clips_dir()?;
     let quota_bytes = settings.quota_bytes();
-    tauri::async_runtime::spawn_blocking(move || storage_status_for_dir(dir, quota_bytes))
-        .await
-        .map_err(|e| format!("storage status task: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::host::library::storage_status_for_dir(dir, quota_bytes)
+    })
+    .await
+    .map_err(|e| format!("storage status task: {e}"))?
 }
 
-fn storage_status_for_dir(dir: PathBuf, quota_bytes: Option<u64>) -> Result<StorageInfo, String> {
+pub(crate) fn storage_status_for_dir(
+    dir: PathBuf,
+    quota_bytes: Option<u64>,
+) -> Result<StorageInfo, String> {
     let status = read_storage_status(&dir, quota_bytes).map_err(|e| e.to_string())?;
     Ok(StorageInfo {
         clip_count: status.clip_count,
@@ -835,11 +888,7 @@ pub(crate) fn validate_clip_path(
 
 #[tauri::command]
 pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
-    let target = validate_clip_path(&settings, &path)?;
-    let dir = target
-        .parent()
-        .ok_or_else(|| "clip has no containing folder".to_string())?;
-    open_folder_path(dir)
+    crate::host::library::reveal_clip(&path, &settings)
 }
 
 #[tauri::command]
@@ -857,13 +906,22 @@ pub async fn copy_clip_to_clipboard(
     .map_err(|e| format!("copy clip task: {e}"))?
 }
 
+pub(crate) fn copy_clip_to_clipboard_for_host(
+    request: CopyClipToClipboardRequest,
+    settings: &StorageSettings,
+) -> Result<(), String> {
+    let target = validate_clip_path(settings, &request.path)?;
+    let share_path = clipboard_share_path(&target, request.audio_track_ids.as_deref())?;
+    crate::host::native::copy_file_to_clipboard(&share_path)
+}
+
 #[tauri::command]
 pub fn open_media_folder(settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let dir = settings.clips_dir()?;
     open_folder_path(&dir)
 }
 
-fn open_folder_path(dir: &Path) -> Result<(), String> {
+pub(crate) fn open_folder_path(dir: &Path) -> Result<(), String> {
     std::process::Command::new("explorer.exe")
         .arg(dir)
         .spawn()
@@ -929,22 +987,34 @@ fn display_renamed_clip_path(old_path: &str, name: &str, fallback_parent: &Path)
         .to_string()
 }
 
-fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, new_path: &str) {
+pub(crate) fn update_cloud_record_paths_for_host(
+    state: &crate::app::RuntimeState,
+    old_path: &str,
+    new_path: &str,
+) -> Result<(), String> {
+    if old_path == new_path {
+        return Ok(());
+    }
+    state.update_cloud(|cloud| update_cloud_record_paths_in_cloud(cloud, old_path, new_path))?;
+    Ok(())
+}
+
+pub(crate) fn update_cloud_record_paths_in_cloud(
+    cloud: &mut crate::settings::CloudSettings,
+    old_path: &str,
+    new_path: &str,
+) {
     if old_path == new_path {
         return;
     }
-    if let Err(error) = state.update_cloud(|cloud| {
-        for record in cloud.uploads.values_mut() {
-            if record.path == old_path {
-                record.path = new_path.to_string();
-            }
+    for record in cloud.uploads.values_mut() {
+        if record.path == old_path {
+            record.path = new_path.to_string();
         }
-    }) {
-        eprintln!("update cloud records after rename: {error}");
     }
 }
 
-fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
+pub(crate) fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
     let payload = dropfiles_payload(path);
     let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, payload.len()) };
     if handle.is_null() {

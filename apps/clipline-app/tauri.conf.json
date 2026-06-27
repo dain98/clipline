@@ -17,6 +17,7 @@
         "minHeight": 640,
         "resizable": true,
         "decorations": false,
+        "create": false,
         "visible": false
       }
     ],

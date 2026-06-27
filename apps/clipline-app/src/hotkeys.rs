@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -28,7 +29,7 @@ const VK_XBUTTON2_CODE: u32 = VK_XBUTTON2 as u32;
 const VK_F1_CODE: u32 = 0x70;
 const VK_F24_CODE: u32 = 0x87;
 
-static SAVE_HOOK: OnceLock<Arc<HookState>> = OnceLock::new();
+static SAVE_HOOK: OnceLock<Mutex<Option<Arc<HookState>>>> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HookHotkey {
@@ -112,7 +113,7 @@ impl HookState {
             .map_err(|e| format!("spawn save mouse hotkey hook: {e}"))?;
 
         let thread_id = ready_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(2))
             .map_err(|e| format!("install save mouse hotkey hook: {e}"))??;
         *mouse_hook = Some(MouseHookThread { thread_id });
         Ok(())
@@ -153,7 +154,7 @@ pub fn install_save_hook<F>(hotkey: &str, on_trigger: F) -> Result<(), String>
 where
     F: Fn() + Send + Sync + 'static,
 {
-    if let Some(state) = SAVE_HOOK.get() {
+    if let Some(state) = current_save_hook() {
         return state.set_hotkey(hotkey);
     }
 
@@ -174,25 +175,69 @@ where
         trigger_tx,
         mouse_hook: Mutex::new(None),
     });
+    publish_save_hook(state.clone())?;
     if parsed_hotkey.requires_mouse_hook() {
-        state.ensure_mouse_hook()?;
+        if let Err(e) = state.ensure_mouse_hook() {
+            clear_save_hook(&state);
+            return Err(e);
+        }
     }
-    SAVE_HOOK
-        .set(state)
-        .map_err(|_| "save hotkey hook was already installed".to_string())?;
-
-    thread::Builder::new()
+    let (ready_tx, ready_rx) = mpsc::channel();
+    if let Err(e) = thread::Builder::new()
         .name("clipline-save-keyboard-hook".into())
-        .spawn(run_keyboard_hook)
-        .map_err(|e| format!("spawn save hotkey hook: {e}"))?;
+        .spawn(move || run_keyboard_hook(ready_tx))
+        .map_err(|e| format!("spawn save hotkey hook: {e}"))
+    {
+        clear_save_hook(&state);
+        return Err(e);
+    }
+    if let Err(e) = ready_rx
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|e| format!("install save hotkey hook: {e}"))
+        .and_then(|result| result)
+    {
+        clear_save_hook(&state);
+        return Err(e);
+    }
     Ok(())
 }
 
 pub fn set_save_hotkey(hotkey: &str) -> Result<(), String> {
-    if let Some(state) = SAVE_HOOK.get() {
+    if let Some(state) = current_save_hook() {
         state.set_hotkey(hotkey)?;
     }
     Ok(())
+}
+
+fn save_hook_slot() -> &'static Mutex<Option<Arc<HookState>>> {
+    SAVE_HOOK.get_or_init(|| Mutex::new(None))
+}
+
+fn current_save_hook() -> Option<Arc<HookState>> {
+    save_hook_slot().lock().ok().and_then(|state| state.clone())
+}
+
+fn publish_save_hook(state: Arc<HookState>) -> Result<(), String> {
+    let mut guard = save_hook_slot()
+        .lock()
+        .map_err(|_| "save hotkey hook lock poisoned".to_string())?;
+    if guard.is_some() {
+        return Err("save hotkey hook was already installed".to_string());
+    }
+    *guard = Some(state);
+    Ok(())
+}
+
+fn clear_save_hook(state: &Arc<HookState>) {
+    let Ok(mut guard) = save_hook_slot().lock() else {
+        return;
+    };
+    if guard
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, state))
+    {
+        *guard = None;
+    }
 }
 
 fn parse_hook_hotkey(raw: &str) -> Result<HookHotkey, String> {
@@ -234,20 +279,26 @@ fn parse_hook_hotkey(raw: &str) -> Result<HookHotkey, String> {
     })
 }
 
-fn run_keyboard_hook() {
+fn run_keyboard_hook(ready_tx: Sender<Result<u32, String>>) {
     let keyboard_hook =
         unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), std::ptr::null_mut(), 0) };
     if keyboard_hook.is_null() {
-        eprintln!("low-level save hotkey hook could not be installed");
+        let _ = ready_tx.send(Err(
+            "low-level save hotkey hook could not be installed".into()
+        ));
         return;
     }
 
+    let _ = ready_tx.send(Ok(unsafe { GetCurrentThreadId() }));
     let mut msg = unsafe { std::mem::zeroed::<MSG>() };
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
         unsafe {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+    unsafe {
+        UnhookWindowsHookEx(keyboard_hook);
     }
 }
 
@@ -331,7 +382,7 @@ fn dispatch_key_down(vk_code: u32, alt_flag: bool) {
     let ctrl = key_is_down(VK_CONTROL_CODE);
     let shift = key_is_down(VK_SHIFT_CODE);
     let alt = alt_flag || key_is_down(VK_ALT_CODE);
-    if let Some(state) = SAVE_HOOK.get() {
+    if let Some(state) = current_save_hook() {
         state.on_key_down(vk_code, ctrl, alt, shift);
     }
 }
@@ -341,7 +392,7 @@ fn release_mouse_hotkey(vk_code: u32) {
 }
 
 fn release_key(vk_code: u32) {
-    if let Some(state) = SAVE_HOOK.get() {
+    if let Some(state) = current_save_hook() {
         state.on_key_up(vk_code);
     }
 }

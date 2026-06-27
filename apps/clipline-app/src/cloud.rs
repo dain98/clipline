@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
 use base64::{engine::general_purpose, Engine as _};
@@ -35,7 +35,7 @@ const DEFAULT_DEVICE_NAME: &str = "Clipline Desktop";
 const READY_POLL_ATTEMPTS: usize = 30;
 const READY_POLL_DELAY: Duration = Duration::from_secs(1);
 const CLOUD_LIBRARY_PAGE_SIZE: i64 = 100;
-const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
+pub(crate) const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
 const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 const CLOUD_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -110,6 +110,12 @@ pub struct CloudUploadProgressEvent {
     pub error: Option<String>,
 }
 
+pub(crate) fn cloud_upload_progress_event_value(
+    event: &CloudUploadProgressEvent,
+) -> serde_json::Value {
+    serde_json::to_value(event).unwrap_or(serde_json::Value::Null)
+}
+
 #[derive(Debug, Serialize)]
 pub struct CloudUploadResult {
     pub record: CloudUploadRecord,
@@ -176,6 +182,59 @@ struct CloudAssetDownload<'a> {
     missing_ok: bool,
 }
 
+trait CloudHostState {
+    fn settings(&self) -> crate::settings::AppSettings;
+
+    fn update_cloud<F>(&self, update: F) -> Result<crate::settings::AppSettings, String>
+    where
+        F: FnOnce(&mut CloudSettings);
+}
+
+impl CloudHostState for RuntimeState {
+    fn settings(&self) -> crate::settings::AppSettings {
+        RuntimeState::settings(self)
+    }
+
+    fn update_cloud<F>(&self, update: F) -> Result<crate::settings::AppSettings, String>
+    where
+        F: FnOnce(&mut CloudSettings),
+    {
+        RuntimeState::update_cloud(self, update)
+    }
+}
+
+impl CloudHostState for crate::host::runtime::FallbackHostContext {
+    fn settings(&self) -> crate::settings::AppSettings {
+        self.settings()
+    }
+
+    fn update_cloud<F>(&self, update: F) -> Result<crate::settings::AppSettings, String>
+    where
+        F: FnOnce(&mut CloudSettings),
+    {
+        self.update_cloud(update)
+    }
+}
+
+struct CloudUploadProgressSinks<'a, R: Runtime> {
+    app: Option<&'a AppHandle<R>>,
+    events: Option<Arc<crate::host::events::ClientEventHub>>,
+}
+
+impl<R: Runtime> CloudUploadProgressSinks<'_, R> {
+    fn emit(&self, event: CloudUploadProgressEvent) {
+        if let Some(app) = self.app {
+            let _ = app.emit(CLOUD_UPLOAD_PROGRESS_EVENT, event.clone());
+        }
+        if let Some(events) = &self.events {
+            events.emit(crate::host::events::ClientEvent::new(
+                CLOUD_UPLOAD_PROGRESS_EVENT,
+                cloud_upload_progress_event_value(&event),
+            ));
+        }
+    }
+}
+
 #[derive(Clone)]
 struct CachedCloudUserAvatar {
     key: String,
@@ -185,6 +244,16 @@ struct CachedCloudUserAvatar {
 
 #[tauri::command]
 pub fn cloud_status(state: tauri::State<RuntimeState>) -> CloudConnectionStatus {
+    cloud_status_for_host(&*state)
+}
+
+pub(crate) fn host_cloud_status(
+    state: &crate::host::runtime::FallbackHostContext,
+) -> CloudConnectionStatus {
+    cloud_status_for_host(state)
+}
+
+fn cloud_status_for_host<S: CloudHostState + ?Sized>(state: &S) -> CloudConnectionStatus {
     let settings = state.settings();
     connection_status(&settings.cloud)
 }
@@ -192,6 +261,18 @@ pub fn cloud_status(state: tauri::State<RuntimeState>) -> CloudConnectionStatus 
 #[tauri::command]
 pub async fn list_cloud_clips(
     state: tauri::State<'_, RuntimeState>,
+) -> Result<CloudLibraryListResult, String> {
+    list_cloud_clips_for_host(&*state).await
+}
+
+pub(crate) async fn host_list_cloud_clips(
+    state: &crate::host::runtime::FallbackHostContext,
+) -> Result<CloudLibraryListResult, String> {
+    list_cloud_clips_for_host(state).await
+}
+
+async fn list_cloud_clips_for_host<S: CloudHostState + ?Sized>(
+    state: &S,
 ) -> Result<CloudLibraryListResult, String> {
     let settings = state.settings();
     let cloud = settings.cloud.clone();
@@ -237,7 +318,27 @@ pub async fn cloud_clip_thumbnail<R: Runtime>(
     state: tauri::State<'_, RuntimeState>,
     request: CloudClipAssetRequest,
 ) -> Result<Option<String>, String> {
-    let (cloud, token) = cloud_asset_context(&state)?;
+    cloud_clip_thumbnail_for_host(&*state, request, Some(&app)).await
+}
+
+pub(crate) async fn host_cloud_clip_thumbnail(
+    state: &crate::host::runtime::FallbackHostContext,
+    request: CloudClipAssetRequest,
+) -> Result<Option<String>, String> {
+    let app = state.attached_app_handle();
+    cloud_clip_thumbnail_for_host::<_, tauri::Wry>(state, request, app.as_ref()).await
+}
+
+async fn cloud_clip_thumbnail_for_host<S, R>(
+    state: &S,
+    request: CloudClipAssetRequest,
+    app: Option<&AppHandle<R>>,
+) -> Result<Option<String>, String>
+where
+    S: CloudHostState + ?Sized,
+    R: Runtime,
+{
+    let (cloud, token) = cloud_asset_context_for_host(state)?;
     let Some(path) = download_cloud_asset_to_cache(
         &cloud,
         &token,
@@ -255,7 +356,7 @@ pub async fn cloud_clip_thumbnail<R: Runtime>(
     else {
         return Ok(None);
     };
-    allow_cloud_cache_asset(&app, &path)?;
+    allow_cloud_cache_asset_for_host(app, &path)?;
     Ok(Some(path.display().to_string()))
 }
 
@@ -265,7 +366,27 @@ pub async fn cache_cloud_clip_media<R: Runtime>(
     state: tauri::State<'_, RuntimeState>,
     request: CloudClipAssetRequest,
 ) -> Result<CachedCloudClip, String> {
-    let (cloud, token) = cloud_asset_context(&state)?;
+    cache_cloud_clip_media_for_host(&*state, request, Some(&app)).await
+}
+
+pub(crate) async fn host_cache_cloud_clip_media(
+    state: &crate::host::runtime::FallbackHostContext,
+    request: CloudClipAssetRequest,
+) -> Result<CachedCloudClip, String> {
+    let app = state.attached_app_handle();
+    cache_cloud_clip_media_for_host::<_, tauri::Wry>(state, request, app.as_ref()).await
+}
+
+async fn cache_cloud_clip_media_for_host<S, R>(
+    state: &S,
+    request: CloudClipAssetRequest,
+    app: Option<&AppHandle<R>>,
+) -> Result<CachedCloudClip, String>
+where
+    S: CloudHostState + ?Sized,
+    R: Runtime,
+{
+    let (cloud, token) = cloud_asset_context_for_host(state)?;
     let path = download_cloud_asset_to_cache(
         &cloud,
         &token,
@@ -281,7 +402,7 @@ pub async fn cache_cloud_clip_media<R: Runtime>(
     )
     .await?
     .ok_or_else(|| "cloud clip media is not available".to_string())?;
-    allow_cloud_cache_asset(&app, &path)?;
+    allow_cloud_cache_asset_for_host(app, &path)?;
     cached_cloud_clip_from_path(&path, &request)
 }
 
@@ -289,7 +410,19 @@ pub async fn cache_cloud_clip_media<R: Runtime>(
 pub async fn cloud_user_avatar(
     state: tauri::State<'_, RuntimeState>,
 ) -> Result<Option<String>, String> {
-    let (cloud, token) = cloud_asset_context(&state)?;
+    cloud_user_avatar_for_host(&*state).await
+}
+
+pub(crate) async fn host_cloud_user_avatar(
+    state: &crate::host::runtime::FallbackHostContext,
+) -> Result<Option<String>, String> {
+    cloud_user_avatar_for_host(state).await
+}
+
+async fn cloud_user_avatar_for_host<S: CloudHostState + ?Sized>(
+    state: &S,
+) -> Result<Option<String>, String> {
+    let (cloud, token) = cloud_asset_context_for_host(state)?;
     let cache_key = cloud_user_avatar_cache_key(&cloud)?;
     let cached = cached_cloud_user_avatar(&cache_key);
     let url = cloud_user_avatar_url(&cloud)?;
@@ -350,7 +483,19 @@ pub async fn cloud_user_avatar(
 pub async fn cloud_user_profile(
     state: tauri::State<'_, RuntimeState>,
 ) -> Result<CloudUserProfile, String> {
-    let (cloud, token) = cloud_asset_context(&state)?;
+    cloud_user_profile_for_host(&*state).await
+}
+
+pub(crate) async fn host_cloud_user_profile(
+    state: &crate::host::runtime::FallbackHostContext,
+) -> Result<CloudUserProfile, String> {
+    cloud_user_profile_for_host(state).await
+}
+
+async fn cloud_user_profile_for_host<S: CloudHostState + ?Sized>(
+    state: &S,
+) -> Result<CloudUserProfile, String> {
+    let (cloud, token) = cloud_asset_context_for_host(state)?;
     let client = connected_client(&cloud, &token)?;
     let response = client.me().await.map_err(cloud_error)?;
     let profile = cloud_user_profile_from_response(&cloud, &response.user)?;
@@ -365,6 +510,16 @@ pub async fn cloud_user_profile(
 
 #[tauri::command]
 pub fn open_cloud_user_profile(state: tauri::State<RuntimeState>) -> Result<(), String> {
+    open_cloud_user_profile_for_host(&*state)
+}
+
+pub(crate) fn host_open_cloud_user_profile(
+    state: &crate::host::runtime::FallbackHostContext,
+) -> Result<(), String> {
+    open_cloud_user_profile_for_host(state)
+}
+
+fn open_cloud_user_profile_for_host<S: CloudHostState + ?Sized>(state: &S) -> Result<(), String> {
     let cloud = state.settings().cloud;
     let username = cloud
         .connected_username
@@ -373,16 +528,24 @@ pub fn open_cloud_user_profile(state: tauri::State<RuntimeState>) -> Result<(), 
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "Clipline Cloud username is unknown".to_string())?;
     let url = cloud_user_profile_url(&cloud, username)?;
-    open_cloud_url(url.as_str(), "cloud user profile")
+    crate::host::native::open_external_url(url.as_str(), "cloud user profile")
 }
 
 #[tauri::command]
 pub fn open_cloud_clip_url(url: String) -> Result<(), String> {
-    let url = validate_cloud_link_url(&url)?;
-    open_cloud_url(&url, "cloud clip URL")
+    open_cloud_clip_url_for_host(url)
 }
 
-fn open_cloud_url(url: &str, context: &str) -> Result<(), String> {
+pub(crate) fn host_open_cloud_clip_url(url: String) -> Result<(), String> {
+    open_cloud_clip_url_for_host(url)
+}
+
+fn open_cloud_clip_url_for_host(url: String) -> Result<(), String> {
+    let url = validate_cloud_link_url(&url)?;
+    crate::host::native::open_external_url(&url, "cloud clip URL")
+}
+
+pub(crate) fn open_cloud_url_for_host(url: &str, context: &str) -> Result<(), String> {
     let operation = wide_null(OsStr::new("open"));
     let target = wide_null(OsStr::new(url));
     let result = unsafe {
@@ -401,7 +564,7 @@ fn open_cloud_url(url: &str, context: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_cloud_link_url(input: &str) -> Result<String, String> {
+pub(crate) fn validate_cloud_link_url(input: &str) -> Result<String, String> {
     let url = reqwest::Url::parse(input).map_err(|e| format!("cloud clip URL is invalid: {e}"))?;
     match url.scheme() {
         "http" | "https" => Ok(url.to_string()),
@@ -409,8 +572,8 @@ fn validate_cloud_link_url(input: &str) -> Result<String, String> {
     }
 }
 
-fn cloud_asset_context(
-    state: &tauri::State<'_, RuntimeState>,
+fn cloud_asset_context_for_host<S: CloudHostState + ?Sized>(
+    state: &S,
 ) -> Result<(CloudSettings, String), String> {
     let cloud = state.settings().cloud;
     let token_target = cloud
@@ -572,7 +735,10 @@ fn cloud_user_profile_from_response(
     })
 }
 
-fn cloud_user_profile_url(cloud: &CloudSettings, username: &str) -> Result<reqwest::Url, String> {
+pub(crate) fn cloud_user_profile_url(
+    cloud: &CloudSettings,
+    username: &str,
+) -> Result<reqwest::Url, String> {
     let username = username.trim();
     if username.is_empty() {
         return Err("Clipline Cloud username is unknown".to_string());
@@ -806,6 +972,16 @@ fn allow_cloud_cache_asset<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Resul
         .map_err(|e| format!("scope cloud cache for playback: {e}"))
 }
 
+fn allow_cloud_cache_asset_for_host<R: Runtime>(
+    app: Option<&AppHandle<R>>,
+    path: &Path,
+) -> Result<(), String> {
+    if let Some(app) = app {
+        allow_cloud_cache_asset(app, path)?;
+    }
+    Ok(())
+}
+
 fn cached_cloud_clip_from_path(
     path: &Path,
     request: &CloudClipAssetRequest,
@@ -845,6 +1021,20 @@ pub async fn sync_cloud_clip_status(
     state: tauri::State<'_, RuntimeState>,
     request: SyncCloudClipStatusRequest,
 ) -> Result<CloudClipStatusSyncResult, String> {
+    sync_cloud_clip_status_for_host(&*state, request).await
+}
+
+pub(crate) async fn host_sync_cloud_clip_status(
+    state: &crate::host::runtime::FallbackHostContext,
+    request: SyncCloudClipStatusRequest,
+) -> Result<CloudClipStatusSyncResult, String> {
+    sync_cloud_clip_status_for_host(state, request).await
+}
+
+async fn sync_cloud_clip_status_for_host<S: CloudHostState + ?Sized>(
+    state: &S,
+    request: SyncCloudClipStatusRequest,
+) -> Result<CloudClipStatusSyncResult, String> {
     let settings = state.settings();
     let cloud = settings.cloud.clone();
     let Some(record) = cloud_record_for_path(&cloud, &request.path) else {
@@ -872,7 +1062,7 @@ pub async fn sync_cloud_clip_status(
         Ok(clip) => {
             let mut updated = record;
             apply_remote_clip_to_record(&cloud, &mut updated, &clip);
-            persist_record(&state, &updated)?;
+            persist_record(state, &updated)?;
             Ok(CloudClipStatusSyncResult {
                 path: request.path,
                 record: Some(updated),
@@ -889,7 +1079,7 @@ pub async fn sync_cloud_clip_status(
             MissingRemoteSyncAction::ConfirmMissing => {
                 let mut updated = record;
                 mark_remote_not_found_once(&mut updated);
-                persist_record(&state, &updated)?;
+                persist_record(state, &updated)?;
                 Ok(CloudClipStatusSyncResult {
                     path: request.path,
                     record: Some(updated),
@@ -914,6 +1104,20 @@ pub async fn sync_cloud_clip_status(
 #[tauri::command]
 pub async fn cloud_connect(
     state: tauri::State<'_, RuntimeState>,
+    request: CloudConnectRequest,
+) -> Result<CloudConnectionStatus, String> {
+    cloud_connect_for_host(&*state, request).await
+}
+
+pub(crate) async fn host_cloud_connect(
+    state: &crate::host::runtime::FallbackHostContext,
+    request: CloudConnectRequest,
+) -> Result<CloudConnectionStatus, String> {
+    cloud_connect_for_host(state, request).await
+}
+
+async fn cloud_connect_for_host<S: CloudHostState + ?Sized>(
+    state: &S,
     request: CloudConnectRequest,
 ) -> Result<CloudConnectionStatus, String> {
     let visibility = request
@@ -989,6 +1193,18 @@ pub async fn cloud_connect(
 pub fn cloud_disconnect(
     state: tauri::State<RuntimeState>,
 ) -> Result<CloudConnectionStatus, String> {
+    cloud_disconnect_for_host(&*state)
+}
+
+pub(crate) fn host_cloud_disconnect(
+    state: &crate::host::runtime::FallbackHostContext,
+) -> Result<CloudConnectionStatus, String> {
+    cloud_disconnect_for_host(state)
+}
+
+fn cloud_disconnect_for_host<S: CloudHostState + ?Sized>(
+    state: &S,
+) -> Result<CloudConnectionStatus, String> {
     let old_target = state.settings().cloud.credential_target;
     if let Some(target) = old_target.as_deref() {
         if let Err(e) = delete_credential(target) {
@@ -1011,7 +1227,51 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     storage: tauri::State<'_, StorageSettings>,
     request: UploadClipCommandRequest,
 ) -> Result<CloudUploadResult, String> {
-    let target = validate_clip_path(&storage, &request.path)?;
+    let events = app
+        .state::<Arc<crate::host::events::ClientEventHub>>()
+        .inner()
+        .clone();
+    upload_clip_to_cloud_for_host(
+        &*state,
+        &storage,
+        request,
+        CloudUploadProgressSinks {
+            app: Some(&app),
+            events: Some(events),
+        },
+    )
+    .await
+}
+
+pub(crate) async fn host_upload_clip_to_cloud(
+    state: &crate::host::runtime::FallbackHostContext,
+    request: UploadClipCommandRequest,
+) -> Result<CloudUploadResult, String> {
+    let storage = state.storage_settings()?;
+    let app = state.attached_app_handle();
+    upload_clip_to_cloud_for_host::<_, tauri::Wry>(
+        state,
+        &storage,
+        request,
+        CloudUploadProgressSinks {
+            app: app.as_ref(),
+            events: Some(state.events()),
+        },
+    )
+    .await
+}
+
+async fn upload_clip_to_cloud_for_host<S, R>(
+    state: &S,
+    storage: &StorageSettings,
+    request: UploadClipCommandRequest,
+    sinks: CloudUploadProgressSinks<'_, R>,
+) -> Result<CloudUploadResult, String>
+where
+    S: CloudHostState + ?Sized,
+    R: Runtime,
+{
+    let target = validate_clip_path(storage, &request.path)?;
     let settings = state.settings();
     let cloud = settings.cloud.clone();
     let token_target = cloud
@@ -1053,8 +1313,8 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         error: None,
         updated_at_unix: unix_now(),
     };
-    persist_record(&state, &record)?;
-    emit_upload_progress(&app, &record, 0, bytes.len() as u64, None);
+    persist_record(state, &record)?;
+    emit_upload_progress(&sinks, &record, 0, bytes.len() as u64, None);
 
     let upload_request = create_upload_request(UploadRequestInput {
         path: &target,
@@ -1090,7 +1350,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                 remote_url: url,
                 error: None,
             };
-            let _ = app.emit(CLOUD_UPLOAD_PROGRESS_EVENT, event);
+            sinks.emit(event);
         },
     )
     .await;
@@ -1101,8 +1361,8 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
             record.upload_status = "failed".to_string();
             record.error = Some(cloud_error(error));
             record.updated_at_unix = unix_now();
-            persist_record(&state, &record)?;
-            emit_upload_progress(&app, &record, 0, bytes.len() as u64, record.error.clone());
+            persist_record(state, &record)?;
+            emit_upload_progress(&sinks, &record, 0, bytes.len() as u64, record.error.clone());
             return Ok(CloudUploadResult { record, clip: None });
         }
     };
@@ -1112,9 +1372,9 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     record.upload_status = "processing".to_string();
     record.error = None;
     record.updated_at_unix = unix_now();
-    persist_record(&state, &record)?;
+    persist_record(state, &record)?;
     emit_upload_progress(
-        &app,
+        &sinks,
         &record,
         progress.received_size_bytes,
         progress.file_size_bytes,
@@ -1131,9 +1391,9 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         ),
         Ok(None) => {
             mark_ready_timeout(&mut record);
-            persist_record(&state, &record)?;
+            persist_record(state, &record)?;
             emit_upload_progress(
-                &app,
+                &sinks,
                 &record,
                 progress.file_size_bytes,
                 progress.file_size_bytes,
@@ -1146,9 +1406,9 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
 
     if let Some(clip) = &clip {
         apply_remote_clip_to_record(&cloud, &mut record, clip);
-        persist_record(&state, &record)?;
+        persist_record(state, &record)?;
         emit_upload_progress(
-            &app,
+            &sinks,
             &record,
             progress.file_size_bytes,
             progress.file_size_bytes,
@@ -1427,7 +1687,10 @@ fn remove_upload_record(cloud: &mut CloudSettings, record: &CloudUploadRecord) {
         .retain(|key, existing| key != &record.local_clip_id && existing.path != record.path);
 }
 
-fn persist_record(state: &RuntimeState, record: &CloudUploadRecord) -> Result<(), String> {
+fn persist_record<S: CloudHostState + ?Sized>(
+    state: &S,
+    record: &CloudUploadRecord,
+) -> Result<(), String> {
     state.update_cloud(|cloud| {
         replace_upload_record(cloud, record.clone());
     })?;
@@ -1544,25 +1807,22 @@ fn delete_uploaded_local_files(target: &Path) {
 }
 
 fn emit_upload_progress<R: Runtime>(
-    app: &AppHandle<R>,
+    sinks: &CloudUploadProgressSinks<'_, R>,
     record: &CloudUploadRecord,
     received_size_bytes: u64,
     file_size_bytes: u64,
     error: Option<String>,
 ) {
-    let _ = app.emit(
-        CLOUD_UPLOAD_PROGRESS_EVENT,
-        CloudUploadProgressEvent {
-            local_clip_id: record.local_clip_id.clone(),
-            path: record.path.clone(),
-            upload_status: record.upload_status.clone(),
-            received_size_bytes,
-            file_size_bytes,
-            remote_clip_id: record.remote_clip_id.clone(),
-            remote_url: record.remote_url.clone(),
-            error,
-        },
-    );
+    sinks.emit(CloudUploadProgressEvent {
+        local_clip_id: record.local_clip_id.clone(),
+        path: record.path.clone(),
+        upload_status: record.upload_status.clone(),
+        received_size_bytes,
+        file_size_bytes,
+        remote_clip_id: record.remote_clip_id.clone(),
+        remote_url: record.remote_url.clone(),
+        error,
+    });
 }
 
 async fn wait_for_ready_clip(
@@ -1800,6 +2060,28 @@ mod tests {
                 .is_some_and(|error| error.contains("processing") && !error.contains("retry the upload")),
             "timeout should explain that cloud processing is still pending without forcing a reupload"
         );
+    }
+
+    #[test]
+    fn cloud_upload_progress_event_value_serializes_client_payload() {
+        let event = CloudUploadProgressEvent {
+            local_clip_id: "local-1".into(),
+            path: "D:\\Videos\\clip.mp4".into(),
+            upload_status: "uploading".into(),
+            received_size_bytes: 25,
+            file_size_bytes: 100,
+            remote_clip_id: Some("remote-1".into()),
+            remote_url: Some("https://clips.example.com/clip/remote-1".into()),
+            error: None,
+        };
+
+        let value = cloud_upload_progress_event_value(&event);
+
+        assert_eq!(value["local_clip_id"], "local-1");
+        assert_eq!(value["upload_status"], "uploading");
+        assert_eq!(value["received_size_bytes"], 25);
+        assert_eq!(value["file_size_bytes"], 100);
+        assert_eq!(value["remote_clip_id"], "remote-1");
     }
 
     #[test]

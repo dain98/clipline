@@ -1,9 +1,8 @@
 // DOM wiring + Tauri bridge. All player math and formatting lives in
 // player-core.js (PlayerCore), which is unit-tested from Rust — keep this
 // file to event plumbing and rendering.
-const { invoke, convertFileSrc } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
-const appWindow = window.__TAURI__.window.getCurrentWindow();
+const { invoke, listen, convertFileSrc } = window.cliplineHost;
+const appWindow = window.cliplineHost.window;
 const $ = (id) => document.getElementById(id);
 const afterNextPaint = () => new Promise((resolve) => {
   requestAnimationFrame(() => requestAnimationFrame(resolve));

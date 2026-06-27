@@ -14,6 +14,49 @@ fn main_js() -> String {
     fs::read_to_string(path).expect("read ui/main.js")
 }
 
+fn client_bridge_js() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/client-bridge.js");
+    fs::read_to_string(path).expect("read ui/client-bridge.js")
+}
+
+fn fallback_manifest_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/manifest.rs");
+    fs::read_to_string(path).expect("read src/fallback/manifest.rs")
+}
+
+fn quoted_calls(source: &str, function_name: &str) -> Vec<String> {
+    let needle = format!("{function_name}(\"");
+    let mut values = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find(&needle) {
+        let value_start = start + needle.len();
+        let tail = &rest[value_start..];
+        let end = tail.find('"').expect("quoted call closes");
+        values.push(tail[..end].to_string());
+        rest = &tail[end + 1..];
+    }
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn quoted_manifest_array(source: &str, array_name: &str) -> Vec<String> {
+    let marker = format!("pub const {array_name}: &[&str] = &[");
+    let start = source.find(&marker).expect("manifest array exists") + marker.len();
+    let tail = &source[start..];
+    let end = tail.find("];").expect("manifest array closes");
+    tail[..end]
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim().trim_end_matches(',');
+            trimmed
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 fn styles_css() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/styles.css");
     fs::read_to_string(path).expect("read ui/styles.css")
@@ -24,9 +67,83 @@ fn app_rs() -> String {
     fs::read_to_string(path).expect("read src/app.rs")
 }
 
+fn compact_source(source: &str) -> String {
+    source.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+fn fallback_runtime_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/host/runtime.rs");
+    fs::read_to_string(path).expect("read src/host/runtime.rs")
+}
+
+fn fallback_server_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/server.rs");
+    fs::read_to_string(path).expect("read src/fallback/server.rs")
+}
+
 fn tauri_config() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
     fs::read_to_string(path).expect("read tauri.conf.json")
+}
+
+fn repo_file(path: &str) -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("app crate has workspace root");
+    fs::read_to_string(root.join(path)).unwrap_or_else(|_| panic!("read {path}"))
+}
+
+fn fallback_validation_script() -> String {
+    repo_file("scripts/validate-fallback-client.ps1")
+}
+
+fn source_after<'a>(source: &'a str, marker: &str) -> &'a str {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing marker {marker}"));
+    &source[start..]
+}
+
+fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+    let tail = source_after(source, start_marker);
+    let end = tail
+        .find(end_marker)
+        .unwrap_or_else(|| panic!("missing marker {end_marker} after {start_marker}"));
+    &tail[..end]
+}
+
+fn quoted_strings(source: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find('"') {
+        let tail = &rest[start + 1..];
+        let Some(end) = tail.find('"') else {
+            break;
+        };
+        values.push(tail[..end].to_string());
+        rest = &tail[end + 1..];
+    }
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn quoted_match_arm_values(match_source: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for line in match_source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("_ =>") {
+            break;
+        }
+        let pattern = trimmed.split("=>").next().unwrap_or(trimmed).trim();
+        if pattern.starts_with('"') || pattern.starts_with("| \"") {
+            values.extend(quoted_strings(pattern));
+        }
+    }
+    values.sort();
+    values.dedup();
+    values
 }
 
 #[test]
@@ -61,6 +178,24 @@ fn windows_installer_repairs_webview2_with_bootstrapper() {
 }
 
 #[test]
+fn main_window_is_not_created_before_setup() {
+    let config: serde_json::Value =
+        serde_json::from_str(&tauri_config()).expect("tauri.conf.json is valid JSON");
+    let windows = config["app"]["windows"]
+        .as_array()
+        .expect("Tauri app windows are configured");
+    let main_window = windows
+        .first()
+        .expect("Clipline config has a main app window");
+
+    assert_eq!(
+        main_window["create"].as_bool(),
+        Some(false),
+        "fallback startup must be selected during setup before any WebView is created"
+    );
+}
+
+#[test]
 fn frontend_reports_webview_readiness_to_native_shell() {
     let app = app_rs();
     let js = main_js();
@@ -72,6 +207,645 @@ fn frontend_reports_webview_readiness_to_native_shell() {
     assert!(
         js.contains("invoke(\"frontend_ready\")"),
         "main.js must report readiness once the frontend JavaScript boots"
+    );
+}
+
+#[test]
+fn frontend_uses_host_bridge_instead_of_tauri_directly() {
+    let html = index_html();
+    let js = main_js();
+    let bridge = client_bridge_js();
+
+    assert!(
+        html.find("client-bridge.js").is_some_and(|bridge_pos| {
+            html.find("main.js")
+                .is_some_and(|main_pos| bridge_pos < main_pos)
+        }),
+        "client-bridge.js must load before main.js"
+    );
+    assert!(
+        bridge.contains("window.cliplineHost"),
+        "bridge must expose window.cliplineHost"
+    );
+    assert!(
+        bridge.contains("close: () => appWindow.close()"),
+        "Tauri bridge close must call the real window close API"
+    );
+    assert!(
+        !bridge.contains("close: () => null"),
+        "Tauri bridge close must not be a no-op placeholder"
+    );
+    assert!(
+        bridge.contains("invoke: (command, args) => tauri.core.invoke(command, args)")
+            && bridge.contains("listen: (event, handler) => tauri.event.listen(event, handler)")
+            && bridge.contains("convertFileSrc: (path) => tauri.core.convertFileSrc(path)"),
+        "Tauri bridge methods must wrap Tauri exports instead of relying on method binding"
+    );
+    assert!(
+        bridge.contains("function showBridgeError(message)")
+            && bridge.contains("function parseJsonText(text, context)"),
+        "fallback bridge must centralize error display and JSON parsing"
+    );
+    assert!(
+        bridge.contains("const text = await response.text()")
+            && bridge.contains("parseJsonText(text, `fallback invoke ${command}`)")
+            && !bridge.contains("response.json().catch"),
+        "fallback invoke must parse response text explicitly and reject malformed JSON"
+    );
+    assert!(
+        bridge.contains("parseJsonText(message.data, `fallback event ${event}`)")
+            && bridge.contains("showBridgeError(error.message)"),
+        "fallback event listener must surface malformed event JSON without throwing"
+    );
+    assert!(
+        bridge.contains("window action failed: ${action}") && bridge.contains("if (!response.ok)"),
+        "fallback window actions must reject failed HTTP responses"
+    );
+    assert!(
+        !js.contains("window.__TAURI__"),
+        "main.js must use window.cliplineHost instead of direct Tauri globals"
+    );
+}
+
+#[test]
+fn fallback_bridge_uses_one_shared_event_stream() {
+    let bridge = client_bridge_js();
+
+    assert!(
+        bridge.contains("let fallbackEventSource")
+            && bridge.contains("const fallbackEventHandlers = new Map()"),
+        "fallback bridge must share one EventSource across all frontend listeners"
+    );
+    assert!(
+        !bridge.contains("/events?name="),
+        "fallback bridge must not open one filtered SSE connection per listener"
+    );
+}
+
+#[test]
+fn fallback_event_hub_receives_app_level_game_and_error_events() {
+    let app = app_rs();
+    let compact_app = compact_source(&app);
+
+    assert!(
+        app.contains("fn emit_client_event"),
+        "app-level events must have a helper that mirrors Tauri emits into ClientEventHub"
+    );
+    assert!(
+        compact_app
+            .matches("emit_client_event(&app,\"game-detection\"")
+            .count()
+            >= 2,
+        "game detection lifecycle events must reach fallback SSE clients"
+    );
+    assert!(
+        compact_app
+            .matches("emit_client_event(&app,\"error\"")
+            .count()
+            + compact_app
+                .matches("emit_client_event(app.handle(),\"error\"")
+                .count()
+            >= 3,
+        "app-level errors must reach fallback SSE clients"
+    );
+}
+
+#[test]
+fn fallback_browser_mode_uses_browser_chrome_instead_of_fake_titlebar() {
+    let bridge = client_bridge_js();
+    let styles = styles_css();
+
+    assert!(
+        bridge.contains(r#"document.documentElement.dataset.hostMode = "tauri""#),
+        "Tauri bridge mode must mark the DOM as native-window hosted"
+    );
+    assert!(
+        bridge.contains(r#"document.documentElement.dataset.hostMode = "fallback""#),
+        "fallback bridge mode must mark the DOM as browser hosted"
+    );
+    assert!(
+        styles.contains(r#"html[data-host-mode="fallback"]"#)
+            && styles.contains("--titlebar-h: 0px")
+            && styles.contains(r#"html[data-host-mode="fallback"] .titlebar"#)
+            && styles.contains("display: none"),
+        "fallback browser mode must hide the fake frameless titlebar and let browser chrome own window controls"
+    );
+}
+
+#[test]
+fn fallback_manifest_covers_every_frontend_command() {
+    let js = main_js();
+    let manifest = fallback_manifest_rs();
+    let commands = quoted_calls(&js, "invoke");
+
+    assert_eq!(commands.len(), 41, "main.js command inventory changed; update this assertion and the fallback manifest together");
+    for command in commands {
+        assert!(
+            manifest.contains(&format!("\"{command}\"")),
+            "fallback manifest must register frontend command {command}"
+        );
+    }
+}
+
+#[test]
+fn fallback_manifest_covers_every_frontend_event_listener() {
+    let js = main_js();
+    let manifest = fallback_manifest_rs();
+    let events = quoted_calls(&js, "listen");
+
+    assert_eq!(
+        events.len(),
+        8,
+        "main.js event inventory changed; update this assertion and the fallback manifest together"
+    );
+    for event in events {
+        assert!(
+            manifest.contains(&format!("\"{event}\"")),
+            "fallback manifest must register frontend event {event}"
+        );
+    }
+}
+
+#[test]
+fn every_fallback_manifest_command_has_dispatch_branch() {
+    let manifest = fallback_manifest_rs();
+    let server =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/server.rs"))
+            .expect("read fallback server");
+
+    let commands = quoted_manifest_array(&manifest, "FALLBACK_COMMANDS");
+    assert_eq!(
+        commands.len(),
+        41,
+        "fallback command manifest inventory changed"
+    );
+
+    let predicate = source_between(
+        &server,
+        "pub fn fallback_dispatches_command(command: &str) -> bool {",
+        "async fn invoke(",
+    );
+    let predicate_commands = quoted_strings(predicate);
+    let invoke = source_between(&server, "async fn invoke(", "async fn events(");
+    let match_arms = source_between(invoke, "match command.as_str() {", "        _ => {}");
+    let match_commands = quoted_match_arm_values(match_arms);
+
+    for command in commands {
+        assert!(
+            predicate_commands.contains(&command),
+            "fallback dispatch predicate must mention manifest command {command}"
+        );
+        assert!(
+            match_commands.contains(&command),
+            "fallback invoke match must branch manifest command {command}"
+        );
+    }
+}
+
+#[test]
+fn app_exposes_force_fallback_client_flag() {
+    let startup =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/startup.rs"))
+            .expect("read fallback startup");
+
+    assert!(
+        startup.contains("--force-fallback-client"),
+        "fallback implementation must expose a debug flag for forced fallback runtime testing"
+    );
+}
+
+#[test]
+fn fallback_external_validation_script_captures_webview2_removed_gate() {
+    let script = fallback_validation_script();
+
+    for required in [
+        "param(",
+        "$CliplineExe",
+        "$EvidencePath",
+        "$UseDebugMissingPreflight",
+        "$IncludeGlobalHotkeyProbe",
+        "--fallback-port",
+        "--debug-webview2-preflight",
+        "missing",
+        "Clipline fallback client:",
+        "startup fallback server started",
+        "native save hotkey ready",
+        "fallback native save hotkey available",
+        "fallback unfocused native save hotkey",
+        "fallback frontend_ready received",
+        "fallback browser frontend_ready",
+        "setup start launched_by_autostart=",
+        "webviews=[]",
+        "normal launch opening main window",
+        "open_main_window start",
+        "Assert-TextBefore",
+        "Assert-TextNotContains",
+        "__CLIPLINE_FALLBACK__",
+        "client-bridge.js",
+        "/invoke/get_settings",
+        "/invoke/list_clips",
+        "/invoke/storage_status",
+        "/invoke/list_game_plugins",
+        "/invoke/memory_status",
+        "/media-path?path=",
+        "MaximumRedirection",
+        "Range = \"bytes=0-0\"",
+        "fallback media playback smoke",
+        "skipped: no clips available",
+        "/events",
+        "text/event-stream",
+        ": heartbeat",
+        "fallback event stream smoke",
+        "Convert-HotkeyToProbeInput",
+        "Send-GlobalHotkeyProbe -Hotkey",
+        "clipline-hotkey-probe",
+        "Send-GlobalHotkeyProbe",
+        "SetForegroundWindow",
+        "Wait-ForegroundWindow",
+        "GetForegroundWindow",
+        "foreground_window_handle",
+        "Stop-Process -Id $focusedProcess.Id",
+        "notepad.exe",
+        "native save hotkey triggered",
+        "Invoke-RestMethod",
+        "FileShare]::ReadWrite",
+        "Remove-Item -LiteralPath $diagnosticLogPath",
+        "ConvertTo-Json",
+        "Write-Error -ErrorAction Continue",
+        "Stop-Process",
+    ] {
+        assert!(
+            script.contains(required),
+            "fallback validation script must include {required}"
+        );
+    }
+}
+
+#[test]
+fn native_save_hook_reports_real_keyboard_hook_readiness() {
+    let app = app_rs();
+    let hotkeys = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/hotkeys.rs"))
+        .expect("read hotkeys");
+    let install_hook = source_between(
+        &hotkeys,
+        "pub fn install_save_hook",
+        "pub fn set_save_hotkey",
+    );
+    let keyboard_hook = source_between(&hotkeys, "fn run_keyboard_hook", "fn run_mouse_hook");
+
+    assert!(
+        install_hook.contains("ready_rx")
+            && install_hook.contains("recv_timeout")
+            && install_hook.contains("run_keyboard_hook(ready_tx)"),
+        "install_save_hook must wait until the low-level keyboard hook reports OS readiness"
+    );
+    let publish_index = install_hook
+        .find("publish_save_hook(state.clone())")
+        .expect("install_save_hook publishes hook state before installing OS hook");
+    let keyboard_start_index = install_hook
+        .find("run_keyboard_hook(ready_tx)")
+        .expect("install_save_hook starts keyboard hook thread");
+    assert!(
+        publish_index < keyboard_start_index && install_hook.contains("clear_save_hook(&state)"),
+        "hook state must be visible before OS callbacks can fire and rolled back on install failure"
+    );
+    assert!(
+        keyboard_hook.contains("SetWindowsHookExW")
+            && keyboard_hook.contains("ready_tx.send(Ok(")
+            && keyboard_hook.contains("ready_tx.send(Err("),
+        "keyboard hook thread must report SetWindowsHookExW success or failure"
+    );
+    assert!(
+        app.contains("native save hotkey ready hotkey={}"),
+        "app setup must only log native save hotkey readiness after the OS hook is installed"
+    );
+}
+
+#[test]
+fn native_save_hotkey_trigger_is_diagnostic_logged() {
+    let app = app_rs();
+
+    assert!(
+        app.contains("let accepted = app.state::<RuntimeState>().request_save();")
+            && app.contains("native save hotkey triggered accepted={accepted}"),
+        "native hotkey callback must log when an unfocused/global keypress reaches the recorder"
+    );
+}
+
+#[test]
+fn fallback_frontend_ready_records_browser_boot_diagnostic() {
+    let app = app_rs();
+    let server =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/server.rs"))
+            .expect("read fallback server");
+    let invoke = source_between(&server, "async fn invoke(", "async fn events(");
+    let frontend_ready_branch = source_between(
+        invoke,
+        "\"frontend_ready\" =>",
+        "        \"save_replay\" =>",
+    );
+
+    assert!(
+        app.contains("pub(crate) fn log_diagnostic("),
+        "fallback server must be able to write browser readiness into the shared diagnostic log"
+    );
+    assert!(
+        frontend_ready_branch.contains("crate::app::log_diagnostic(\"fallback frontend_ready received\")"),
+        "fallback frontend_ready must prove that the auto-opened browser ran the shared UI JavaScript"
+    );
+}
+
+#[test]
+fn app_setup_selects_fallback_before_opening_webview() {
+    let app = app_rs();
+    let run_start = app
+        .find("pub fn run()")
+        .expect("app.rs exposes run entrypoint");
+    let run = &app[run_start..];
+    let preflight = run
+        .find("webview_preflight = webview2_runtime_preflight")
+        .expect("run computes WebView2 runtime preflight before fallback selection");
+    let diagnostic = run
+        .find("log_diagnostic(webview2_runtime_diagnostic(&webview2_runtime_versions))")
+        .expect("run logs real WebView2 registry diagnostics before applying debug overrides");
+    let preflight_override = run
+        .find("debug_webview2_preflight_override(&args)")
+        .expect("run applies debug WebView2 preflight override before fallback selection");
+    let preference_call = source_between(
+        run,
+        "let startup_fallback_requested =",
+        "== crate::fallback::startup::FallbackLaunchPreference::StartFallback",
+    );
+    let preference = run
+        .find("let startup_fallback_requested =")
+        .expect("run computes startup fallback selection");
+    let setup_start = app
+        .find(".setup(move |app|")
+        .expect("app.rs configures setup");
+    let setup = &app[setup_start..];
+    let fallback_launch = setup
+        .find("start_fallback_from_setup")
+        .expect("setup starts forced fallback when requested");
+    let normal_launch = setup
+        .find("if !launched_by_autostart")
+        .expect("setup handles normal non-autostart launch");
+    let open_main = setup
+        .find("open_main_window(app.handle())")
+        .expect("setup opens the main window for normal launches");
+
+    assert!(
+        preference_call.contains("fallback_launch_preference(&args, webview_preflight)")
+            && !preference_call.contains("WebviewPreflight::Available"),
+        "run must pass the computed WebView2 preflight to fallback selection"
+    );
+    assert!(
+        preflight < preference,
+        "startup fallback selection must use registry preflight instead of hard-coding WebView2 availability"
+    );
+    assert!(
+        preflight < diagnostic && diagnostic < preflight_override && preflight_override < preference,
+        "debug WebView2 preflight override must apply after real registry logging and before startup fallback selection"
+    );
+    assert!(
+        fallback_launch < normal_launch && normal_launch < open_main,
+        "setup must choose startup fallback before opening the WebView for normal launches"
+    );
+}
+
+#[test]
+fn fallback_attached_host_delegates_recorder_and_settings_to_tauri_state() {
+    let runtime = fallback_runtime_rs();
+
+    let settings_method = source_between(
+        &runtime,
+        "pub fn settings(&self) -> crate::settings::AppSettings",
+        "pub fn events(&self)",
+    );
+    assert!(
+        settings_method.contains("app.state::<crate::app::RuntimeState>()")
+            && settings_method.contains("crate::app::host_get_settings"),
+        "attached fallback settings reads must use Tauri RuntimeState to avoid update-channel drift"
+    );
+
+    let save_settings_method = source_between(
+        &runtime,
+        "pub fn save_settings(",
+        "pub fn list_displays(&self)",
+    );
+    assert!(
+        save_settings_method.contains("crate::app::host_save_settings(&app, settings)")
+            && save_settings_method.contains("*guard = committed.clone()"),
+        "attached fallback save_settings must delegate to the shared Tauri settings save path and sync its cache"
+    );
+
+    let report_method = source_between(
+        &runtime,
+        "pub fn report_decode_support(&self, codecs: &[String])",
+        "pub fn start_microphone_test(",
+    );
+    assert!(
+        report_method.contains("crate::app::host_report_decode_support")
+            && report_method.contains("app.state::<crate::app::RuntimeState>()"),
+        "attached fallback decode support must update the Tauri RuntimeState recorder configuration"
+    );
+
+    let save_replay_method = source_between(
+        &runtime,
+        "pub fn save_replay(&self) -> bool",
+        "pub fn recording_active(&self)",
+    );
+    assert!(
+        save_replay_method.contains("crate::app::host_save_replay")
+            && save_replay_method.contains("app.state::<crate::app::RuntimeState>()"),
+        "attached fallback save_replay must request save on the Tauri recorder"
+    );
+
+    let set_recording_method = source_between(
+        &runtime,
+        "pub fn set_recording(&self, recording: bool)",
+        "#[cfg(test)]",
+    );
+    assert!(
+        set_recording_method.contains("crate::app::host_set_recording")
+            && set_recording_method.contains("app.state::<crate::app::RuntimeState>()"),
+        "attached fallback set_recording must control the Tauri recorder instead of starting a local service"
+    );
+}
+
+#[test]
+fn fallback_install_update_uses_tauri_helper_without_local_pre_stop() {
+    let runtime = fallback_runtime_rs();
+    let install_method = source_between(
+        &runtime,
+        "pub async fn install_update(&self) -> Result<(), String>",
+        "pub fn save_settings(",
+    );
+
+    assert!(
+        install_method.contains("crate::app::host_update_for_install(&app, &state).await"),
+        "fallback install_update must prove an update exists through the shared Tauri helper"
+    );
+    assert!(
+        !install_method.contains("set_recording(false)"),
+        "fallback install_update must not stop fallback-local recording before an update is found"
+    );
+    assert!(
+        install_method.find("host_update_for_install")
+            < install_method.find("self.stop_microphone_test()")
+            && install_method.find("self.stop_microphone_test()")
+                < install_method.find("host_install_available_update"),
+        "fallback install_update must stop fallback-local mic tests after update availability is proven and before installer launch"
+    );
+}
+
+#[test]
+fn fallback_autostart_status_uses_tauri_plugin_when_attached() {
+    let app = app_rs();
+    let runtime = fallback_runtime_rs();
+    let server = fallback_server_rs();
+    let status_method = source_between(
+        &runtime,
+        "pub fn get_autostart_status(&self) -> Result<bool, String>",
+        "pub fn list_displays(&self)",
+    );
+    let branch = source_between(
+        &server,
+        "\"get_autostart_status\" => {",
+        "\"check_for_updates\" => {",
+    );
+
+    assert!(
+        app.contains("pub(crate) fn host_get_autostart_status"),
+        "WebView autostart status helper must be reusable by fallback"
+    );
+    assert!(
+        status_method.contains("crate::app::host_get_autostart_status(&app)"),
+        "attached fallback autostart status must query the Tauri autolaunch plugin"
+    );
+    assert!(
+        branch.contains("state.host.get_autostart_status()"),
+        "fallback get_autostart_status dispatch must use host parity logic"
+    );
+}
+
+#[test]
+fn fallback_cloud_links_use_shared_cloud_url_validation() {
+    let cloud = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cloud.rs"))
+        .expect("read src/cloud.rs");
+    let server = fallback_server_rs();
+    let branch = source_between(
+        &server,
+        "\"open_cloud_clip_url\" => {",
+        "\"report_decode_support\" => {",
+    );
+
+    assert!(
+        cloud.contains("pub(crate) fn validate_cloud_link_url"),
+        "cloud clip URL parser must be reusable by fallback and WebView commands"
+    );
+    assert!(
+        branch.contains("crate::cloud::host_open_cloud_clip_url(args.url)"),
+        "fallback open_cloud_clip_url dispatch must route through the shared host helper"
+    );
+
+    let host_helper = source_between(
+        &cloud,
+        "pub(crate) fn host_open_cloud_clip_url(url: String) -> Result<(), String> {",
+        "fn open_cloud_clip_url_for_host(url: String) -> Result<(), String> {",
+    );
+    assert!(
+        host_helper.contains("open_cloud_clip_url_for_host(url)"),
+        "fallback host helper must delegate to the shared cloud clip opener"
+    );
+
+    let opener = source_between(
+        &cloud,
+        "fn open_cloud_clip_url_for_host(url: String) -> Result<(), String> {",
+        "pub(crate) fn open_cloud_url_for_host(url: &str, context: &str) -> Result<(), String> {",
+    );
+    let validate = opener
+        .find("let url = validate_cloud_link_url(&url)?")
+        .expect("cloud clip opener validates URL first");
+    let open = opener
+        .find("crate::host::native::open_external_url(&url, \"cloud clip URL\")")
+        .expect("cloud clip opener uses shared native URL opener");
+    assert!(
+        validate < open,
+        "cloud clip opener must validate with the shared parser before opening"
+    );
+}
+
+#[test]
+fn fallback_setup_keeps_server_alive_when_browser_launch_fails() {
+    let app = app_rs();
+    let setup_fallback = source_between(
+        &app,
+        "fn start_fallback_from_setup(",
+        "fn launch_fallback_client(",
+    );
+
+    assert!(
+        setup_fallback
+            .contains(r#"launch_fallback_client(host, port, "startup fallback", false)?"#),
+        "default-browser launch failure should be logged without tearing down the fallback server"
+    );
+    assert!(
+        app.contains("fn show_fallback_browser_launch_notice")
+            && app.contains("fallback_browser_launch_notice_message")
+            && app.contains(r#"show_fallback_browser_launch_notice(&info.base_url, &e)"#),
+        "startup fallback browser launch failure must show the user the fallback URL instead of only logging it"
+    );
+
+    let launch = source_between(
+        &app,
+        "fn launch_fallback_client(",
+        "fn open_url_in_default_browser(",
+    );
+    let show_notice = launch
+        .find(r#"show_fallback_browser_launch_notice(&info.base_url, &e)"#)
+        .expect("fallback launch failure shows URL notice");
+    let error_return = launch
+        .find("if open_failure_is_error")
+        .expect("fallback launch can treat URL open failure as error");
+    assert!(
+        show_notice < error_return,
+        "dead-WebView fallback launch failures should show the fallback URL before returning an error"
+    );
+}
+
+#[test]
+fn fallback_server_serves_shared_ui_assets() {
+    let server =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fallback/server.rs"))
+            .expect("read fallback server");
+
+    assert!(
+        server.contains("index.html"),
+        "fallback server must serve the shared index.html"
+    );
+    assert!(
+        server.contains(".route(\"/{token}\", get(index))"),
+        "fallback server base URL must serve the shared index without a trailing slash"
+    );
+    assert!(
+        server.contains("client-bridge.js"),
+        "fallback server must serve the shared client bridge"
+    );
+    assert!(
+        server.contains("__CLIPLINE_FALLBACK__"),
+        "fallback index must inject fallback bridge config"
+    );
+    assert!(
+        server.contains("/{token}/ui/{*asset}"),
+        "fallback server must serve nested UI assets"
+    );
+    assert!(
+        server.contains("std::path::Path::new(asset)")
+            && server.contains(".components()")
+            && server.contains("Component::Prefix(_)")
+            && server.contains("Component::RootDir")
+            && server.contains("Component::ParentDir"),
+        "fallback UI asset paths must reject Windows drive prefixes, absolute roots, and parent traversal"
     );
 }
 

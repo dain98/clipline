@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use tauri::image::Image;
@@ -19,6 +19,7 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_updater::UpdaterExt;
 
+use crate::fallback::startup::{WebviewFailureAction, WebviewHealthSignal};
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
 use crate::service::{self, Cmd, Event, ServiceOptions};
@@ -35,9 +36,10 @@ static DIAGNOSTIC_LOG: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_READY_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_REPAIR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+static FALLBACK_CLIENT_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(serde::Serialize)]
-struct DisplayInfo {
+pub(crate) struct DisplayInfo {
     id: String,
     name: String,
     x: i32,
@@ -48,14 +50,14 @@ struct DisplayInfo {
 }
 
 #[derive(serde::Serialize)]
-struct AudioDeviceInfo {
+pub(crate) struct AudioDeviceInfo {
     id: String,
     name: String,
     is_default: bool,
 }
 
 #[derive(serde::Serialize)]
-struct AudioDeviceLists {
+pub(crate) struct AudioDeviceLists {
     outputs: Vec<AudioDeviceInfo>,
     inputs: Vec<AudioDeviceInfo>,
 }
@@ -71,7 +73,7 @@ struct GameDetectionEvent {
 }
 
 #[derive(serde::Serialize)]
-struct UpdateCheckResult {
+pub(crate) struct UpdateCheckResult {
     channel: UpdateChannel,
     channel_label: &'static str,
     current_version: String,
@@ -162,7 +164,7 @@ fn format_diagnostic_log_line(
     )
 }
 
-fn log_diagnostic(message: impl AsRef<str>) {
+pub(crate) fn log_diagnostic(message: impl AsRef<str>) {
     let line = format_diagnostic_log_line(chrono::Utc::now(), std::process::id(), message.as_ref());
     if let Ok(mut log) = diagnostic_log().lock() {
         if let Some(file) = log.as_mut() {
@@ -282,7 +284,127 @@ You can get it from Microsoft: https://developer.microsoft.com/microsoft-edge/we
         });
 }
 
-fn probe_webview_after_reveal<R: Runtime>(window: &WebviewWindow<R>, context: &str) {
+fn fallback_browser_launch_notice_message(url: &str, error: &str) -> String {
+    let log_path = diagnostic_log_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unavailable".to_string());
+    format!(
+        "Clipline started its WebView2-free fallback client, but Windows could not open your default browser automatically.\n\n\
+Copy this URL into a browser to open Clipline:\n{url}\n\n\
+Launch error: {error}\n\n\
+Diagnostic log: {log_path}",
+    )
+}
+
+fn show_fallback_browser_launch_notice(url: &str, error: &str) {
+    let description = fallback_browser_launch_notice_message(url, error);
+    log_diagnostic(format!(
+        "fallback browser launch notice shown url={url} error={error}"
+    ));
+    let _ = std::thread::Builder::new()
+        .name("clipline-fallback-browser-notice".into())
+        .spawn(move || {
+            let _ = rfd::MessageDialog::new()
+                .set_title("Open Clipline in your browser")
+                .set_description(description)
+                .set_buttons(rfd::MessageButtons::Ok)
+                .show();
+        });
+}
+
+fn emit_client_event<R, T>(app: &AppHandle<R>, event: &'static str, payload: T)
+where
+    R: Runtime,
+    T: serde::Serialize + Clone,
+{
+    let hub = app.state::<Arc<crate::host::events::ClientEventHub>>();
+    hub.emit(crate::host::events::ClientEvent::new(
+        event,
+        serde_json::to_value(payload.clone()).unwrap_or(serde_json::Value::Null),
+    ));
+    let _ = app.emit(event, payload);
+}
+
+fn webview_health_signal_for_repair_reason(
+    reason: WebviewRepairNoticeReason,
+) -> Option<WebviewHealthSignal> {
+    match reason {
+        WebviewRepairNoticeReason::GetterFailedToReceiveMessage => {
+            Some(WebviewHealthSignal::GetterFailedToReceiveMessage)
+        }
+        WebviewRepairNoticeReason::FrontendReadyTimeout => {
+            Some(WebviewHealthSignal::FrontendReadyTimeout)
+        }
+        WebviewRepairNoticeReason::OtherGetterError => None,
+    }
+}
+
+fn start_fallback_or_show_notice(app: &AppHandle<tauri::Wry>, reason: WebviewRepairNoticeReason) {
+    let Some(signal) = webview_health_signal_for_repair_reason(reason) else {
+        show_webview_repair_notice_once(reason);
+        return;
+    };
+
+    let action = crate::fallback::startup::launch_decision_after_webview_health(
+        signal,
+        FALLBACK_CLIENT_STARTED.load(Ordering::Acquire),
+    );
+    match action {
+        WebviewFailureAction::Ignore => {
+            log_diagnostic(format!(
+                "webview health fallback launch ignored signal={signal:?}"
+            ));
+        }
+        WebviewFailureAction::ShowNativeDiagnostic => {
+            show_webview_repair_notice_once(reason);
+        }
+        WebviewFailureAction::StartFallback => {
+            if FALLBACK_CLIENT_STARTED
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                log_diagnostic(format!(
+                    "webview health fallback launch lost duplicate race signal={signal:?}"
+                ));
+                return;
+            }
+
+            log_diagnostic(format!(
+                "webview health fallback launch starting signal={signal:?}"
+            ));
+            if let Err(e) = start_fallback_from_app_handle(app, signal) {
+                log_diagnostic(format!(
+                    "webview health fallback launch failed signal={signal:?}: {e}"
+                ));
+                eprintln!("dead WebView2 fallback launch failed: {e}");
+                if crate::fallback::startup::launch_decision_after_webview_health(
+                    WebviewHealthSignal::FallbackLaunchFailed,
+                    false,
+                ) == WebviewFailureAction::ShowNativeDiagnostic
+                {
+                    show_webview_repair_notice_once(reason);
+                }
+            }
+        }
+    }
+}
+
+fn start_fallback_from_app_handle(
+    app: &AppHandle<tauri::Wry>,
+    signal: WebviewHealthSignal,
+) -> Result<(), String> {
+    let host = app.state::<Arc<crate::host::runtime::FallbackHostContext>>();
+    host.attach_app_handle(app.clone())?;
+    let host = Arc::clone(host.inner());
+    let diagnostic_context = format!("dead webview fallback signal={signal:?}");
+    launch_fallback_client(host, None, &diagnostic_context, true)
+}
+
+fn probe_webview_after_reveal(
+    app: &AppHandle<tauri::Wry>,
+    window: &WebviewWindow<tauri::Wry>,
+    context: &str,
+) {
     match window.is_visible() {
         Ok(visible) => log_diagnostic(format!("{context} health probe is_visible=ok({visible})")),
         Err(e) => {
@@ -290,12 +412,12 @@ fn probe_webview_after_reveal<R: Runtime>(window: &WebviewWindow<R>, context: &s
             log_diagnostic(format!(
                 "{context} health probe is_visible=err({e}) reason={reason:?}"
             ));
-            show_webview_repair_notice_once(reason);
+            start_fallback_or_show_notice(app, reason);
         }
     }
 }
 
-fn arm_frontend_ready_watchdog() {
+fn arm_frontend_ready_watchdog(app: AppHandle<tauri::Wry>) {
     if FRONTEND_READY.load(Ordering::Acquire) {
         return;
     }
@@ -309,11 +431,14 @@ fn arm_frontend_ready_watchdog() {
     log_diagnostic("webview readiness watchdog armed");
     let _ = std::thread::Builder::new()
         .name("clipline-webview-readiness-watchdog".into())
-        .spawn(|| {
+        .spawn(move || {
             std::thread::sleep(WEBVIEW_READY_TIMEOUT);
             if !FRONTEND_READY.load(Ordering::Acquire) {
                 log_diagnostic("webview readiness watchdog expired before frontend_ready");
-                show_webview_repair_notice_once(WebviewRepairNoticeReason::FrontendReadyTimeout);
+                start_fallback_or_show_notice(
+                    &app,
+                    WebviewRepairNoticeReason::FrontendReadyTimeout,
+                );
             } else {
                 log_diagnostic("webview readiness watchdog observed frontend_ready");
             }
@@ -361,11 +486,35 @@ fn query_registry_pv(key: &str) -> Option<String> {
     parse_reg_pv_output(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn webview2_runtime_diagnostic() -> String {
-    let entries = webview2_runtime_registry_keys()
+fn webview2_runtime_registry_versions() -> Vec<(String, Option<String>)> {
+    webview2_runtime_registry_keys()
         .into_iter()
         .map(|key| {
-            let version = query_registry_pv(&key).unwrap_or_else(|| "missing".to_string());
+            let version = query_registry_pv(&key);
+            (key, version)
+        })
+        .collect()
+}
+
+fn webview2_runtime_preflight(
+    versions: &[(String, Option<String>)],
+) -> crate::fallback::startup::WebviewPreflight {
+    if versions.iter().any(|(_, version)| {
+        version
+            .as_deref()
+            .is_some_and(|version| !version.trim().is_empty())
+    }) {
+        crate::fallback::startup::WebviewPreflight::Available
+    } else {
+        crate::fallback::startup::WebviewPreflight::Missing
+    }
+}
+
+fn webview2_runtime_diagnostic(versions: &[(String, Option<String>)]) -> String {
+    let entries = versions
+        .iter()
+        .map(|(key, version)| {
+            let version = version.as_deref().unwrap_or("missing");
             format!("{key}={version}")
         })
         .collect::<Vec<_>>();
@@ -374,6 +523,10 @@ fn webview2_runtime_diagnostic() -> String {
 
 #[tauri::command]
 fn memory_status() -> Result<crate::memory::MemoryStatus, String> {
+    host_memory_status()
+}
+
+pub(crate) fn host_memory_status() -> Result<crate::memory::MemoryStatus, String> {
     crate::memory::current_process_tree_memory()
 }
 
@@ -549,7 +702,11 @@ impl RuntimeState {
             pump_events(app.clone(), rx);
         }
         if prepared.cleared_active_game {
-            let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
+            emit_client_event(
+                &app,
+                "game-detection",
+                GameDetectionEvent::from_detected(None),
+            );
         }
         Ok(())
     }
@@ -704,7 +861,7 @@ impl RuntimeState {
             pump_events(app.clone(), rx);
         }
         if emit_event {
-            let _ = app.emit("game-detection", event);
+            emit_client_event(&app, "game-detection", event);
         }
         Ok(())
     }
@@ -751,12 +908,20 @@ fn active_game_still_configured(settings: &AppSettings, active: Option<&Detected
 
 #[tauri::command]
 fn save_replay(state: tauri::State<RuntimeState>) {
-    state.request_save();
+    host_save_replay(&state);
 }
 
 #[tauri::command]
 fn get_autostart_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    host_get_autostart_status(&app)
+}
+
+pub(crate) fn host_get_autostart_status<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
     app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+pub(crate) fn host_persisted_autostart_status(settings: &AppSettings) -> bool {
+    settings.open_on_startup
 }
 
 fn set_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<bool, String> {
@@ -907,6 +1072,26 @@ fn should_open_on_tray_click(button: MouseButton, button_state: MouseButtonState
     button == MouseButton::Left && button_state == MouseButtonState::Up
 }
 
+pub(crate) fn host_save_replay(state: &RuntimeState) -> bool {
+    state.request_save()
+}
+
+pub(crate) fn host_get_settings(state: &RuntimeState) -> AppSettings {
+    state.settings()
+}
+
+pub(crate) fn host_set_recording<R: Runtime>(
+    state: &RuntimeState,
+    app: AppHandle<R>,
+    recording: bool,
+) -> Result<bool, String> {
+    state.set_recording(app, recording)
+}
+
+pub(crate) fn host_report_decode_support(state: &RuntimeState, codecs: &[String]) {
+    state.set_decodable_codecs(codecs);
+}
+
 #[tauri::command]
 fn minimize_main_window<R: Runtime>(
     app: AppHandle<R>,
@@ -928,7 +1113,7 @@ fn set_recording<R: Runtime>(
     state: tauri::State<RuntimeState>,
     recording: bool,
 ) -> Result<bool, String> {
-    state.set_recording(app, recording)
+    host_set_recording(&state, app, recording)
 }
 
 async fn check_update_for_channel<R: Runtime>(
@@ -968,15 +1153,13 @@ fn missing_release_metadata_message(channel: UpdateChannel) -> String {
     )
 }
 
-#[tauri::command]
-async fn check_for_updates<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, RuntimeState>,
+pub(crate) async fn host_check_for_updates<R: Runtime>(
+    app: &AppHandle<R>,
+    settings: &AppSettings,
 ) -> Result<UpdateCheckResult, String> {
-    let settings = state.settings();
     let channel = settings.update_channel;
     let current_version = app.package_info().version.to_string();
-    let (update, status) = check_update_for_channel(&app, channel).await?;
+    let (update, status) = check_update_for_channel(app, channel).await?;
 
     Ok(UpdateCheckResult {
         channel,
@@ -994,16 +1177,36 @@ async fn check_for_updates<R: Runtime>(
 }
 
 #[tauri::command]
-async fn install_update<R: Runtime>(
+async fn check_for_updates<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, RuntimeState>,
-) -> Result<(), String> {
-    let channel = state.settings().update_channel;
-    let (update, status) = check_update_for_channel(&app, channel).await?;
-    let Some(update) = update else {
-        return Err(status.unwrap_or_else(|| "no update is available".into()));
-    };
+) -> Result<UpdateCheckResult, String> {
+    let settings = state.settings();
+    host_check_for_updates(&app, &settings).await
+}
 
+pub(crate) async fn host_install_update<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &RuntimeState,
+) -> Result<(), String> {
+    let update = host_update_for_install(app, state).await?;
+    host_install_available_update(app, state, update).await
+}
+
+pub(crate) async fn host_update_for_install<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &RuntimeState,
+) -> Result<tauri_plugin_updater::Update, String> {
+    let channel = state.settings().update_channel;
+    let (update, status) = check_update_for_channel(app, channel).await?;
+    update.ok_or_else(|| status.unwrap_or_else(|| "no update is available".into()))
+}
+
+pub(crate) async fn host_install_available_update<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &RuntimeState,
+    update: tauri_plugin_updater::Update,
+) -> Result<(), String> {
     app.state::<MicTestState>().stop();
     state.send(Cmd::Stop { announce: false });
     update
@@ -1013,8 +1216,40 @@ async fn install_update<R: Runtime>(
 }
 
 #[tauri::command]
+async fn install_update<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, RuntimeState>,
+) -> Result<(), String> {
+    host_install_update(&app, &state).await
+}
+
+#[tauri::command]
 fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
-    state.settings()
+    host_get_settings(&state)
+}
+
+pub(crate) async fn host_choose_media_folder(
+    settings: &AppSettings,
+    current: Option<String>,
+) -> Result<Option<String>, String> {
+    let current_dir = current
+        .as_deref()
+        .and_then(|path| crate::settings::normalize_media_dir(path).ok())
+        .filter(|path| path.exists())
+        .or_else(|| settings.media_dir_path().ok())
+        .unwrap_or_else(service::default_clips_dir);
+
+    // Run the native modal off the main thread so recorder status and other
+    // IPC keep flowing while the picker is open.
+    tokio::task::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Media Folder");
+        if current_dir.exists() {
+            dialog = dialog.set_directory(current_dir);
+        }
+        dialog.pick_folder().map(|path| path.display().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1022,17 +1257,23 @@ async fn choose_media_folder(
     state: tauri::State<'_, RuntimeState>,
     current: Option<String>,
 ) -> Result<Option<String>, String> {
+    let settings = state.settings();
+    host_choose_media_folder(&settings, current).await
+}
+
+pub(crate) async fn host_choose_replay_cache_folder(
+    settings: &AppSettings,
+    current: Option<String>,
+) -> Result<Option<String>, String> {
     let current_dir = current
         .as_deref()
-        .and_then(|path| crate::settings::normalize_media_dir(path).ok())
+        .and_then(|path| crate::settings::normalize_replay_cache_dir(path).ok())
         .filter(|path| path.exists())
-        .or_else(|| state.settings().media_dir_path().ok())
+        .or_else(|| settings.media_dir_path().ok())
         .unwrap_or_else(service::default_clips_dir);
 
-    // Run the native modal off the main thread so recorder status and other
-    // IPC keep flowing while the picker is open.
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Media Folder");
+    tokio::task::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Replay Cache Folder");
         if current_dir.exists() {
             dialog = dialog.set_directory(current_dir);
         }
@@ -1047,26 +1288,16 @@ async fn choose_replay_cache_folder(
     state: tauri::State<'_, RuntimeState>,
     current: Option<String>,
 ) -> Result<Option<String>, String> {
-    let current_dir = current
-        .as_deref()
-        .and_then(|path| crate::settings::normalize_replay_cache_dir(path).ok())
-        .filter(|path| path.exists())
-        .or_else(|| state.settings().media_dir_path().ok())
-        .unwrap_or_else(service::default_clips_dir);
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Replay Cache Folder");
-        if current_dir.exists() {
-            dialog = dialog.set_directory(current_dir);
-        }
-        dialog.pick_folder().map(|path| path.display().to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())
+    let settings = state.settings();
+    host_choose_replay_cache_folder(&settings, current).await
 }
 
 #[tauri::command]
 fn list_displays() -> Result<Vec<DisplayInfo>, String> {
+    host_list_displays()
+}
+
+pub(crate) fn host_list_displays() -> Result<Vec<DisplayInfo>, String> {
     clipline_capture::windows::display::enumerate_displays()
         .map_err(|e| e.to_string())
         .map(|displays| {
@@ -1087,6 +1318,10 @@ fn list_displays() -> Result<Vec<DisplayInfo>, String> {
 
 #[tauri::command]
 fn list_audio_devices() -> Result<AudioDeviceLists, String> {
+    host_list_audio_devices()
+}
+
+pub(crate) fn host_list_audio_devices() -> Result<AudioDeviceLists, String> {
     clipline_capture::windows::wasapi::enumerate_audio_devices()
         .map_err(|e| e.to_string())
         .map(|devices| AudioDeviceLists {
@@ -1120,11 +1355,19 @@ fn list_audio_devices() -> Result<AudioDeviceLists, String> {
 /// otherwise freeze the UI since synchronous commands run on the main thread.
 #[tauri::command(async)]
 fn probe_encoders() -> Vec<service::EncoderOption> {
+    host_probe_encoders()
+}
+
+pub(crate) fn host_probe_encoders() -> Vec<service::EncoderOption> {
     service::available_encoder_options()
 }
 
 #[tauri::command]
 fn list_game_windows() -> Vec<GameWindowInfo> {
+    host_list_game_windows()
+}
+
+pub(crate) fn host_list_game_windows() -> Vec<GameWindowInfo> {
     crate::games::list_game_windows()
 }
 
@@ -1132,11 +1375,19 @@ fn list_game_windows() -> Vec<GameWindowInfo> {
 /// Returns `None` when the path has no usable icon.
 #[tauri::command]
 fn extract_window_icon(exe_path: String) -> Option<String> {
+    host_extract_window_icon(exe_path)
+}
+
+pub(crate) fn host_extract_window_icon(exe_path: String) -> Option<String> {
     crate::game_icon::extract_exe_icon_data_url(&exe_path)
 }
 
 #[tauri::command]
 fn list_game_plugins() -> Vec<GamePluginInfo> {
+    host_list_game_plugins()
+}
+
+pub(crate) fn host_list_game_plugins() -> Vec<GamePluginInfo> {
     crate::games::game_plugin_catalog()
 }
 
@@ -1145,7 +1396,7 @@ fn list_game_plugins() -> Vec<GamePluginInfo> {
 /// Takes effect on the next recorder (re)start.
 #[tauri::command]
 fn report_decode_support(state: tauri::State<RuntimeState>, codecs: Vec<String>) {
-    state.set_decodable_codecs(&codecs);
+    host_report_decode_support(&state, &codecs);
 }
 
 #[tauri::command]
@@ -1232,6 +1483,32 @@ fn save_settings<R: Runtime>(
     state: tauri::State<RuntimeState>,
     tray_items: tauri::State<TrayItems<R>>,
     storage_settings: tauri::State<crate::library::StorageSettings>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
+    apply_settings_save(app, &state, &tray_items, &storage_settings, settings)
+}
+
+pub(crate) fn host_save_settings(
+    app: &AppHandle<tauri::Wry>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
+    let state = app.state::<RuntimeState>();
+    let tray_items = app.state::<TrayItems<tauri::Wry>>();
+    let storage_settings = app.state::<crate::library::StorageSettings>();
+    apply_settings_save(
+        app.clone(),
+        &state,
+        &tray_items,
+        &storage_settings,
+        settings,
+    )
+}
+
+fn apply_settings_save<R: Runtime>(
+    app: AppHandle<R>,
+    state: &RuntimeState,
+    tray_items: &TrayItems<R>,
+    storage_settings: &crate::library::StorageSettings,
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
     settings.hotkey = crate::settings::normalize_hotkey(&settings.hotkey)?;
@@ -1300,7 +1577,7 @@ fn save_settings<R: Runtime>(
             ) {
                 let message = format!("global save hotkey still unavailable: {e}");
                 eprintln!("{message}");
-                let _ = app.emit("error", message);
+                emit_client_event(&app, "error", message);
             }
         }
     }
@@ -1339,6 +1616,65 @@ fn save_settings<R: Runtime>(
     Ok(settings)
 }
 
+fn start_fallback_from_setup(
+    app: &mut tauri::App<tauri::Wry>,
+    host: Arc<crate::host::runtime::FallbackHostContext>,
+    port: Option<u16>,
+) -> Result<(), String> {
+    host.attach_app_handle(app.handle().clone())?;
+    launch_fallback_client(host, port, "startup fallback", false)?;
+    FALLBACK_CLIENT_STARTED.store(true, Ordering::Release);
+    Ok(())
+}
+
+fn launch_fallback_client(
+    host: Arc<crate::host::runtime::FallbackHostContext>,
+    port: Option<u16>,
+    diagnostic_context: &str,
+    open_failure_is_error: bool,
+) -> Result<(), String> {
+    let info =
+        tauri::async_runtime::block_on(crate::fallback::server::start_fallback_server(port, host))?;
+    log_diagnostic(format!(
+        "{diagnostic_context} server started addr={} url={}",
+        info.addr, info.base_url
+    ));
+    eprintln!("Clipline fallback client: {}", info.base_url);
+    if let Err(e) = open_url_in_default_browser(&info.base_url) {
+        log_diagnostic(format!("{diagnostic_context} URL open failed: {e}"));
+        eprintln!("open fallback client URL: {e}");
+        show_fallback_browser_launch_notice(&info.base_url, &e);
+        if open_failure_is_error {
+            return Err(e);
+        }
+    } else {
+        log_diagnostic(format!("{diagnostic_context} URL opened"));
+    }
+    eprintln!("Clipline fallback server is running; close Clipline to stop it.");
+    Ok(())
+}
+
+fn open_url_in_default_browser(url: &str) -> Result<(), String> {
+    let operation = crate::util::wide_null(std::ffi::OsStr::new("open"));
+    let target = crate::util::wide_null(std::ffi::OsStr::new(url));
+    let result = unsafe {
+        windows_sys::Win32::UI::Shell::ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        )
+    };
+    if result as isize <= 32 {
+        return Err(format!(
+            "open fallback client URL failed with shell code {result:?}"
+        ));
+    }
+    Ok(())
+}
+
 pub fn run() {
     let mut settings = AppSettings::load_or_default();
     let args: Vec<String> = std::env::args().collect();
@@ -1347,7 +1683,17 @@ pub fn run() {
         env!("CARGO_PKG_VERSION"),
         diagnostic_log_path()
     ));
-    log_diagnostic(webview2_runtime_diagnostic());
+    let webview2_runtime_versions = webview2_runtime_registry_versions();
+    let mut webview_preflight = webview2_runtime_preflight(&webview2_runtime_versions);
+    log_diagnostic(webview2_runtime_diagnostic(&webview2_runtime_versions));
+    if let Some(debug_preflight) =
+        crate::fallback::startup::debug_webview2_preflight_override(&args)
+    {
+        log_diagnostic(format!(
+            "debug WebView2 preflight override applied real_preflight={webview_preflight:?} effective_preflight={debug_preflight:?}"
+        ));
+        webview_preflight = debug_preflight;
+    }
     let mut lol_url = None::<String>;
     if let Some(i) = args.iter().position(|a| a == "--window") {
         if let Some(title) = args.get(i + 1) {
@@ -1378,6 +1724,16 @@ pub fn run() {
         settings = AppSettings::default();
     }
 
+    let startup_fallback_requested =
+        crate::fallback::startup::fallback_launch_preference(&args, webview_preflight)
+            == crate::fallback::startup::FallbackLaunchPreference::StartFallback;
+    let fallback_port = crate::fallback::startup::requested_fallback_port(&args);
+    if startup_fallback_requested {
+        log_diagnostic(format!(
+            "startup fallback launch requested webview_preflight={webview_preflight:?} fallback_port={fallback_port:?}"
+        ));
+    }
+
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)
         .unwrap_or(Some(service::DEFAULT_DISK_QUOTA_BYTES));
     let media_dir = settings
@@ -1392,11 +1748,18 @@ pub fn run() {
     );
     let global_hotkey = parse_global_hotkey(&settings.hotkey)
         .unwrap_or_else(|_| Some(parse_hotkey("Alt+F10").unwrap()));
+    let client_events = Arc::new(crate::host::events::ClientEventHub::default());
+    let fallback_host = Arc::new(crate::host::runtime::FallbackHostContext::new(
+        settings.clone(),
+        client_events.clone(),
+    ));
 
     tauri::Builder::default()
         .manage(RuntimeState::new(cmd_tx, settings.clone(), lol_url))
         .manage(MicTestState::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
+        .manage(client_events)
+        .manage(fallback_host.clone())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
@@ -1465,18 +1828,24 @@ pub fn run() {
                     let message =
                         format!("global save hotkey unavailable; continuing without it: {e}");
                     eprintln!("{message}");
-                    let _ = app.handle().emit("error", message);
+                    emit_client_event(app.handle(), "error", message);
                 }
             }
             if let Err(e) = crate::hotkeys::install_save_hook(&settings.hotkey, {
                 let app = app.handle().clone();
                 move || {
-                    app.state::<RuntimeState>().request_save();
+                    let accepted = app.state::<RuntimeState>().request_save();
+                    log_diagnostic(format!("native save hotkey triggered accepted={accepted}"));
                 }
             }) {
                 let message = format!("low-level save hotkey unavailable: {e}");
                 eprintln!("{message}");
-                let _ = app.handle().emit("error", message);
+                emit_client_event(app.handle(), "error", message);
+            } else {
+                log_diagnostic(format!(
+                    "native save hotkey ready hotkey={}",
+                    settings.hotkey
+                ));
             }
             // Bound the asset protocol to the configured media folder so clips
             // under a custom root play back, while the static config scope stays
@@ -1571,10 +1940,22 @@ pub fn run() {
 
             pump_events(app.handle().clone(), event_rx);
             spawn_game_detector(app.handle().clone());
+            let fallback_client_started = if startup_fallback_requested {
+                if let Err(e) =
+                    start_fallback_from_setup(app, fallback_host.clone(), fallback_port)
+                {
+                    log_diagnostic(format!("startup fallback launch failed: {e}"));
+                    eprintln!("startup fallback launch failed: {e}");
+                    return Err(std::io::Error::other(e).into());
+                }
+                true
+            } else {
+                false
+            };
 
-            // The main window is created hidden by default so autostart launches
-            // don't flash it. Show it for normal launches.
-            if !launched_by_autostart {
+            // The main window is created manually so fallback can be selected
+            // before WebView2 is touched, and autostart launches stay in tray.
+            if !launched_by_autostart && !fallback_client_started {
                 log_diagnostic("normal launch opening main window");
                 if let Err(e) = open_main_window(app.handle()) {
                     log_diagnostic(format!("normal launch open failed: {e}"));
@@ -1643,7 +2024,7 @@ fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
                     Ok(()) => last_error = None,
                     Err(e) if last_error.as_deref() != Some(e.as_str()) => {
                         last_error = Some(e.clone());
-                        let _ = app.emit("error", format!("game detection: {e}"));
+                        emit_client_event(&app, "error", format!("game detection: {e}"));
                     }
                     Err(_) => {}
                 }
@@ -1652,7 +2033,7 @@ fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
         .expect("spawn game detector thread");
 }
 
-fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+fn open_main_window(app: &AppHandle<tauri::Wry>) -> Result<(), String> {
     log_diagnostic(format!(
         "open_main_window start webviews={}",
         webview_labels(app)
@@ -1665,8 +2046,8 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
             log_window_state("open existing before reveal", &window);
             let result = reveal_logged_window(&window, "open existing");
             log_window_state("open existing after reveal", &window);
-            probe_webview_after_reveal(&window, "open existing after reveal");
-            arm_frontend_ready_watchdog();
+            probe_webview_after_reveal(app, &window, "open existing after reveal");
+            arm_frontend_ready_watchdog(app.clone());
             result
         }
         MainWindowOpenTarget::NewMain => {
@@ -1675,17 +2056,17 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
             log_window_state("open rebuilt before reveal", &window);
             let result = reveal_logged_window(&window, "open rebuilt");
             log_window_state("open rebuilt after reveal", &window);
-            probe_webview_after_reveal(&window, "open rebuilt after reveal");
-            arm_frontend_ready_watchdog();
+            probe_webview_after_reveal(app, &window, "open rebuilt after reveal");
+            arm_frontend_ready_watchdog(app.clone());
             result
         }
     }
 }
 
-fn build_main_window<R: Runtime>(
-    app: &AppHandle<R>,
+fn build_main_window(
+    app: &AppHandle<tauri::Wry>,
     label: &str,
-) -> Result<WebviewWindow<R>, String> {
+) -> Result<WebviewWindow<tauri::Wry>, String> {
     let mut config = app
         .config()
         .app
@@ -1743,22 +2124,44 @@ where
 }
 
 fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>) {
-    std::thread::spawn(move || {
-        for event in event_rx {
-            let _ = match &event {
-                Event::Status { .. } => handle.emit("status", &event),
-                Event::Saved { .. } => handle.emit("saved", &event),
-                Event::Error { message } => handle.emit("error", message.clone()),
-            };
-            if let Event::Saved {
-                full_session: false,
-                ..
-            } = &event
-            {
-                crate::sound::play_replay_saved();
+    std::thread::Builder::new()
+        .name("clipline-event-pump".into())
+        .spawn(move || {
+            let hub = handle.state::<Arc<crate::host::events::ClientEventHub>>();
+            for event in event_rx {
+                match &event {
+                    Event::Status { .. } => {
+                        hub.emit(crate::host::events::ClientEvent::new(
+                            "status",
+                            serde_json::to_value(&event).unwrap_or(serde_json::Value::Null),
+                        ));
+                        let _ = handle.emit("status", &event);
+                    }
+                    Event::Saved { .. } => {
+                        hub.emit(crate::host::events::ClientEvent::new(
+                            "saved",
+                            serde_json::to_value(&event).unwrap_or(serde_json::Value::Null),
+                        ));
+                        let _ = handle.emit("saved", &event);
+                    }
+                    Event::Error { message } => {
+                        hub.emit(crate::host::events::ClientEvent::new(
+                            "error",
+                            serde_json::json!(message),
+                        ));
+                        let _ = handle.emit("error", message.clone());
+                    }
+                }
+                if let Event::Saved {
+                    full_session: false,
+                    ..
+                } = &event
+                {
+                    crate::sound::play_replay_saved();
+                }
             }
-        }
-    });
+        })
+        .expect("spawn event pump");
 }
 
 fn parse_quota_gb(raw: &str) -> Result<Option<u64>, &'static str> {
@@ -2215,6 +2618,34 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         assert_eq!(
             parse_reg_pv_output(output).as_deref(),
             Some("120.0.2210.55")
+        );
+    }
+
+    #[test]
+    fn webview2_preflight_is_missing_when_all_runtime_versions_are_absent() {
+        let versions = [
+            ("hklm-wow6432".to_string(), None),
+            ("hklm".to_string(), None),
+            ("hkcu".to_string(), None),
+        ];
+
+        assert_eq!(
+            webview2_runtime_preflight(&versions),
+            crate::fallback::startup::WebviewPreflight::Missing
+        );
+    }
+
+    #[test]
+    fn webview2_preflight_is_available_when_any_runtime_version_exists() {
+        let versions = [
+            ("hklm-wow6432".to_string(), None),
+            ("hklm".to_string(), Some("120.0.2210.55".to_string())),
+            ("hkcu".to_string(), None),
+        ];
+
+        assert_eq!(
+            webview2_runtime_preflight(&versions),
+            crate::fallback::startup::WebviewPreflight::Available
         );
     }
 

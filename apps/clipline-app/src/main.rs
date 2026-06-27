@@ -17,6 +17,8 @@ mod cloud;
 #[cfg(windows)]
 mod cloud_upload;
 #[cfg(windows)]
+mod fallback;
+#[cfg(windows)]
 mod game_icon;
 #[cfg(windows)]
 mod game_plugins;
@@ -24,6 +26,8 @@ mod game_plugins;
 mod games;
 #[cfg(windows)]
 mod hotkeys;
+#[cfg(windows)]
+mod host;
 #[cfg(windows)]
 mod library;
 #[cfg(windows)]
