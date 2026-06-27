@@ -23,8 +23,8 @@ use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
-    is_global_shortcut_hotkey, parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode,
-    GameRecordingMode,
+    AppSettings, CaptureMode, GameRecordingMode, is_global_shortcut_hotkey, parse_hotkey,
+    quota_bytes_from_gb,
 };
 use crate::updates::UpdateChannel;
 
@@ -789,11 +789,7 @@ fn saved_autostart_preference_for_build(
     previous: bool,
     debug_build: bool,
 ) -> bool {
-    if debug_build {
-        previous
-    } else {
-        requested
-    }
+    if debug_build { previous } else { requested }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1397,6 +1393,18 @@ pub fn run() {
         .manage(RuntimeState::new(cmd_tx, settings.clone(), lol_url))
         .manage(MicTestState::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            let launched_by_autostart = args.iter().any(|arg| arg == "--autostart");
+            log_diagnostic(format!(
+                "single-instance secondary launch launched_by_autostart={launched_by_autostart} cwd={cwd:?} args={args:?}"
+            ));
+            if !launched_by_autostart {
+                if let Err(e) = open_main_window(app) {
+                    log_diagnostic(format!("single-instance open existing failed: {e}"));
+                    eprintln!("open existing window: {e}");
+                }
+            }
+        }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),

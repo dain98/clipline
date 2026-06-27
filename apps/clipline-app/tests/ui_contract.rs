@@ -29,6 +29,11 @@ fn tauri_config() -> String {
     fs::read_to_string(path).expect("read tauri.conf.json")
 }
 
+fn cargo_toml() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    fs::read_to_string(path).expect("read Cargo.toml")
+}
+
 #[test]
 fn default_capability_only_targets_main_window() {
     let capability =
@@ -42,6 +47,28 @@ fn default_capability_only_targets_main_window() {
     assert!(
         !capability.contains("main-recovery"),
         "recovery windows are intentionally not created or granted frontend command permissions"
+    );
+}
+
+#[test]
+fn native_shell_prevents_duplicate_clipline_instances() {
+    let manifest = cargo_toml();
+    let app = app_rs();
+    let single_instance_plugin = "tauri_plugin_single_instance::init";
+    let single_instance = app
+        .find(single_instance_plugin)
+        .expect("native shell should register the Tauri single-instance plugin");
+    let autostart = app
+        .find("tauri_plugin_autostart::init")
+        .expect("native shell should register autostart");
+
+    assert!(
+        manifest.contains("tauri-plugin-single-instance"),
+        "Cargo.toml should depend on the single-instance plugin"
+    );
+    assert!(
+        single_instance < autostart,
+        "single-instance plugin must be registered before autostart or other shell plugins"
     );
 }
 
