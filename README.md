@@ -42,9 +42,9 @@ Download the latest **[nightly installer](https://github.com/dain98/clipline/rel
 
 On Windows, the standard installer embeds Microsoft's small WebView2 Evergreen bootstrapper. If WebView2 is missing or older than Clipline's minimum supported runtime, the installer may download the current runtime from Microsoft. Offline or Microsoft-blocked machines may need the WebView2 Runtime installed manually first. Windows 11 normally includes WebView2.
 
-If WebView2 is unavailable or broken, Clipline starts a local browser fallback that uses the same first-party UI through a tokenized `127.0.0.1` connection. The fallback is intended for Windows 10 machines where WebView2 cannot be kept installed; it still requires a normal browser for the UI.
+If WebView2 is unavailable or broken, Clipline starts a local browser fallback that uses the same first-party UI through a tokenized `127.0.0.1` connection. The fallback is intended for Windows 10 machines where WebView2 cannot be kept installed; it still requires a normal browser for the UI. The native Clipline process keeps running behind that browser UI, so the global Save Replay hotkey is still owned by the native global/low-level hook path and does not depend on the browser window staying focused.
 
-To validate the fallback on a WebView2-removed Windows 10 machine, run `scripts\validate-fallback-client.ps1 -CliplineExe <path-to-Clipline.exe>`. On a dev machine that still has WebView2, add `-UseDebugMissingPreflight` to exercise the same startup fallback path and write an evidence JSON. When clips are present, the evidence includes a `/media-path` redirect plus a ranged `/media/{id}` playback probe; it also verifies the `/events` SSE stream reaches a heartbeat.
+To validate the fallback on a WebView2-removed Windows 10 machine, run `scripts\validate-fallback-client.ps1 -CliplineExe <path-to-Clipline.exe>`. On a dev machine that still has WebView2, add `-UseDebugMissingPreflight` to exercise the same startup fallback path and write an evidence JSON. The evidence verifies the native Save Replay hotkey hook initializes before fallback startup. When clips are present, it also includes a `/media-path` redirect plus a ranged `/media/{id}` playback probe, and verifies the `/events` SSE stream reaches a heartbeat.
 
 **On signing — two different things, only one is done yet:**
 

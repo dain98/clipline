@@ -3055,6 +3055,15 @@ Local command validated:
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate-fallback-client.ps1 -CliplineExe target\debug\clipline-app.exe -UseDebugMissingPreflight -Port 47654 -EvidencePath $env:TEMP\clipline-fallback-validation-local.json`.
 Real WebView2-removed Windows 10 validation still remains external.
 
+**Execution note (2026-06-27 native hotkey fallback):** The fallback browser does not own global
+keyboard focus. Save Replay remains native-owned because the Tauri setup path registers Clipline's
+global shortcut and low-level Windows save hook before starting the fallback server. Added a
+diagnostic success line (`native save hotkey initialized`) and updated the external validation
+harness to require that line before `startup fallback server started`; the evidence JSON now
+includes `fallback native save hotkey available`. Local harness run on port 47651 passed with
+debug-missing WebView2 preflight, shared UI, invoke smoke, media range smoke, SSE heartbeat, and
+native-hotkey availability. Real WebView2-removed Windows 10 validation still remains external.
+
 ---
 
 ## Self-Review Notes

@@ -428,6 +428,8 @@ fn fallback_external_validation_script_captures_webview2_removed_gate() {
         "missing",
         "Clipline fallback client:",
         "startup fallback server started",
+        "native save hotkey initialized",
+        "fallback native save hotkey available",
         "setup start launched_by_autostart=",
         "webviews=[]",
         "normal launch opening main window",

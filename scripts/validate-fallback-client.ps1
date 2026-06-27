@@ -379,11 +379,14 @@ try {
     $diagnosticText = Read-TextFile $diagnosticLogPath
     Assert-TextContains $diagnosticText "setup start launched_by_autostart=" "diagnostic log"
     Assert-TextContains $diagnosticText "startup fallback server started" "diagnostic log"
+    Assert-TextContains $diagnosticText "native save hotkey initialized" "diagnostic log"
     Assert-TextContains $diagnosticText "webviews=[]" "diagnostic log"
     Assert-TextBefore $diagnosticText "setup start launched_by_autostart=" "startup fallback server started" "diagnostic log"
+    Assert-TextBefore $diagnosticText "native save hotkey initialized" "startup fallback server started" "diagnostic log"
     Assert-TextNotContains $diagnosticText "normal launch opening main window" "diagnostic log"
     Assert-TextNotContains $diagnosticText "open_main_window start" "diagnostic log"
     Add-Check $checks "fallback starts before WebView creation" $true @{ log = $diagnosticLogPath }
+    Add-Check $checks "fallback native save hotkey available" $true @{ log = $diagnosticLogPath }
 
     if ($UseDebugMissingPreflight) {
         Assert-TextContains $diagnosticText "debug WebView2 preflight override applied" "diagnostic log"

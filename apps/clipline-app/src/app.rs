@@ -1840,6 +1840,11 @@ pub fn run() {
                 let message = format!("low-level save hotkey unavailable: {e}");
                 eprintln!("{message}");
                 emit_client_event(app.handle(), "error", message);
+            } else {
+                log_diagnostic(format!(
+                    "native save hotkey initialized hotkey={}",
+                    settings.hotkey
+                ));
             }
             // Bound the asset protocol to the configured media folder so clips
             // under a custom root play back, while the static config scope stays
