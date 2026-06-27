@@ -86,6 +86,18 @@ fn tauri_config() -> String {
     fs::read_to_string(path).expect("read tauri.conf.json")
 }
 
+fn repo_file(path: &str) -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("app crate has workspace root");
+    fs::read_to_string(root.join(path)).unwrap_or_else(|_| panic!("read {path}"))
+}
+
+fn fallback_validation_script() -> String {
+    repo_file("scripts/validate-fallback-client.ps1")
+}
+
 fn source_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)
@@ -400,6 +412,47 @@ fn app_exposes_force_fallback_client_flag() {
         startup.contains("--force-fallback-client"),
         "fallback implementation must expose a debug flag for forced fallback runtime testing"
     );
+}
+
+#[test]
+fn fallback_external_validation_script_captures_webview2_removed_gate() {
+    let script = fallback_validation_script();
+
+    for required in [
+        "param(",
+        "$CliplineExe",
+        "$EvidencePath",
+        "$UseDebugMissingPreflight",
+        "--fallback-port",
+        "--debug-webview2-preflight",
+        "missing",
+        "Clipline fallback client:",
+        "startup fallback server started",
+        "setup start launched_by_autostart=",
+        "webviews=[]",
+        "normal launch opening main window",
+        "open_main_window start",
+        "Assert-TextBefore",
+        "Assert-TextNotContains",
+        "__CLIPLINE_FALLBACK__",
+        "client-bridge.js",
+        "/invoke/get_settings",
+        "/invoke/list_clips",
+        "/invoke/storage_status",
+        "/invoke/list_game_plugins",
+        "/invoke/memory_status",
+        "Invoke-RestMethod",
+        "FileShare]::ReadWrite",
+        "Remove-Item -LiteralPath $diagnosticLogPath",
+        "ConvertTo-Json",
+        "Write-Error -ErrorAction Continue",
+        "Stop-Process",
+    ] {
+        assert!(
+            script.contains(required),
+            "fallback validation script must include {required}"
+        );
+    }
 }
 
 #[test]
