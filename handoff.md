@@ -336,8 +336,8 @@ Recent fixes (2026-06-25):
   validation harness for Nate/VM: pass `-CliplineExe <path>` on a WebView2-removed machine, or add
   `-UseDebugMissingPreflight` on a dev box to generate evidence JSON for the same startup path. When
   clips exist, the harness also proves browser media playback via an opaque `/media-path` redirect
-  and a ranged `/media/{id}` request. Nate/real WebView2-removed Windows 10 validation still remains
-  external.
+  and a ranged `/media/{id}` request, and it verifies the fallback `/events` SSE stream reaches a
+  heartbeat. Nate/real WebView2-removed Windows 10 validation still remains external.
 
 Recent fixes (2026-06-24):
 - Windows 10 follow-up from Nate's 0.1.12 logs: the recovery-window build also produced

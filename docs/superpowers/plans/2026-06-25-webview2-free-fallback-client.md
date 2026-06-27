@@ -3050,7 +3050,8 @@ free-form notes. The harness launches Clipline with a fixed fallback port, optio
 fallback URL, proves setup logged `webviews=[]` before fallback, verifies the shared fallback UI is
 served, runs fallback invokes for settings, library, storage, game plugins, and memory, proves the
 browser media playback route with a `/media-path` redirect plus a ranged `/media/{id}` request when
-clips exist, then writes an evidence JSON. Local command validated:
+clips exist, verifies the `/events` SSE stream reaches a heartbeat, then writes an evidence JSON.
+Local command validated:
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate-fallback-client.ps1 -CliplineExe target\debug\clipline-app.exe -UseDebugMissingPreflight -Port 47654 -EvidencePath $env:TEMP\clipline-fallback-validation-local.json`.
 Real WebView2-removed Windows 10 validation still remains external.
 

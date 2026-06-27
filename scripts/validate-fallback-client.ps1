@@ -231,6 +231,67 @@ function Test-FallbackMediaPlayback {
     }
 }
 
+function Test-FallbackEventStream {
+    param(
+        [string]$BaseUrl,
+        [int]$TimeoutSeconds
+    )
+
+    $uri = "$BaseUrl/events"
+    $request = [System.Net.HttpWebRequest]::Create($uri)
+    $request.Method = "GET"
+    $request.Accept = "text/event-stream"
+    $request.Timeout = [Math]::Max(5000, $TimeoutSeconds * 1000)
+    $request.ReadWriteTimeout = [Math]::Max(5000, $TimeoutSeconds * 1000)
+
+    $response = $request.GetResponse()
+    try {
+        if ([int]$response.StatusCode -ne 200) {
+            throw "fallback event stream returned $($response.StatusCode), expected 200"
+        }
+        $contentType = [string](Header-Value $response.Headers "Content-Type")
+        if (!$contentType.StartsWith("text/event-stream", [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "fallback event stream returned unexpected Content-Type: $contentType"
+        }
+
+        $stream = $response.GetResponseStream()
+        try {
+            $reader = [System.IO.StreamReader]::new($stream)
+            try {
+                $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+                $lines = [System.Collections.Generic.List[string]]::new()
+                while ((Get-Date) -lt $deadline) {
+                    $line = $reader.ReadLine()
+                    if ($null -eq $line) {
+                        break
+                    }
+                    $lines.Add($line)
+                    if ($line -eq ": heartbeat") {
+                        return @{
+                            status = [int]$response.StatusCode
+                            content_type = $contentType
+                            heartbeat = ": heartbeat"
+                        }
+                    }
+                }
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        finally {
+            if ($stream) {
+                $stream.Dispose()
+            }
+        }
+    }
+    finally {
+        $response.Dispose()
+    }
+
+    throw "fallback event stream did not emit heartbeat before timeout"
+}
+
 function Assert-TextContains {
     param(
         [string]$Text,
@@ -359,6 +420,9 @@ try {
 
     $mediaDetails = Test-FallbackMediaPlayback -BaseUrl $baseUrl -Clips $clips
     Add-Check $checks "fallback media playback smoke" $true $mediaDetails
+
+    $eventStreamDetails = Test-FallbackEventStream -BaseUrl $baseUrl -TimeoutSeconds $TimeoutSeconds
+    Add-Check $checks "fallback event stream smoke" $true $eventStreamDetails
 
     if ($IncludeSaveReplay) {
         Invoke-FallbackCommand -BaseUrl $baseUrl -Command "save_replay" | Out-Null
