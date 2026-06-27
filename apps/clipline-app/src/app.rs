@@ -1865,7 +1865,7 @@ pub fn run() {
                 {
                     log_diagnostic(format!("forced fallback launch failed: {e}"));
                     eprintln!("forced fallback launch failed: {e}");
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, e).into());
+                    return Err(std::io::Error::other(e).into());
                 }
                 true
             } else {

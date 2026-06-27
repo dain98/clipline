@@ -1271,7 +1271,7 @@ where
     S: CloudHostState + ?Sized,
     R: Runtime,
 {
-    let target = validate_clip_path(&storage, &request.path)?;
+    let target = validate_clip_path(storage, &request.path)?;
     let settings = state.settings();
     let cloud = settings.cloud.clone();
     let token_target = cloud

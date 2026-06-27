@@ -305,9 +305,9 @@ pub(crate) fn delete_clip_for_host(path: String, settings: &StorageSettings) -> 
 }
 
 fn delete_clip_files(target: &Path) -> Result<(), String> {
-    std::fs::remove_file(&target).map_err(|e| e.to_string())?;
+    std::fs::remove_file(target).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(target.with_extension("markers.json"));
-    let _ = std::fs::remove_file(crate::poster::poster_path(&target));
+    let _ = std::fs::remove_file(crate::poster::poster_path(target));
     Ok(())
 }
 
