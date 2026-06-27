@@ -261,6 +261,10 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-27):
+- Nightly 0.1.16 contains the memory/duplicate-instance guard, close-to-tray playback suspension,
+  settings-draft preservation, replay Opus pre-skip fix, and rustfmt drift cleanup. The previous
+  public nightly metadata was 0.1.15, so the app and Tauri package versions were bumped to 0.1.16
+  for updater eligibility.
 - Close-to-tray now emits a frontend playback-suspend event before hiding the WebView, so review
   audio/video and pending preview work stop instead of continuing behind the tray session.
 - Settings now keep an explicit unsaved draft while the settings page is open. Tab switches and
