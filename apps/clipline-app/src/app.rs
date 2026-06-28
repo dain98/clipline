@@ -1468,6 +1468,7 @@ pub fn run() {
             crate::library::list_clips,
             crate::library::clip_poster,
             crate::library::delete_clip,
+            crate::library::delete_clips,
             crate::library::rename_clip,
             crate::library::export_clip,
             crate::library::preview_clip_audio_tracks,

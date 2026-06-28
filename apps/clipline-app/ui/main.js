@@ -92,6 +92,11 @@ let galleryFilter = "all";
 let gallerySort = "new";
 let galleryGroup = "smart";
 let gallerySearch = "";
+// Multi-select state for the local gallery. `selectMode` makes tile body
+// clicks toggle selection instead of opening the clip; `selectedClipPaths`
+// survives filter/sort/group/render rebuilds because it is keyed on `clip.path`.
+let selectedClipPaths = new Set();
+let selectMode = false;
 const posterCache = new Map();
 let currentSettings = null;
 let settingsDraft = null;
@@ -2423,7 +2428,11 @@ function observePoster(path, thumb) {
 
 function clipCard(c) {
   const el = document.createElement("article");
-  el.className = "card" + (currentClip && currentClip.path === c.path ? " active" : "");
+  const selected = selectedClipPaths.has(c.path);
+  el.className = "card"
+    + (currentClip && currentClip.path === c.path ? " active" : "")
+    + (selected ? " selected" : "");
+  el.dataset.clipPath = c.path;
   el.title = c.name;
   const cloudRecord = clipCloudRecord(c);
 
@@ -2539,6 +2548,10 @@ function clipCard(c) {
 
   // Clicking the open clip's card again closes it (back to the gallery).
   el.addEventListener("click", () => {
+    if (selectMode && gallerySource === "local") {
+      toggleClipSelection(c.path);
+      return;
+    }
     if (currentClip && currentClip.path === c.path) closeReview();
     else openClip(c);
   });
@@ -2549,6 +2562,87 @@ function clipCard(c) {
   });
 
   return el;
+}
+
+/* ---- gallery: multi-select + bulk actions ---- */
+
+// Update a single card's selection UI without a full re-render. Windows
+// backslashes make `[data-clip-path="..."]` fragile as a CSS selector, so
+// iterate the cards and match `dataset.clipPath` in JS instead.
+function applySelectionToCard(card, on) {
+  card.classList.toggle("selected", on);
+}
+
+function findClipCard(path) {
+  for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
+    if (card.dataset.clipPath === path) return card;
+  }
+  return null;
+}
+
+function toggleClipSelection(path) {
+  const on = selectedClipPaths.has(path);
+  if (on) selectedClipPaths.delete(path);
+  else selectedClipPaths.add(path);
+  const card = findClipCard(path);
+  if (card) applySelectionToCard(card, !on);
+  syncBulkBar();
+}
+
+function clearSelection() {
+  selectedClipPaths.clear();
+  for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
+    applySelectionToCard(card, false);
+  }
+  syncBulkBar();
+}
+
+function selectAllVisible() {
+  selectedClipPaths = new Set();
+  for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
+    if (!card.dataset.clipPath) continue;
+    selectedClipPaths.add(card.dataset.clipPath);
+    applySelectionToCard(card, true);
+  }
+  syncBulkBar();
+}
+
+function exitSelectMode() {
+  selectMode = false;
+  clearSelection();
+  syncSelectionControls();
+}
+
+function syncSelectToggleLabel() {
+  const toggle = $("gallery-select-toggle");
+  if (toggle) toggle.textContent = selectMode ? "Done" : "Select multiple";
+}
+
+function syncSelectionControls() {
+  if (gallerySource !== "local" && selectMode) {
+    selectMode = false;
+    clearSelection();
+  }
+  const toggle = $("gallery-select-toggle");
+  if (toggle) {
+    toggle.hidden = gallerySource !== "local";
+    toggle.classList.toggle("active", selectMode);
+    syncSelectToggleLabel();
+  }
+  const grid = $("gallery-grid");
+  if (grid) grid.classList.toggle("select-mode", selectMode && gallerySource === "local");
+  syncBulkBar();
+}
+
+function syncBulkBar() {
+  const bar = $("gallery-bulk-bar");
+  if (!bar) return;
+  const count = selectedClipPaths.size;
+  const visible = (selectMode || count > 0) && gallerySource === "local";
+  bar.hidden = !visible;
+  $("bulk-count").textContent = `${count} selected`;
+  const del = $("bulk-delete");
+  if (del) del.disabled = count === 0;
 }
 
 /* ---- gallery: filter / sort / group ---- */
@@ -2657,6 +2751,7 @@ function renderClips() {
   $("gallery-filter").hidden = showingCloud;
   $("gallery-group").hidden = showingCloud;
   $("gallery-sort").hidden = showingCloud;
+  syncSelectionControls();
   document.querySelectorAll("#gallery-source-tabs .source-tab").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.gallerySource === gallerySource);
   });
@@ -3787,14 +3882,27 @@ async function exportTrim() {
   }
 }
 
+const DEFAULT_DELETE_CONFIRM_TITLE = $("confirm-title").textContent;
+
 // In-app modal — the native browser prompt renders "tauri.localhost says".
 function confirmDelete(name) {
+  return confirmDeleteDialog("Delete this clip?", name);
+}
+
+function confirmBulkDelete(count) {
+  return confirmDeleteDialog(`Delete ${count} clips?`, "This cannot be undone.");
+}
+
+function confirmDeleteDialog(title, detail) {
   return new Promise((resolve) => {
     const dlg = $("confirm-dialog");
-    $("confirm-detail").textContent = name;
+    const titleEl = $("confirm-title");
+    titleEl.textContent = title;
+    $("confirm-detail").textContent = detail;
     const finish = (ok) => {
       dlg.removeEventListener("close", onClose);
       if (dlg.open) dlg.close();
+      titleEl.textContent = DEFAULT_DELETE_CONFIRM_TITLE;
       resolve(ok);
     };
     const onClose = () => finish(false); // Esc / backdrop paths
@@ -3803,6 +3911,25 @@ function confirmDelete(name) {
     $("confirm-accept").onclick = () => finish(true);
     dlg.showModal();
   });
+}
+
+function formatDeletionFailures(failed) {
+  return (failed || []).map(([p, m]) => `${p.split(/[\\/]/).pop()}: ${m}`).join("; ");
+}
+
+function deletionNotice(count) {
+  if (count <= 0) return "";
+  return count === 1 ? "deleted 1 clip" : `deleted ${count} clips`;
+}
+
+async function applyDeletion(removedPaths) {
+  const removed = new Set(removedPaths || []);
+  if (!removed.size) return;
+  const wasCurrent = currentClip && removed.has(currentClip.path);
+  clipsCache = clipsCache.filter((clip) => !removed.has(clip.path));
+  if (wasCurrent) closeReview();
+  else renderClips();
+  await refreshStorage();
 }
 
 function confirmQuit() {
@@ -3897,13 +4024,9 @@ async function deleteClip(path = currentClip && currentClip.path) {
   if (!(await confirmDelete(name))) return;
   try {
     await invoke("delete_clip", { path });
+    await applyDeletion([path]);
     setNotice("clip deleted", { transient: true });
     $("error").textContent = "";
-    const wasCurrent = currentClip && currentClip.path === path;
-    clipsCache = clipsCache.filter((clip) => clip.path !== path);
-    if (wasCurrent) closeReview();
-    else renderClips();
-    await refreshStorage();
   } catch (e) {
     $("error").textContent = e;
   }
@@ -4132,6 +4255,22 @@ async function uploadClipToCloud(clip, request = {}) {
   }
 }
 
+async function bulkDeleteSelected() {
+  const paths = [...selectedClipPaths];
+  if (!paths.length) return;
+  if (!(await confirmBulkDelete(paths.length))) return;
+  try {
+    const report = await invoke("delete_clips", { paths });
+    await applyDeletion(report.deleted);
+    const notice = deletionNotice(report.deleted.length);
+    if (notice) setNotice(notice, { transient: true });
+    $("error").textContent = formatDeletionFailures(report.failed);
+    clearSelection();
+  } catch (e) {
+    $("error").textContent = String(e);
+  }
+}
+
 /* ---- backend events ---- */
 
 listen("status", (e) => {
@@ -4216,9 +4355,19 @@ $("gallery-source-tabs").addEventListener("click", (ev) => {
   const tab = ev.target.closest(".source-tab");
   if (!tab) return;
   gallerySource = tab.dataset.gallerySource === "cloud" ? "cloud" : "local";
+  if (gallerySource === "cloud") exitSelectMode();
   renderClips();
   if (gallerySource === "cloud") loadCloudClips({ force: true });
 });
+$("gallery-select-toggle").addEventListener("click", () => {
+  selectMode = !selectMode;
+  if (!selectMode) clearSelection();
+  syncSelectionControls();
+});
+$("bulk-select-all").addEventListener("click", selectAllVisible);
+$("bulk-clear").addEventListener("click", clearSelection);
+$("bulk-cancel").addEventListener("click", exitSelectMode);
+$("bulk-delete").addEventListener("click", bulkDeleteSelected);
 $("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });
 $("gallery-group").addEventListener("change", (ev) => { galleryGroup = ev.target.value; renderClips(); });
 $("gallery-filter").addEventListener("click", (ev) => {
@@ -4544,6 +4693,21 @@ document.addEventListener("keydown", (ev) => {
     ev.preventDefault();
     $("keys-dialog").showModal();
     return;
+  }
+  // Gallery multi-select shortcuts (only when the library view is shown).
+  const galleryVisible = !$("gallery-view").hidden;
+  if (galleryVisible && !currentClip && (selectMode || selectedClipPaths.size > 0)) {
+    if (ev.code === "Escape") {
+      ev.preventDefault();
+      if (selectedClipPaths.size > 0) clearSelection();
+      else exitSelectMode();
+      return;
+    }
+    if (ev.code === "KeyA" && ev.ctrlKey && selectMode) {
+      ev.preventDefault();
+      selectAllVisible();
+      return;
+    }
   }
   if (!currentClip) return;
   const intent = keyIntent(ev.code, ev.shiftKey);

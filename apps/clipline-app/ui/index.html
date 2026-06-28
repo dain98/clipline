@@ -90,12 +90,27 @@
           </select>
         </header>
         <div id="gallery-filter" class="gallery-filter">
-          <button class="g-chip on" data-filter="all" type="button">All</button>
-          <button class="g-chip" data-filter="replay" type="button"><span class="g-dot" style="background:var(--ok)"></span>Replays</button>
-          <button class="g-chip" data-filter="session" type="button"><span class="g-dot" style="background:var(--session)"></span>Sessions</button>
-          <button class="g-chip" data-filter="trim" type="button"><span class="g-dot" style="background:var(--marker)"></span>Trims</button>
-          <span class="g-sep"></span>
-          <button class="g-chip" data-filter="marked" type="button">Has markers</button>
+          <div class="gallery-filter-row">
+            <div class="gallery-filter-chips">
+              <button class="g-chip on" data-filter="all" type="button">All</button>
+              <button class="g-chip" data-filter="replay" type="button"><span class="g-dot" style="background:var(--ok)"></span>Replays</button>
+              <button class="g-chip" data-filter="session" type="button"><span class="g-dot" style="background:var(--session)"></span>Sessions</button>
+              <button class="g-chip" data-filter="trim" type="button"><span class="g-dot" style="background:var(--marker)"></span>Trims</button>
+              <span class="g-sep"></span>
+              <button class="g-chip" data-filter="marked" type="button">Has markers</button>
+            </div>
+            <div class="gallery-filter-actions">
+              <button id="gallery-select-toggle" class="gallery-select-toggle" type="button" hidden>Select multiple</button>
+            </div>
+          </div>
+          <div id="gallery-bulk-bar" class="gallery-bulk-bar" hidden>
+            <span id="bulk-count" class="bulk-count"></span>
+            <button id="bulk-select-all" type="button">Select all</button>
+            <button id="bulk-clear" type="button">Clear</button>
+            <span class="g-sep"></span>
+            <button id="bulk-delete" class="danger-text" type="button">Delete</button>
+            <button id="bulk-cancel" type="button">Cancel</button>
+          </div>
         </div>
         <div id="gallery-grid" class="gallery-grid"></div>
         <div id="cloud-gallery-grid" class="cloud-gallery-grid" hidden></div>
@@ -687,7 +702,7 @@
 
   <dialog id="confirm-dialog">
     <div class="confirm-body">
-      <strong>Delete this clip?</strong>
+      <strong id="confirm-title">Delete this clip?</strong>
       <span id="confirm-detail"></span>
       <span class="hint">The file and its markers are removed from disk.</span>
     </div>
