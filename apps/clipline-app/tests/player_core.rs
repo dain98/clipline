@@ -1572,6 +1572,41 @@ fn game_event_rail_item_marks_deaths_enemy() {
 }
 
 #[test]
+fn game_event_rail_item_formats_actor_objectives_with_portrait_and_icon() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const OBJECTIVE_SUMMARY = {
+          player_name: 'dain',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'dain', champion_name: 'Nautilus', team: 'ORDER' },
+            { player_name: 'Jinmee', champion_name: 'Ezreal', team: 'ORDER' }
+          ]
+        };
+        const OBJECTIVE_PRESENTATION = {
+          marker_kinds: {
+            TurretKilled: {
+              category: 'structure',
+              icon: 'data:image/png;base64,turret-icon'
+            }
+          }
+        };
+        const OBJECTIVE_OPTIONS = { data_dragon: { version: '16.13.1' } };
+        "#,
+    ))
+    .expect("define objective rail inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'TurretKilled', actor: 'Jinmee', t_s: 445 }, OBJECTIVE_SUMMARY, OBJECTIVE_PRESENTATION, OBJECTIVE_OPTIONS)"
+        ),
+        r#"{"layout":"actor_event","kind":"TurretKilled","category":"structure","allegiance":"friendly","label":"Turret Killed","text":"Turret Killed · Jinmee","icon":"data:image/png;base64,turret-icon","actor":{"name":"Jinmee","champion":"Ezreal","team":"ORDER","assetKey":"Ezreal","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Ezreal.png","initials":"JI","local":false}}"#
+    );
+}
+
+#[test]
 fn game_event_rail_item_falls_back_without_participants() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(

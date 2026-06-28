@@ -2538,6 +2538,17 @@ function renderGameEventRail(clip = currentClip) {
         gameEventIcon(view, marker, presentation),
         gameEventPortrait(view.victim),
       );
+    } else if (view.layout === "actor_event" && view.actor) {
+      const label = document.createElement("span");
+      label.className = "game-event-objective-label";
+      label.textContent = view.label || view.text || markerEventText(marker, presentation);
+      button.classList.add("game-event-actor-event");
+      button.append(
+        time,
+        gameEventPortrait(view.actor),
+        gameEventIcon(view, marker, presentation),
+        label,
+      );
     } else {
       const label = document.createElement("span");
       label.className = "game-event-label";

@@ -2074,24 +2074,30 @@ label span { white-space: nowrap; }
   min-height: 72px;
   padding: 7px;
 }
-.game-event-row-friendly {
+.game-event-rail ol button.game-event-actor-event {
+  grid-template-columns: 38px minmax(46px, 0.85fr) 30px minmax(0, 1fr);
+  gap: 6px;
+  min-height: 72px;
+  padding: 7px;
+}
+.game-event-rail ol button.game-event-row-friendly {
   border-color: rgba(59, 130, 246, 0.42);
   background: linear-gradient(90deg, rgba(37, 99, 235, 0.16), rgba(255, 255, 255, 0.035));
 }
-.game-event-row-enemy {
+.game-event-rail ol button.game-event-row-enemy {
   border-color: rgba(248, 113, 113, 0.42);
   background: linear-gradient(90deg, rgba(185, 28, 28, 0.16), rgba(255, 255, 255, 0.035));
 }
-.game-event-row-neutral {
+.game-event-rail ol button.game-event-row-neutral {
   border-color: rgba(148, 163, 184, 0.24);
 }
-.game-event-row-friendly:hover,
-.game-event-row-friendly.active {
+.game-event-rail ol button.game-event-row-friendly:hover,
+.game-event-rail ol button.game-event-row-friendly.active {
   border-color: rgba(96, 165, 250, 0.72);
   background: linear-gradient(90deg, rgba(37, 99, 235, 0.24), rgba(59, 130, 246, 0.1));
 }
-.game-event-row-enemy:hover,
-.game-event-row-enemy.active {
+.game-event-rail ol button.game-event-row-enemy:hover,
+.game-event-rail ol button.game-event-row-enemy.active {
   border-color: rgba(252, 165, 165, 0.72);
   background: linear-gradient(90deg, rgba(185, 28, 28, 0.24), rgba(248, 113, 113, 0.1));
 }
@@ -2106,6 +2112,15 @@ label span { white-space: nowrap; }
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
+}
+.game-event-objective-label {
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .game-event-rail .game-event-participant {
   display: grid;
@@ -2135,8 +2150,8 @@ label span { white-space: nowrap; }
 .game-event-rail .game-event-kind-icon {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: rgba(8, 10, 14, 0.42);
@@ -2146,8 +2161,9 @@ label span { white-space: nowrap; }
 }
 .game-event-rail .game-event-kind-icon img {
   display: block;
-  width: 18px;
-  height: 18px;
+  width: 23px;
+  height: 23px;
+  margin: auto;
   object-fit: contain;
 }
 .game-event-rail .game-event-name {

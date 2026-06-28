@@ -873,6 +873,13 @@ const PlayerCore = (() => {
         item.actor = actor;
         item.victim = victim;
       }
+    } else if (item.icon && (category === "objective" || category === "structure")) {
+      const actor = participantSlot(marker && marker.actor, summary, presentation, options);
+      if (actor) {
+        item.layout = "actor_event";
+        item.allegiance = eventAllegiance(marker, summary, actor);
+        item.actor = actor;
+      }
     }
 
     return item;

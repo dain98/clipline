@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "package_version": "1.2.3",
+  "package_version": "1.2.4",
   "id": "league_of_legends",
   "name": "League of Legends",
   "summary": "Auto-records full matches when the in-game window is active.",
