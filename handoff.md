@@ -284,6 +284,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-27):
+- Nightly 0.1.17 contains the local clip-library multi-select/bulk-delete workflow and the
+  replay-audio fixes from PR #61. The previous public nightly metadata was 0.1.16, so the
+  app and Tauri package versions were bumped to 0.1.17 for updater eligibility.
+- Replay muxing now avoids carrying non-zero Opus pre-skip into freshly cut replay clips and
+  selects the intended WASAPI loopback process tree, fixing the start-of-clip audio burst and
+  the Steam-track tunnel/phase artifact observed in newly recorded clips.
 - Nightly 0.1.16 contains the memory/duplicate-instance guard, close-to-tray playback suspension,
   settings-draft preservation, replay Opus pre-skip fix, and rustfmt drift cleanup. The previous
   public nightly metadata was 0.1.15, so the app and Tauri package versions were bumped to 0.1.16
