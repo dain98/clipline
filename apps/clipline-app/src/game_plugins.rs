@@ -448,10 +448,10 @@ pub fn known_first_party_package_release(plugin_id: &str) -> Option<KnownFirstPa
     match plugin_id {
         LEAGUE_OF_LEGENDS_ID => Some(KnownFirstPartyPackageRelease {
             plugin_id: LEAGUE_OF_LEGENDS_ID,
-            version: Version::parse("1.3.1").expect("known League package version is valid"),
+            version: Version::parse("1.3.2").expect("known League package version is valid"),
             source_label: "clipline-plugin-league-of-legends",
-            url: "https://github.com/dain98/clipline-plugin-league-of-legends/releases/download/v1.3.1/clipline-plugin-league-of-legends-1.3.1.zip",
-            sha256: "f1d5bc497abadb9497144e9adfbfb4c164bf32956149e6451ff4a28cde97403e",
+            url: "https://github.com/dain98/clipline-plugin-league-of-legends/releases/download/v1.3.2/clipline-plugin-league-of-legends-1.3.2.zip",
+            sha256: "49f31c471c1b9f9af48066a5fa8bad3ecda3f397b25da01a2c73bea8e697d18a",
         }),
         _ => None,
     }
@@ -890,7 +890,7 @@ fn install_state(receipt: &InstalledPluginRecord) -> &'static str {
 
 const LEAGUE_SEED_MANIFEST_JSON: &str = r#"{
   "schema_version": 1,
-  "package_version": "1.2.2",
+  "package_version": "1.2.3",
   "id": "league_of_legends",
   "name": "League of Legends",
   "summary": "Auto-records full matches when the in-game window is active.",
@@ -924,7 +924,8 @@ const LEAGUE_SEED_MANIFEST_JSON: &str = r#"{
     },
     "event_rail": {
       "enabled": true,
-      "title": "Match events"
+      "title": "Match events",
+      "layout": "kill_feed"
     },
     "metadata_panel": {
       "enabled": true,
@@ -1135,6 +1136,12 @@ mod tests {
             Some("16.13.1")
         );
         assert_eq!(
+            presentation
+                .pointer("/event_rail/layout")
+                .and_then(serde_json::Value::as_str),
+            Some("kill_feed")
+        );
+        assert_eq!(
             portrait
                 .get("asset_provider")
                 .and_then(serde_json::Value::as_str),
@@ -1228,8 +1235,8 @@ mod tests {
 
         let info = plugin.info();
 
-        assert_eq!(release.version.to_string(), "1.3.1");
-        assert_eq!(info.latest_version.as_deref(), Some("1.3.1"));
+        assert_eq!(release.version.to_string(), "1.3.2");
+        assert_eq!(info.latest_version.as_deref(), Some("1.3.2"));
         assert_eq!(
             info.latest_source_label.as_deref(),
             Some("clipline-plugin-league-of-legends")

@@ -54,6 +54,7 @@ const {
   markerStyle,
   markerDigest,
   gameEventActiveIndex,
+  gameEventRailItem,
   playerSummaryLabel,
   playerSummaryFields,
   rulerMarksRange,
@@ -2410,6 +2411,51 @@ function markerEventText(marker, presentation) {
   return `${label}${actor}`;
 }
 
+function gameEventPortrait(slot) {
+  const root = document.createElement("span");
+  root.className = "game-event-participant";
+  const portrait = document.createElement("span");
+  portrait.className = "game-event-portrait";
+  portrait.title = slot.champion ? `${slot.champion} · ${slot.name}` : slot.name;
+  if (slot.asset) {
+    const img = document.createElement("img");
+    img.src = slot.asset;
+    img.alt = slot.champion || slot.name;
+    img.addEventListener("error", () => {
+      img.remove();
+      portrait.textContent = slot.initials || "?";
+    }, { once: true });
+    portrait.appendChild(img);
+  } else {
+    portrait.textContent = slot.initials || "?";
+  }
+  const name = document.createElement("span");
+  name.className = "game-event-name";
+  name.textContent = slot.name || slot.champion || "?";
+  root.append(portrait, name);
+  return root;
+}
+
+function gameEventIcon(view, marker, presentation) {
+  const icon = document.createElement("span");
+  icon.className = "game-event-kind-icon";
+  icon.title = view.label || markerDisplayLabel(marker, presentation);
+  if (view.icon) {
+    const img = document.createElement("img");
+    img.src = view.icon;
+    img.alt = "";
+    img.setAttribute("aria-hidden", "true");
+    img.addEventListener("error", () => {
+      img.remove();
+      icon.textContent = markerStyle(marker.kind, presentation).glyph;
+    }, { once: true });
+    icon.appendChild(img);
+  } else {
+    icon.textContent = markerStyle(marker.kind, presentation).glyph;
+  }
+  return icon;
+}
+
 let activeGameEventIndex = -1;
 let selectedGameEventIndex = -1;
 let selectedGameEventTime = null;
@@ -2469,21 +2515,35 @@ function renderGameEventRail(clip = currentClip) {
   title.textContent = eventRail.title || (clip && clip.game ? `${clip.game.name} events` : "Game events");
   summary.textContent = markerSummary(markers);
   list.replaceChildren();
+  const playerSummary = clip && clip.markers ? clip.markers.player_summary : null;
   markers.forEach((marker, index) => {
     const item = document.createElement("li");
     const button = document.createElement("button");
+    const view = gameEventRailItem(marker, playerSummary, presentation, {
+      data_dragon: presentation && presentation.data_dragon,
+    });
     button.type = "button";
     button.setAttribute("data-game-event-index", String(index));
     button.setAttribute("data-game-event-time", String(marker.t_s || 0));
-    button.className = `marker-${markerStyle(marker.kind, presentation).cls}`;
+    button.className = `marker-${view.category} game-event-row-${view.allegiance || "neutral"}`;
     const time = document.createElement("span");
     time.className = "game-event-time";
     time.textContent = fmtDur(marker.t_s || 0);
-    const label = document.createElement("span");
-    label.className = "game-event-label";
-    label.textContent = markerEventText(marker, presentation);
     button.title = markerDisplayLabel(marker, presentation);
-    button.append(time, label);
+    if (view.layout === "duel" && view.actor && view.victim) {
+      button.classList.add("game-event-duel");
+      button.append(
+        time,
+        gameEventPortrait(view.actor),
+        gameEventIcon(view, marker, presentation),
+        gameEventPortrait(view.victim),
+      );
+    } else {
+      const label = document.createElement("span");
+      label.className = "game-event-label";
+      label.textContent = view.text || markerEventText(marker, presentation);
+      button.append(time, label);
+    }
     button.addEventListener("click", () => {
       const markerTime = marker.t_s || 0;
       selectGameEvent(index, markerTime);

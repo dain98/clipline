@@ -1502,6 +1502,102 @@ fn player_summary_fields_resolve_data_dragon_portraits() {
 }
 
 #[test]
+fn game_event_rail_item_formats_duel_with_data_dragon_portraits() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const RAIL_SUMMARY = {
+          player_name: 'dain',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'dain', champion_name: 'Nautilus', team: 'ORDER' },
+            { player_name: 'Soupmaster', champion_name: 'Ahri', team: 'CHAOS' }
+          ]
+        };
+        const RAIL_PRESENTATION = {
+          marker_kinds: {
+            ChampionKill: {
+              category: 'kill',
+              icon: 'data:image/png;base64,kill-icon'
+            }
+          }
+        };
+        const RAIL_OPTIONS = { data_dragon: { version: '16.13.1' } };
+        "#,
+    ))
+    .expect("define rail inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'ChampionKill', actor: 'dain', victim: 'Soupmaster', t_s: 162 }, RAIL_SUMMARY, RAIL_PRESENTATION, RAIL_OPTIONS)"
+        ),
+        r#"{"layout":"duel","kind":"ChampionKill","category":"kill","allegiance":"friendly","label":"Champion Kill","text":"Champion Kill · dain","icon":"data:image/png;base64,kill-icon","actor":{"name":"dain","champion":"Nautilus","team":"ORDER","assetKey":"Nautilus","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Nautilus.png","initials":"DA","local":true},"victim":{"name":"Soupmaster","champion":"Ahri","team":"CHAOS","assetKey":"Ahri","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Ahri.png","initials":"SO","local":false}}"#
+    );
+}
+
+#[test]
+fn game_event_rail_item_marks_deaths_enemy() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const DEATH_SUMMARY = {
+          player_name: 'dain',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'dain', champion_name: 'Nautilus', team: 'ORDER' },
+            { player_name: 'Kcrystal', champion_name: 'Zed', team: 'CHAOS' }
+          ]
+        };
+        const DEATH_PRESENTATION = {
+          marker_kinds: {
+            ChampionDeath: {
+              category: 'death',
+              icon: 'data:image/png;base64,death-icon'
+            }
+          }
+        };
+        const DEATH_OPTIONS = { data_dragon: { version: '16.13.1' } };
+        "#,
+    ))
+    .expect("define death rail inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'ChampionDeath', actor: 'Kcrystal', victim: 'dain', t_s: 160 }, DEATH_SUMMARY, DEATH_PRESENTATION, DEATH_OPTIONS)"
+        ),
+        r#"{"layout":"duel","kind":"ChampionDeath","category":"death","allegiance":"enemy","label":"Champion Death","text":"Champion Death · Kcrystal","icon":"data:image/png;base64,death-icon","actor":{"name":"Kcrystal","champion":"Zed","team":"CHAOS","assetKey":"Zed","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Zed.png","initials":"KC","local":false},"victim":{"name":"dain","champion":"Nautilus","team":"ORDER","assetKey":"Nautilus","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Nautilus.png","initials":"DA","local":true}}"#
+    );
+}
+
+#[test]
+fn game_event_rail_item_falls_back_without_participants() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const FALLBACK_PRESENTATION = {
+          marker_kinds: {
+            ChampionKill: {
+              category: 'kill',
+              icon: 'data:image/png;base64,kill-icon'
+            }
+          }
+        };
+        "#,
+    ))
+    .expect("define fallback rail inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'ChampionKill', actor: 'dain', victim: 'Soupmaster', t_s: 162 }, null, FALLBACK_PRESENTATION, {})"
+        ),
+        r#"{"layout":"text","kind":"ChampionKill","category":"kill","allegiance":"friendly","label":"Champion Kill","text":"Champion Kill · dain","icon":"data:image/png;base64,kill-icon"}"#
+    );
+}
+
+#[test]
 fn session_groups_bucket_and_sort_by_newest() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(

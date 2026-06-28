@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "package_version": "1.2.2",
+  "package_version": "1.2.3",
   "id": "league_of_legends",
   "name": "League of Legends",
   "summary": "Auto-records full matches when the in-game window is active.",
@@ -79,7 +79,8 @@
     },
     "event_rail": {
       "enabled": true,
-      "title": "Match events"
+      "title": "Match events",
+      "layout": "kill_feed"
     },
     "metadata_panel": {
       "enabled": true,

@@ -2054,6 +2054,7 @@ label span { white-space: nowrap; }
   gap: 8px;
   width: 100%;
   height: auto;
+  min-height: 38px;
   min-width: 0;
   padding: 7px 8px;
   border: 1px solid var(--line);
@@ -2067,6 +2068,33 @@ label span { white-space: nowrap; }
   border-color: var(--line-strong);
   background: rgba(59, 130, 246, 0.13);
 }
+.game-event-rail ol button.game-event-duel {
+  grid-template-columns: 38px minmax(46px, 1fr) 28px minmax(46px, 1fr);
+  gap: 6px;
+  min-height: 72px;
+  padding: 7px;
+}
+.game-event-row-friendly {
+  border-color: rgba(59, 130, 246, 0.42);
+  background: linear-gradient(90deg, rgba(37, 99, 235, 0.16), rgba(255, 255, 255, 0.035));
+}
+.game-event-row-enemy {
+  border-color: rgba(248, 113, 113, 0.42);
+  background: linear-gradient(90deg, rgba(185, 28, 28, 0.16), rgba(255, 255, 255, 0.035));
+}
+.game-event-row-neutral {
+  border-color: rgba(148, 163, 184, 0.24);
+}
+.game-event-row-friendly:hover,
+.game-event-row-friendly.active {
+  border-color: rgba(96, 165, 250, 0.72);
+  background: linear-gradient(90deg, rgba(37, 99, 235, 0.24), rgba(59, 130, 246, 0.1));
+}
+.game-event-row-enemy:hover,
+.game-event-row-enemy.active {
+  border-color: rgba(252, 165, 165, 0.72);
+  background: linear-gradient(90deg, rgba(185, 28, 28, 0.24), rgba(248, 113, 113, 0.1));
+}
 .game-event-time {
   color: var(--muted);
   font-size: 11.5px;
@@ -2078,6 +2106,59 @@ label span { white-space: nowrap; }
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
+}
+.game-event-rail .game-event-participant {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.game-event-rail .game-event-portrait {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #0c1017;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  overflow: hidden;
+}
+.game-event-rail .game-event-portrait img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.game-event-rail .game-event-kind-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(8, 10, 14, 0.42);
+  color: var(--text);
+  font-size: 13px;
+  overflow: hidden;
+}
+.game-event-rail .game-event-kind-icon img {
+  display: block;
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+.game-event-rail .game-event-name {
+  width: 100%;
+  min-width: 0;
+  color: var(--text);
+  font-size: 10.5px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .game-metadata-panel {
@@ -2160,7 +2241,7 @@ label span { white-space: nowrap; }
   }
   .game-event-rail ol {
     grid-auto-flow: column;
-    grid-auto-columns: minmax(180px, 1fr);
+    grid-auto-columns: minmax(220px, 1fr);
     overflow-x: auto;
     overflow-y: hidden;
   }

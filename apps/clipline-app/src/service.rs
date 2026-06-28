@@ -2094,6 +2094,9 @@ mod tests {
             kills,
             deaths,
             assists,
+            player_name: String::new(),
+            team: String::new(),
+            participants: Vec::new(),
         }
     }
 
@@ -2131,6 +2134,9 @@ mod tests {
             kills: 3,
             deaths: 4,
             assists: 23,
+            player_name: String::new(),
+            team: String::new(),
+            participants: Vec::new(),
         };
 
         let count = write_marker_sidecar(

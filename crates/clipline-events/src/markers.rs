@@ -20,14 +20,30 @@ pub struct ClipMarker {
     pub event: GameEvent,
 }
 
+/// One player in a game adapter's match summary roster.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerParticipant {
+    pub player_name: String,
+    pub champion_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub team: String,
+}
+
 /// Per-player match summary shown in library rows when a game adapter can
-/// provide it.
+/// provide it. Extra participant fields are optional so older sidecars remain
+/// readable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerSummary {
     pub champion_name: String,
     pub kills: u32,
     pub deaths: u32,
     pub assists: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub player_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub team: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<PlayerParticipant>,
 }
 
 /// One user-facing audio stream inside a saved clip.
@@ -170,6 +186,9 @@ mod tests {
             kills: 3,
             deaths: 4,
             assists: 23,
+            player_name: String::new(),
+            team: String::new(),
+            participants: Vec::new(),
         });
         clip.audio_tracks = vec![ClipAudioTrack {
             id: "output".into(),
@@ -204,5 +223,23 @@ mod tests {
         assert!(back.player_summary.is_none());
         assert!(back.audio_tracks.is_empty());
         assert!(back.markers.is_empty());
+    }
+
+    #[test]
+    fn player_summary_defaults_missing_participant_data() {
+        let json = r#"{
+          "champion_name": "Nautilus",
+          "kills": 3,
+          "deaths": 4,
+          "assists": 23
+        }"#;
+
+        let summary: PlayerSummary = serde_json::from_str(json).unwrap();
+
+        assert_eq!(summary.champion_name, "Nautilus");
+        assert_eq!((summary.kills, summary.deaths, summary.assists), (3, 4, 23));
+        assert!(summary.player_name.is_empty());
+        assert!(summary.team.is_empty());
+        assert!(summary.participants.is_empty());
     }
 }

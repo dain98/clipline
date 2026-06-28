@@ -290,13 +290,15 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      closed marker vocabulary but cannot add event kinds or change persistence policy. The review
      player now threads presentation into pure `player-core.js` marker helpers and `main.js`
      renders plugin-driven gallery summaries, marker styling, a playback-synced, pull-tab-collapsible
-     right-side event rail, and a declarative bottom metadata strip. League's metadata strip now
-     resolves the champion portrait through the Riot Data Dragon champion-square provider plus
-     champion + K/D/A from the existing sidecar summary; richer stats such as CS/min require additive
-     summary data later.
+     right-side event rail, and a declarative bottom metadata strip. League's Live Client summary
+     now keeps optional participant/team roster data so the event rail can render kill-feed-style
+     actor/victim champion portraits from Data Dragon, with blue/red row treatment for local kills
+     and deaths. League's metadata strip resolves the local champion portrait through the Riot Data
+     Dragon champion-square provider plus champion + K/D/A from the sidecar summary; richer stats
+     such as CS/min require additive summary data later.
      Settings > Games shows backend-driven first-party package actions (check/update/reinstall/
      reset-to-seed). League now also has the separate public
-     `clipline-plugin-league-of-legends` repository with a v1.3.1 package zip; Clipline pins that
+     `clipline-plugin-league-of-legends` repository with a v1.3.2 package zip; Clipline pins that
      release URL and SHA-256 digest before activating the staged zip installer. Reset remains
      reset-to-seed, while update/reinstall install only this known first-party package. No arbitrary
      URL/package install is exposed.
@@ -668,8 +670,8 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
    already carry importance.
-2. **Signed plugin metadata:** the first external
-   `clipline-plugin-league-of-legends` v1.3.1 zip is published and Clipline pins its digest for
+2. **Signed plugin metadata:** the external
+   `clipline-plugin-league-of-legends` v1.3.2 zip is published and Clipline pins its digest for
    Settings > Games update/reinstall. The remaining hardening step is replacing the app-pinned
    single digest with a pinned signing key plus signed package metadata so future first-party plugin
    releases do not require a Clipline binary update; keep arbitrary URLs out of scope unless the

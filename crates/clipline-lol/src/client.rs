@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use clipline_events::PlayerSummary;
+use clipline_events::{PlayerParticipant, PlayerSummary};
 
 use crate::normalize::player_name_key;
 use crate::raw::{EventData, PlayerListEntry};
@@ -138,11 +138,30 @@ pub fn player_summary_from_list(
     if champion_name.is_empty() {
         return None;
     }
+    let participants = players
+        .iter()
+        .filter_map(|player| {
+            let player_name = player.summoner_name.trim();
+            let champion_name = player.champion_name.trim();
+            if player_name.is_empty() || champion_name.is_empty() {
+                return None;
+            }
+            Some(PlayerParticipant {
+                player_name: player_name.to_string(),
+                champion_name: champion_name.to_string(),
+                team: player.team.trim().to_string(),
+            })
+        })
+        .collect();
+
     Some(PlayerSummary {
         champion_name: champion_name.to_string(),
         kills: player.scores.kills,
         deaths: player.scores.deaths,
         assists: player.scores.assists,
+        player_name: player.summoner_name.trim().to_string(),
+        team: player.team.trim().to_string(),
+        participants,
     })
 }
 
@@ -189,6 +208,7 @@ mod tests {
             summoner_name: summoner_name.into(),
             riot_id: riot_id.map(str::to_string),
             champion_name: champion_name.into(),
+            team: String::new(),
             scores: PlayerScores {
                 kills,
                 deaths,
@@ -213,6 +233,41 @@ mod tests {
 
         let by_summoner = player_summary_from_list(&players, " DAIN ").unwrap();
         assert_eq!(by_summoner.champion_name, "Nautilus");
+    }
+
+    #[test]
+    fn player_summary_carries_participants_and_team() {
+        let players: Vec<PlayerListEntry> = serde_json::from_str(
+            r#"[
+              {
+                "summonerName": "dain",
+                "riotId": "Dain#NA1",
+                "championName": "Nautilus",
+                "team": "ORDER",
+                "scores": { "kills": 3, "deaths": 4, "assists": 23 }
+              },
+              {
+                "summonerName": "Soupmaster",
+                "riotId": "Soup#NA1",
+                "championName": "Ahri",
+                "team": "CHAOS",
+                "scores": { "kills": 7, "deaths": 2, "assists": 4 }
+              }
+            ]"#,
+        )
+        .unwrap();
+
+        let summary = player_summary_from_list(&players, "dain#NA1").unwrap();
+
+        assert_eq!(summary.player_name, "dain");
+        assert_eq!(summary.team, "ORDER");
+        assert_eq!(summary.participants.len(), 2);
+        assert_eq!(summary.participants[0].player_name, "dain");
+        assert_eq!(summary.participants[0].champion_name, "Nautilus");
+        assert_eq!(summary.participants[0].team, "ORDER");
+        assert_eq!(summary.participants[1].player_name, "Soupmaster");
+        assert_eq!(summary.participants[1].champion_name, "Ahri");
+        assert_eq!(summary.participants[1].team, "CHAOS");
     }
 
     #[test]

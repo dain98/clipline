@@ -55,6 +55,8 @@ pub struct PlayerListEntry {
     pub riot_id: Option<String>,
     #[serde(rename = "championName", default)]
     pub champion_name: String,
+    #[serde(rename = "team", default)]
+    pub team: String,
     #[serde(rename = "scores", default)]
     pub scores: PlayerScores,
 }
@@ -127,6 +129,7 @@ mod tests {
             "summonerName": "dain",
             "riotId": "Dain#NA1",
             "championName": "Nautilus",
+            "team": "ORDER",
             "scores": { "kills": 3, "deaths": 4, "assists": 23 }
           }
         ]"#;
@@ -134,6 +137,7 @@ mod tests {
         assert_eq!(players[0].summoner_name, "dain");
         assert_eq!(players[0].riot_id.as_deref(), Some("Dain#NA1"));
         assert_eq!(players[0].champion_name, "Nautilus");
+        assert_eq!(players[0].team, "ORDER");
         assert_eq!(players[0].scores.kills, 3);
         assert_eq!(players[0].scores.deaths, 4);
         assert_eq!(players[0].scores.assists, 23);

@@ -764,6 +764,120 @@ const PlayerCore = (() => {
     return out;
   };
 
+  const markerLabel = (kind, presentation) => {
+    const configured = markerKindConfig(kind, presentation);
+    return String(
+      configured.label
+        || String(kind || "Other").replace(/([a-z])([A-Z])/g, "$1 $2")
+    );
+  };
+
+  const markerEventText = (marker, presentation) => {
+    const label = markerLabel(marker && marker.kind, presentation);
+    const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
+    return `${label}${actor}`;
+  };
+
+  const playerIdentityKey = (value) => {
+    const trimmed = String(value || "").trim();
+    const withoutTag = trimmed.split("#")[0].trim();
+    return withoutTag.toLowerCase();
+  };
+
+  const playerInitials = (value) => {
+    const letters = String(value || "").match(/[A-Za-z0-9]/g) || [];
+    return (letters.slice(0, 2).join("").toUpperCase() || "?").slice(0, 2);
+  };
+
+  const eventRailDataDragonAliases = (presentation) => {
+    const fields = presentation
+      && presentation.metadata_panel
+      && Array.isArray(presentation.metadata_panel.fields)
+      ? presentation.metadata_panel.fields
+      : [];
+    const portrait = fields.find((field) =>
+      field
+        && field.asset_key_format === "data_dragon_champion"
+        && field.asset_aliases
+        && typeof field.asset_aliases === "object"
+    );
+    return portrait ? portrait.asset_aliases : {};
+  };
+
+  const participantForName = (summary, name) => {
+    const key = playerIdentityKey(name);
+    if (!key || !summary || !Array.isArray(summary.participants)) return null;
+    return summary.participants.find((participant) =>
+      playerIdentityKey(participant && participant.player_name) === key
+        || playerIdentityKey(participant && participant.champion_name) === key
+    ) || null;
+  };
+
+  const localPlayerKey = (summary) =>
+    playerIdentityKey(summary && (summary.player_name || summary.champion_name));
+
+  const localTeam = (summary) => String(summary && summary.team || "").trim();
+
+  const participantSlot = (name, summary, presentation, options) => {
+    const participant = participantForName(summary, name);
+    if (!participant) return null;
+    const displayName = String(name || participant.player_name || participant.champion_name || "").trim();
+    const champion = String(participant.champion_name || "").trim();
+    if (!displayName || !champion) return null;
+    const aliases = eventRailDataDragonAliases(presentation);
+    const assetKey = dataDragonChampionKey(champion, aliases);
+    const asset = dataDragonChampionSquareAsset(assetKey, options);
+    const slot = {
+      name: displayName,
+      champion,
+      team: String(participant.team || "").trim(),
+      assetKey,
+    };
+    if (asset) slot.asset = asset;
+    slot.initials = playerInitials(displayName);
+    slot.local = playerIdentityKey(displayName) === localPlayerKey(summary);
+    return slot;
+  };
+
+  const eventAllegiance = (marker, summary, actorSlot) => {
+    const kind = marker && marker.kind;
+    if (kind === "ChampionKill") return "friendly";
+    if (kind === "ChampionDeath") return "enemy";
+    const actorTeam = actorSlot && actorSlot.team ? actorSlot.team : "";
+    const ownTeam = localTeam(summary);
+    if (!actorTeam || !ownTeam) return "neutral";
+    return actorTeam === ownTeam ? "friendly" : "enemy";
+  };
+
+  const gameEventRailItem = (marker, summary = null, presentation = null, options = {}) => {
+    const kind = marker && marker.kind ? marker.kind : "Other";
+    const category = markerCategory(kind, presentation);
+    const label = markerLabel(kind, presentation);
+    const item = {
+      layout: "text",
+      kind,
+      category,
+      allegiance: eventAllegiance(marker, summary, null),
+      label,
+      text: markerEventText(marker, presentation),
+    };
+    const icon = markerKindConfig(kind, presentation).icon;
+    if (typeof icon === "string" && icon.trim()) item.icon = icon.trim();
+
+    if (kind === "ChampionKill" || kind === "ChampionDeath") {
+      const actor = participantSlot(marker && marker.actor, summary, presentation, options);
+      const victim = participantSlot(marker && marker.victim, summary, presentation, options);
+      if (actor && victim) {
+        item.layout = "duel";
+        item.allegiance = eventAllegiance(marker, summary, actor);
+        item.actor = actor;
+        item.victim = victim;
+      }
+    }
+
+    return item;
+  };
+
   const RULER_STEPS_S = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
 
   // Labeled marks at "nice" intervals across an arbitrary window. Picks the step
@@ -1170,6 +1284,7 @@ const PlayerCore = (() => {
     markerDigest,
     playerSummaryLabel,
     playerSummaryFields,
+    gameEventRailItem,
     rulerMarks,
     rulerMarksRange,
     sessionGroups,
