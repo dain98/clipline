@@ -480,6 +480,12 @@ Recent fixes (2026-06-19):
   audio is still preserved. Cloud upload records now supersede older records for the same clip
   path, so retrying with a different audio-track selection does not leave stale failed state in
   the library.
+- Review playback now treats any source MP4 with more than one audio track as needing the selected
+  audio preview/mix, even when every track is selected. This keeps default output+mic captures
+  audible in WebView2 and common share targets that only play the first track; if ffmpeg-based
+  mixing is unavailable, the app falls back to source playback without pinning a persistent error.
+  Local gallery poster failures are cached for the app session and stay on the gradient placeholder
+  instead of attaching per-card video elements that can hold Windows file locks.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
