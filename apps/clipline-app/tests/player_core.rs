@@ -596,10 +596,14 @@ fn multi_track_default_selection_requires_preview() {
             { id: 'output', kind: 'output', label: 'Output Audio' },
             { id: 'microphone', kind: 'microphone', label: 'Microphone' },
           ];
+          const singleTrack = [
+            { id: 'output', kind: 'output', label: 'Output Audio' },
+          ];
           return {
             splitDefault: PlayerCore.selectionNeedsPreview(splitTracks, PlayerCore.defaultAudioTrackIds(splitTracks)),
             normalDefault: PlayerCore.selectionNeedsPreview(normalTracks, PlayerCore.defaultAudioTrackIds(normalTracks)),
             normalPartial: PlayerCore.selectionNeedsPreview(normalTracks, ['microphone']),
+            singleDefault: PlayerCore.selectionNeedsPreview(singleTrack, PlayerCore.defaultAudioTrackIds(singleTrack)),
           };
         })()
         "#,
@@ -607,7 +611,7 @@ fn multi_track_default_selection_requires_preview() {
 
     assert_eq!(
         model,
-        r#"{"splitDefault":true,"normalDefault":true,"normalPartial":true}"#
+        r#"{"splitDefault":true,"normalDefault":true,"normalPartial":true,"singleDefault":false}"#
     );
 }
 

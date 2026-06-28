@@ -482,9 +482,10 @@ Recent fixes (2026-06-19):
   the library.
 - Review playback now treats any source MP4 with more than one audio track as needing the selected
   audio preview/mix, even when every track is selected. This keeps default output+mic captures
-  audible in WebView2 and common share targets that only play the first track. Local gallery posters
-  also fall back to a muted video frame when backend poster extraction or JPEG loading fails, so
-  cards are not stranded on the gradient placeholder.
+  audible in WebView2 and common share targets that only play the first track; if ffmpeg-based
+  mixing is unavailable, the app falls back to source playback without pinning a persistent error.
+  Local gallery poster failures are cached for the app session and stay on the gradient placeholder
+  instead of attaching per-card video elements that can hold Windows file locks.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window

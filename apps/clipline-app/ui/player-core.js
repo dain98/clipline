@@ -511,8 +511,8 @@ const PlayerCore = (() => {
 
   const selectionNeedsPreview = (tracks, selectedIds) => {
     const sourceIds = normalizedAudioTracks(tracks).map(audioTrackId).filter(Boolean);
-    const selected = selectedAudioTrackIds(tracks, selectedIds);
     if (sourceIds.length > 1) return true;
+    const selected = selectedAudioTrackIds(tracks, selectedIds);
     return sourceIds.length !== selected.length || sourceIds.some((id, index) => id !== selected[index]);
   };
 

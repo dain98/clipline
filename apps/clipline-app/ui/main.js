@@ -98,6 +98,7 @@ let gallerySearch = "";
 let selectedClipPaths = new Set();
 let selectMode = false;
 const posterCache = new Map();
+const POSTER_UNAVAILABLE = Symbol("poster unavailable");
 let currentSettings = null;
 let settingsDraft = null;
 let recordingActive = false;
@@ -131,6 +132,8 @@ let uploadDialogClip = null;
 let selectedAudioTrackIds = new Set();
 let uploadSelectedAudioTrackIds = new Set();
 let audioPreviewSeq = 0;
+let currentReviewAudioKey = null;
+let audioPreviewUnavailable = false;
 let currentReviewMediaPath = null;
 let renamePending = false;
 const DECK_STATUS_TOAST_MS = 3200;
@@ -223,10 +226,18 @@ function selectedAudioTrackIdsForClip(clip = currentClip, selected = selectedAud
   return PlayerCore.selectedAudioTrackIds(clipAudioTracks(clip), [...selected]);
 }
 
+function audioSelectionKey(clip = currentClip, selected = selectedAudioTrackIdsForClip(clip)) {
+  return `${clip && clip.path ? clip.path : ""}\n${selected.join("\n")}`;
+}
+
 function applyDefaultAudioSelectionIfNeeded({ shouldResume = false } = {}) {
   const tracks = clipAudioTracks();
   const selected = selectedAudioTrackIdsForClip();
-  if (!PlayerCore.selectionNeedsPreview(tracks, selected)) return false;
+  if (audioPreviewUnavailable && selected.length > 1) return false;
+  if (!PlayerCore.selectionNeedsPreview(tracks, selected)) {
+    currentReviewAudioKey = audioSelectionKey(currentClip, selected);
+    return false;
+  }
   applySelectedAudioTracksToPlayback({ forceResume: shouldResume });
   return true;
 }
@@ -2036,7 +2047,7 @@ function loadCloudThumbnail(entry, thumb) {
   const key = cloudThumbnailKey(entry);
   const cached = posterCache.get(key);
   if (cached) {
-    if (!thumb.querySelector(".card-thumb-img")) thumb.appendChild(makePosterImg(cached));
+    if (!thumb.querySelector(".card-thumb-img")) insertThumbMedia(thumb, makePosterImg(cached));
     return;
   }
   let pending = cloudThumbnailInflight.get(key);
@@ -2059,7 +2070,7 @@ function loadCloudThumbnail(entry, thumb) {
       const url = posterPath;
       if (!url) return;
       if (thumb.isConnected && !thumb.querySelector(".card-thumb-img")) {
-        thumb.appendChild(makePosterImg(url));
+        insertThumbMedia(thumb, makePosterImg(url));
       }
     })
     .catch(() => {});
@@ -2070,7 +2081,7 @@ function observeCloudThumbnail(entry, thumb) {
   const key = cloudThumbnailKey(entry);
   const cached = posterCache.get(key);
   if (cached) {
-    thumb.appendChild(makePosterImg(cached));
+    insertThumbMedia(thumb, makePosterImg(cached));
     return;
   }
   if (!posterObserver) {
@@ -2366,7 +2377,7 @@ function thumbGradient(c) {
 }
 
 function insertThumbMedia(thumb, media) {
-  const firstOverlay = thumb.querySelector(".card-play, .card-kind, .card-dur, .marker-strip, .card-del");
+  const firstOverlay = thumb.querySelector(".card-play, .card-kind, .card-dur, .card-markers, .card-del");
   thumb.insertBefore(media, firstOverlay || null);
 }
 
@@ -2375,66 +2386,33 @@ function makePosterImg(url, onError = null) {
   img.className = "card-thumb-img";
   img.src = url;
   img.alt = "";
-  img.addEventListener("error", () => onError && onError());
   img.addEventListener("error", () => {
-    if (!onError) img.remove();
+    img.remove();
+    if (onError) onError();
   });
   return img;
 }
 
-function posterFallbackSeekSeconds(clip) {
-  const markers = clip && clip.markers ? clip.markers : null;
-  const duration = Number(markers && markers.duration_s);
-  const durationOk = Number.isFinite(duration) && duration > 0;
-  const first = markers && Array.isArray(markers.markers) ? markers.markers[0] : null;
-  if (first) {
-    const t = Math.max(0, Number(first.t_s) || 0);
-    return durationOk ? Math.min(t, Math.max(0, duration - 0.2)) : t;
-  }
-  return durationOk ? Math.min(duration * 0.15, 5) : 1;
-}
-
-function makePosterFallbackVideo(path, clip) {
-  const video = document.createElement("video");
-  video.className = "card-thumb-img";
-  video.src = convertFileSrc(path);
-  video.muted = true;
-  video.preload = "metadata";
-  video.playsInline = true;
-  video.tabIndex = -1;
-  video.setAttribute("aria-hidden", "true");
-  video.addEventListener("loadedmetadata", () => {
-    const target = posterFallbackSeekSeconds(clip);
-    if (Number.isFinite(video.duration) && video.duration > 0) {
-      video.currentTime = Math.min(target, Math.max(0, video.duration - 0.2));
-    } else {
-      video.currentTime = target;
-    }
-  }, { once: true });
-  video.addEventListener("error", () => video.remove(), { once: true });
-  return video;
-}
-
-function showPosterFallback(path, thumb, clip) {
-  if (!thumb.isConnected || thumb.querySelector("video.card-thumb-img")) return;
-  const existing = thumb.querySelector(".card-thumb-img");
-  if (existing) existing.remove();
-  insertThumbMedia(thumb, makePosterFallbackVideo(path, clip));
+function markPosterUnavailable(path) {
+  posterCache.set(path, POSTER_UNAVAILABLE);
 }
 
 // Lazily fetch + cache a clip's poster, then drop it into its card thumbnail.
 // The backend caches the JPEG, so repeat calls are cheap after the first.
-function loadCardPoster(path, thumb, clip) {
+function loadCardPoster(path, thumb) {
   invoke("clip_poster", { path })
     .then((posterPath) => {
-      if (!posterPath) return;
+      if (!posterPath) {
+        markPosterUnavailable(path);
+        return;
+      }
       const url = convertFileSrc(posterPath);
       posterCache.set(path, url);
       if (thumb.isConnected && !thumb.querySelector(".card-thumb-img")) {
-        insertThumbMedia(thumb, makePosterImg(url, () => showPosterFallback(path, thumb, clip)));
+        insertThumbMedia(thumb, makePosterImg(url, () => markPosterUnavailable(path)));
       }
     })
-    .catch(() => showPosterFallback(path, thumb, clip));
+    .catch(() => markPosterUnavailable(path));
 }
 
 // Extracting a poster is an ffmpeg spawn, so we only request one once its card
@@ -2453,7 +2431,7 @@ const posterObserver =
             const request = posterQueue.get(thumb);
             posterQueue.delete(thumb);
             if (request && request.type === "local-poster") {
-              loadCardPoster(request.path, thumb, request.clip);
+              loadCardPoster(request.path, thumb);
             } else if (request && request.type === "cloud-thumbnail") {
               loadCloudThumbnail(request.entry, thumb);
             }
@@ -2465,12 +2443,12 @@ const posterObserver =
 
 // Request a clip's poster when its thumbnail nears the viewport — or right away
 // when IntersectionObserver is unavailable.
-function observePoster(path, thumb, clip) {
+function observePoster(path, thumb) {
   if (!posterObserver) {
-    loadCardPoster(path, thumb, clip);
+    loadCardPoster(path, thumb);
     return;
   }
-  posterQueue.set(thumb, { type: "local-poster", path, clip });
+  posterQueue.set(thumb, { type: "local-poster", path });
   posterObserver.observe(thumb);
 }
 
@@ -2502,8 +2480,13 @@ function clipCard(c) {
   thumb.className = "card-thumb";
   thumb.style.cssText = thumbGradient(c);
   const cachedPoster = posterCache.get(c.path);
-  if (cachedPoster) insertThumbMedia(thumb, makePosterImg(cachedPoster, () => showPosterFallback(c.path, thumb, c)));
-  else observePoster(c.path, thumb, c);
+  if (cachedPoster === POSTER_UNAVAILABLE) {
+    // Keep the stable gradient placeholder when extraction or image loading failed.
+  } else if (cachedPoster) {
+    insertThumbMedia(thumb, makePosterImg(cachedPoster, () => markPosterUnavailable(c.path)));
+  } else {
+    observePoster(c.path, thumb);
+  }
 
   const play = document.createElement("div");
   play.className = "card-play";
@@ -3056,16 +3039,30 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
   if (!clip || !tracks.length) return;
 
   const selected = selectedAudioTrackIdsForClip(clip);
-  if (!PlayerCore.selectionNeedsPreview(tracks, selected) && currentReviewMediaPath === clip.path) {
-    setDeckStatus(audioSelectionLabel(clip), { transient: true });
-    return;
-  }
-
-  const seq = ++audioPreviewSeq;
+  const selectionKey = audioSelectionKey(clip, selected);
   const resumeTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
   const shouldResume = forceResume || (!video.paused && !video.ended);
   const rate = video.playbackRate;
   const trimRange = { start: trimStart, end: trimEnd };
+  if (currentReviewAudioKey === audioSelectionKey(clip, selected)) {
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
+    return;
+  }
+  if (!PlayerCore.selectionNeedsPreview(tracks, selected) && currentReviewMediaPath === clip.path) {
+    currentReviewAudioKey = selectionKey;
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
+    return;
+  }
+  if (audioPreviewUnavailable && selected.length > 1) {
+    currentReviewAudioKey = null;
+    if (currentReviewMediaPath !== clip.path) {
+      setReviewVideoSource(clip.path, { resumeTime, shouldResume, rate, trimRange });
+    }
+    setDeckStatus("audio mix unavailable; playing source", { transient: true });
+    return;
+  }
+
+  const seq = ++audioPreviewSeq;
   setDeckStatus("switching audio tracks...");
   $("error").textContent = "";
   try {
@@ -3077,13 +3074,27 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
     });
     if (seq !== audioPreviewSeq || !currentClip || currentClip.path !== clip.path) return;
     setReviewVideoSource(path, { resumeTime, shouldResume, rate, trimRange });
+    currentReviewAudioKey = selectionKey;
     setDeckStatus(audioSelectionLabel(clip), { transient: true });
   } catch (e) {
     if (seq !== audioPreviewSeq) return;
-    setDeckStatus("");
-    $("error").textContent = String(e);
-    if (forceResume && currentClip && currentClip.path === clip.path) {
-      video.play().catch(() => syncPlayState());
+    const message = String(e);
+    if (message.includes("ffmpeg is not available for audio track mixing")) {
+      audioPreviewUnavailable = true;
+      if (currentClip && currentClip.path === clip.path) {
+        if (currentReviewMediaPath !== clip.path) {
+          setReviewVideoSource(clip.path, { resumeTime, shouldResume, rate, trimRange });
+        } else if (forceResume) {
+          video.play().catch(() => syncPlayState());
+        }
+      }
+      setDeckStatus("audio mix unavailable; playing source", { transient: true });
+    } else {
+      setDeckStatus("");
+      $("error").textContent = message;
+      if (forceResume && currentClip && currentClip.path === clip.path) {
+        video.play().catch(() => syncPlayState());
+      }
     }
   }
 }
@@ -3105,6 +3116,7 @@ function suspendReviewPlayback() {
   video.load();
   currentClip = null;
   currentReviewMediaPath = null;
+  currentReviewAudioKey = null;
   selectedAudioTrackIds = new Set();
   resetZoom();
   syncReviewLocalActions();
@@ -3191,6 +3203,7 @@ function openClip(clip) {
   pendingSeek = null;
   currentClip = clip;
   currentReviewMediaPath = clip.path;
+  currentReviewAudioKey = null;
   resetSelectedAudioTracks(clip);
   $("error").textContent = "";
   setDeckStatus("");
@@ -3228,6 +3241,7 @@ function closeReview() {
   video.load();
   currentClip = null;
   currentReviewMediaPath = null;
+  currentReviewAudioKey = null;
   syncReviewLocalActions();
   syncUploadClipButton();
   selectedAudioTrackIds = new Set();

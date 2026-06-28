@@ -731,7 +731,7 @@ fn rail_shows_connected_cloud_identity() {
 }
 
 #[test]
-fn audio_preview_generation_is_not_eager_on_clip_open() {
+fn default_audio_preview_is_gated_and_degrades_to_source_on_failure() {
     let js = main_js();
     let open_clip_start = js.find("function openClip(clip)").unwrap();
     let close_review_start = js.find("function closeReview()").unwrap();
@@ -761,13 +761,14 @@ fn audio_preview_generation_is_not_eager_on_clip_open() {
     );
     assert!(
         js.contains("function applyDefaultAudioSelectionIfNeeded({ shouldResume = false } = {})")
+            && js.contains("if (audioPreviewUnavailable && selected.length > 1) return false;")
             && js.contains("PlayerCore.selectionNeedsPreview")
             && js.contains("applySelectedAudioTracksToPlayback({ forceResume: shouldResume });"),
         "default audio application must be gated by PlayerCore.selectionNeedsPreview"
     );
     assert!(
-        js.contains("!PlayerCore.selectionNeedsPreview(tracks, selected) && currentReviewMediaPath === clip.path"),
-        "all-track playback should keep the source only when PlayerCore says no preview mix is needed"
+        js.contains("currentReviewAudioKey === audioSelectionKey(clip, selected)"),
+        "reapplying the same selected audio tracks should not remux the current review source"
     );
     assert!(
         js.contains("function applyCloudClipSyncResult(")
@@ -776,9 +777,11 @@ fn audio_preview_generation_is_not_eager_on_clip_open() {
         "cloud sync results must update or remove the local cloud record cache"
     );
     assert!(
-        js.contains("if (forceResume && currentClip && currentClip.path === clip.path) {")
-            && js.contains("video.play().catch(() => syncPlayState());"),
-        "preview generation failure while opening a clip must fall back to source playback"
+        js.contains("setDeckStatus(\"audio mix unavailable; playing source\", { transient: true });")
+            && js.contains("audioPreviewUnavailable = true;")
+            && js.contains("if (currentReviewMediaPath !== clip.path) {")
+            && js.contains("setReviewVideoSource(clip.path, { resumeTime, shouldResume, rate, trimRange });"),
+        "preview generation failure should fall back to source playback without a persistent error banner"
     );
     assert!(
         js.contains("function cloudUploadRecordForPath(path)")
@@ -1207,18 +1210,35 @@ fn library_has_cloud_source_tab() {
         "cloud-only cards should not render inline Play/Open/Copy buttons"
     );
     for required in [
-        "function makePosterFallbackVideo(path, clip)",
-        "function showPosterFallback(path, thumb, clip)",
-        "img.addEventListener(\"error\", () => onError && onError())",
-        ".catch(() => showPosterFallback(path, thumb, clip));",
-        "video.preload = \"metadata\"",
-        "video.currentTime =",
-        "loadCardPoster(path, thumb, clip)",
-        "observePoster(c.path, thumb, c)",
+        "const POSTER_UNAVAILABLE = Symbol(\"poster unavailable\")",
+        "function markPosterUnavailable(path)",
+        ".card-markers",
+        "img.addEventListener(\"error\", () => {",
+        "img.remove();",
+        "if (onError) onError();",
+        "posterCache.set(path, POSTER_UNAVAILABLE);",
+        "if (cachedPoster === POSTER_UNAVAILABLE) {",
+        ".catch(() => markPosterUnavailable(path));",
+        "loadCardPoster(path, thumb)",
+        "observePoster(c.path, thumb)",
+        "insertThumbMedia(thumb, makePosterImg(cached))",
+        "insertThumbMedia(thumb, makePosterImg(url))",
     ] {
         assert!(
             js.contains(required),
-            "local clip thumbnails must fall back to video frames through `{required}`"
+            "local clip thumbnails must safely cache poster failures and preserve overlays through `{required}`"
+        );
+    }
+    for forbidden in [
+        "function makePosterFallbackVideo(",
+        "function showPosterFallback(",
+        "video.className = \"card-thumb-img\"",
+        "img.addEventListener(\"error\", () => onError && onError())",
+        "thumb.appendChild(makePosterImg(cached))",
+    ] {
+        assert!(
+            !js.contains(forbidden),
+            "thumbnail fallbacks must not keep source media open or bypass overlay-safe insertion via `{forbidden}`"
         );
     }
     for required in [
