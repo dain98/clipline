@@ -507,11 +507,26 @@ fn game_event_active_index_honors_clicked_event_during_lead_in() {
         "const M = [{ t_s: 72 }, { t_s: 140 }, { t_s: 161 }];",
     ))
     .expect("define markers");
-    assert_eq!(eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 158)"), "1");
-    assert_eq!(eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 158, 2)"), "2");
-    assert_eq!(eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 161.2, 2)"), "2");
-    assert_eq!(eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 158, 99)"), "1");
-    assert_eq!(eval(&mut ctx, "PlayerCore.gameEventActiveIndex([], 158, 2)"), "-1");
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 158)"),
+        "1"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 158, 2)"),
+        "2"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 161.2, 2)"),
+        "2"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 158, 99)"),
+        "1"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.gameEventActiveIndex([], 158, 2)"),
+        "-1"
+    );
 }
 
 #[test]

@@ -52,6 +52,8 @@ struct GamePluginPackageStatus {
     plugin_id: String,
     installed_version: Option<String>,
     seed_version: Option<String>,
+    latest_version: Option<String>,
+    latest_source_label: Option<String>,
     install_state: String,
     update_available: bool,
     can_reset_to_seed: bool,
@@ -1169,14 +1171,39 @@ fn game_plugin_package_status(plugin_id: &str) -> Result<GamePluginPackageStatus
         return Err(format!("unknown game plugin {plugin_id:?}"));
     };
     let message = match plugin.install_state.as_str() {
-        "repair_available" => "Package can be reset from the bundled seed.".to_string(),
-        _ if plugin.update_available => "Bundled seed update is available.".to_string(),
-        _ => "Package is current for this Clipline build.".to_string(),
+        "repair_available" => {
+            if let Some(source) = plugin.latest_source_label.as_deref() {
+                format!("Package can be repaired from {source} or reset to the bundled seed.")
+            } else {
+                "Package can be reset from the bundled seed.".to_string()
+            }
+        }
+        _ if plugin.update_available => {
+            let source = plugin
+                .latest_source_label
+                .as_deref()
+                .unwrap_or("known first-party package");
+            let version = plugin
+                .latest_version
+                .as_deref()
+                .map(|version| format!(" v{version}"))
+                .unwrap_or_default();
+            format!("{source}{version} is available.")
+        }
+        _ => {
+            let source = plugin
+                .latest_source_label
+                .as_deref()
+                .unwrap_or("this Clipline build");
+            format!("Package is current for {source}.")
+        }
     };
     Ok(GamePluginPackageStatus {
         plugin_id: plugin.id,
         installed_version: plugin.installed_version,
         seed_version: plugin.seed_version,
+        latest_version: plugin.latest_version,
+        latest_source_label: plugin.latest_source_label,
         install_state: plugin.install_state,
         update_available: plugin.update_available,
         can_reset_to_seed: plugin.can_reset_to_seed,
@@ -1202,25 +1229,77 @@ fn reset_plugin_to_seed<R: Runtime>(
     Ok(crate::games::game_plugin_catalog())
 }
 
+async fn download_first_party_plugin_package(
+    release: &crate::game_plugins::KnownFirstPartyPackageRelease,
+) -> Result<PathBuf, String> {
+    let response = reqwest::get(release.url)
+        .await
+        .map_err(|e| format!("download game plugin package: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "download game plugin package from {} failed with HTTP {status}",
+            release.url
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("read game plugin package download: {e}"))?;
+    let download_dir = crate::settings::persistence::config_base().join("plugin-downloads");
+    tokio::fs::create_dir_all(&download_dir)
+        .await
+        .map_err(|e| format!("create game plugin download dir {download_dir:?}: {e}"))?;
+    let zip_path = download_dir.join(format!("{}-{}.zip", release.plugin_id, release.version));
+    tokio::fs::write(&zip_path, &bytes)
+        .await
+        .map_err(|e| format!("write game plugin package {zip_path:?}: {e}"))?;
+    Ok(zip_path)
+}
+
+async fn install_first_party_plugin_release(
+    plugin_id: &str,
+    require_newer: bool,
+) -> Result<Vec<GamePluginInfo>, String> {
+    let release = crate::game_plugins::known_first_party_package_release(plugin_id)
+        .ok_or_else(|| format!("no first-party release feed for game plugin {plugin_id:?}"))?;
+    if require_newer {
+        let current = crate::games::game_plugin_catalog()
+            .into_iter()
+            .find(|plugin| plugin.id == plugin_id)
+            .and_then(|plugin| plugin.installed_version)
+            .and_then(|version| semver::Version::parse(&version).ok());
+        if current
+            .as_ref()
+            .is_some_and(|version| version >= &release.version)
+        {
+            return Ok(crate::games::game_plugin_catalog());
+        }
+    }
+
+    let zip_path = download_first_party_plugin_package(&release).await?;
+    crate::game_plugins::install_verified_package_zip(
+        &zip_path,
+        release.sha256,
+        &crate::game_plugins::plugin_install_root(),
+        release.source_label,
+    )?;
+    Ok(crate::games::game_plugin_catalog())
+}
+
 #[tauri::command]
 fn check_game_plugin_package(plugin_id: String) -> Result<GamePluginPackageStatus, String> {
     game_plugin_package_status(&plugin_id)
 }
 
 #[tauri::command]
-fn update_game_plugin_package<R: Runtime>(
-    app: AppHandle<R>,
-    plugin_id: String,
-) -> Result<Vec<GamePluginInfo>, String> {
-    reset_plugin_to_seed(app, plugin_id)
+async fn update_game_plugin_package(plugin_id: String) -> Result<Vec<GamePluginInfo>, String> {
+    install_first_party_plugin_release(&plugin_id, true).await
 }
 
 #[tauri::command]
-fn reinstall_game_plugin_package<R: Runtime>(
-    app: AppHandle<R>,
-    plugin_id: String,
-) -> Result<Vec<GamePluginInfo>, String> {
-    reset_plugin_to_seed(app, plugin_id)
+async fn reinstall_game_plugin_package(plugin_id: String) -> Result<Vec<GamePluginInfo>, String> {
+    install_first_party_plugin_release(&plugin_id, false).await
 }
 
 #[tauri::command]

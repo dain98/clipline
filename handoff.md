@@ -293,10 +293,11 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      right-side event rail, and a declarative bottom metadata strip (League currently uses champion + K/D/A from the
      existing sidecar summary; richer stats such as CS/min require additive summary data later).
      Settings > Games shows backend-driven first-party package actions (check/update/reinstall/
-     reset-to-seed); update/reinstall/reset are intentionally bounded to the bundled seed until a
-     real signed external release feed exists. A staged zip installer with SHA-256 validation,
-     zip-slip rejection, manifest validation before activation, and rollback-on-failure tests is in
-     place for that follow-up, but no arbitrary URL/package install is exposed.
+     reset-to-seed). League now also has the separate public
+     `clipline-plugin-league-of-legends` repository with a v1.3.0 package zip; Clipline pins that
+     release URL and SHA-256 digest before activating the staged zip installer. Reset remains
+     reset-to-seed, while update/reinstall install only this known first-party package. No arbitrary
+     URL/package install is exposed.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -665,11 +666,12 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
    already carry importance.
-2. **External first-party plugin release feed:** create/publish
-   `clipline-plugin-league-of-legends` release zips, pin the expected signing key or digest in the
-   app, and wire Settings > Games update/reinstall to that feed. The in-app installer already has
-   staging/rollback, zip-slip, digest, manifest-schema, and unknown-capability tests; keep arbitrary
-   URLs out of scope unless the threat model changes.
+2. **Signed plugin metadata:** the first external
+   `clipline-plugin-league-of-legends` v1.3.0 zip is published and Clipline pins its digest for
+   Settings > Games update/reinstall. The remaining hardening step is replacing the app-pinned
+   single digest with a pinned signing key plus signed package metadata so future first-party plugin
+   releases do not require a Clipline binary update; keep arbitrary URLs out of scope unless the
+   threat model changes.
 3. **Frame-accurate trim polish** (ddoc §11): re-encode only boundary GOPs, keep the current
    stream-copy path as the instant/lossless mode.
 4. **In-app HEVC/AV1 playback** (ddoc §11): the encoder matrix (milestone 23) can record HEVC/AV1,

@@ -43,6 +43,8 @@ pub struct GamePluginInfo {
     pub event_markers: bool,
     pub installed_version: Option<String>,
     pub seed_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub latest_source_label: Option<String>,
     pub install_state: String,
     pub install_provenance: Option<String>,
     pub first_party: bool,
@@ -188,6 +190,15 @@ pub struct InstalledPluginRecord {
     pub signature: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct KnownFirstPartyPackageRelease {
+    pub plugin_id: &'static str,
+    pub version: Version,
+    pub source_label: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+}
+
 impl InstalledPluginRecord {
     pub fn new_for_seed(
         plugin_id: &str,
@@ -243,10 +254,23 @@ impl GamePlugin {
 
     pub fn info(&self) -> GamePluginInfo {
         let seed_version = seed_package_version(self.id());
-        let update_available = seed_version
+        let latest_release = known_first_party_package_release(self.id());
+        let mut latest_package = seed_version
             .as_ref()
-            .is_some_and(|version| version > &self.manifest.package_version);
-        let first_party = seed_version.is_some();
+            .map(|version| (version.clone(), "bundled seed".to_string()));
+        if let Some(release) = latest_release.as_ref() {
+            let release_package = (release.version.clone(), release.source_label.to_string());
+            if latest_package
+                .as_ref()
+                .is_none_or(|(version, _)| release_package.0 > *version)
+            {
+                latest_package = Some(release_package);
+            }
+        }
+        let update_available = latest_package
+            .as_ref()
+            .is_some_and(|(version, _)| version > &self.manifest.package_version);
+        let first_party = seed_version.is_some() || latest_release.is_some();
         GamePluginInfo {
             id: self.id().into(),
             name: self.manifest.name.clone(),
@@ -261,12 +285,16 @@ impl GamePlugin {
                 .is_some(),
             installed_version: Some(self.manifest.package_version.to_string()),
             seed_version: seed_version.as_ref().map(ToString::to_string),
+            latest_version: latest_package
+                .as_ref()
+                .map(|(version, _)| version.to_string()),
+            latest_source_label: latest_package.map(|(_, label)| label),
             install_state: install_state(&self.install).to_string(),
             install_provenance: Some(self.install.provenance.as_str().to_string()),
             first_party,
             update_available,
             can_reset_to_seed: first_party,
-            presentation: self.manifest.presentation.clone(),
+            presentation: self.presentation_value(),
             icon: self.icon_string(),
         }
     }
@@ -284,18 +312,45 @@ impl GamePlugin {
         match self.manifest.icon.as_ref()? {
             PluginIcon::UiAsset { path } => Some(path.clone()),
             PluginIcon::DataUrl { data } => Some(data.clone()),
-            PluginIcon::File { path } => self
-                .root_dir
-                .as_deref()
-                .and_then(|root| safe_relative_path(root, path))
-                .and_then(|path| std::fs::read(path).ok())
-                .map(|bytes| crate::game_icon::png_data_url(&bytes)),
+            PluginIcon::File { path } => self.package_file_data_url(path),
             PluginIcon::Extracted => {
                 let cache = plugin_icon_cache_path(self.id())?;
                 let bytes = std::fs::read(&cache).ok()?;
                 Some(crate::game_icon::png_data_url(&bytes))
             }
         }
+    }
+
+    fn presentation_value(&self) -> Option<serde_json::Value> {
+        let mut presentation = self.manifest.presentation.clone()?;
+        let Some(marker_kinds) = presentation
+            .get_mut("marker_kinds")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return Some(presentation);
+        };
+
+        for config in marker_kinds.values_mut() {
+            let Some(icon_value) = config.get_mut("icon") else {
+                continue;
+            };
+            let Some(icon_path) = icon_value.as_str() else {
+                continue;
+            };
+            let Some(data_url) = self.package_file_data_url(icon_path) else {
+                continue;
+            };
+            *icon_value = serde_json::Value::String(data_url);
+        }
+        Some(presentation)
+    }
+
+    fn package_file_data_url(&self, path: &str) -> Option<String> {
+        self.root_dir
+            .as_deref()
+            .and_then(|root| safe_relative_path(root, path))
+            .and_then(|path| std::fs::read(path).ok())
+            .map(|bytes| crate::game_icon::png_data_url(&bytes))
     }
 
     fn uses_extracted_icon(&self) -> bool {
@@ -385,6 +440,19 @@ pub fn display_name_for_game_id(game_id: GameId) -> &'static str {
 pub fn seed_package_version(plugin_id: &str) -> Option<Version> {
     match plugin_id {
         LEAGUE_OF_LEGENDS_ID => Some(league_seed_manifest().package_version),
+        _ => None,
+    }
+}
+
+pub fn known_first_party_package_release(plugin_id: &str) -> Option<KnownFirstPartyPackageRelease> {
+    match plugin_id {
+        LEAGUE_OF_LEGENDS_ID => Some(KnownFirstPartyPackageRelease {
+            plugin_id: LEAGUE_OF_LEGENDS_ID,
+            version: Version::parse("1.3.0").expect("known League package version is valid"),
+            source_label: "clipline-plugin-league-of-legends",
+            url: "https://github.com/dain98/clipline-plugin-league-of-legends/releases/download/v1.3.0/clipline-plugin-league-of-legends-1.3.0.zip",
+            sha256: "070687055eb04610820ba36c9506350c39984217e461b785747f16ab2ceb9390",
+        }),
         _ => None,
     }
 }
@@ -822,13 +890,13 @@ fn install_state(receipt: &InstalledPluginRecord) -> &'static str {
 
 const LEAGUE_SEED_MANIFEST_JSON: &str = r#"{
   "schema_version": 1,
-  "package_version": "1.2.0",
+  "package_version": "1.2.1",
   "id": "league_of_legends",
   "name": "League of Legends",
   "summary": "Auto-records full matches when the in-game window is active.",
   "default_enabled": true,
   "default_recording_mode": "full_session",
-  "icon": { "type": "ui_asset", "path": "assets/games/league-of-legends.png" },
+  "icon": { "type": "file", "path": "assets/games/league-of-legends.png" },
   "window_match": { "exe_name": "League of Legends.exe", "selection": "longest_title" },
   "event_source": "league_live_client",
   "presentation": {
@@ -1021,6 +1089,92 @@ mod tests {
         .collect::<std::collections::BTreeSet<_>>();
 
         assert_eq!(styled, kept);
+    }
+
+    #[test]
+    fn plugin_info_resolves_packaged_presentation_assets() {
+        let dir = TestDir::new("clipline-plugin", "presentation-assets");
+        let plugin_dir = dir.path().join(LEAGUE_OF_LEGENDS_ID);
+        std::fs::create_dir_all(plugin_dir.join("assets/games")).unwrap();
+        std::fs::create_dir_all(plugin_dir.join("assets/markers")).unwrap();
+        std::fs::write(
+            plugin_dir.join("assets/games/league-of-legends.png"),
+            b"game-icon",
+        )
+        .unwrap();
+        std::fs::write(plugin_dir.join("assets/markers/kill.png"), b"kill-icon").unwrap();
+        std::fs::write(
+            plugin_dir.join(PLUGIN_MANIFEST_FILE),
+            r#"{
+              "schema_version": 1,
+              "package_version": "1.2.0",
+              "id": "league_of_legends",
+              "name": "League of Legends",
+              "summary": "Auto-records full matches when the in-game window is active.",
+              "default_enabled": true,
+              "default_recording_mode": "full_session",
+              "icon": { "type": "file", "path": "assets/games/league-of-legends.png" },
+              "window_match": { "exe_name": "League of Legends.exe", "selection": "longest_title" },
+              "event_source": "league_live_client",
+              "presentation": {
+                "marker_kinds": {
+                  "ChampionKill": { "category": "kill", "icon": "assets/markers/kill.png" }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        write_receipt(&plugin_dir, InstallProvenance::Manual, "1.2.0");
+
+        let info = load_installed_plugin(&plugin_dir).unwrap().info();
+        let presentation = info.presentation.expect("presentation");
+        let marker_icon = presentation
+            .get("marker_kinds")
+            .and_then(|value| value.get("ChampionKill"))
+            .and_then(|value| value.get("icon"))
+            .and_then(serde_json::Value::as_str)
+            .expect("marker icon");
+
+        assert!(
+            info.icon
+                .as_deref()
+                .is_some_and(|icon| icon.starts_with("data:image/png;base64,")),
+            "plugin package icon should be exposed as a data URL"
+        );
+        assert!(
+            marker_icon.starts_with("data:image/png;base64,"),
+            "presentation marker icons should be package-relative data URLs, got {marker_icon}"
+        );
+    }
+
+    #[test]
+    fn first_party_release_status_uses_external_package_feed() {
+        let release = known_first_party_package_release(LEAGUE_OF_LEGENDS_ID)
+            .expect("League has a first-party package release");
+        let manifest = league_seed_manifest();
+        let plugin = GamePlugin {
+            manifest: manifest.clone(),
+            install: InstalledPluginRecord::new_for_seed(
+                &manifest.id,
+                manifest.package_version,
+                manifest.schema_version,
+                "bundled",
+            ),
+            root_dir: None,
+        };
+
+        let info = plugin.info();
+
+        assert_eq!(release.version.to_string(), "1.3.0");
+        assert_eq!(info.latest_version.as_deref(), Some("1.3.0"));
+        assert_eq!(
+            info.latest_source_label.as_deref(),
+            Some("clipline-plugin-league-of-legends")
+        );
+        assert!(
+            info.update_available,
+            "external package release should make the older bundled seed updatable"
+        );
     }
 
     #[test]

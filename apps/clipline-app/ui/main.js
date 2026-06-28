@@ -833,14 +833,17 @@ function renderGamePluginModeControl(plugin, settings) {
 
 function gamePluginPackageStatusText(plugin) {
   const installed = plugin.installed_version ? `v${plugin.installed_version}` : "not installed";
+  const latest = plugin.latest_version
+    ? `${plugin.latest_source_label || "known package"} v${plugin.latest_version}`
+    : (plugin.seed_version ? `seed v${plugin.seed_version}` : "no known package");
   const seed = plugin.seed_version ? `seed v${plugin.seed_version}` : "no bundled seed";
   if (plugin.install_state === "repair_available") {
-    return `${installed}; repair available from ${seed}`;
+    return `${installed}; repair available from ${latest}; reset uses ${seed}`;
   }
   if (plugin.update_available) {
-    return `${installed}; ${seed} available`;
+    return `${installed}; ${latest} available`;
   }
-  return `${installed}; ${seed}`;
+  return `${installed}; current for ${latest}`;
 }
 
 function syncGamePluginCatalog(nextPlugins) {

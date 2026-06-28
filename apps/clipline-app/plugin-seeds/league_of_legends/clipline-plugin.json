@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "package_version": "1.2.0",
+  "package_version": "1.2.1",
   "id": "league_of_legends",
   "name": "League of Legends",
   "summary": "Auto-records full matches when the in-game window is active.",
   "default_enabled": true,
   "default_recording_mode": "full_session",
   "icon": {
-    "type": "ui_asset",
+    "type": "file",
     "path": "assets/games/league-of-legends.png"
   },
   "window_match": {

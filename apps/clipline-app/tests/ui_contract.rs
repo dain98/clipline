@@ -546,6 +546,8 @@ fn review_player_owns_all_controls() {
             && main_js().contains("update_game_plugin_package")
             && main_js().contains("reinstall_game_plugin_package")
             && main_js().contains("reset_game_plugin_to_seed")
+            && main_js().contains("plugin.latest_version")
+            && main_js().contains("plugin.latest_source_label")
             && main_js().contains("dataset.gamePluginAction")
             && styles_css().contains(".game-profile-mode"),
         "supported games must render from backend game plugins, including first-party package actions, not hardcoded rows"
