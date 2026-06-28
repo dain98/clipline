@@ -11,6 +11,7 @@ use crate::traits::{
 };
 
 const MAX_PENDING_GOP_BYTES: usize = 64 * 1024 * 1024;
+const MID_STREAM_REPLAY_OPUS_PRE_SKIP: u16 = 960; // One 20 ms Opus frame at 48 kHz.
 
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
@@ -339,14 +340,14 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             ));
         }
         let video_cfg = self.encoder.track_config();
-        let reset_audio_pre_skip = !self.replay_starts_at_stream_origin(&segments);
+        let starts_at_stream_origin = self.replay_starts_at_stream_origin(&segments);
         let audio_cfgs: Vec<_> = self
             .audio_sources
             .iter()
             .map(|s| {
                 let mut cfg = s.track_config();
-                if reset_audio_pre_skip {
-                    cfg.pre_skip = 0;
+                if !starts_at_stream_origin {
+                    cfg.pre_skip = MID_STREAM_REPLAY_OPUS_PRE_SKIP;
                 }
                 cfg
             })
@@ -849,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn save_replay_from_middle_resets_opus_pre_skip() {
+    fn save_replay_from_middle_discards_opus_start_preroll() {
         use crate::mock::MockAudioSource;
 
         let mut rec = Recorder::new(
@@ -867,8 +868,8 @@ mod tests {
 
         assert_eq!(
             first_opus_pre_skip(&buf),
-            0,
-            "mid-stream replay clips must not ask players to discard the first Opus samples"
+            960,
+            "mid-stream replay clips discard only the first Opus frame to avoid cold decoder startup artifacts"
         );
     }
 

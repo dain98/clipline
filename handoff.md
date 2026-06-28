@@ -234,13 +234,19 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      safety track, then app/process tracks, then microphone when enabled; when the experimental
      "app audio tracks" Capture setting is off, only the mixed Output Audio track is recorded.
      That setting defaults off.
-     Electron-style apps that emit
-     multiple child-process audio sessions are grouped by same-executable root process before
-     process-loopback capture, so Discord should appear once instead of as renderer/audio-service
-     duplicates. The
-     process-loopback activation path uses an agile completion handler and an owned `VT_BLOB`
-     activation payload; the dev machine reproduced heap corruption when that blob pointed at
-     stack memory. Saved
+      Electron-style apps that emit
+      multiple child-process audio sessions are grouped by same-executable root process before
+      process-loopback capture, so Discord should appear once instead of as renderer/audio-service
+      duplicates. Launcher parent sessions (for example Steam) are dropped when a child process
+      also has its own audio session, because process-loopback captures the target process tree and
+      otherwise records the game twice with a small offset. Clipline also filters its own
+      `clipline-app` process out of split app-audio tracks so replay-save notification sounds are
+      not selected as a separate default source. Mid-stream buffered replays advertise a one-frame
+      (20 ms) Opus pre-skip so cold decoders discard the first-frame startup artifact instead of
+      playing it as a short burst at clip start. The
+      process-loopback activation path uses an agile completion handler and an owned `VT_BLOB`
+      activation payload; the dev machine reproduced heap corruption when that blob pointed at
+      stack memory. Saved
      replays and full-session recordings write `audio_tracks` metadata into marker sidecars, the
      review deck exposes an expandable track checklist, and the upload dialog lets users choose
      which tracks to include. Single-track and muted selections are stream-copy remuxed through

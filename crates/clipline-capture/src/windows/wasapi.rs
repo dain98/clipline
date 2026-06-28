@@ -668,6 +668,7 @@ pub fn enumerate_output_processes(
                 process_path,
             });
         }
+        drop_duplicate_process_tree_ancestors(&mut processes, &process_snapshot);
         processes.sort_by(|a, b| {
             a.label
                 .to_lowercase()
@@ -1026,13 +1027,11 @@ fn process_group_root(
                 .get(&pid)
                 .and_then(|entry| entry.process_path.clone())
         });
-    let mut visited = std::collections::HashSet::from([pid]);
 
-    while let (Some(path), Some(current)) = (current_path.as_deref(), snapshot.get(&current_pid)) {
-        let parent_pid = current.parent_pid;
-        if parent_pid == 0 || !visited.insert(parent_pid) {
+    for parent_pid in process_parent_pids(pid, snapshot) {
+        let Some(path) = current_path.as_deref() else {
             break;
-        }
+        };
         let Some(parent) = snapshot.get(&parent_pid) else {
             break;
         };
@@ -1047,6 +1046,103 @@ fn process_group_root(
     }
 
     current_pid
+}
+
+fn drop_duplicate_process_tree_ancestors(
+    processes: &mut Vec<AudioProcessInfo>,
+    snapshot: &std::collections::HashMap<u32, ProcessSnapshotEntry>,
+) {
+    // Keep the child app's split track label and drop launcher parents whose
+    // process-tree capture would duplicate the child. Parent-owned launcher
+    // sounds remain available in the mixed Output Audio safety track.
+    let duplicate_ancestors: std::collections::HashSet<u32> = processes
+        .iter()
+        .filter(|candidate| {
+            processes.iter().any(|other| {
+                candidate.pid != other.pid
+                    && process_is_ancestor(candidate.pid, other.pid, snapshot)
+                    && process_images_differ(candidate, other, snapshot)
+            })
+        })
+        .map(|process| process.pid)
+        .collect();
+    processes.retain(|process| !duplicate_ancestors.contains(&process.pid));
+}
+
+fn process_is_ancestor(
+    ancestor_pid: u32,
+    descendant_pid: u32,
+    snapshot: &std::collections::HashMap<u32, ProcessSnapshotEntry>,
+) -> bool {
+    process_parent_pids(descendant_pid, snapshot).contains(&ancestor_pid)
+}
+
+fn process_parent_pids(
+    pid: u32,
+    snapshot: &std::collections::HashMap<u32, ProcessSnapshotEntry>,
+) -> Vec<u32> {
+    let mut parent_pids = Vec::new();
+    let mut current_pid = pid;
+    let mut visited = std::collections::HashSet::from([pid]);
+    while let Some(current) = snapshot.get(&current_pid) {
+        let parent_pid = current.parent_pid;
+        if parent_pid == 0 || !visited.insert(parent_pid) {
+            break;
+        }
+        parent_pids.push(parent_pid);
+        current_pid = parent_pid;
+    }
+    parent_pids
+}
+
+fn process_images_differ(
+    a: &AudioProcessInfo,
+    b: &AudioProcessInfo,
+    snapshot: &std::collections::HashMap<u32, ProcessSnapshotEntry>,
+) -> bool {
+    match (
+        process_path_for(a.pid, a.process_path.as_deref(), snapshot),
+        process_path_for(b.pid, b.process_path.as_deref(), snapshot),
+    ) {
+        (Some(a_path), Some(b_path)) => !same_process_image(a_path, b_path),
+        _ => {
+            let Some(a_name) = process_identity_name(a, snapshot) else {
+                return false;
+            };
+            let Some(b_name) = process_identity_name(b, snapshot) else {
+                return false;
+            };
+            !a_name.eq_ignore_ascii_case(&b_name)
+        }
+    }
+}
+
+fn process_path_for<'a>(
+    pid: u32,
+    path: Option<&'a str>,
+    snapshot: &'a std::collections::HashMap<u32, ProcessSnapshotEntry>,
+) -> Option<&'a str> {
+    path.or_else(|| {
+        snapshot
+            .get(&pid)
+            .and_then(|entry| entry.process_path.as_deref())
+    })
+}
+
+fn process_identity_name(
+    process: &AudioProcessInfo,
+    snapshot: &std::collections::HashMap<u32, ProcessSnapshotEntry>,
+) -> Option<String> {
+    process_path_for(process.pid, process.process_path.as_deref(), snapshot)
+        .and_then(process_name_from_path)
+        .or_else(|| {
+            process
+                .process_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+        })
 }
 
 fn same_process_image(a: &str, b: &str) -> bool {
@@ -1275,6 +1371,84 @@ mod tests {
             process_group_root(20, Some(r"C:\Games\Game.exe"), &snapshot),
             20
         );
+    }
+
+    #[test]
+    fn process_candidates_drop_launcher_parent_when_child_also_has_audio() {
+        let snapshot = std::collections::HashMap::from([
+            (
+                10,
+                ProcessSnapshotEntry {
+                    parent_pid: 1,
+                    process_path: Some(r"C:\Program Files\Steam\steam.exe".into()),
+                },
+            ),
+            (
+                20,
+                ProcessSnapshotEntry {
+                    parent_pid: 10,
+                    process_path: Some(r"C:\Games\SlayTheSpire2.exe".into()),
+                },
+            ),
+        ]);
+        let mut processes = vec![
+            AudioProcessInfo {
+                pid: 10,
+                label: "steam".into(),
+                process_name: Some("steam".into()),
+                process_path: Some(r"C:\Program Files\Steam\steam.exe".into()),
+            },
+            AudioProcessInfo {
+                pid: 20,
+                label: "SlayTheSpire2".into(),
+                process_name: Some("SlayTheSpire2".into()),
+                process_path: Some(r"C:\Games\SlayTheSpire2.exe".into()),
+            },
+        ];
+
+        drop_duplicate_process_tree_ancestors(&mut processes, &snapshot);
+
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].label, "SlayTheSpire2");
+    }
+
+    #[test]
+    fn process_candidates_drop_launcher_parent_when_parent_path_is_unknown() {
+        let snapshot = std::collections::HashMap::from([
+            (
+                10,
+                ProcessSnapshotEntry {
+                    parent_pid: 1,
+                    process_path: None,
+                },
+            ),
+            (
+                20,
+                ProcessSnapshotEntry {
+                    parent_pid: 10,
+                    process_path: Some(r"C:\Games\SlayTheSpire2.exe".into()),
+                },
+            ),
+        ]);
+        let mut processes = vec![
+            AudioProcessInfo {
+                pid: 10,
+                label: "steam".into(),
+                process_name: Some("steam".into()),
+                process_path: None,
+            },
+            AudioProcessInfo {
+                pid: 20,
+                label: "SlayTheSpire2".into(),
+                process_name: Some("SlayTheSpire2".into()),
+                process_path: Some(r"C:\Games\SlayTheSpire2.exe".into()),
+            },
+        ];
+
+        drop_duplicate_process_tree_ancestors(&mut processes, &snapshot);
+
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].label, "SlayTheSpire2");
     }
 
     #[test]

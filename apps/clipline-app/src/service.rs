@@ -19,7 +19,7 @@ use clipline_capture::traits::{
 };
 use clipline_capture::windows::nv12::CropRect;
 use clipline_capture::windows::wasapi::{
-    enumerate_output_processes, process_loopback_available, WasapiChannelMode,
+    enumerate_output_processes, process_loopback_available, AudioProcessInfo, WasapiChannelMode,
 };
 use clipline_capture::windows::{
     d3d11, find_window_by_title, mft_probe, window_from_raw_handle, DxgiDuplicationCapture,
@@ -980,7 +980,7 @@ fn add_output_audio_sources(
     if options.split_output_by_process && process_loopback_available() {
         match enumerate_output_processes(options.output_device_id.as_deref()) {
             Ok(processes) => {
-                for process in processes {
+                for process in split_output_process_candidates(processes, std::process::id()) {
                     match WasapiLoopback::start_process_output(
                         clock,
                         process.pid,
@@ -1030,6 +1030,18 @@ fn add_output_audio_sources(
             ));
         }
     }
+}
+
+fn split_output_process_candidates(
+    processes: Vec<AudioProcessInfo>,
+    own_pid: u32,
+) -> Vec<AudioProcessInfo> {
+    // Split process tracks should not include Clipline's own notification
+    // sounds. The mixed Output Audio safety track remains raw speaker loopback.
+    processes
+        .into_iter()
+        .filter(|process| process.pid != own_pid)
+        .collect()
 }
 
 fn add_mixed_output_audio_source(
@@ -2050,6 +2062,30 @@ mod tests {
             marker_source_kind(&opts),
             MarkerSourceKind::LegacyLeaguePoller
         );
+    }
+
+    #[test]
+    fn split_output_candidates_exclude_clipline_process() {
+        let own_pid = 42;
+        let processes = vec![
+            clipline_capture::windows::wasapi::AudioProcessInfo {
+                pid: own_pid,
+                label: "clipline-app".into(),
+                process_name: Some("clipline-app".into()),
+                process_path: Some(r"C:\Clipline\clipline-app.exe".into()),
+            },
+            clipline_capture::windows::wasapi::AudioProcessInfo {
+                pid: 99,
+                label: "Game".into(),
+                process_name: Some("Game".into()),
+                process_path: Some(r"C:\Games\Game.exe".into()),
+            },
+        ];
+
+        let candidates = split_output_process_candidates(processes, own_pid);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].label, "Game");
     }
 
     fn player_summary(champion_name: &str, kills: u32, deaths: u32, assists: u32) -> PlayerSummary {
