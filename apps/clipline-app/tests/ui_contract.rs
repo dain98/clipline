@@ -1379,3 +1379,118 @@ fn ui_is_split_into_markup_styles_and_logic() {
         );
     }
 }
+
+#[test]
+fn gallery_supports_multi_select_bulk_actions() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+    let library = library_rs();
+    let app = app_rs();
+
+    for required in [
+        "id=\"gallery-select-toggle\"",
+        ">Select multiple</button>",
+        "class=\"gallery-filter-row\"",
+        "class=\"gallery-filter-chips\"",
+        "class=\"gallery-filter-actions\"",
+        "id=\"gallery-bulk-bar\"",
+        "id=\"bulk-count\"",
+        "id=\"bulk-select-all\"",
+        "id=\"bulk-clear\"",
+        "id=\"bulk-delete\"",
+        "id=\"bulk-cancel\"",
+        "id=\"confirm-title\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "gallery multi-select markup must include `{required}`"
+        );
+    }
+
+    let filter_chips = html
+        .find("class=\"gallery-filter-chips\"")
+        .expect("gallery filter chip row exists");
+    let select_toggle = html
+        .find("id=\"gallery-select-toggle\"")
+        .expect("gallery select toggle exists");
+    let bulk_bar = html
+        .find("id=\"gallery-bulk-bar\"")
+        .expect("gallery bulk action bar exists");
+    let gallery_grid = html
+        .find("id=\"gallery-grid\"")
+        .expect("gallery grid exists");
+    assert!(
+        filter_chips < select_toggle && select_toggle < bulk_bar && bulk_bar < gallery_grid,
+        "bulk action bar must live inside the filter toolbar before the grid"
+    );
+    assert!(
+        html.find("id=\"gallery-sort\"")
+            .expect("gallery sort exists")
+            < filter_chips,
+        "Select multiple should live in the filter toolbar, not the main gallery header"
+    );
+
+    for required in [
+        "let selectedClipPaths",
+        "let selectMode",
+        "function toggleClipSelection",
+        "function clearSelection",
+        "function selectAllVisible",
+        "function exitSelectMode",
+        "function syncSelectionControls",
+        "function syncBulkBar",
+        "function confirmBulkDelete",
+        "function bulkDeleteSelected",
+        "dataset.clipPath",
+        "selectedClipPaths.has(c.path)",
+        "Select multiple",
+        "selectMode || count > 0",
+        "await invoke(\"delete_clips\"",
+        "gallerySource !== \"local\"",
+    ] {
+        assert!(
+            js.contains(required),
+            "main.js must wire multi-select behavior through `{required}`"
+        );
+    }
+
+    assert!(
+        library.contains("pub async fn delete_clips")
+            && library.contains("fn delete_clips_impl")
+            && library.contains("DeletedClipsReport"),
+        "library.rs must expose a batch delete command, its testable core, and the report struct"
+    );
+    assert!(
+        app.contains("crate::library::delete_clips"),
+        "native command registry must register delete_clips"
+    );
+
+    for required in [
+        ".gallery-bulk-bar",
+        ".gallery-bulk-bar[hidden]",
+        ".gallery-filter-row",
+        ".gallery-filter-chips",
+        ".gallery-filter-actions",
+        ".gallery-grid.select-mode .card",
+        ".gallery-grid.select-mode .card-del",
+        ".card.selected",
+    ] {
+        assert!(
+            css.contains(required),
+            "multi-select UI needs stable styling for `{required}`"
+        );
+    }
+    assert!(
+        !js.contains("card-check")
+            && !js.contains("check.addEventListener")
+            && !js.contains("bulkUploadSelected")
+            && !js.contains("uploadOneClipBulk")
+            && !css.contains(".card-check"),
+        "multi-select mode should use whole-card selection, not a competing per-card checkbox"
+    );
+    assert!(
+        !html.contains("id=\"bulk-upload\"") && !html.contains("Upload to cloud"),
+        "bulk actions should not expose bulk cloud upload"
+    );
+}

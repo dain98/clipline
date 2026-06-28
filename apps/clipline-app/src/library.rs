@@ -293,6 +293,59 @@ pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Res
     Ok(())
 }
 
+/// A bulk-delete result: the paths that were removed and the (path, reason)
+/// pairs that could not be. Surface `failed` to the UI so partial success is
+/// visible rather than silently swallowed.
+#[derive(serde::Serialize)]
+pub struct DeletedClipsReport {
+    pub deleted: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
+/// Testable core of [`delete_clips`]: deletes each already-validated clip plus
+/// its `markers.json` sidecar and cached poster (best effort), recording any
+/// removal failures. `failed` carries inputs that already failed validation so
+/// the caller's report stays complete in one place.
+fn delete_clips_impl(
+    validated: Vec<(String, PathBuf)>,
+    mut failed: Vec<(String, String)>,
+) -> DeletedClipsReport {
+    let mut deleted = Vec::new();
+    for (path, target) in validated {
+        match std::fs::remove_file(&target) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(target.with_extension("markers.json"));
+                let _ = std::fs::remove_file(crate::poster::poster_path(&target));
+                deleted.push(path);
+            }
+            Err(e) => failed.push((path, e.to_string())),
+        }
+    }
+    DeletedClipsReport { deleted, failed }
+}
+
+/// Delete many clips in one round trip. Validation runs up front while the
+/// `StorageSettings` borrow is live; owned `PathBuf`s then move into a single
+/// blocking task so the UI does not pay N async hops.
+#[tauri::command]
+pub async fn delete_clips(
+    paths: Vec<String>,
+    settings: tauri::State<'_, StorageSettings>,
+) -> Result<DeletedClipsReport, String> {
+    let mut validated: Vec<(String, PathBuf)> = Vec::with_capacity(paths.len());
+    let mut failed: Vec<(String, String)> = Vec::new();
+    for path in paths {
+        match validate_clip_path(&settings, &path) {
+            Ok(target) => validated.push((path, target)),
+            Err(e) => failed.push((path, e)),
+        }
+    }
+    let result = tauri::async_runtime::spawn_blocking(move || delete_clips_impl(validated, failed))
+        .await
+        .map_err(|e| format!("delete clips task: {e}"))?;
+    Ok(result)
+}
+
 #[tauri::command]
 pub async fn rename_clip(
     path: String,
@@ -1700,6 +1753,56 @@ mod tests {
         let not_mp4 = root.join("clip.txt");
         touch_mp4(&not_mp4);
         assert!(validate_clip_path(&settings, not_mp4.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn delete_clips_impl_handles_partial_success_and_sidecars() {
+        let dir = TestDir::new("clipline-library", "delete-clips-impl");
+        let root = dir.path().join("media");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Two real clips, each with a markers sidecar and a cached poster.
+        let a = root.join("a.mp4");
+        let b = root.join("b.mp4");
+        touch_mp4(&a);
+        touch_mp4(&b);
+        std::fs::write(a.with_extension("markers.json"), b"{}").unwrap();
+        std::fs::write(b.with_extension("markers.json"), b"{}").unwrap();
+        std::fs::write(crate::poster::poster_path(&a), b"poster").unwrap();
+        std::fs::write(crate::poster::poster_path(&b), b"poster").unwrap();
+
+        // A third clip that should be left untouched (not in the deleted set).
+        let c = root.join("c.mp4");
+        touch_mp4(&c);
+        std::fs::write(c.with_extension("markers.json"), b"{}").unwrap();
+
+        let validated = vec![
+            (a.to_str().unwrap().to_string(), a.clone()),
+            (b.to_str().unwrap().to_string(), b.clone()),
+        ];
+        // One path already failed validation upstream — passed through as failed.
+        let failed_in = vec![("bogus".to_string(), "refused".to_string())];
+
+        let report = delete_clips_impl(validated, failed_in);
+
+        assert_eq!(report.deleted.len(), 2);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, "bogus");
+        assert!(!a.exists(), "a.mp4 should be removed");
+        assert!(!b.exists(), "b.mp4 should be removed");
+        assert!(
+            !a.with_extension("markers.json").exists(),
+            "a.mp4 markers sidecar should be removed"
+        );
+        assert!(
+            !crate::poster::poster_path(&b).exists(),
+            "b.mp4 poster should be removed"
+        );
+        assert!(c.exists(), "c.mp4 must be left untouched");
+        assert!(
+            c.with_extension("markers.json").exists(),
+            "c.mp4 markers sidecar must be left untouched"
+        );
     }
 
     #[test]

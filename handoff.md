@@ -13,7 +13,7 @@ Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
 ## Current state (2026-06-27): a working tray recorder with a first-party review player
 
-Thirty-one milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
+Thirty-two milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -254,6 +254,23 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      low-level mouse hook. The rail now shows the active Save Replay hotkey below RAM. Single-track
      and muted cloud uploads use lightweight selected-track remuxing; multi-track cloud/share
      exports now use native Opus mixing so external players hear one normal audio stream.
+32. **Library multi-select + bulk actions** — the local gallery supports selecting multiple
+     clips and acting on them in bulk. A filter-toolbar `#gallery-select-toggle` button labeled
+     `Select multiple` flips the whole grid into selectable mode where clicking a tile toggles
+     selection instead of opening it; the normal per-card trash affordance is hidden while this
+     mode is active so selection and one-off deletion do not compete. A `#gallery-bulk-bar` appears
+     inside the filter toolbar with `Select all` / `Clear` / `Delete` / `Cancel` and a live count.
+     `Delete` runs the new
+     `delete_clips` Tauri command (one round trip, validates every path up front via
+     `validate_clip_path`, deletes mp4 + `markers.json` sidecar + cached poster, returns a
+     `DeletedClipsReport { deleted, failed }` so partial success is surfaced rather than swallowed).
+     `Esc` clears the selection then exits select mode; `Ctrl+A`
+     (in select mode) selects all visible. Selection is keyed on `clip.path` (survives
+     filter/sort/group/re-render), is **local-only** — the Cloud tab hides the Select toggle and
+     clears/exits selection on entry. Backend work is
+     split into a testable `delete_clips_impl` (no `tauri::State`) so the partial-success +
+     sidecar/poster cleanup behavior is covered by a unit test; `tests/ui_contract.rs` gains
+     `gallery_supports_multi_select_bulk_actions`.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
