@@ -304,6 +304,14 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-27):
+- Nightly 0.1.18 contains the default multitrack playback fix and gallery thumbnail hardening
+  from PR #63. The previous public nightly metadata was 0.1.17, so the app and Tauri package
+  versions were bumped to 0.1.18 for updater eligibility.
+- Review playback now mixes default output+mic multi-track captures for WebView2/share targets
+  that only play the first audio stream, but falls back to source playback without a persistent
+  error when ffmpeg audio mixing is unavailable. Local poster failures are cached for the app
+  session and stay on the gradient placeholder instead of using per-card video elements that can
+  keep Windows file handles open.
 - Nightly 0.1.17 contains the local clip-library multi-select/bulk-delete workflow and the
   replay-audio fixes from PR #61. The previous public nightly metadata was 0.1.16, so the
   app and Tauri package versions were bumped to 0.1.17 for updater eligibility.
@@ -500,6 +508,12 @@ Recent fixes (2026-06-19):
   audio is still preserved. Cloud upload records now supersede older records for the same clip
   path, so retrying with a different audio-track selection does not leave stale failed state in
   the library.
+- Review playback now treats any source MP4 with more than one audio track as needing the selected
+  audio preview/mix, even when every track is selected. This keeps default output+mic captures
+  audible in WebView2 and common share targets that only play the first track; if ffmpeg-based
+  mixing is unavailable, the app falls back to source playback without pinning a persistent error.
+  Local gallery poster failures are cached for the app session and stay on the gradient placeholder
+  instead of attaching per-card video elements that can hold Windows file locks.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window
