@@ -287,9 +287,13 @@ fn poster_seek_seconds(clip: &Path) -> f64 {
 #[tauri::command]
 pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let target = validate_clip_path(&settings, &path)?;
-    std::fs::remove_file(&target).map_err(|e| e.to_string())?;
+    remove_clip_files(&target)
+}
+
+fn remove_clip_files(target: &Path) -> Result<(), String> {
+    std::fs::remove_file(target).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(target.with_extension("markers.json"));
-    let _ = std::fs::remove_file(crate::poster::poster_path(&target));
+    let _ = std::fs::remove_file(crate::poster::poster_path(target));
     Ok(())
 }
 
@@ -312,12 +316,8 @@ fn delete_clips_impl(
 ) -> DeletedClipsReport {
     let mut deleted = Vec::new();
     for (path, target) in validated {
-        match std::fs::remove_file(&target) {
-            Ok(_) => {
-                let _ = std::fs::remove_file(target.with_extension("markers.json"));
-                let _ = std::fs::remove_file(crate::poster::poster_path(&target));
-                deleted.push(path);
-            }
+        match remove_clip_files(&target) {
+            Ok(_) => deleted.push(path),
             Err(e) => failed.push((path, e.to_string())),
         }
     }

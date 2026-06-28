@@ -2599,28 +2599,18 @@ function clearSelection() {
 
 function selectAllVisible() {
   selectedClipPaths = new Set();
-  // Mirror the render pipeline: galleryGroups wraps sortGalleryClips(filtered).
-  for (const c of galleryGroups(sortGalleryClips(filterGalleryClips(clipsCache)))) {
-    for (const clip of c.clips) selectedClipPaths.add(clip.path);
-  }
   for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
-    applySelectionToCard(card, selectedClipPaths.has(card.dataset.clipPath));
+    if (!card.dataset.clipPath) continue;
+    selectedClipPaths.add(card.dataset.clipPath);
+    applySelectionToCard(card, true);
   }
   syncBulkBar();
 }
 
-// Reset mode/selection/label only — does NOT hide #gallery-select-toggle.
-// `syncSelectionControls()` owns the toggle's visibility against the source tab.
 function exitSelectMode() {
   selectMode = false;
   clearSelection();
-  const grid = $("gallery-grid");
-  if (grid) grid.classList.remove("select-mode");
-  const bar = $("gallery-bulk-bar");
-  if (bar) bar.hidden = true;
-  const toggle = $("gallery-select-toggle");
-  if (toggle) toggle.classList.remove("active");
-  syncSelectToggleLabel();
+  syncSelectionControls();
 }
 
 function syncSelectToggleLabel() {
@@ -2628,14 +2618,20 @@ function syncSelectToggleLabel() {
   if (toggle) toggle.textContent = selectMode ? "Done" : "Select multiple";
 }
 
-// Owns the Select toggle's visibility (hidden on the Cloud tab) and active state.
 function syncSelectionControls() {
+  if (gallerySource !== "local" && selectMode) {
+    selectMode = false;
+    clearSelection();
+  }
   const toggle = $("gallery-select-toggle");
-  if (!toggle) return;
-  toggle.hidden = gallerySource !== "local";
-  toggle.classList.toggle("active", selectMode);
-  syncSelectToggleLabel();
-  if (gallerySource !== "local" && selectMode) exitSelectMode();
+  if (toggle) {
+    toggle.hidden = gallerySource !== "local";
+    toggle.classList.toggle("active", selectMode);
+    syncSelectToggleLabel();
+  }
+  const grid = $("gallery-grid");
+  if (grid) grid.classList.toggle("select-mode", selectMode && gallerySource === "local");
+  syncBulkBar();
 }
 
 function syncBulkBar() {
@@ -2756,7 +2752,6 @@ function renderClips() {
   $("gallery-group").hidden = showingCloud;
   $("gallery-sort").hidden = showingCloud;
   syncSelectionControls();
-  root.classList.toggle("select-mode", selectMode && !showingCloud);
   document.querySelectorAll("#gallery-source-tabs .source-tab").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.gallerySource === gallerySource);
   });
@@ -3887,6 +3882,8 @@ async function exportTrim() {
   }
 }
 
+const DEFAULT_DELETE_CONFIRM_TITLE = $("confirm-title").textContent;
+
 // In-app modal — the native browser prompt renders "tauri.localhost says".
 function confirmDelete(name) {
   return confirmDeleteDialog("Delete this clip?", name);
@@ -3896,9 +3893,6 @@ function confirmBulkDelete(count) {
   return confirmDeleteDialog(`Delete ${count} clips?`, "This cannot be undone.");
 }
 
-// Shared confirm dialog builder. The static HTML title ("Delete this clip?")
-// carries `id="confirm-title"`; both single and bulk deletes set it per call
-// and restore it afterward so the next single-clip delete looks right.
 function confirmDeleteDialog(title, detail) {
   return new Promise((resolve) => {
     const dlg = $("confirm-dialog");
@@ -3908,7 +3902,7 @@ function confirmDeleteDialog(title, detail) {
     const finish = (ok) => {
       dlg.removeEventListener("close", onClose);
       if (dlg.open) dlg.close();
-      titleEl.textContent = "Delete this clip?";
+      titleEl.textContent = DEFAULT_DELETE_CONFIRM_TITLE;
       resolve(ok);
     };
     const onClose = () => finish(false); // Esc / backdrop paths
@@ -3917,6 +3911,25 @@ function confirmDeleteDialog(title, detail) {
     $("confirm-accept").onclick = () => finish(true);
     dlg.showModal();
   });
+}
+
+function formatDeletionFailures(failed) {
+  return (failed || []).map(([p, m]) => `${p.split(/[\\/]/).pop()}: ${m}`).join("; ");
+}
+
+function deletionNotice(count) {
+  if (count <= 0) return "";
+  return count === 1 ? "deleted 1 clip" : `deleted ${count} clips`;
+}
+
+async function applyDeletion(removedPaths) {
+  const removed = new Set(removedPaths || []);
+  if (!removed.size) return;
+  const wasCurrent = currentClip && removed.has(currentClip.path);
+  clipsCache = clipsCache.filter((clip) => !removed.has(clip.path));
+  if (wasCurrent) closeReview();
+  else renderClips();
+  await refreshStorage();
 }
 
 function confirmQuit() {
@@ -4011,13 +4024,9 @@ async function deleteClip(path = currentClip && currentClip.path) {
   if (!(await confirmDelete(name))) return;
   try {
     await invoke("delete_clip", { path });
+    await applyDeletion([path]);
     setNotice("clip deleted", { transient: true });
     $("error").textContent = "";
-    const wasCurrent = currentClip && currentClip.path === path;
-    clipsCache = clipsCache.filter((clip) => clip.path !== path);
-    if (wasCurrent) closeReview();
-    else renderClips();
-    await refreshStorage();
   } catch (e) {
     $("error").textContent = e;
   }
@@ -4252,19 +4261,10 @@ async function bulkDeleteSelected() {
   if (!(await confirmBulkDelete(paths.length))) return;
   try {
     const report = await invoke("delete_clips", { paths });
-    const removed = new Set(report.deleted);
-    clipsCache = clipsCache.filter((c) => !removed.has(c.path));
-    if (currentClip && removed.has(currentClip.path)) {
-      clearSelection();
-      closeReview();
-      return;
-    }
-    renderClips();
-    await refreshStorage();
-    setNotice(`deleted ${report.deleted.length} clips`, { transient: true });
-    $("error").textContent = report.failed.length
-      ? report.failed.map(([p, m]) => `${p.split(/[\\/]/).pop()}: ${m}`).join("; ")
-      : "";
+    await applyDeletion(report.deleted);
+    const notice = deletionNotice(report.deleted.length);
+    if (notice) setNotice(notice, { transient: true });
+    $("error").textContent = formatDeletionFailures(report.failed);
     clearSelection();
   } catch (e) {
     $("error").textContent = String(e);
@@ -4361,16 +4361,8 @@ $("gallery-source-tabs").addEventListener("click", (ev) => {
 });
 $("gallery-select-toggle").addEventListener("click", () => {
   selectMode = !selectMode;
-  if (selectMode) {
-    const grid = $("gallery-grid");
-    if (grid) grid.classList.add("select-mode");
-  } else {
-    clearSelection();
-    const grid = $("gallery-grid");
-    if (grid) grid.classList.remove("select-mode");
-  }
+  if (!selectMode) clearSelection();
   syncSelectionControls();
-  syncBulkBar();
 });
 $("bulk-select-all").addEventListener("click", selectAllVisible);
 $("bulk-clear").addEventListener("click", clearSelection);

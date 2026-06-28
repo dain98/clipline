@@ -1440,8 +1440,11 @@ fn gallery_supports_multi_select_bulk_actions() {
         "function exitSelectMode",
         "function syncSelectionControls",
         "function syncBulkBar",
+        "function applyDeletion",
+        "function deletionNotice",
         "function confirmBulkDelete",
         "function bulkDeleteSelected",
+        "const DEFAULT_DELETE_CONFIRM_TITLE",
         "dataset.clipPath",
         "selectedClipPaths.has(c.path)",
         "Select multiple",
@@ -1458,8 +1461,9 @@ fn gallery_supports_multi_select_bulk_actions() {
     assert!(
         library.contains("pub async fn delete_clips")
             && library.contains("fn delete_clips_impl")
+            && library.contains("fn remove_clip_files")
             && library.contains("DeletedClipsReport"),
-        "library.rs must expose a batch delete command, its testable core, and the report struct"
+        "library.rs must expose a shared deletion helper, batch delete command, testable core, and report struct"
     );
     assert!(
         app.contains("crate::library::delete_clips"),
@@ -1492,5 +1496,74 @@ fn gallery_supports_multi_select_bulk_actions() {
     assert!(
         !html.contains("id=\"bulk-upload\"") && !html.contains("Upload to cloud"),
         "bulk actions should not expose bulk cloud upload"
+    );
+
+    let delete_clip_fn = js
+        .split("async function deleteClip")
+        .nth(1)
+        .and_then(|rest| rest.split("async function openFolder").next())
+        .expect("deleteClip function body exists");
+    assert!(
+        delete_clip_fn.contains("await applyDeletion([path]);"),
+        "single delete should use the shared post-delete reconciliation helper"
+    );
+
+    let bulk_delete_fn = js
+        .split("async function bulkDeleteSelected")
+        .nth(1)
+        .and_then(|rest| rest.split("/* ---- backend events ---- */").next())
+        .expect("bulkDeleteSelected function body exists");
+    assert!(
+        bulk_delete_fn.contains("await applyDeletion(report.deleted);"),
+        "bulk delete should refresh storage and close the current review through the shared helper"
+    );
+    assert!(
+        bulk_delete_fn.contains("deletionNotice(report.deleted.length)"),
+        "bulk delete should suppress zero-delete notices and pluralize nonzero deletes"
+    );
+    assert!(
+        bulk_delete_fn.contains("formatDeletionFailures(report.failed)"),
+        "bulk delete must surface partial failures even when the current clip was removed"
+    );
+
+    let select_all_fn = js
+        .split("function selectAllVisible")
+        .nth(1)
+        .and_then(|rest| rest.split("function exitSelectMode").next())
+        .expect("selectAllVisible function body exists");
+    assert!(
+        !select_all_fn.contains("galleryGroups(sortGalleryClips(filterGalleryClips(clipsCache)))"),
+        "selectAllVisible should select from rendered card paths without re-running the gallery pipeline"
+    );
+
+    let select_toggle_handler = js
+        .split("$(\"gallery-select-toggle\").addEventListener(\"click\"")
+        .nth(1)
+        .and_then(|rest| rest.split("$(\"bulk-select-all\")").next())
+        .expect("gallery select toggle handler exists");
+    assert!(
+        !select_toggle_handler.contains("gallery-grid")
+            && !select_toggle_handler.contains("classList.add(\"select-mode\")")
+            && !select_toggle_handler.contains("classList.remove(\"select-mode\")"),
+        "select-mode visual class ownership should live in the selection sync helpers"
+    );
+
+    let delete_clip_rs = library
+        .split("pub fn delete_clip")
+        .nth(1)
+        .and_then(|rest| rest.split("pub struct DeletedClipsReport").next())
+        .expect("delete_clip command body exists");
+    assert!(
+        delete_clip_rs.contains("remove_clip_files(&target)"),
+        "single delete should call the same file-removal helper as bulk delete"
+    );
+    let delete_clips_impl_rs = library
+        .split("fn delete_clips_impl")
+        .nth(1)
+        .and_then(|rest| rest.split("pub async fn delete_clips").next())
+        .expect("delete_clips_impl body exists");
+    assert!(
+        delete_clips_impl_rs.contains("remove_clip_files(&target)"),
+        "bulk delete should call the shared file-removal helper"
     );
 }
