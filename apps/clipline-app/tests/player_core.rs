@@ -501,6 +501,20 @@ fn marker_navigation_skips_nearby_and_wraps() {
 }
 
 #[test]
+fn game_event_active_index_honors_clicked_event_during_lead_in() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        "const M = [{ t_s: 72 }, { t_s: 140 }, { t_s: 161 }];",
+    ))
+    .expect("define markers");
+    assert_eq!(eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 158)"), "1");
+    assert_eq!(eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 158, 2)"), "2");
+    assert_eq!(eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 161.2, 2)"), "2");
+    assert_eq!(eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 158, 99)"), "1");
+    assert_eq!(eval(&mut ctx, "PlayerCore.gameEventActiveIndex([], 158, 2)"), "-1");
+}
+
+#[test]
 fn marker_count_pluralizes() {
     let mut ctx = player_core_context();
     assert_eq!(eval(&mut ctx, "PlayerCore.markerSummary([])"), "no markers");
@@ -924,6 +938,40 @@ fn marker_styles_map_kinds_to_categories() {
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.markerStyle('SomethingNew')"),
         r#"{"glyph":"•","cls":"info"}"#
+    );
+}
+
+#[test]
+fn marker_styles_accept_injected_plugin_presentation() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"const P = {
+          marker_kinds: {
+            ChampionKill: { category: 'hero', glyph: '!' },
+            DragonKill: { category: 'objective' }
+          },
+          marker_categories: {
+            hero: { singular: 'hero play', plural: 'hero plays', glyph: '!' },
+            objective: { singular: 'map objective', plural: 'map objectives', glyph: '◆' }
+          }
+        };"#,
+    ))
+    .expect("define presentation");
+
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('ChampionKill', P)"),
+        r#"{"glyph":"!","cls":"hero"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('SomethingNew', P)"),
+        r#"{"glyph":"•","cls":"info"}"#
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.markerDigest([{ kind: 'ChampionKill' }, { kind: 'ChampionKill' }, { kind: 'DragonKill' }], P)"
+        ),
+        "2 hero plays · 1 map objective"
     );
 }
 
@@ -1365,6 +1413,38 @@ fn player_summary_label_formats_champion_kda() {
             "PlayerCore.playerSummaryLabel({ champion_name: '   ', kills: 1, deaths: 2, assists: 3 })"
         ),
         ""
+    );
+}
+
+#[test]
+fn player_summary_fields_format_declarative_metadata() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const SUMMARY = { champion_name: 'Nautilus', kills: 3, deaths: 4, assists: 23 };
+        const FIELDS = [
+          {
+            type: 'portrait',
+            source: 'player_summary.champion_name',
+            label: 'Champion',
+            asset_template: 'assets/champions/{assetKey}.png'
+          },
+          { type: 'champion', source: 'player_summary.champion_name', label: 'Champion' },
+          { type: 'kda', label: 'K/D/A' },
+          { type: 'stat', source: 'player_summary.kills', label: 'Kills' },
+          { type: 'stat', source: 'player_summary.creep_score', label: 'CS' }
+        ];
+        "#,
+    ))
+    .expect("define summary fields");
+
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.playerSummaryFields(SUMMARY, FIELDS)"),
+        r#"[{"type":"portrait","label":"Champion","value":"Nautilus","assetKey":"nautilus","asset":"assets/champions/nautilus.png"},{"type":"champion","label":"Champion","value":"Nautilus"},{"type":"kda","label":"K/D/A","value":"3/4/23"},{"type":"stat","label":"Kills","value":"3"}]"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.playerSummaryFields(null, FIELDS)"),
+        "[]"
     );
 }
 

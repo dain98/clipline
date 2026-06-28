@@ -169,6 +169,13 @@ fn review_player_owns_all_controls() {
         "id=\"overview-window\"",
         "id=\"overview-window-l\"",
         "id=\"overview-window-r\"",
+        "id=\"game-event-rail\"",
+        "id=\"game-event-rail-title\"",
+        "id=\"game-event-rail-summary\"",
+        "id=\"game-event-rail-toggle\"",
+        "id=\"game-event-list\"",
+        "id=\"game-metadata-panel\"",
+        "id=\"game-metadata-fields\"",
         "id=\"zoom-out\"",
         "id=\"zoom-fit\"",
         "id=\"zoom-in\"",
@@ -529,33 +536,87 @@ fn review_player_owns_all_controls() {
         main_js().contains("await invoke(\"list_game_plugins\")")
             && main_js().contains("renderGamePlugins")
             && main_js().contains("gamePluginSettings")
+            && main_js().contains("plugin.presentation")
             && main_js().contains("games.plugins")
             && main_js().contains("dataset.gamePluginEnabled")
             && main_js().contains("game-plugin-mode-")
             && main_js().contains("normalizeGamePluginId")
             && main_js().contains("Takes priority over matching custom games.")
+            && main_js().contains("check_game_plugin_package")
+            && main_js().contains("update_game_plugin_package")
+            && main_js().contains("reinstall_game_plugin_package")
+            && main_js().contains("reset_game_plugin_to_seed")
+            && main_js().contains("dataset.gamePluginAction")
             && styles_css().contains(".game-profile-mode"),
-        "supported games must render from backend game plugins, not hardcoded rows"
+        "supported games must render from backend game plugins, including first-party package actions, not hardcoded rows"
     );
     assert!(
-        main_js().contains("const leagueMeta = playerSummaryLabel")
+        main_js().contains("function pluginPresentationForClip(clip)")
+            && main_js().contains("function clipGameSummary(clip)")
+            && main_js().contains("function renderGameEventRail")
+            && main_js().contains("function syncGameEventRail")
+            && main_js().contains("function setGameEventRailCollapsed")
+            && main_js().contains("function selectGameEvent")
+            && main_js().contains("function clearGameEventSelection")
+            && main_js().contains("gameEventActiveIndex")
+            && main_js().contains("keepGameEventSelection")
+            && main_js().contains("gameEventRailCollapsed")
+            && main_js().contains("event-rail-collapsed")
+            && main_js().contains("game-event-rail-toggle\").addEventListener(\"click\"")
+            && main_js().contains("setGameEventRailCollapsed(!gameEventRailCollapsed)")
+            && main_js().contains("syncGameEventRail(video.currentTime || 0, { force: true })")
+            && main_js().contains("function renderGameMetadataPanel")
+            && main_js().contains("presentation.event_rail")
+            && main_js().contains("presentation.metadata_panel")
+            && main_js().contains("playerSummaryFields")
+            && main_js().contains("data-game-event-index")
+            && main_js().contains("gallery.summary === \"player_summary_kda\"")
+            && main_js().contains("const gameMeta = clipGameSummary(c)")
             && main_js().contains(
-                "const leagueSessionTitle = isLeagueFullSessionClip(c, kind) && leagueMeta"
+                "const gameSessionTitle = isPluginSummaryFullSessionTitle(c, kind, gameMeta)"
             )
-            && main_js().contains("? leagueMeta")
+            && main_js().contains("? gameMeta")
             && main_js().contains("function clipLibraryTitle(clip, fallbackTitle)")
-            && main_js().contains("if (isLeagueClip(clip)) return fallbackTitle")
+            && main_js().contains("if (usesFallbackTitleForPluginClip(clip)) return fallbackTitle")
             && main_js().contains("const clipName = clip && String(clip.name || \"\").trim()")
             && main_js().contains("return clipName || fallbackTitle")
-            && main_js().contains("detail.className = \"league-meta\"")
-            && main_js().contains("if (leagueMeta && !leagueSessionTitle)")
+            && main_js().contains("detail.className = \"game-meta\"")
+            && main_js().contains("if (gameMeta && !gameSessionTitle)")
             && main_js().contains("const infoParts = []")
             && main_js().contains(
                 "if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s))"
             )
-            && main_js().contains("if (!leagueMeta && digest) infoParts.push(digest)")
-            && styles_css().contains(".clip .league-meta"),
-        "League rows must keep their title rules while non-League rows use actual clip names"
+            && main_js().contains("if (!gameMeta && digest) infoParts.push(digest)")
+            && !main_js().contains("LEAGUE_OF_LEGENDS_ID")
+            && !main_js().contains("isLeagueClip")
+            && !main_js().contains("function renderGamePanel")
+            && index_html().contains("aria-controls=\"game-event-list\"")
+            && styles_css().contains(".review-body.has-event-rail.event-rail-collapsed")
+            && styles_css().contains(".game-event-rail-tab")
+            && styles_css().contains(".game-event-rail:hover .game-event-rail-tab")
+            && styles_css().contains("--game-event-rail-pad: 10px;")
+            && styles_css().contains("left: 0;")
+            && !styles_css().contains("left: var(--game-event-rail-pad);")
+            && styles_css().contains("top: 50%;")
+            && styles_css().contains("transform: translate(-100%, -50%)")
+            && styles_css().contains(".game-event-rail::before")
+            && styles_css().contains("left: -34px;")
+            && styles_css().contains("height: 72px;")
+            && styles_css().contains("pointer-events: auto;")
+            && styles_css().contains("transition: opacity 120ms ease, background 120ms ease;")
+            && styles_css().contains(".game-event-rail-tab:active")
+            && !styles_css().contains("translate(calc(-100% + 8px), -50%)")
+            && !styles_css().contains("transition: opacity 120ms ease, transform")
+            && styles_css().contains("padding: var(--game-event-rail-pad);")
+            && styles_css().contains(".game-event-rail.is-collapsed")
+            && index_html().contains(
+                "<svg class=\"i-collapse\" viewBox=\"0 0 24 24\"><path d=\"M8.6 16.6 10 18l6-6-6-6-1.4 1.4 4.6 4.6-4.6 4.6z\"/></svg>"
+            )
+            && index_html().contains(
+                "<svg class=\"i-expand\" viewBox=\"0 0 24 24\"><path d=\"M15.4 7.4 14 6l-6 6 6 6 1.4-1.4L10.8 12l4.6-4.6z\"/></svg>"
+            )
+            && styles_css().contains(".clip .game-meta"),
+        "plugin-driven game rows must keep League title/KDA behavior and render right-side events plus declarative bottom metadata"
     );
     assert!(
         !index_html().contains("game-profile planned"),

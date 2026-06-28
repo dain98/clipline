@@ -19,6 +19,8 @@ clipline-cloud-api = { git = "https://github.com/dain98/clipline-cloud", rev = "
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+semver = { version = "1", features = ["serde"] }
+sha2 = "0.10"
 tokio = { workspace = true }
 tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-runtime = "2"
@@ -31,6 +33,7 @@ rfd = "0.15"
 png = "0.17"
 base64 = "0.22"
 rodio = { version = "0.17", default-features = false, features = ["vorbis"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

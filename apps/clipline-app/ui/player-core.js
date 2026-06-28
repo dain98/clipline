@@ -471,6 +471,23 @@ const PlayerCore = (() => {
     return markers.length === 1 ? "1 marker" : `${markers.length} markers`;
   };
 
+  const gameEventActiveIndex = (markers, currentTime, selectedIndex = -1) => {
+    const list = Array.isArray(markers) ? markers : [];
+    if (!list.length) return -1;
+    const t = Number.isFinite(currentTime) ? currentTime : 0;
+    const selected = Number(selectedIndex);
+    if (Number.isInteger(selected) && selected >= 0 && selected < list.length) {
+      const selectedTime = Number(list[selected].t_s) || 0;
+      if (t < selectedTime - 0.15) return selected;
+    }
+    let active = -1;
+    for (let i = 0; i < list.length; i += 1) {
+      if ((Number(list[i].t_s) || 0) <= t + 0.15) active = i;
+      else break;
+    }
+    return active;
+  };
+
   const audioTrackId = (track) => String((track && track.id) || "");
 
   const audioTrackKind = (track) => String((track && track.kind) || "");
@@ -557,7 +574,7 @@ const PlayerCore = (() => {
     ).length;
 
   // EventKind variant name -> visual category. Unknown kinds degrade to info.
-  const MARKER_CATEGORIES = {
+  const DEFAULT_MARKER_KINDS = {
     ChampionKill: "kill",
     ChampionDeath: "death",
     FirstBlood: "kill",
@@ -570,38 +587,68 @@ const PlayerCore = (() => {
     InhibKilled: "structure",
     FirstBrick: "structure",
   };
-  const MARKER_GLYPHS = {
-    kill: "✕",
-    death: "✕",
-    spree: "★",
-    objective: "◆",
-    structure: "▣",
-    info: "•",
+  const DEFAULT_MARKER_CATEGORIES = {
+    kill: { singular: "kill", plural: "kills", glyph: "✕" },
+    death: { singular: "death", plural: "deaths", glyph: "✕" },
+    spree: { singular: "spree", plural: "sprees", glyph: "★" },
+    objective: { singular: "objective", plural: "objectives", glyph: "◆" },
+    structure: { singular: "structure", plural: "structures", glyph: "▣" },
+    info: { singular: "event", plural: "events", glyph: "•" },
   };
 
-  const markerStyle = (kind) => {
-    const cls = MARKER_CATEGORIES[kind] || "info";
-    return { glyph: MARKER_GLYPHS[cls], cls };
+  const markerKindConfig = (kind, presentation) => {
+    const configured = presentation && presentation.marker_kinds
+      ? presentation.marker_kinds[kind]
+      : null;
+    return configured && typeof configured === "object" ? configured : {};
   };
 
-  const DIGEST_NOUNS = {
-    kill: ["kill", "kills"],
-    death: ["death", "deaths"],
-    spree: ["spree", "sprees"],
-    objective: ["objective", "objectives"],
-    structure: ["structure", "structures"],
-    info: ["event", "events"],
+  const markerCategoryConfig = (category, presentation) => {
+    const configured = presentation && presentation.marker_categories
+      ? presentation.marker_categories[category]
+      : null;
+    return configured && typeof configured === "object" ? configured : {};
   };
 
-  const markerDigest = (markers) => {
+  const markerCategory = (kind, presentation) => {
+    const configured = markerKindConfig(kind, presentation);
+    return String(configured.category || DEFAULT_MARKER_KINDS[kind] || "info");
+  };
+
+  const markerCategoryMeta = (category, presentation) => {
+    const configured = markerCategoryConfig(category, presentation);
+    const fallback = DEFAULT_MARKER_CATEGORIES[category] || DEFAULT_MARKER_CATEGORIES.info;
+    return {
+      singular: String(configured.singular || fallback.singular),
+      plural: String(configured.plural || fallback.plural),
+      glyph: String(configured.glyph || fallback.glyph),
+    };
+  };
+
+  const markerStyle = (kind, presentation = null) => {
+    const configured = markerKindConfig(kind, presentation);
+    const cls = markerCategory(kind, presentation);
+    const category = markerCategoryMeta(cls, presentation);
+    return { glyph: String(configured.glyph || category.glyph), cls };
+  };
+
+  const markerDigest = (markers, presentation = null) => {
     const counts = {};
     for (const m of markers) {
-      const cls = MARKER_CATEGORIES[m.kind] || "info";
+      const cls = markerCategory(m.kind, presentation);
       counts[cls] = (counts[cls] || 0) + 1;
     }
-    return Object.keys(DIGEST_NOUNS)
+    const configuredOrder = Object.keys((presentation && presentation.marker_categories) || {});
+    const order = [
+      ...configuredOrder,
+      ...Object.keys(DEFAULT_MARKER_CATEGORIES).filter((cls) => !configuredOrder.includes(cls)),
+    ];
+    return order
       .filter((cls) => counts[cls])
-      .map((cls) => `${counts[cls]} ${DIGEST_NOUNS[cls][counts[cls] === 1 ? 0 : 1]}`)
+      .map((cls) => {
+        const meta = markerCategoryMeta(cls, presentation);
+        return `${counts[cls]} ${counts[cls] === 1 ? meta.singular : meta.plural}`;
+      })
       .join(" · ");
   };
 
@@ -614,6 +661,64 @@ const PlayerCore = (() => {
       return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
     };
     return `${champion} | ${stat(summary.kills)}/${stat(summary.deaths)}/${stat(summary.assists)}`;
+  };
+
+  const summaryStat = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? String(Math.floor(n)) : "";
+  };
+
+  const playerSummaryValue = (summary, source) => {
+    if (!summary || typeof source !== "string" || !source.startsWith("player_summary.")) {
+      return "";
+    }
+    const key = source.slice("player_summary.".length);
+    if (!/^[a-z0-9_]+$/i.test(key)) return "";
+    const value = summary[key];
+    if (typeof value === "string") return value.trim();
+    if (typeof value === "number") return summaryStat(value);
+    return "";
+  };
+
+  const metadataAssetKey = (value) => String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  const playerSummaryFields = (summary, fields = []) => {
+    if (!summary || !Array.isArray(fields)) return [];
+    const out = [];
+    for (const field of fields) {
+      if (!field || typeof field !== "object") continue;
+      const type = String(field.type || "stat");
+      const label = String(field.label || "").trim();
+      if (type === "portrait") {
+        const value = playerSummaryValue(summary, field.source || "player_summary.champion_name");
+        if (value) {
+          const assetKey = metadataAssetKey(value);
+          const formatted = { type, label, value, assetKey };
+          if (typeof field.asset_template === "string" && field.asset_template.includes("{assetKey}")) {
+            formatted.asset = field.asset_template.replaceAll("{assetKey}", assetKey);
+          }
+          out.push(formatted);
+        }
+      } else if (type === "champion") {
+        const value = playerSummaryValue(summary, field.source || "player_summary.champion_name");
+        if (value) out.push({ type, label, value });
+      } else if (type === "kda") {
+        const kills = summaryStat(summary.kills);
+        const deaths = summaryStat(summary.deaths);
+        const assists = summaryStat(summary.assists);
+        if (kills || deaths || assists) {
+          out.push({ type, label, value: `${kills || "0"}/${deaths || "0"}/${assists || "0"}` });
+        }
+      } else if (type === "stat") {
+        const value = playerSummaryValue(summary, field.source);
+        if (value) out.push({ type, label, value });
+      }
+    }
+    return out;
   };
 
   const RULER_STEPS_S = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
@@ -1011,6 +1116,7 @@ const PlayerCore = (() => {
     nextMarker,
     prevMarker,
     markerSummary,
+    gameEventActiveIndex,
     defaultAudioTrackIds,
     selectedAudioTrackIds,
     selectionNeedsPreview,
@@ -1020,6 +1126,7 @@ const PlayerCore = (() => {
     markerStyle,
     markerDigest,
     playerSummaryLabel,
+    playerSummaryFields,
     rulerMarks,
     rulerMarksRange,
     sessionGroups,

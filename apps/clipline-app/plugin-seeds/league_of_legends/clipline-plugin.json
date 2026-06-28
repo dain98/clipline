@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "package_version": "1.2.0",
+  "id": "league_of_legends",
+  "name": "League of Legends",
+  "summary": "Auto-records full matches when the in-game window is active.",
+  "default_enabled": true,
+  "default_recording_mode": "full_session",
+  "icon": {
+    "type": "ui_asset",
+    "path": "assets/games/league-of-legends.png"
+  },
+  "window_match": {
+    "exe_name": "League of Legends.exe",
+    "selection": "longest_title"
+  },
+  "event_source": "league_live_client",
+  "presentation": {
+    "marker_kinds": {
+      "ChampionKill": {
+        "category": "kill",
+        "icon": "assets/markers/kill.png"
+      },
+      "ChampionDeath": {
+        "category": "death",
+        "icon": "assets/markers/death.png"
+      },
+      "DragonKill": {
+        "category": "objective",
+        "icon": "assets/markers/dragon.png"
+      },
+      "BaronKill": {
+        "category": "objective",
+        "icon": "assets/markers/baron.png"
+      },
+      "TurretKilled": {
+        "category": "structure",
+        "icon": "assets/markers/turret.png"
+      }
+    },
+    "marker_categories": {
+      "kill": {
+        "singular": "kill",
+        "plural": "kills",
+        "glyph": "✕"
+      },
+      "death": {
+        "singular": "death",
+        "plural": "deaths",
+        "glyph": "✕"
+      },
+      "spree": {
+        "singular": "spree",
+        "plural": "sprees",
+        "glyph": "★"
+      },
+      "objective": {
+        "singular": "objective",
+        "plural": "objectives",
+        "glyph": "◆"
+      },
+      "structure": {
+        "singular": "structure",
+        "plural": "structures",
+        "glyph": "▣"
+      },
+      "info": {
+        "singular": "event",
+        "plural": "events",
+        "glyph": "•"
+      }
+    },
+    "gallery": {
+      "summary": "player_summary_kda",
+      "full_session_title": "summary"
+    },
+    "event_rail": {
+      "enabled": true,
+      "title": "Match events"
+    },
+    "metadata_panel": {
+      "enabled": true,
+      "fields": [
+        {
+          "type": "portrait",
+          "source": "player_summary.champion_name",
+          "label": "Champion"
+        },
+        {
+          "type": "champion",
+          "source": "player_summary.champion_name",
+          "label": "Champion"
+        },
+        {
+          "type": "kda",
+          "label": "K/D/A"
+        }
+      ]
+    }
+  }
+}

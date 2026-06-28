@@ -48,6 +48,17 @@ struct DisplayInfo {
 }
 
 #[derive(serde::Serialize)]
+struct GamePluginPackageStatus {
+    plugin_id: String,
+    installed_version: Option<String>,
+    seed_version: Option<String>,
+    install_state: String,
+    update_available: bool,
+    can_reset_to_seed: bool,
+    message: String,
+}
+
+#[derive(serde::Serialize)]
 struct AudioDeviceInfo {
     id: String,
     name: String,
@@ -1150,6 +1161,76 @@ fn list_game_plugins() -> Vec<GamePluginInfo> {
     crate::games::game_plugin_catalog()
 }
 
+fn game_plugin_package_status(plugin_id: &str) -> Result<GamePluginPackageStatus, String> {
+    let Some(plugin) = crate::games::game_plugin_catalog()
+        .into_iter()
+        .find(|plugin| plugin.id == plugin_id)
+    else {
+        return Err(format!("unknown game plugin {plugin_id:?}"));
+    };
+    let message = match plugin.install_state.as_str() {
+        "repair_available" => "Package can be reset from the bundled seed.".to_string(),
+        _ if plugin.update_available => "Bundled seed update is available.".to_string(),
+        _ => "Package is current for this Clipline build.".to_string(),
+    };
+    Ok(GamePluginPackageStatus {
+        plugin_id: plugin.id,
+        installed_version: plugin.installed_version,
+        seed_version: plugin.seed_version,
+        install_state: plugin.install_state,
+        update_available: plugin.update_available,
+        can_reset_to_seed: plugin.can_reset_to_seed,
+        message,
+    })
+}
+
+fn plugin_seed_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("resolve bundled plugin seed resources: {e}"))?;
+    Ok(resource_dir.join("plugin-seeds"))
+}
+
+fn reset_plugin_to_seed<R: Runtime>(
+    app: AppHandle<R>,
+    plugin_id: String,
+) -> Result<Vec<GamePluginInfo>, String> {
+    let seed_root = plugin_seed_root(&app)?;
+    let install_root = crate::game_plugins::plugin_install_root();
+    crate::game_plugins::reset_first_party_plugin_to_seed(&plugin_id, &seed_root, &install_root)?;
+    Ok(crate::games::game_plugin_catalog())
+}
+
+#[tauri::command]
+fn check_game_plugin_package(plugin_id: String) -> Result<GamePluginPackageStatus, String> {
+    game_plugin_package_status(&plugin_id)
+}
+
+#[tauri::command]
+fn update_game_plugin_package<R: Runtime>(
+    app: AppHandle<R>,
+    plugin_id: String,
+) -> Result<Vec<GamePluginInfo>, String> {
+    reset_plugin_to_seed(app, plugin_id)
+}
+
+#[tauri::command]
+fn reinstall_game_plugin_package<R: Runtime>(
+    app: AppHandle<R>,
+    plugin_id: String,
+) -> Result<Vec<GamePluginInfo>, String> {
+    reset_plugin_to_seed(app, plugin_id)
+}
+
+#[tauri::command]
+fn reset_game_plugin_to_seed<R: Runtime>(
+    app: AppHandle<R>,
+    plugin_id: String,
+) -> Result<Vec<GamePluginInfo>, String> {
+    reset_plugin_to_seed(app, plugin_id)
+}
+
 /// The frontend reports which codecs WebView2 can decode (canPlayType) so
 /// Automatic selection never records a clip the review player can't show.
 /// Takes effect on the next recorder (re)start.
@@ -1443,6 +1524,10 @@ pub fn run() {
             probe_encoders,
             report_decode_support,
             list_game_plugins,
+            check_game_plugin_package,
+            update_game_plugin_package,
+            reinstall_game_plugin_package,
+            reset_game_plugin_to_seed,
             list_game_windows,
             extract_window_icon,
             memory_status,
@@ -1512,6 +1597,26 @@ pub fn run() {
             {
                 eprintln!(
                     "could not scope audio preview cache {audio_preview_scope_dir:?} for playback: {e}"
+                );
+            }
+            match app.path().resource_dir() {
+                Ok(resource_dir) => {
+                    let seed_root = resource_dir.join("plugin-seeds");
+                    if let Err(e) = crate::game_plugins::seed_bundled_plugins(&seed_root) {
+                        eprintln!("could not seed bundled game plugins from {seed_root:?}: {e}");
+                    }
+                }
+                Err(e) => eprintln!("could not resolve resource dir for plugin seeds: {e}"),
+            }
+            let plugin_install_root = crate::game_plugins::plugin_install_root();
+            if let Err(e) = std::fs::create_dir_all(&plugin_install_root) {
+                eprintln!("could not create plugin install root {plugin_install_root:?}: {e}");
+            } else if let Err(e) = app
+                .asset_protocol_scope()
+                .allow_directory(&plugin_install_root, true)
+            {
+                eprintln!(
+                    "could not scope plugin install root {plugin_install_root:?} for assets: {e}"
                 );
             }
 

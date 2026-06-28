@@ -11,9 +11,9 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-27): a working tray recorder with a first-party review player
+## Current state (2026-06-28): a working tray recorder with a first-party review player
 
-Thirty-two milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
+Thirty-three milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -277,6 +277,26 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      split into a testable `delete_clips_impl` (no `tauri::State`) so the partial-success +
      sidecar/poster cleanup behavior is covered by a unit test; `tests/ui_contract.rs` gains
      `gallery_supports_multi_select_bulk_actions`.
+33. **League presentation plugin extraction** — the built-in game plugin seam now loads
+     declarative first-party packages from `%APPDATA%\Clipline\plugins\<plugin_id>\`, seeded from
+     bundled Tauri resources under `plugin-seeds`. League's package manifest carries
+     `schema_version: 1`, SemVer `package_version`, declarative window matching
+     (`League of Legends.exe` + longest-title selection), icon metadata, the built-in
+     `league_live_client` event-source capability name, and additive presentation config. Install
+     receipts live beside packages as `clipline-plugin.receipt.json`; seeded installs reseed only
+     when the bundled package is newer, manual installs are not clobbered, and missing/corrupt
+     receipts become `unknown` / repair-available until the user explicitly resets to seed.
+     `EventKind`, `GameId`, and `is_timeline_marker()` remain core-owned: manifests style the
+     closed marker vocabulary but cannot add event kinds or change persistence policy. The review
+     player now threads presentation into pure `player-core.js` marker helpers and `main.js`
+     renders plugin-driven gallery summaries, marker styling, a playback-synced, pull-tab-collapsible
+     right-side event rail, and a declarative bottom metadata strip (League currently uses champion + K/D/A from the
+     existing sidecar summary; richer stats such as CS/min require additive summary data later).
+     Settings > Games shows backend-driven first-party package actions (check/update/reinstall/
+     reset-to-seed); update/reinstall/reset are intentionally bounded to the bundled seed until a
+     real signed external release feed exists. A staged zip installer with SHA-256 validation,
+     zip-slip rejection, manifest validation before activation, and rollback-on-failure tests is in
+     place for that follow-up, but no arbitrary URL/package install is exposed.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -631,16 +651,21 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
    already carry importance.
-2. **Frame-accurate trim polish** (ddoc §11): re-encode only boundary GOPs, keep the current
+2. **External first-party plugin release feed:** create/publish
+   `clipline-plugin-league-of-legends` release zips, pin the expected signing key or digest in the
+   app, and wire Settings > Games update/reinstall to that feed. The in-app installer already has
+   staging/rollback, zip-slip, digest, manifest-schema, and unknown-capability tests; keep arbitrary
+   URLs out of scope unless the threat model changes.
+3. **Frame-accurate trim polish** (ddoc §11): re-encode only boundary GOPs, keep the current
    stream-copy path as the instant/lossless mode.
-3. **In-app HEVC/AV1 playback** (ddoc §11): the encoder matrix (milestone 23) can record HEVC/AV1,
+4. **In-app HEVC/AV1 playback** (ddoc §11): the encoder matrix (milestone 23) can record HEVC/AV1,
    but WebView2 can't decode them without OS extensions — Automatic avoids them and explicit picks
    warn. A native FFmpeg decode path feeding frames to the review player would close that gap.
    Smaller follow-ups from milestone 23: wire the Microsoft software H.264 MFT (the only
    software H.264 under LGPL), bundle the lgpl-shared ffmpeg into the installer, and revisit
    NVENC/QSV arg tuning (only AMF + SVT-AV1 were verified live on this RDNA2 box).
-4. **Dynamic audio-session tracking** (ddoc §10): process audio is split at recorder start; new app sessions that appear mid-recording and multi-process grouping remain next.
-5. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
+5. **Dynamic audio-session tracking** (ddoc §10): process audio is split at recorder start; new app sessions that appear mid-recording and multi-process grouping remain next.
+6. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
    guidance (§8), WebView2-destroyed-when-minimized RAM trick (§4), installer/signing (§4).
 
 Also worth knowing: the default `Videos\Clipline` folder on this machine holds test clips from the milestone
