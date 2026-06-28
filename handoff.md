@@ -284,6 +284,14 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-27):
+- Nightly 0.1.18 contains the default multitrack playback fix and gallery thumbnail hardening
+  from PR #63. The previous public nightly metadata was 0.1.17, so the app and Tauri package
+  versions were bumped to 0.1.18 for updater eligibility.
+- Review playback now mixes default output+mic multi-track captures for WebView2/share targets
+  that only play the first audio stream, but falls back to source playback without a persistent
+  error when ffmpeg audio mixing is unavailable. Local poster failures are cached for the app
+  session and stay on the gradient placeholder instead of using per-card video elements that can
+  keep Windows file handles open.
 - Nightly 0.1.17 contains the local clip-library multi-select/bulk-delete workflow and the
   replay-audio fixes from PR #61. The previous public nightly metadata was 0.1.16, so the
   app and Tauri package versions were bumped to 0.1.17 for updater eligibility.
