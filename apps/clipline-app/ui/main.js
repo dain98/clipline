@@ -2365,28 +2365,76 @@ function thumbGradient(c) {
   return `--g1:hsl(${h} 30% 18%); --g2:hsl(${(h + 38) % 360} 34% 8%);`;
 }
 
-function makePosterImg(url) {
+function insertThumbMedia(thumb, media) {
+  const firstOverlay = thumb.querySelector(".card-play, .card-kind, .card-dur, .marker-strip, .card-del");
+  thumb.insertBefore(media, firstOverlay || null);
+}
+
+function makePosterImg(url, onError = null) {
   const img = document.createElement("img");
   img.className = "card-thumb-img";
   img.src = url;
   img.alt = "";
-  img.addEventListener("error", () => img.remove());
+  img.addEventListener("error", () => onError && onError());
+  img.addEventListener("error", () => {
+    if (!onError) img.remove();
+  });
   return img;
+}
+
+function posterFallbackSeekSeconds(clip) {
+  const markers = clip && clip.markers ? clip.markers : null;
+  const duration = Number(markers && markers.duration_s);
+  const durationOk = Number.isFinite(duration) && duration > 0;
+  const first = markers && Array.isArray(markers.markers) ? markers.markers[0] : null;
+  if (first) {
+    const t = Math.max(0, Number(first.t_s) || 0);
+    return durationOk ? Math.min(t, Math.max(0, duration - 0.2)) : t;
+  }
+  return durationOk ? Math.min(duration * 0.15, 5) : 1;
+}
+
+function makePosterFallbackVideo(path, clip) {
+  const video = document.createElement("video");
+  video.className = "card-thumb-img";
+  video.src = convertFileSrc(path);
+  video.muted = true;
+  video.preload = "metadata";
+  video.playsInline = true;
+  video.tabIndex = -1;
+  video.setAttribute("aria-hidden", "true");
+  video.addEventListener("loadedmetadata", () => {
+    const target = posterFallbackSeekSeconds(clip);
+    if (Number.isFinite(video.duration) && video.duration > 0) {
+      video.currentTime = Math.min(target, Math.max(0, video.duration - 0.2));
+    } else {
+      video.currentTime = target;
+    }
+  }, { once: true });
+  video.addEventListener("error", () => video.remove(), { once: true });
+  return video;
+}
+
+function showPosterFallback(path, thumb, clip) {
+  if (!thumb.isConnected || thumb.querySelector("video.card-thumb-img")) return;
+  const existing = thumb.querySelector(".card-thumb-img");
+  if (existing) existing.remove();
+  insertThumbMedia(thumb, makePosterFallbackVideo(path, clip));
 }
 
 // Lazily fetch + cache a clip's poster, then drop it into its card thumbnail.
 // The backend caches the JPEG, so repeat calls are cheap after the first.
-function loadCardPoster(path, thumb) {
+function loadCardPoster(path, thumb, clip) {
   invoke("clip_poster", { path })
     .then((posterPath) => {
       if (!posterPath) return;
       const url = convertFileSrc(posterPath);
       posterCache.set(path, url);
       if (thumb.isConnected && !thumb.querySelector(".card-thumb-img")) {
-        thumb.appendChild(makePosterImg(url));
+        insertThumbMedia(thumb, makePosterImg(url, () => showPosterFallback(path, thumb, clip)));
       }
     })
-    .catch(() => {});
+    .catch(() => showPosterFallback(path, thumb, clip));
 }
 
 // Extracting a poster is an ffmpeg spawn, so we only request one once its card
@@ -2404,8 +2452,8 @@ const posterObserver =
             obs.unobserve(thumb);
             const request = posterQueue.get(thumb);
             posterQueue.delete(thumb);
-            if (typeof request === "string") {
-              loadCardPoster(request, thumb);
+            if (request && request.type === "local-poster") {
+              loadCardPoster(request.path, thumb, request.clip);
             } else if (request && request.type === "cloud-thumbnail") {
               loadCloudThumbnail(request.entry, thumb);
             }
@@ -2417,12 +2465,12 @@ const posterObserver =
 
 // Request a clip's poster when its thumbnail nears the viewport — or right away
 // when IntersectionObserver is unavailable.
-function observePoster(path, thumb) {
+function observePoster(path, thumb, clip) {
   if (!posterObserver) {
-    loadCardPoster(path, thumb);
+    loadCardPoster(path, thumb, clip);
     return;
   }
-  posterQueue.set(thumb, path);
+  posterQueue.set(thumb, { type: "local-poster", path, clip });
   posterObserver.observe(thumb);
 }
 
@@ -2454,8 +2502,8 @@ function clipCard(c) {
   thumb.className = "card-thumb";
   thumb.style.cssText = thumbGradient(c);
   const cachedPoster = posterCache.get(c.path);
-  if (cachedPoster) thumb.appendChild(makePosterImg(cachedPoster));
-  else observePoster(c.path, thumb);
+  if (cachedPoster) insertThumbMedia(thumb, makePosterImg(cachedPoster, () => showPosterFallback(c.path, thumb, c)));
+  else observePoster(c.path, thumb, c);
 
   const play = document.createElement("div");
   play.className = "card-play";
@@ -3008,7 +3056,7 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
   if (!clip || !tracks.length) return;
 
   const selected = selectedAudioTrackIdsForClip(clip);
-  if (selected.length === tracks.length && currentReviewMediaPath === clip.path) {
+  if (!PlayerCore.selectionNeedsPreview(tracks, selected) && currentReviewMediaPath === clip.path) {
     setDeckStatus(audioSelectionLabel(clip), { transient: true });
     return;
   }

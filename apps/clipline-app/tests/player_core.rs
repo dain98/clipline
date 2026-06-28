@@ -581,7 +581,7 @@ fn normal_output_track_remains_directly_selectable() {
 }
 
 #[test]
-fn split_output_default_selection_requires_preview() {
+fn multi_track_default_selection_requires_preview() {
     let mut ctx = player_core_context();
     let model = eval_json(
         &mut ctx,
@@ -607,7 +607,7 @@ fn split_output_default_selection_requires_preview() {
 
     assert_eq!(
         model,
-        r#"{"splitDefault":true,"normalDefault":false,"normalPartial":true}"#
+        r#"{"splitDefault":true,"normalDefault":true,"normalPartial":true}"#
     );
 }
 

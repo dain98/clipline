@@ -766,8 +766,8 @@ fn audio_preview_generation_is_not_eager_on_clip_open() {
         "default audio application must be gated by PlayerCore.selectionNeedsPreview"
     );
     assert!(
-        js.contains("selected.length === tracks.length && currentReviewMediaPath === clip.path"),
-        "all-track playback should keep the original source until the user changes selection"
+        js.contains("!PlayerCore.selectionNeedsPreview(tracks, selected) && currentReviewMediaPath === clip.path"),
+        "all-track playback should keep the source only when PlayerCore says no preview mix is needed"
     );
     assert!(
         js.contains("function applyCloudClipSyncResult(")
@@ -1206,6 +1206,21 @@ fn library_has_cloud_source_tab() {
         !js.contains("actions.className = \"card-actions\""),
         "cloud-only cards should not render inline Play/Open/Copy buttons"
     );
+    for required in [
+        "function makePosterFallbackVideo(path, clip)",
+        "function showPosterFallback(path, thumb, clip)",
+        "img.addEventListener(\"error\", () => onError && onError())",
+        ".catch(() => showPosterFallback(path, thumb, clip));",
+        "video.preload = \"metadata\"",
+        "video.currentTime =",
+        "loadCardPoster(path, thumb, clip)",
+        "observePoster(c.path, thumb, c)",
+    ] {
+        assert!(
+            js.contains(required),
+            "local clip thumbnails must fall back to video frames through `{required}`"
+        );
+    }
     for required in [
         ".gallery-source-tabs",
         ".source-tab.active",
