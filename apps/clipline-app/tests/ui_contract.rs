@@ -571,6 +571,7 @@ fn review_player_owns_all_controls() {
             && main_js().contains("presentation.event_rail")
             && main_js().contains("presentation.metadata_panel")
             && main_js().contains("playerSummaryFields")
+            && main_js().contains("data_dragon: presentation && presentation.data_dragon")
             && main_js().contains("data-game-event-index")
             && main_js().contains("gallery.summary === \"player_summary_kda\"")
             && main_js().contains("const gameMeta = clipGameSummary(c)")

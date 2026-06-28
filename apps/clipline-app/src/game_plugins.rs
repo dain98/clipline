@@ -448,10 +448,10 @@ pub fn known_first_party_package_release(plugin_id: &str) -> Option<KnownFirstPa
     match plugin_id {
         LEAGUE_OF_LEGENDS_ID => Some(KnownFirstPartyPackageRelease {
             plugin_id: LEAGUE_OF_LEGENDS_ID,
-            version: Version::parse("1.3.0").expect("known League package version is valid"),
+            version: Version::parse("1.3.1").expect("known League package version is valid"),
             source_label: "clipline-plugin-league-of-legends",
-            url: "https://github.com/dain98/clipline-plugin-league-of-legends/releases/download/v1.3.0/clipline-plugin-league-of-legends-1.3.0.zip",
-            sha256: "070687055eb04610820ba36c9506350c39984217e461b785747f16ab2ceb9390",
+            url: "https://github.com/dain98/clipline-plugin-league-of-legends/releases/download/v1.3.1/clipline-plugin-league-of-legends-1.3.1.zip",
+            sha256: "f1d5bc497abadb9497144e9adfbfb4c164bf32956149e6451ff4a28cde97403e",
         }),
         _ => None,
     }
@@ -890,7 +890,7 @@ fn install_state(receipt: &InstalledPluginRecord) -> &'static str {
 
 const LEAGUE_SEED_MANIFEST_JSON: &str = r#"{
   "schema_version": 1,
-  "package_version": "1.2.1",
+  "package_version": "1.2.2",
   "id": "league_of_legends",
   "name": "League of Legends",
   "summary": "Auto-records full matches when the in-game window is active.",
@@ -900,6 +900,9 @@ const LEAGUE_SEED_MANIFEST_JSON: &str = r#"{
   "window_match": { "exe_name": "League of Legends.exe", "selection": "longest_title" },
   "event_source": "league_live_client",
   "presentation": {
+    "data_dragon": {
+      "version": "16.13.1"
+    },
     "marker_kinds": {
       "ChampionKill": { "category": "kill", "icon": "assets/markers/kill.png" },
       "ChampionDeath": { "category": "death", "icon": "assets/markers/death.png" },
@@ -926,7 +929,28 @@ const LEAGUE_SEED_MANIFEST_JSON: &str = r#"{
     "metadata_panel": {
       "enabled": true,
       "fields": [
-        { "type": "portrait", "source": "player_summary.champion_name", "label": "Champion" },
+        {
+          "type": "portrait",
+          "source": "player_summary.champion_name",
+          "label": "Champion",
+          "asset_provider": "riot_data_dragon_champion_square",
+          "asset_key_format": "data_dragon_champion",
+          "asset_aliases": {
+            "belveth": "Belveth",
+            "cho'gath": "Chogath",
+            "dr. mundo": "DrMundo",
+            "kai'sa": "Kaisa",
+            "kha'zix": "Khazix",
+            "k'sante": "KSante",
+            "kog'maw": "KogMaw",
+            "leblanc": "Leblanc",
+            "nunu & willump": "Nunu",
+            "rek'sai": "Reksai",
+            "renata glasc": "Renata",
+            "vel'koz": "Velkoz",
+            "wukong": "MonkeyKing"
+          }
+        },
         { "type": "champion", "source": "player_summary.champion_name", "label": "Champion" },
         { "type": "kda", "label": "K/D/A" }
       ]
@@ -1092,6 +1116,45 @@ mod tests {
     }
 
     #[test]
+    fn league_seed_manifest_declares_data_dragon_portrait_provider() {
+        let manifest = league_seed_manifest();
+        let presentation = manifest.presentation.as_ref().expect("presentation block");
+        let fields = presentation
+            .pointer("/metadata_panel/fields")
+            .and_then(serde_json::Value::as_array)
+            .expect("metadata panel fields");
+        let portrait = fields
+            .iter()
+            .find(|field| field.get("type").and_then(serde_json::Value::as_str) == Some("portrait"))
+            .expect("portrait field");
+
+        assert_eq!(
+            presentation
+                .pointer("/data_dragon/version")
+                .and_then(serde_json::Value::as_str),
+            Some("16.13.1")
+        );
+        assert_eq!(
+            portrait
+                .get("asset_provider")
+                .and_then(serde_json::Value::as_str),
+            Some("riot_data_dragon_champion_square")
+        );
+        assert_eq!(
+            portrait
+                .get("asset_key_format")
+                .and_then(serde_json::Value::as_str),
+            Some("data_dragon_champion")
+        );
+        assert_eq!(
+            portrait
+                .pointer("/asset_aliases/wukong")
+                .and_then(serde_json::Value::as_str),
+            Some("MonkeyKing")
+        );
+    }
+
+    #[test]
     fn plugin_info_resolves_packaged_presentation_assets() {
         let dir = TestDir::new("clipline-plugin", "presentation-assets");
         let plugin_dir = dir.path().join(LEAGUE_OF_LEGENDS_ID);
@@ -1165,8 +1228,8 @@ mod tests {
 
         let info = plugin.info();
 
-        assert_eq!(release.version.to_string(), "1.3.0");
-        assert_eq!(info.latest_version.as_deref(), Some("1.3.0"));
+        assert_eq!(release.version.to_string(), "1.3.1");
+        assert_eq!(info.latest_version.as_deref(), Some("1.3.1"));
         assert_eq!(
             info.latest_source_label.as_deref(),
             Some("clipline-plugin-league-of-legends")

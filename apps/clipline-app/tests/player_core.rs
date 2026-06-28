@@ -1468,6 +1468,40 @@ fn player_summary_fields_format_declarative_metadata() {
 }
 
 #[test]
+fn player_summary_fields_resolve_data_dragon_portraits() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const FIELDS = [{
+          type: 'portrait',
+          source: 'player_summary.champion_name',
+          label: 'Champion',
+          asset_provider: 'riot_data_dragon_champion_square',
+          asset_key_format: 'data_dragon_champion',
+          asset_aliases: { wukong: 'MonkeyKing' }
+        }];
+        const OPTIONS = { data_dragon: { version: '16.13.1' } };
+        "#,
+    ))
+    .expect("define data dragon fields");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.playerSummaryFields({ champion_name: 'Nautilus', kills: 3, deaths: 4, assists: 23 }, FIELDS, OPTIONS)"
+        ),
+        r#"[{"type":"portrait","label":"Champion","value":"Nautilus","assetKey":"Nautilus","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Nautilus.png"}]"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.playerSummaryFields({ champion_name: 'Wukong', kills: 1, deaths: 0, assists: 2 }, FIELDS, OPTIONS)"
+        ),
+        r#"[{"type":"portrait","label":"Champion","value":"Wukong","assetKey":"MonkeyKing","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/MonkeyKing.png"}]"#
+    );
+}
+
+#[test]
 fn session_groups_bucket_and_sort_by_newest() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(

@@ -687,7 +687,44 @@ const PlayerCore = (() => {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
-  const playerSummaryFields = (summary, fields = []) => {
+  const dataDragonLookupKey = (value) => String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+
+  const dataDragonChampionKey = (value, aliases = {}) => {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    const lookup = dataDragonLookupKey(raw);
+    if (aliases && typeof aliases === "object") {
+      for (const [alias, key] of Object.entries(aliases)) {
+        const resolved = String(key || "").trim();
+        if (dataDragonLookupKey(alias) === lookup && /^[A-Za-z0-9]+$/.test(resolved)) {
+          return resolved;
+        }
+      }
+    }
+    return (raw.match(/[A-Za-z0-9]+/g) || [])
+      .map((part) => part ? `${part[0].toUpperCase()}${part.slice(1)}` : "")
+      .join("");
+  };
+
+  const dataDragonVersion = (options) => {
+    const version = options
+      && options.data_dragon
+      && typeof options.data_dragon.version === "string"
+      ? options.data_dragon.version.trim()
+      : "";
+    return /^\d+\.\d+\.\d+$/.test(version) ? version : "";
+  };
+
+  const dataDragonChampionSquareAsset = (assetKey, options) => {
+    const version = dataDragonVersion(options);
+    if (!version || !/^[A-Za-z0-9]+$/.test(assetKey)) return "";
+    return `https://ddragon.leagueoflegends.com/cdn/${version}/img/champion/${assetKey}.png`;
+  };
+
+  const playerSummaryFields = (summary, fields = [], options = {}) => {
     if (!summary || !Array.isArray(fields)) return [];
     const out = [];
     for (const field of fields) {
@@ -697,10 +734,15 @@ const PlayerCore = (() => {
       if (type === "portrait") {
         const value = playerSummaryValue(summary, field.source || "player_summary.champion_name");
         if (value) {
-          const assetKey = metadataAssetKey(value);
+          const assetKey = field.asset_key_format === "data_dragon_champion"
+            ? dataDragonChampionKey(value, field.asset_aliases)
+            : metadataAssetKey(value);
           const formatted = { type, label, value, assetKey };
           if (typeof field.asset_template === "string" && field.asset_template.includes("{assetKey}")) {
             formatted.asset = field.asset_template.replaceAll("{assetKey}", assetKey);
+          } else if (field.asset_provider === "riot_data_dragon_champion_square") {
+            const asset = dataDragonChampionSquareAsset(assetKey, options);
+            if (asset) formatted.asset = asset;
           }
           out.push(formatted);
         }

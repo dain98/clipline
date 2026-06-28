@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "package_version": "1.2.1",
+  "package_version": "1.2.2",
   "id": "league_of_legends",
   "name": "League of Legends",
   "summary": "Auto-records full matches when the in-game window is active.",
@@ -16,6 +16,9 @@
   },
   "event_source": "league_live_client",
   "presentation": {
+    "data_dragon": {
+      "version": "16.13.1"
+    },
     "marker_kinds": {
       "ChampionKill": {
         "category": "kill",
@@ -84,7 +87,24 @@
         {
           "type": "portrait",
           "source": "player_summary.champion_name",
-          "label": "Champion"
+          "label": "Champion",
+          "asset_provider": "riot_data_dragon_champion_square",
+          "asset_key_format": "data_dragon_champion",
+          "asset_aliases": {
+            "belveth": "Belveth",
+            "cho'gath": "Chogath",
+            "dr. mundo": "DrMundo",
+            "kai'sa": "Kaisa",
+            "kha'zix": "Khazix",
+            "k'sante": "KSante",
+            "kog'maw": "KogMaw",
+            "leblanc": "Leblanc",
+            "nunu & willump": "Nunu",
+            "rek'sai": "Reksai",
+            "renata glasc": "Renata",
+            "vel'koz": "Velkoz",
+            "wukong": "MonkeyKing"
+          }
         },
         {
           "type": "champion",

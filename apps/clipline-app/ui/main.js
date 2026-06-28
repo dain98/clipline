@@ -2541,10 +2541,13 @@ function syncGameEventRail(currentTime = video.currentTime || 0, options = {}) {
 function renderGameMetadataPanel(clip = currentClip) {
   const panel = $("game-metadata-panel");
   const fieldsRoot = $("game-metadata-fields");
+  const presentation = pluginPresentationForClip(clip);
   const metadataPanel = metadataPanelPolicy(clip);
   const summary = clip && clip.markers ? clip.markers.player_summary : null;
   const fields = metadataPanel && metadataPanel.fields
-    ? playerSummaryFields(summary, metadataPanel.fields)
+    ? playerSummaryFields(summary, metadataPanel.fields, {
+      data_dragon: presentation && presentation.data_dragon,
+    })
     : [];
   if (!metadataPanel || !metadataPanel.enabled || !fields.length) {
     panel.hidden = true;
