@@ -24,6 +24,31 @@ fn styles_css() -> String {
     fs::read_to_string(path).expect("read ui/styles.css")
 }
 
+fn js_function_body<'a>(source: &'a str, name: &str) -> &'a str {
+    let signature = format!("function {name}(");
+    let function_start = source
+        .find(&signature)
+        .unwrap_or_else(|| panic!("missing JavaScript function {name}"));
+    let body_start = source[function_start..]
+        .find('{')
+        .map(|offset| function_start + offset + 1)
+        .unwrap_or_else(|| panic!("missing JavaScript function body for {name}"));
+    let mut depth = 1usize;
+    for (offset, ch) in source[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[body_start..body_start + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated JavaScript function body for {name}");
+}
+
 fn app_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs");
     fs::read_to_string(path).expect("read src/app.rs")
@@ -776,6 +801,28 @@ fn review_player_owns_all_controls() {
             "{id} must render an SVG icon, not a text label"
         );
     }
+}
+
+#[test]
+fn game_event_rail_does_not_run_on_every_animation_frame() {
+    let js = main_js();
+    let animate_playhead = js_function_body(&js, "animatePlayhead");
+
+    assert!(
+        !animate_playhead.contains("syncGameEventRail"),
+        "the animated playhead loop must stay cheap; event rail sync should run from coarse media events"
+    );
+    assert!(
+        js.contains("let gameEventRows = []")
+            && js.contains("gameEventRows.push(button)")
+            && !js.contains("document.querySelectorAll(\"[data-game-event-index]\")"),
+        "event rail active-state updates should use cached row elements instead of querying the DOM each tick"
+    );
+    assert!(
+        js.contains("video.addEventListener(\"timeupdate\"")
+            && js.contains("syncGameEventRail(video.currentTime || 0);"),
+        "timeupdate should keep the event rail following playback without tying it to requestAnimationFrame"
+    );
 }
 
 #[test]

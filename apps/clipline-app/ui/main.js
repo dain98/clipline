@@ -2380,6 +2380,7 @@ let activeGameEventIndex = -1;
 let selectedGameEventIndex = -1;
 let selectedGameEventTime = null;
 let gameEventRailCollapsed = false;
+let gameEventRows = [];
 
 function eventRailPolicy(clip) {
   const presentation = pluginPresentationForClip(clip);
@@ -2430,11 +2431,13 @@ function renderGameEventRail(clip = currentClip) {
     title.textContent = "";
     summary.textContent = "";
     list.replaceChildren();
+    gameEventRows = [];
     return;
   }
   title.textContent = eventRail.title || (clip && clip.game ? `${clip.game.name} events` : "Game events");
   summary.textContent = markerSummary(markers);
   list.replaceChildren();
+  gameEventRows = [];
   const playerSummary = clip && clip.markers ? clip.markers.player_summary : null;
   markers.forEach((marker, index) => {
     const item = document.createElement("li");
@@ -2479,6 +2482,7 @@ function renderGameEventRail(clip = currentClip) {
       seekTo(markerTime - MARKER_LEAD_S, { keepGameEventSelection: true });
       video.play().catch(() => syncPlayState());
     });
+    gameEventRows.push(button);
     item.appendChild(button);
     list.appendChild(item);
   });
@@ -2514,12 +2518,13 @@ function setGameEventRailCollapsed(collapsed) {
 function syncGameEventRail(currentTime = video.currentTime || 0, options = {}) {
   const rail = $("game-event-rail");
   if (!rail || rail.hidden || rail.classList.contains("is-collapsed")) return;
+  if (!gameEventRows.length) return;
   const markers = clipMarkers();
   const selectedIndex = selectedGameEventIndexForTime(currentTime);
   const next = gameEventActiveIndex(markers, currentTime, selectedIndex);
   if (next === activeGameEventIndex && !options.force) return;
   activeGameEventIndex = next;
-  document.querySelectorAll("[data-game-event-index]").forEach((row) => {
+  gameEventRows.forEach((row) => {
     const active = Number(row.dataset.gameEventIndex) === next;
     row.classList.toggle("active", active);
     row.setAttribute("aria-current", active ? "true" : "false");
@@ -3844,7 +3849,6 @@ function renderOverviewMarkers() {
 function animatePlayhead() {
   maybeFollow(video.currentTime || 0);
   paintTimeline();
-  syncGameEventRail(video.currentTime || 0);
   updateOverlay();
   if (!video.paused && !video.ended) rafId = requestAnimationFrame(animatePlayhead);
 }
@@ -4967,6 +4971,7 @@ $("settings-save").addEventListener("click", async () => {
 video.addEventListener("click", togglePlay);
 video.addEventListener("play", () => {
   syncPlayState();
+  syncGameEventRail(video.currentTime || 0);
   cancelAnimationFrame(rafId);
   rafId = requestAnimationFrame(animatePlayhead);
 });
