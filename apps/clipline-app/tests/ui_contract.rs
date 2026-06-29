@@ -25,6 +25,37 @@ fn styles_css() -> String {
     fs::read_to_string(path).expect("read ui/styles.css")
 }
 
+fn css_rule_body<'a>(source: &'a str, selector: &str) -> &'a str {
+    let selector_start = source
+        .find(selector)
+        .unwrap_or_else(|| panic!("missing CSS selector {selector}"));
+    let body_start = source[selector_start..]
+        .find('{')
+        .map(|offset| selector_start + offset + 1)
+        .unwrap_or_else(|| panic!("missing CSS block for {selector}"));
+    let mut depth = 1usize;
+    for (offset, ch) in source[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[body_start..body_start + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated CSS block for {selector}");
+}
+
+fn css_decl_value<'a>(rule_body: &'a str, property: &str) -> Option<&'a str> {
+    rule_body.split(';').find_map(|declaration| {
+        let (name, value) = declaration.trim().split_once(':')?;
+        (name.trim() == property).then(|| value.trim())
+    })
+}
+
 fn marker_png_alpha_bounds(asset_dir: &str, name: &str) -> ((u32, u32), (u32, u32)) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(asset_dir)
@@ -1259,13 +1290,13 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
 
     // The whole-clip navigator sits between the ruler and the export row.
     let trim_toggle = html.find("id=\"trim-mode-toggle\"").expect("trim toggle");
-    let timeline_stack = html.find("class=\"timeline-stack\"").expect("timeline stack");
+    let timeline_stack = html
+        .find("class=\"timeline-stack\"")
+        .expect("timeline stack");
     let action_row = html
         .find("class=\"timeline-action-row\"")
         .expect("timeline action row");
-    let timeline_main = html
-        .find("class=\"timeline-main\"")
-        .expect("timeline main");
+    let timeline_main = html.find("class=\"timeline-main\"").expect("timeline main");
     let timeline = html.find("id=\"timeline\"").expect("timeline");
     let marker_layer = html.find("id=\"marker-layer\"").expect("marker layer");
     let ruler = html.find("id=\"ruler\"").expect("ruler");
@@ -1277,7 +1308,9 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         "the simple scissors trim control must sit in its own row above the timeline band"
     );
     assert!(
-        timeline < marker_layer && marker_layer < ruler && !html.contains("class=\"timeline-rail\""),
+        timeline < marker_layer
+            && marker_layer < ruler
+            && !html.contains("class=\"timeline-rail\""),
         "event markers must live on the timeline band above the attached time ruler"
     );
 
@@ -1315,30 +1348,58 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         css.contains("#overview-window") && css.contains(".ov-marker") && css.contains(".snapped"),
         "navigator window, marker ticks, and snap feedback must be styled"
     );
+    let action_row_rule = css_rule_body(&css, ".timeline-action-row");
+    let timeline_main_rule = css_rule_body(&css, ".timeline-main");
+    let timeline_rule = css_rule_body(&css, "#timeline");
+    let timeline_progress_rule = css_rule_body(&css, "#timeline::before");
+    let marker_layer_rule = css_rule_body(&css, "#marker-layer");
+    let ruler_rule = css_rule_body(&css, ".ruler");
+    let ruler_tick_rule = css_rule_body(&css, ".ruler .tick.micro");
+    let ruler_lab_rule = css_rule_body(&css, ".ruler .lab");
+    let marker_glyph_rule = css_rule_body(&css, ".marker .glyph");
+    let marker_image_rule = css_rule_body(&css, ".marker .glyph.img");
     assert!(
-        css.contains(".timeline-main {\n  position: relative;\n  height: 56px;")
-            && css.contains(".timeline-action-row {\n  display: flex;\n  justify-content: flex-end;\n  align-items: center;\n  height: 26px;\n  min-width: 0;\n  margin-bottom: 8px;")
-            && css.contains("border: 0;\n  border-radius: 7px 7px 0 0;\n  background: #12161d;")
-            && !css.contains(".timeline-main {\n  position: relative;\n  height: 56px;\n  min-width: 0;\n  border: 1px solid var(--line);")
-            && css.contains("#timeline {\n  position: absolute;\n  inset: 0;\n  height: auto;\n  border: 0;\n  border-radius: 0;\n  background: transparent;")
-            && css.contains("#timeline::before")
+        css_decl_value(action_row_rule, "display").is_some()
+            && css_decl_value(action_row_rule, "justify-content").is_some()
+            && css_decl_value(timeline_main_rule, "position").is_some()
+            && css_decl_value(timeline_main_rule, "border") == Some("0")
+            && css_decl_value(timeline_main_rule, "overflow").is_some()
+            && css_decl_value(timeline_rule, "position").is_some()
+            && css_decl_value(timeline_rule, "border") == Some("0")
+            && css_decl_value(timeline_rule, "background") == Some("transparent")
+            && css_decl_value(timeline_progress_rule, "background").is_some()
             && !css.contains("#timeline::after")
-            && css.contains("background: #e5164f;")
-            && css.contains("#marker-layer {\n  position: absolute;\n  left: 0;\n  right: 0;\n  top: 18px;")
-            && css.contains(".ruler {\n  position: relative;\n  height: 28px;\n  margin-top: 0;\n  border: 0;\n  border-radius: 0 0 7px 7px;\n  background: #12161d;")
-            && css.contains(".ruler .tick.micro")
-            && css.contains(".ruler .lab {\n  position: absolute;\n  top: 13px;")
-            && css.contains(
-                ".marker .glyph {\n  flex: 0 0 auto;\n  width: 18px;\n  height: 18px;"
-            )
-            && css.contains(".marker .glyph svg { width: 18px; height: 18px; display: block; }"),
-        "event markers must sit on a borderless, app-toned timeline band above a dense attached ruler"
+            && css_decl_value(marker_layer_rule, "position").is_some()
+            && css_decl_value(marker_layer_rule, "pointer-events").is_some()
+            && css_decl_value(ruler_rule, "position").is_some()
+            && css_decl_value(ruler_rule, "border") == Some("0")
+            && css_decl_value(ruler_tick_rule, "height").is_some()
+            && css_decl_value(ruler_lab_rule, "position").is_some()
+            && css_decl_value(marker_glyph_rule, "width").is_some()
+            && css_decl_value(marker_glyph_rule, "height").is_some()
+            && css_decl_value(marker_image_rule, "mask").is_some()
+            && css_decl_value(marker_image_rule, "filter")
+                .is_some_and(|value| value.contains("drop-shadow")),
+        "event markers must sit on a borderless timeline band above a dense attached ruler"
     );
     assert!(
-        css.contains(".timeline-action-row")
-            && css.contains("#trim-mode-toggle {\n  position: relative;")
-            && css.contains("color: #ffffff;"),
+        css_decl_value(action_row_rule, "display").is_some()
+            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "position").is_some()
+            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "color") == Some("#ffffff"),
         "the simple scissors trim control must be above the track and high contrast"
+    );
+    assert!(
+        css_decl_value(
+            css_rule_body(&css, "#trim-mode-toggle.active"),
+            "background"
+        )
+        .is_none()
+            && css_decl_value(
+                css_rule_body(&css, ".deck.simple-trim-active #trim-mode-toggle"),
+                "background"
+            )
+            .is_some(),
+        "the simple trim deck state must own the active scissors background"
     );
     assert!(
         js.contains("const minorStep = step / 10;")

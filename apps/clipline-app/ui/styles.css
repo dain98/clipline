@@ -2675,7 +2675,6 @@ label span { white-space: nowrap; }
 #trim-mode-toggle.active {
   color: #ffffff;
   border-color: rgba(255, 255, 255, 0.62);
-  background: rgba(61, 123, 253, 0.38);
 }
 .deck.simple-timeline .nav-row { display: none; }
 .deck.simple-timeline #overview,
