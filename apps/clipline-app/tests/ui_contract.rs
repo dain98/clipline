@@ -529,6 +529,13 @@ fn review_player_owns_all_controls() {
         "settings must expose the Games tab and custom game action"
     );
     assert!(
+        html.contains(">Supported games<")
+            && html.contains("loading supported games...")
+            && !html.contains(">Game plugins<")
+            && !html.contains("loading game plugins..."),
+        "Settings > Games must name built-in integrations as supported games"
+    );
+    assert!(
         main_js().contains("gameRecordingModeControl")
             && main_js().contains("custom-game-recording-mode")
             && main_js().contains("recording_mode")

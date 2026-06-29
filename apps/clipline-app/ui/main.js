@@ -1648,7 +1648,7 @@ function updateGameDetectionStatus() {
     } else if (customGames.length) {
       $("game-detection-status").textContent = "No saved custom game is active.";
     } else {
-      $("game-detection-status").textContent = "Enable a game plugin or add a running game window, then save.";
+      $("game-detection-status").textContent = "Enable a supported game or add a running game window, then save.";
     }
   }
 }
