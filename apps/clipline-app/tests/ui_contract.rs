@@ -1395,6 +1395,31 @@ fn timeline_marker_pngs_have_matching_alpha_height() {
 }
 
 #[test]
+fn league_event_rail_pngs_have_matching_alpha_height() {
+    let event_rail_icon_names = [
+        "baron.png",
+        "death.png",
+        "dragon.png",
+        "kill.png",
+        "turret.png",
+    ];
+
+    for name in event_rail_icon_names {
+        let (canvas, visible) =
+            marker_png_alpha_bounds("plugin-seeds/league_of_legends/assets/event-rail", name);
+        assert_eq!(
+            canvas,
+            (320, 320),
+            "league event rail {name} canvas must match the other match event icons"
+        );
+        assert_eq!(
+            visible.1, 280,
+            "league event rail {name} visible alpha height must match the other match event icons"
+        );
+    }
+}
+
+#[test]
 fn no_native_browser_dialogs() {
     let js = main_js();
     let css = styles_css();
