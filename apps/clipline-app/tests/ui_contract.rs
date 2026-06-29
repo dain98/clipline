@@ -1272,16 +1272,19 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     );
     assert!(
         css.contains(".timeline-main {\n  position: relative;\n  height: 56px;")
+            && css.contains(".timeline-action-row {\n  display: flex;\n  justify-content: flex-end;\n  align-items: center;\n  height: 26px;\n  min-width: 0;\n  margin-bottom: 8px;")
+            && css.contains("border: 0;\n  border-radius: 7px 7px 0 0;\n  background: #12161d;")
+            && !css.contains(".timeline-main {\n  position: relative;\n  height: 56px;\n  min-width: 0;\n  border: 1px solid var(--line);")
             && css.contains("#timeline {\n  position: absolute;\n  inset: 0;\n  height: auto;\n  border: 0;\n  border-radius: 0;\n  background: transparent;")
             && css.contains("#timeline::before")
             && !css.contains("#timeline::after")
             && css.contains("background: #e5164f;")
             && css.contains("#marker-layer {\n  position: absolute;\n  left: 0;\n  right: 0;\n  top: 18px;")
-            && css.contains(".ruler {\n  position: relative;\n  height: 28px;")
+            && css.contains(".ruler {\n  position: relative;\n  height: 28px;\n  margin-top: 0;\n  border: 0;\n  border-radius: 0 0 7px 7px;\n  background: #12161d;")
             && css.contains(".ruler .tick.micro")
             && css.contains(".ruler .lab {\n  position: absolute;\n  top: 13px;")
             && css.contains(".marker .glyph {\n  flex: 0 0 auto;\n  width: 16px;"),
-        "event markers must sit on a transparent Outplayed-like timeline band above a dense attached ruler"
+        "event markers must sit on a borderless, app-toned timeline band above a dense attached ruler"
     );
     assert!(
         css.contains(".timeline-action-row")
