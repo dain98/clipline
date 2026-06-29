@@ -2,6 +2,7 @@
 //! the browser owns nothing, and the UI stays split into testable assets.
 
 use std::fs;
+use std::io::BufReader;
 use std::path::Path;
 
 fn index_html() -> String {
@@ -22,6 +23,51 @@ fn player_core_js() -> String {
 fn styles_css() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/styles.css");
     fs::read_to_string(path).expect("read ui/styles.css")
+}
+
+fn marker_png_alpha_bounds(name: &str) -> ((u32, u32), (u32, u32)) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("ui/assets/markers")
+        .join(name);
+    let file = fs::File::open(&path).unwrap_or_else(|err| panic!("open {path:?}: {err}"));
+    let decoder = png::Decoder::new(BufReader::new(file));
+    let mut reader = decoder
+        .read_info()
+        .unwrap_or_else(|err| panic!("decode {path:?}: {err}"));
+    let mut bytes = vec![0; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut bytes)
+        .unwrap_or_else(|err| panic!("read {path:?}: {err}"));
+    assert_eq!(
+        (info.color_type, info.bit_depth),
+        (png::ColorType::Rgba, png::BitDepth::Eight),
+        "{name} must stay an 8-bit RGBA PNG so CSS masks use its alpha channel"
+    );
+
+    let row_stride = info.width as usize * 4;
+    let frame = &bytes[..info.buffer_size()];
+    let mut min_x = info.width;
+    let mut min_y = info.height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut found = false;
+    for y in 0..info.height {
+        for x in 0..info.width {
+            let alpha = frame[y as usize * row_stride + x as usize * 4 + 3];
+            if alpha > 0 {
+                found = true;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    assert!(found, "{name} must include non-transparent marker art");
+    (
+        (info.width, info.height),
+        (max_x - min_x + 1, max_y - min_y + 1),
+    )
 }
 
 fn js_function_body<'a>(source: &'a str, name: &str) -> &'a str {
@@ -692,9 +738,8 @@ fn review_player_owns_all_controls() {
             && styles_css().contains(".game-event-rail ol button.game-event-duel .game-event-kind-icon")
             && styles_css().contains("width: 34px;\n  height: 34px;\n  overflow: visible;")
             && !styles_css().contains("align-self: start;\n  margin-top: 7px;")
-            && styles_css().contains(".game-event-rail ol button.marker-kill .game-event-kind-icon img")
-            && styles_css().contains(".game-event-rail ol button.marker-death .game-event-kind-icon img")
-            && styles_css().contains("width: 36px;\n  height: 36px;")
+            && !styles_css().contains(".game-event-rail ol button.marker-kill .game-event-kind-icon img")
+            && !styles_css().contains(".game-event-rail ol button.marker-death .game-event-kind-icon img")
             && styles_css().contains("border: 0;\n  border-radius: 0;\n  background: transparent;")
             && styles_css().contains("filter:\n    drop-shadow(1px 0 0 rgba(2, 6, 23, 0.9))")
             && styles_css().contains(".game-event-name")
@@ -1299,14 +1344,40 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         "the time ruler must add Outplayed-style dense ticks between major labels"
     );
     assert!(
-        css.contains(".marker-death .glyph.img")
-            && css.contains("-webkit-mask: var(--marker-img) center / 190% no-repeat"),
-        "death marker art has extra transparent padding and must be scaled to match kill markers"
+        !css.contains(".marker-death .glyph.img") && !css.contains("190% no-repeat"),
+        "normalized marker PNGs must not need per-kind timeline mask scaling"
     );
     assert!(
         css.contains(".marker .glyph.img")
             && css.contains("mask: var(--marker-img) center / contain no-repeat;\n  filter:\n    drop-shadow(1px 0 0 rgba(2, 6, 23, 0.9))"),
         "timeline marker image glyphs must use the same black alpha-outline as event rail icons"
+    );
+}
+
+#[test]
+fn timeline_marker_pngs_have_matching_alpha_height() {
+    let marker_names = [
+        "baron.png",
+        "death.png",
+        "dragon.png",
+        "kill.png",
+        "turret.png",
+    ];
+
+    for name in marker_names {
+        let (canvas, visible) = marker_png_alpha_bounds(name);
+        assert_eq!(canvas, (320, 320), "{name} canvas must match the other timeline markers");
+        assert_eq!(
+            visible.1, 280,
+            "{name} visible alpha height must match the other timeline markers"
+        );
+    }
+
+    let css = styles_css();
+    assert!(
+        !css.contains(".game-event-rail ol button.marker-kill .game-event-kind-icon img")
+            && !css.contains(".game-event-rail ol button.marker-death .game-event-kind-icon img"),
+        "normalized marker PNGs must not need per-kind event rail image sizing"
     );
 }
 
