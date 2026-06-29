@@ -547,15 +547,32 @@ fn review_player_owns_all_controls() {
             && main_js().contains("game-plugin-mode-")
             && main_js().contains("normalizeGamePluginId")
             && main_js().contains("Takes priority over matching custom games.")
-            && main_js().contains("check_game_plugin_package")
-            && main_js().contains("update_game_plugin_package")
-            && main_js().contains("reinstall_game_plugin_package")
-            && main_js().contains("reset_game_plugin_to_seed")
-            && main_js().contains("plugin.latest_version")
-            && main_js().contains("plugin.latest_source_label")
-            && main_js().contains("dataset.gamePluginAction")
+            && !main_js().contains("check_game_plugin_package")
+            && !main_js().contains("update_game_plugin_package")
+            && !main_js().contains("reinstall_game_plugin_package")
+            && !main_js().contains("reset_game_plugin_to_seed")
+            && !main_js().contains("plugin.latest_version")
+            && !main_js().contains("plugin.latest_source_label")
+            && !main_js().contains("dataset.gamePluginAction")
+            && !styles_css().contains(".game-plugin-actions")
             && styles_css().contains(".game-profile-mode"),
-        "supported games must render from backend game plugins, including first-party package actions, not hardcoded rows"
+        "supported games must render from backend profiles without package install/update actions"
+    );
+    assert!(
+        main_js().contains("empty.textContent = \"no supported games available\"")
+            && !main_js().contains("not installed")
+            && !main_js().contains("repair available")
+            && !main_js().contains("Package is current"),
+        "Settings > Games copy should describe built-in supported games, not installable packages"
+    );
+    assert!(
+        !app_rs().contains("check_game_plugin_package")
+            && !app_rs().contains("update_game_plugin_package")
+            && !app_rs().contains("reinstall_game_plugin_package")
+            && !app_rs().contains("reset_game_plugin_to_seed")
+            && !app_rs().contains("seed_bundled_plugins")
+            && !app_rs().contains("plugin_install_root"),
+        "Clipline should not expose installable game package commands"
     );
     assert!(
         main_js().contains("function pluginPresentationForClip(clip)")
@@ -580,6 +597,8 @@ fn review_player_owns_all_controls() {
             && main_js().contains("setGameEventRailCollapsed(!gameEventRailCollapsed)")
             && main_js().contains("syncGameEventRail(video.currentTime || 0, { force: true })")
             && main_js().contains("function renderGameMetadataPanel")
+            && main_js().contains("function renderMetadataIconList(field)")
+            && main_js().contains("field.type === \"summoner_spells\" || field.type === \"item_build\"")
             && main_js().contains("presentation.event_rail")
             && main_js().contains("presentation.metadata_panel")
             && main_js().contains("playerSummaryFields")
@@ -594,6 +613,8 @@ fn review_player_owns_all_controls() {
             && main_js().contains("cardPreview.titleSource === \"summary\"")
             && main_js().contains("cardPreview.icon")
             && styles_css().contains(".card-game-ico.portrait")
+            && styles_css().contains(".game-metadata-icons.summoner_spells")
+            && styles_css().contains(".game-metadata-icons.item_build")
             && player_core_js().contains("const clipName = clip && typeof clip.name === \"string\" ? clip.name.trim() : \"\"")
             && player_core_js().contains("titlePolicy === \"clip\" && clipName ? clipName : fallback")
             && main_js().contains("detail.className = \"game-meta\"")

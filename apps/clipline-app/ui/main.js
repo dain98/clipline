@@ -794,11 +794,6 @@ function updateGamePluginSummary(plugin) {
   if (summary) summary.textContent = gamePluginSummary(plugin);
 }
 
-function updateGamePluginPackageStatus(pluginId, message) {
-  const status = document.querySelector(`[data-game-plugin-package-status="${pluginId}"]`);
-  if (status) status.textContent = message || "";
-}
-
 function renderGamePluginModeControl(plugin, settings) {
   const control = document.createElement("div");
   control.className = "segmented-control game-profile-mode";
@@ -832,21 +827,6 @@ function renderGamePluginModeControl(plugin, settings) {
   return control;
 }
 
-function gamePluginPackageStatusText(plugin) {
-  const installed = plugin.installed_version ? `v${plugin.installed_version}` : "not installed";
-  const latest = plugin.latest_version
-    ? `${plugin.latest_source_label || "known package"} v${plugin.latest_version}`
-    : (plugin.seed_version ? `seed v${plugin.seed_version}` : "no known package");
-  const seed = plugin.seed_version ? `seed v${plugin.seed_version}` : "no bundled seed";
-  if (plugin.install_state === "repair_available") {
-    return `${installed}; repair available from ${latest}; reset uses ${seed}`;
-  }
-  if (plugin.update_available) {
-    return `${installed}; ${latest} available`;
-  }
-  return `${installed}; current for ${latest}`;
-}
-
 function syncGamePluginCatalog(nextPlugins) {
   gamePlugins = Array.isArray(nextPlugins) ? nextPlugins : [];
   renderGamePlugins();
@@ -858,64 +838,13 @@ function syncGamePluginCatalog(nextPlugins) {
   }
 }
 
-async function checkGamePluginPackage(plugin) {
-  try {
-    updateGamePluginPackageStatus(plugin.id, "checking...");
-    const status = await invoke("check_game_plugin_package", { pluginId: plugin.id });
-    updateGamePluginPackageStatus(plugin.id, status.message || gamePluginPackageStatusText(plugin));
-  } catch (e) {
-    updateGamePluginPackageStatus(plugin.id, String(e));
-  }
-}
-
-async function runGamePluginPackageAction(plugin, command, busyText) {
-  try {
-    updateGamePluginPackageStatus(plugin.id, busyText);
-    const nextPlugins = await invoke(command, { pluginId: plugin.id });
-    syncGamePluginCatalog(nextPlugins);
-    const refreshed = gamePlugins.find((item) => item.id === plugin.id) || plugin;
-    updateGamePluginPackageStatus(refreshed.id, gamePluginPackageStatusText(refreshed));
-  } catch (e) {
-    updateGamePluginPackageStatus(plugin.id, String(e));
-  }
-}
-
-function renderGamePluginPackageActions(plugin) {
-  const wrap = document.createElement("div");
-  wrap.className = "game-plugin-actions";
-
-  const status = document.createElement("span");
-  status.dataset.gamePluginPackageStatus = plugin.id;
-  status.textContent = gamePluginPackageStatusText(plugin);
-  wrap.appendChild(status);
-
-  if (!plugin.first_party) return wrap;
-
-  const actions = [
-    ["Check", "check", () => checkGamePluginPackage(plugin), false],
-    ["Update", "update", () => runGamePluginPackageAction(plugin, "update_game_plugin_package", "updating..."), !plugin.update_available],
-    ["Reinstall", "reinstall", () => runGamePluginPackageAction(plugin, "reinstall_game_plugin_package", "reinstalling..."), false],
-    ["Reset", "reset", () => runGamePluginPackageAction(plugin, "reset_game_plugin_to_seed", "resetting..."), !plugin.can_reset_to_seed],
-  ];
-  for (const [label, key, onClick, disabled] of actions) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.gamePluginAction = key;
-    button.textContent = label;
-    button.disabled = disabled;
-    button.addEventListener("click", onClick);
-    wrap.appendChild(button);
-  }
-  return wrap;
-}
-
 function renderGamePlugins() {
   const root = $("supported-games");
   root.replaceChildren();
   if (!gamePlugins.length) {
     const empty = document.createElement("div");
     empty.className = "hint";
-    empty.textContent = "no game plugins installed";
+    empty.textContent = "no supported games available";
     root.appendChild(empty);
     return;
   }
@@ -959,8 +888,7 @@ function renderGamePlugins() {
       enabled,
       icon,
       meta,
-      renderGamePluginModeControl(plugin, settings),
-      renderGamePluginPackageActions(plugin)
+      renderGamePluginModeControl(plugin, settings)
     );
     root.appendChild(row);
   }
@@ -2599,6 +2527,41 @@ function syncGameEventRail(currentTime = video.currentTime || 0, options = {}) {
   });
 }
 
+function metadataIconFallbackText(value) {
+  const letters = String(value || "").match(/[A-Za-z0-9]/g) || [];
+  return (letters.slice(0, 2).join("").toUpperCase() || "?").slice(0, 2);
+}
+
+function renderMetadataIcon(entry, className) {
+  const icon = document.createElement("span");
+  icon.className = className;
+  icon.title = entry.value || "";
+  icon.setAttribute("aria-label", entry.value || "Metadata icon");
+  if (entry.asset) {
+    const img = document.createElement("img");
+    img.src = entry.asset;
+    img.alt = entry.value || "";
+    img.addEventListener("error", () => {
+      img.remove();
+      icon.textContent = metadataIconFallbackText(entry.value || entry.assetKey);
+    }, { once: true });
+    icon.appendChild(img);
+  } else {
+    icon.textContent = metadataIconFallbackText(entry.value || entry.assetKey);
+  }
+  return icon;
+}
+
+function renderMetadataIconList(field) {
+  const list = document.createElement("div");
+  list.className = `game-metadata-icons ${field.type}`;
+  list.setAttribute("aria-label", field.label || field.type);
+  for (const entry of field.items || []) {
+    list.appendChild(renderMetadataIcon(entry, "game-metadata-icon"));
+  }
+  return list;
+}
+
 function renderGameMetadataPanel(clip = currentClip) {
   const panel = $("game-metadata-panel");
   const fieldsRoot = $("game-metadata-fields");
@@ -2636,13 +2599,25 @@ function renderGameMetadataPanel(clip = currentClip) {
       fieldsRoot.appendChild(portrait);
       continue;
     }
+    if (field.type === "summoner_spells" || field.type === "item_build") {
+      fieldsRoot.appendChild(renderMetadataIconList(field));
+      continue;
+    }
     const item = document.createElement("div");
     item.className = `game-metadata-field ${field.type}`;
-    const label = document.createElement("strong");
-    label.textContent = field.label || field.type;
+    if (field.label) {
+      const label = document.createElement("strong");
+      label.textContent = field.label;
+      item.appendChild(label);
+    }
     const value = document.createElement("span");
     value.textContent = field.value;
-    item.append(label, value);
+    item.appendChild(value);
+    if (field.secondary) {
+      const secondary = document.createElement("small");
+      secondary.textContent = field.secondary;
+      item.appendChild(secondary);
+    }
     fieldsRoot.appendChild(item);
   }
   panel.hidden = false;

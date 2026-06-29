@@ -1,5 +1,8 @@
 # Plugin Declarative Presentation
 
+> Superseded by `docs/superpowers/plans/2026-06-29-first-party-supported-games.md`.
+> Clipline is no longer pursuing installable game presentation plugins in this branch.
+
 ## Goal
 
 Move League marker/gallery/review presentation to optional manifest fields while keeping `clipline-events` as the closed event vocabulary.
@@ -27,4 +30,3 @@ Move League marker/gallery/review presentation to optional manifest fields while
 - [ ] `cargo test -p clipline-app`
 - [ ] `cargo test --workspace`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-

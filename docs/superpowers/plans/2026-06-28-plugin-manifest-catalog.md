@@ -1,5 +1,8 @@
 # Plugin Manifest Catalog
 
+> Superseded by `docs/superpowers/plans/2026-06-29-first-party-supported-games.md`.
+> Clipline is no longer pursuing installable game presentation plugins in this branch.
+
 ## Goal
 
 Move the existing built-in game plugin seam to manifest-backed records without changing user-visible League behavior.
@@ -27,4 +30,3 @@ Move the existing built-in game plugin seam to manifest-backed records without c
 - [ ] `cargo test -p clipline-app`
 - [ ] `cargo test --workspace`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-

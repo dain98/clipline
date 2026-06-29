@@ -1,5 +1,8 @@
 # League Data Dragon Portraits Implementation Plan
 
+> Superseded by `docs/superpowers/plans/2026-06-29-first-party-supported-games.md`.
+> League presentation now lives in Clipline's built-in supported game profile instead of a standalone package repo.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add Riot Data Dragon champion portrait support to the League plugin's declarative bottom metadata strip.

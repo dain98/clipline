@@ -29,6 +29,23 @@ pub struct PlayerParticipant {
     pub team: String,
 }
 
+/// One summoner spell in a game adapter's match summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerSummonerSpell {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub asset_key: String,
+}
+
+/// One item in a game adapter's match summary build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerItem {
+    pub id: u32,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u32>,
+}
+
 /// Per-player match summary shown in library rows when a game adapter can
 /// provide it. Extra participant fields are optional so older sidecars remain
 /// readable.
@@ -48,6 +65,10 @@ pub struct PlayerSummary {
     pub team: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub participants: Vec<PlayerParticipant>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summoner_spells: Vec<PlayerSummonerSpell>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<PlayerItem>,
 }
 
 /// One user-facing audio stream inside a saved clip.
@@ -195,6 +216,8 @@ mod tests {
             player_name: String::new(),
             team: String::new(),
             participants: Vec::new(),
+            summoner_spells: Vec::new(),
+            items: Vec::new(),
         });
         clip.audio_tracks = vec![ClipAudioTrack {
             id: "output".into(),
@@ -251,5 +274,7 @@ mod tests {
         assert!(summary.player_name.is_empty());
         assert!(summary.team.is_empty());
         assert!(summary.participants.is_empty());
+        assert!(summary.summoner_spells.is_empty());
+        assert!(summary.items.is_empty());
     }
 }

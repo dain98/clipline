@@ -1,5 +1,8 @@
 # League Event Rail Polish Plan
 
+> Superseded by `docs/superpowers/plans/2026-06-29-first-party-supported-games.md`.
+> League presentation now lives in Clipline's built-in supported game profile instead of a standalone package repo.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:test-driven-development and superpowers:systematic-debugging. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Polish the League match-events rail after real ARAM testing: friendly/enemy coloring must show, objective rows must include the relevant champion portrait plus event icon, and marker icons should use cleaner first-party-compatible CommunityDragon assets.

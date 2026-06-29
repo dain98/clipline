@@ -277,37 +277,29 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      split into a testable `delete_clips_impl` (no `tauri::State`) so the partial-success +
      sidecar/poster cleanup behavior is covered by a unit test; `tests/ui_contract.rs` gains
      `gallery_supports_multi_select_bulk_actions`.
-33. **League presentation plugin extraction** — the built-in game plugin seam now loads
-     declarative first-party packages from `%APPDATA%\Clipline\plugins\<plugin_id>\`, seeded from
-     bundled Tauri resources under `plugin-seeds`. League's package manifest carries
-     `schema_version: 1`, SemVer `package_version`, declarative window matching
-     (`League of Legends.exe` + longest-title selection), icon metadata, the built-in
-     `league_live_client` event-source capability name, and additive presentation config. Install
-     receipts live beside packages as `clipline-plugin.receipt.json`; seeded installs reseed only
-     when the bundled package is newer, manual installs are not clobbered, and missing/corrupt
-     receipts become `unknown` / repair-available until the user explicitly resets to seed.
-     `EventKind`, `GameId`, and `is_timeline_marker()` remain core-owned: manifests style the
-     closed marker vocabulary but cannot add event kinds or change persistence policy. The review
-     player now threads presentation into pure `player-core.js` marker helpers and `main.js`
-     renders plugin-driven gallery summaries, marker styling, a playback-synced, pull-tab-collapsible
-     right-side event rail, and a declarative bottom metadata strip. League's Live Client summary
-     now keeps optional participant/team roster data so the event rail can render kill-feed-style
-     actor/victim champion portraits from Data Dragon, actor/objective rows for turret/dragon/baron
-     events, blue/red row treatment, restored first-party timeline marker icons, and a separate
-     event-rail icon map using first-party kill/death silhouettes plus CommunityDragon objective icons.
-     Gallery cards now also have a declarative `gallery.card` policy for plugin-controlled title
-     and icon behavior; League uses this to keep full-session cards titled by K/D/A plus CS/min
-     when fresh sidecars have creep-score data, while replacing the generic League logo with the
-     local champion portrait. League's metadata strip
-     resolves the local champion portrait through the Riot Data
-     Dragon champion-square provider plus champion + K/D/A from the sidecar summary; richer stats
-     such as CS/min require additive summary data later.
-     Settings > Games shows backend-driven first-party package actions (check/update/reinstall/
-     reset-to-seed). League now also has the separate public
-     `clipline-plugin-league-of-legends` repository with a v1.3.6 package zip; Clipline pins that
-     release URL and SHA-256 digest before activating the staged zip installer. Reset remains
-     reset-to-seed, while update/reinstall install only this known first-party package. No arbitrary
-     URL/package install is exposed.
+33. **First-party supported game presentation** — the installable plugin direction was replaced
+     with built-in supported game profiles. League remains the first profile, with declarative
+     presentation data for marker styling, gallery cards, a playback-synced, pull-tab-collapsible
+     right-side event rail, and a bottom metadata strip. Event ingestion stays core-owned behind
+     the built-in `league_live_client` capability; game integration updates ship with normal
+     Clipline releases instead of external plugin zips or Settings-driven package installs.
+     `EventKind`, `GameId`, and `is_timeline_marker()` remain core-owned: profiles style the closed
+     marker vocabulary but cannot add event kinds or change persistence policy. The review player
+     threads presentation into pure `player-core.js` marker helpers and `main.js` renders
+     profile-driven gallery summaries, marker styling, the event rail, and metadata. League's Live
+     Client summary keeps optional participant/team roster data so the event rail can render
+     kill-feed-style actor/victim champion portraits from Data Dragon, actor/objective rows for
+     turret/dragon/baron events, blue/red row treatment, restored first-party timeline marker
+     icons, and a separate event-rail icon map using first-party kill/death silhouettes plus
+     CommunityDragon objective icons. Gallery cards use the profile `gallery.card` policy for title
+     and icon behavior; League keeps full-session cards titled by K/D/A plus CS/min when fresh
+     sidecars have creep-score data, while replacing the generic League logo with the local
+     champion portrait. League's metadata strip resolves the local champion portrait through the
+     Riot Data Dragon champion-square provider, renders summoner spells beside the portrait, shows
+     value-first K/D/A plus ratio, and appends a compact item-build row from fresh Live Client
+     sidecar data; older clips fall back to whatever summary fields they already have. Settings >
+     Games remains backend-driven for supported game rows but no longer exposes check/update/
+     reinstall/reset package actions.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -676,12 +668,11 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
    already carry importance.
-2. **Signed plugin metadata:** the external
-   `clipline-plugin-league-of-legends` v1.3.6 zip is published and Clipline pins its digest for
-   Settings > Games update/reinstall. The remaining hardening step is replacing the app-pinned
-   single digest with a pinned signing key plus signed package metadata so future first-party plugin
-   releases do not require a Clipline binary update; keep arbitrary URLs out of scope unless the
-   threat model changes.
+2. **Next supported game investigation:** CS2 is the cleanest candidate because Valve Game State
+   Integration is official and maps naturally to Clipline's event rail. Apex LiveAPI is promising
+   after a local normal-match smoke test. TFT likely needs OCR/synthetic round markers plus Riot
+   postgame data. Valorant/Fortnite should wait until there is a safe official data source worth
+   integrating.
 3. **Frame-accurate trim polish** (ddoc §11): re-encode only boundary GOPs, keep the current
    stream-copy path as the instant/lossless mode.
 4. **In-app HEVC/AV1 playback** (ddoc §11): the encoder matrix (milestone 23) can record HEVC/AV1,

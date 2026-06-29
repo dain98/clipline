@@ -57,8 +57,38 @@ pub struct PlayerListEntry {
     pub champion_name: String,
     #[serde(rename = "team", default)]
     pub team: String,
+    #[serde(default)]
+    pub items: Vec<PlayerItemEntry>,
+    #[serde(rename = "summonerSpells", default)]
+    pub summoner_spells: PlayerSummonerSpells,
     #[serde(rename = "scores", default)]
     pub scores: PlayerScores,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PlayerItemEntry {
+    #[serde(rename = "itemID", alias = "itemId", alias = "id", default)]
+    pub item_id: u32,
+    #[serde(rename = "displayName", default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub slot: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PlayerSummonerSpells {
+    #[serde(rename = "summonerSpellOne")]
+    pub one: Option<PlayerSummonerSpellEntry>,
+    #[serde(rename = "summonerSpellTwo")]
+    pub two: Option<PlayerSummonerSpellEntry>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PlayerSummonerSpellEntry {
+    #[serde(rename = "displayName", default)]
+    pub display_name: String,
+    #[serde(rename = "rawDisplayName", default)]
+    pub raw_display_name: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

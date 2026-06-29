@@ -1,5 +1,8 @@
 # League Kill Feed Event Rail Implementation Plan
 
+> Superseded by `docs/superpowers/plans/2026-06-29-first-party-supported-games.md`.
+> League presentation now lives in Clipline's built-in supported game profile instead of a standalone package repo.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Render League match events in the right rail as a compact kill-feed-style list with champion portraits, event icons, and friendly/enemy visual treatment.

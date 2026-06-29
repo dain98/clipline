@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use clipline_events::{PlayerParticipant, PlayerSummary};
+use clipline_events::{PlayerItem, PlayerParticipant, PlayerSummary, PlayerSummonerSpell};
 
 use crate::normalize::player_name_key;
-use crate::raw::{EventData, PlayerListEntry};
+use crate::raw::{EventData, PlayerItemEntry, PlayerListEntry, PlayerSummonerSpellEntry};
 
 /// Riot's local Live Client Data endpoint (ddoc §5a).
 pub const DEFAULT_BASE: &str = "https://127.0.0.1:2999";
@@ -139,6 +139,69 @@ fn normalized_game_time_s(game_time_s: Option<f64>) -> Option<u32> {
     Some(seconds.floor() as u32)
 }
 
+fn summoner_spell_asset_key(spell: &PlayerSummonerSpellEntry) -> String {
+    let raw = spell.raw_display_name.trim();
+    if let Some((_, after_prefix)) = raw.split_once("SummonerSpell_") {
+        let key = after_prefix.split('_').next().unwrap_or_default();
+        if key.starts_with("Summoner")
+            && key.len() > "Summoner".len()
+            && key.chars().all(|ch| ch.is_ascii_alphanumeric())
+        {
+            return key.to_string();
+        }
+    }
+
+    match spell
+        .display_name
+        .trim()
+        .to_ascii_lowercase()
+        .replace(|ch: char| !ch.is_ascii_alphanumeric(), "")
+        .as_str()
+    {
+        "barrier" => "SummonerBarrier",
+        "clarity" => "SummonerMana",
+        "cleanse" => "SummonerBoost",
+        "dash" => "SummonerSnowball",
+        "exhaust" => "SummonerExhaust",
+        "flash" => "SummonerFlash",
+        "ghost" => "SummonerHaste",
+        "heal" => "SummonerHeal",
+        "ignite" => "SummonerDot",
+        "mark" => "SummonerSnowball",
+        "smite" => "SummonerSmite",
+        "teleport" => "SummonerTeleport",
+        _ => "",
+    }
+    .to_string()
+}
+
+fn summoner_spell_summary(spell: &PlayerSummonerSpellEntry) -> Option<PlayerSummonerSpell> {
+    let name = spell.display_name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(PlayerSummonerSpell {
+        name: name.to_string(),
+        asset_key: summoner_spell_asset_key(spell),
+    })
+}
+
+fn item_summary(item: &PlayerItemEntry) -> Option<PlayerItem> {
+    if item.item_id == 0 {
+        return None;
+    }
+    let name = item.display_name.trim();
+    Some(PlayerItem {
+        id: item.item_id,
+        name: if name.is_empty() {
+            item.item_id.to_string()
+        } else {
+            name.to_string()
+        },
+        slot: item.slot,
+    })
+}
+
 pub fn player_summary_from_list_with_game_time(
     players: &[PlayerListEntry],
     local_player: &str,
@@ -174,6 +237,16 @@ pub fn player_summary_from_list_with_game_time(
             })
         })
         .collect();
+    let summoner_spells = [
+        player.summoner_spells.one.as_ref(),
+        player.summoner_spells.two.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(summoner_spell_summary)
+    .collect();
+    let mut items: Vec<_> = player.items.iter().filter_map(item_summary).collect();
+    items.sort_by_key(|item| item.slot.unwrap_or(u32::MAX));
 
     Some(PlayerSummary {
         champion_name: champion_name.to_string(),
@@ -185,13 +258,15 @@ pub fn player_summary_from_list_with_game_time(
         player_name: player.summoner_name.trim().to_string(),
         team: player.team.trim().to_string(),
         participants,
+        summoner_spells,
+        items,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raw::{PlayerListEntry, PlayerScores};
+    use crate::raw::{PlayerListEntry, PlayerScores, PlayerSummonerSpells};
 
     #[test]
     fn is_loopback_url_accepts_loopback_variants() {
@@ -232,6 +307,8 @@ mod tests {
             riot_id: riot_id.map(str::to_string),
             champion_name: champion_name.into(),
             team: String::new(),
+            items: Vec::new(),
+            summoner_spells: PlayerSummonerSpells::default(),
             scores: PlayerScores {
                 kills,
                 deaths,
@@ -295,6 +372,49 @@ mod tests {
         assert_eq!(summary.participants[1].player_name, "Soupmaster");
         assert_eq!(summary.participants[1].champion_name, "Ahri");
         assert_eq!(summary.participants[1].team, "CHAOS");
+    }
+
+    #[test]
+    fn player_summary_carries_summoner_spells_and_item_build() {
+        let players: Vec<PlayerListEntry> = serde_json::from_str(
+            r#"[
+              {
+                "summonerName": "dain",
+                "riotId": "Dain#NA1",
+                "championName": "Vel'Koz",
+                "team": "ORDER",
+                "summonerSpells": {
+                  "summonerSpellOne": {
+                    "displayName": "Ignite",
+                    "rawDisplayName": "GeneratedTip_SummonerSpell_SummonerDot_DisplayName"
+                  },
+                  "summonerSpellTwo": {
+                    "displayName": "Flash",
+                    "rawDisplayName": "GeneratedTip_SummonerSpell_SummonerFlash_DisplayName"
+                  }
+                },
+                "items": [
+                  { "itemID": 1056, "displayName": "Doran's Ring", "slot": 0 },
+                  { "itemID": 3020, "displayName": "Sorcerer's Shoes", "slot": 1 },
+                  { "itemID": 6655, "displayName": "Luden's Companion", "slot": 2 }
+                ],
+                "scores": { "kills": 11, "deaths": 19, "assists": 34, "creepScore": 204 }
+              }
+            ]"#,
+        )
+        .unwrap();
+
+        let summary = player_summary_from_list(&players, "dain#NA1").unwrap();
+        let value = serde_json::to_value(summary).unwrap();
+
+        assert_eq!(value["summoner_spells"][0]["name"], "Ignite");
+        assert_eq!(value["summoner_spells"][0]["asset_key"], "SummonerDot");
+        assert_eq!(value["summoner_spells"][1]["name"], "Flash");
+        assert_eq!(value["summoner_spells"][1]["asset_key"], "SummonerFlash");
+        assert_eq!(value["items"][0]["id"], 1056);
+        assert_eq!(value["items"][0]["name"], "Doran's Ring");
+        assert_eq!(value["items"][0]["slot"], 0);
+        assert_eq!(value["items"][2]["id"], 6655);
     }
 
     #[test]

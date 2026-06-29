@@ -2106,6 +2106,8 @@ mod tests {
             player_name: String::new(),
             team: String::new(),
             participants: Vec::new(),
+            summoner_spells: Vec::new(),
+            items: Vec::new(),
         }
     }
 
@@ -2148,6 +2150,8 @@ mod tests {
             player_name: String::new(),
             team: String::new(),
             participants: Vec::new(),
+            summoner_spells: Vec::new(),
+            items: Vec::new(),
         };
 
         let count = write_marker_sidecar(

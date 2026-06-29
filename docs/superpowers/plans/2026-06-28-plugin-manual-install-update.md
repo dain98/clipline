@@ -1,5 +1,8 @@
 # Plugin Manual Install And Update
 
+> Superseded by `docs/superpowers/plans/2026-06-29-first-party-supported-games.md`.
+> Clipline is no longer pursuing installable game presentation plugins in this branch.
+
 ## Goal
 
 Add a manual first-party install/update path for the League package without opening arbitrary third-party plugin execution.
@@ -26,4 +29,3 @@ Add a manual first-party install/update path for the League package without open
 - [ ] `cargo test -p clipline-app`
 - [ ] `cargo test --workspace`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-

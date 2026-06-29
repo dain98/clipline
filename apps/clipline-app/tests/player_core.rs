@@ -1502,6 +1502,56 @@ fn player_summary_fields_resolve_data_dragon_portraits() {
 }
 
 #[test]
+fn player_summary_fields_format_rich_league_metadata() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const SUMMARY = {
+          champion_name: "Vel'Koz",
+          kills: 11,
+          deaths: 19,
+          assists: 34,
+          summoner_spells: [
+            { name: 'Ignite', asset_key: 'SummonerDot' },
+            { name: 'Flash', asset_key: 'SummonerFlash' }
+          ],
+          items: [
+            { id: 1056, name: "Doran's Ring" },
+            { id: 3020, name: "Sorcerer's Shoes" },
+            { id: 6655, name: "Luden's Companion" },
+            { id: 3089, name: "Rabadon's Deathcap" }
+          ]
+        };
+        const FIELDS = [
+          {
+            type: 'summoner_spells',
+            source: 'player_summary.summoner_spells',
+            label: 'Summoner spells',
+            asset_provider: 'riot_data_dragon_summoner_spell'
+          },
+          { type: 'kda', secondary: 'kda_ratio' },
+          {
+            type: 'item_build',
+            source: 'player_summary.items',
+            label: 'Build',
+            asset_provider: 'riot_data_dragon_item'
+          }
+        ];
+        const OPTIONS = { data_dragon: { version: '16.13.1' } };
+        "#,
+    ))
+    .expect("define rich summary fields");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.playerSummaryFields(SUMMARY, FIELDS, OPTIONS)"
+        ),
+        r#"[{"type":"summoner_spells","label":"Summoner spells","items":[{"value":"Ignite","assetKey":"SummonerDot","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/spell/SummonerDot.png"},{"value":"Flash","assetKey":"SummonerFlash","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/spell/SummonerFlash.png"}]},{"type":"kda","label":"","value":"11/19/34","secondary":"2.37 KDA"},{"type":"item_build","label":"Build","items":[{"value":"Doran's Ring","assetKey":"1056","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/item/1056.png"},{"value":"Sorcerer's Shoes","assetKey":"3020","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/item/3020.png"},{"value":"Luden's Companion","assetKey":"6655","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/item/6655.png"},{"value":"Rabadon's Deathcap","assetKey":"3089","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/item/3089.png"}]}]"#
+    );
+}
+
+#[test]
 fn gallery_card_preview_uses_declarative_title_and_icon() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(

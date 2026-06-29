@@ -671,6 +671,21 @@ const PlayerCore = (() => {
     return `${stat(summary.kills)}/${stat(summary.deaths)}/${stat(summary.assists)}`;
   };
 
+  const playerSummaryKdaRatio = (summary) => {
+    if (!summary) return "";
+    const stat = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+    };
+    const kills = stat(summary.kills);
+    const deaths = stat(summary.deaths);
+    const assists = stat(summary.assists);
+    const impact = kills + assists;
+    if (deaths === 0 && impact > 0) return "Perfect KDA";
+    const ratio = deaths === 0 ? 0 : impact / deaths;
+    return `${ratio.toFixed(2)} KDA`;
+  };
+
   const summaryStat = (value) => {
     const n = Number(value);
     return Number.isFinite(n) && n >= 0 ? String(Math.floor(n)) : "";
@@ -731,6 +746,56 @@ const PlayerCore = (() => {
     return `https://ddragon.leagueoflegends.com/cdn/${version}/img/champion/${assetKey}.png`;
   };
 
+  const dataDragonSummonerSpellAsset = (assetKey, options) => {
+    const version = dataDragonVersion(options);
+    if (!version || !/^Summoner[A-Za-z0-9]+$/.test(assetKey)) return "";
+    return `https://ddragon.leagueoflegends.com/cdn/${version}/img/spell/${assetKey}.png`;
+  };
+
+  const dataDragonItemAsset = (assetKey, options) => {
+    const version = dataDragonVersion(options);
+    if (!version || !/^[0-9]+$/.test(assetKey)) return "";
+    return `https://ddragon.leagueoflegends.com/cdn/${version}/img/item/${assetKey}.png`;
+  };
+
+  const playerSummaryArray = (summary, source, fallbackKey) => {
+    if (!summary) return [];
+    const key = typeof source === "string" && source.startsWith("player_summary.")
+      ? source.slice("player_summary.".length)
+      : fallbackKey;
+    if (!/^[a-z0-9_]+$/i.test(key)) return [];
+    return Array.isArray(summary[key]) ? summary[key] : [];
+  };
+
+  const summaryIconItem = (entry, type, field, options) => {
+    if (!entry || typeof entry !== "object") return null;
+    const provider = String(field.asset_provider || "").trim();
+    if (type === "summoner_spells") {
+      const value = String(entry.name || entry.display_name || "").trim();
+      const assetKey = String(entry.asset_key || "").trim();
+      if (!value && !assetKey) return null;
+      const item = { value: value || assetKey, assetKey };
+      if (provider === "riot_data_dragon_summoner_spell") {
+        const asset = dataDragonSummonerSpellAsset(assetKey, options);
+        if (asset) item.asset = asset;
+      }
+      return item;
+    }
+    if (type === "item_build") {
+      const id = Number(entry.id);
+      const assetKey = Number.isFinite(id) && id > 0 ? String(Math.floor(id)) : "";
+      const value = String(entry.name || assetKey || "").trim();
+      if (!assetKey || !value) return null;
+      const item = { value, assetKey };
+      if (provider === "riot_data_dragon_item") {
+        const asset = dataDragonItemAsset(assetKey, options);
+        if (asset) item.asset = asset;
+      }
+      return item;
+    }
+    return null;
+  };
+
   const playerSummaryFields = (summary, fields = [], options = {}) => {
     if (!summary || !Array.isArray(fields)) return [];
     const out = [];
@@ -761,8 +826,22 @@ const PlayerCore = (() => {
         const deaths = summaryStat(summary.deaths);
         const assists = summaryStat(summary.assists);
         if (kills || deaths || assists) {
-          out.push({ type, label, value: `${kills || "0"}/${deaths || "0"}/${assists || "0"}` });
+          const formatted = { type, label, value: `${kills || "0"}/${deaths || "0"}/${assists || "0"}` };
+          if (field.secondary === "kda_ratio") {
+            const secondary = playerSummaryKdaRatio(summary);
+            if (secondary) formatted.secondary = secondary;
+          }
+          out.push(formatted);
         }
+      } else if (type === "summoner_spells" || type === "item_build") {
+        const fallbackKey = type === "summoner_spells" ? "summoner_spells" : "items";
+        const maxItems = Number(field.max_items);
+        const limit = Number.isFinite(maxItems) && maxItems > 0 ? Math.floor(maxItems) : 8;
+        const items = playerSummaryArray(summary, field.source, fallbackKey)
+          .slice(0, limit)
+          .map((entry) => summaryIconItem(entry, type, field, options))
+          .filter(Boolean);
+        if (items.length) out.push({ type, label, items });
       } else if (type === "stat") {
         const value = playerSummaryValue(summary, field.source);
         if (value) out.push({ type, label, value });

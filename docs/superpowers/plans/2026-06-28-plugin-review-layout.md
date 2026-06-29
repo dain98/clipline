@@ -1,5 +1,8 @@
 # Plugin Review Layout Implementation Plan
 
+> Superseded by `docs/superpowers/plans/2026-06-29-first-party-supported-games.md`.
+> Clipline is no longer pursuing installable game presentation plugins in this branch.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Move plugin timeline events into a playback-synced right rail and make the bottom game metadata area declarative through plugin presentation config.
