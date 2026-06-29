@@ -26,6 +26,7 @@ const {
   fmtTenths,
   fmtAgo,
   overlayVisible,
+  OVERLAY_HIDE_MS,
   clampTime,
   percentFor,
   percentForView,
@@ -153,7 +154,7 @@ let hotkeyCaptureActive = false;
 let trimStart = 0;
 let trimEnd = 0;
 let dragging = null;
-let rafId = 0;
+let overlayTimerId = 0;
 // Timeline zoom: the visible window into the clip. zoomSpan === 0 means fully
 // zoomed out (the whole clip is shown); a smaller span shows [zoomStart, +span].
 let zoomStart = 0;
@@ -2380,6 +2381,7 @@ let activeGameEventIndex = -1;
 let selectedGameEventIndex = -1;
 let selectedGameEventTime = null;
 let gameEventRailCollapsed = false;
+let gameEventRows = [];
 
 function eventRailPolicy(clip) {
   const presentation = pluginPresentationForClip(clip);
@@ -2430,11 +2432,13 @@ function renderGameEventRail(clip = currentClip) {
     title.textContent = "";
     summary.textContent = "";
     list.replaceChildren();
+    gameEventRows = [];
     return;
   }
   title.textContent = eventRail.title || (clip && clip.game ? `${clip.game.name} events` : "Game events");
   summary.textContent = markerSummary(markers);
   list.replaceChildren();
+  gameEventRows = [];
   const playerSummary = clip && clip.markers ? clip.markers.player_summary : null;
   markers.forEach((marker, index) => {
     const item = document.createElement("li");
@@ -2479,6 +2483,7 @@ function renderGameEventRail(clip = currentClip) {
       seekTo(markerTime - MARKER_LEAD_S, { keepGameEventSelection: true });
       video.play().catch(() => syncPlayState());
     });
+    gameEventRows.push(button);
     item.appendChild(button);
     list.appendChild(item);
   });
@@ -2514,12 +2519,13 @@ function setGameEventRailCollapsed(collapsed) {
 function syncGameEventRail(currentTime = video.currentTime || 0, options = {}) {
   const rail = $("game-event-rail");
   if (!rail || rail.hidden || rail.classList.contains("is-collapsed")) return;
+  if (!gameEventRows.length) return;
   const markers = clipMarkers();
   const selectedIndex = selectedGameEventIndexForTime(currentTime);
   const next = gameEventActiveIndex(markers, currentTime, selectedIndex);
   if (next === activeGameEventIndex && !options.force) return;
   activeGameEventIndex = next;
-  document.querySelectorAll("[data-game-event-index]").forEach((row) => {
+  gameEventRows.forEach((row) => {
     const active = Number(row.dataset.gameEventIndex) === next;
     row.classList.toggle("active", active);
     row.setAttribute("aria-current", active ? "true" : "false");
@@ -3479,8 +3485,7 @@ async function releaseVideoFileHandle() {
 function suspendReviewPlayback() {
   setClipTitleEditing(false);
   audioPreviewSeq += 1;
-  cancelAnimationFrame(rafId);
-  rafId = 0;
+  clearOverlayIdleCheck();
   video.pause();
   video.removeAttribute("src");
   video.load();
@@ -3568,8 +3573,7 @@ async function saveClipRename(ev) {
 
 function openClip(clip) {
   audioPreviewSeq += 1;
-  cancelAnimationFrame(rafId);
-  rafId = 0;
+  clearOverlayIdleCheck();
   pendingSeek = null;
   currentClip = clip;
   currentReviewMediaPath = clip.path;
@@ -3607,7 +3611,7 @@ function openClip(clip) {
 function closeReview() {
   setClipTitleEditing(false);
   audioPreviewSeq += 1;
-  cancelAnimationFrame(rafId);
+  clearOverlayIdleCheck();
   video.pause();
   video.removeAttribute("src");
   video.load();
@@ -3839,16 +3843,6 @@ function renderOverviewMarkers() {
   }
 }
 
-// timeupdate fires ~4 Hz; animate the playhead per-frame while playing.
-// The same loop re-evaluates overlay fade (no timers to manage).
-function animatePlayhead() {
-  maybeFollow(video.currentTime || 0);
-  paintTimeline();
-  syncGameEventRail(video.currentTime || 0);
-  updateOverlay();
-  if (!video.paused && !video.ended) rafId = requestAnimationFrame(animatePlayhead);
-}
-
 // Per-event glyphs for the marker pins, keyed by EventKind. Kept here (DOM
 // layer) rather than in player-core.js so its tested {glyph,cls} contract stays
 // untouched. Each draws in currentColor so the category tint (--mc) colors it.
@@ -4036,17 +4030,35 @@ function syncVolume() {
 /* ---- overlay visibility (PlayerCore.overlayVisible policy) ---- */
 
 let lastActivityMs = 0;
+let overlayIdle = null;
 
 function noteActivity() {
   lastActivityMs = performance.now();
-  updateOverlay();
+  scheduleOverlayIdleCheck();
 }
 
 function updateOverlay() {
   const idleMs = performance.now() - lastActivityMs;
-  document
-    .querySelector(".stage")
-    .classList.toggle("idle", !overlayVisible(video.paused, idleMs));
+  const nextIdle = !overlayVisible(video.paused, idleMs);
+  if (overlayIdle === nextIdle) return;
+  stage.classList.toggle("idle", nextIdle);
+  overlayIdle = nextIdle;
+}
+
+function clearOverlayIdleCheck() {
+  clearTimeout(overlayTimerId);
+  overlayTimerId = 0;
+}
+
+function scheduleOverlayIdleCheck() {
+  clearOverlayIdleCheck();
+  updateOverlay();
+  if (video.paused || video.ended) return;
+  const remainingMs = Math.max(0, OVERLAY_HIDE_MS - (performance.now() - lastActivityMs));
+  overlayTimerId = setTimeout(() => {
+    overlayTimerId = 0;
+    updateOverlay();
+  }, remainingMs + 30);
 }
 
 function toggleMute() {
@@ -4967,15 +4979,18 @@ $("settings-save").addEventListener("click", async () => {
 video.addEventListener("click", togglePlay);
 video.addEventListener("play", () => {
   syncPlayState();
-  cancelAnimationFrame(rafId);
-  rafId = requestAnimationFrame(animatePlayhead);
+  syncGameEventRail(video.currentTime || 0);
+  paintTimeline();
+  scheduleOverlayIdleCheck();
 });
 video.addEventListener("pause", () => {
   syncPlayState();
-  cancelAnimationFrame(rafId);
+  clearOverlayIdleCheck();
   paintTimeline();
+  updateOverlay();
 });
 video.addEventListener("timeupdate", () => {
+  maybeFollow(video.currentTime || 0);
   paintTimeline();
   syncGameEventRail(video.currentTime || 0);
 });
