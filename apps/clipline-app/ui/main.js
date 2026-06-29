@@ -4005,16 +4005,19 @@ function renderRuler() {
   const viewEnd = view.start + view.span;
   const pct = (t) => percentForView(t, view.start, view.span);
   const marks = rulerMarksRange(view.start, view.span, 8);
-  // Minor ticks between the labeled majors give the ruler a fine, precise feel.
+  // Dense ticks between the labeled majors mirror clipping tools: quick spatial
+  // reference without turning the timeline into a data graph.
   if (marks.length >= 2) {
     const step = marks[1].t - marks[0].t;
-    const minorStep = step / 3;
+    const minorStep = step / 10;
     const isMajor = (t) => marks.some((m) => Math.abs(m.t - t) < minorStep / 2);
     const firstMinor = Math.ceil(view.start / minorStep - 1e-9) * minorStep;
     for (let t = firstMinor; t <= viewEnd + 1e-6; t += minorStep) {
       if (t <= 0 || isMajor(t)) continue;
       const tick = document.createElement("i");
-      tick.className = "tick";
+      const divisionsFromFirst = Math.round((t - marks[0].t) / minorStep);
+      const isHalf = divisionsFromFirst % 5 === 0;
+      tick.className = isHalf ? "tick minor" : "tick micro";
       tick.style.left = `${pct(t)}%`;
       root.appendChild(tick);
     }

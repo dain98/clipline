@@ -226,21 +226,23 @@
 
         <div class="deck">
           <div class="timeline-stack">
-            <button id="trim-mode-toggle" type="button" title="Trim clip" aria-pressed="false">
-              <svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm0 12c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM19 3l-6 6 2 2 7-7V3h-3z"/></svg>
-            </button>
-            <div id="timeline" title="Click to seek · drag the selection to slide · drag the edges to trim · scroll to zoom">
-              <div id="dim-in" class="dim"></div>
-              <div id="dim-out" class="dim"></div>
-              <div id="trim-band" title="Drag to slide the whole selection"></div>
-              <div id="playhead"></div>
-              <div id="handle-in" class="handle" title="Trim in (I at playhead)"></div>
-              <div id="handle-out" class="handle" title="Trim out (O at playhead)"></div>
+            <div class="timeline-action-row">
+              <button id="trim-mode-toggle" type="button" title="Trim clip" aria-pressed="false">
+                <svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm0 12c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM19 3l-6 6 2 2 7-7V3h-3z"/></svg>
+              </button>
             </div>
-            <div class="timeline-rail">
+            <div class="timeline-main">
+              <div id="timeline" title="Click to seek · drag the selection to slide · drag the edges to trim · scroll to zoom">
+                <div id="dim-in" class="dim"></div>
+                <div id="dim-out" class="dim"></div>
+                <div id="trim-band" title="Drag to slide the whole selection"></div>
+                <div id="playhead"></div>
+                <div id="handle-in" class="handle" title="Trim in (I at playhead)"></div>
+                <div id="handle-out" class="handle" title="Trim out (O at playhead)"></div>
+              </div>
               <div id="marker-layer"></div>
-              <div id="ruler" class="ruler"></div>
             </div>
+            <div id="ruler" class="ruler"></div>
           </div>
 
           <div class="nav-row">

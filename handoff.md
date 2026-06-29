@@ -310,7 +310,9 @@ Recent fixes (2026-06-29):
 - The review deck now defaults to a simple Outplayed-style timeline: whole-clip browse view first,
   a scissors button enters local trim mode around the playhead, and `Create Clip` uses the existing
   keyframe-aligned export path. The previous navigator/zoom/snap editor is still available via the
-  General setting `Legacy timeline editor` (`legacy_timeline_editor` in settings JSON).
+  General setting `Legacy timeline editor` (`legacy_timeline_editor` in settings JSON). The simple
+  timeline now keeps the scissors control above the track, layers event markers on the timeline band,
+  and attaches a denser time ruler below it.
 - Nightly 0.1.20 contains the League replay playback performance fix from PR #65. The previous
   public nightly metadata was 0.1.19, so the app and Tauri package versions were bumped to
   0.1.20 for updater eligibility.

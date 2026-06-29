@@ -1215,17 +1215,25 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     // The whole-clip navigator sits between the ruler and the export row.
     let trim_toggle = html.find("id=\"trim-mode-toggle\"").expect("trim toggle");
     let timeline_stack = html.find("class=\"timeline-stack\"").expect("timeline stack");
+    let action_row = html
+        .find("class=\"timeline-action-row\"")
+        .expect("timeline action row");
+    let timeline_main = html
+        .find("class=\"timeline-main\"")
+        .expect("timeline main");
     let timeline = html.find("id=\"timeline\"").expect("timeline");
-    let timeline_rail = html.find("class=\"timeline-rail\"").expect("timeline rail");
     let marker_layer = html.find("id=\"marker-layer\"").expect("marker layer");
     let ruler = html.find("id=\"ruler\"").expect("ruler");
     assert!(
-        timeline_stack < trim_toggle && trim_toggle < timeline,
-        "the simple scissors trim control must be attached to the timeline stack, above the track"
+        timeline_stack < action_row
+            && action_row < trim_toggle
+            && trim_toggle < timeline_main
+            && timeline_main < timeline,
+        "the simple scissors trim control must sit in its own row above the timeline band"
     );
     assert!(
-        timeline < timeline_rail && timeline_rail < marker_layer && marker_layer < ruler,
-        "event markers and time markers must share the attached ruler rail below the video track"
+        timeline < marker_layer && marker_layer < ruler && !html.contains("class=\"timeline-rail\""),
+        "event markers must live on the timeline band above the attached time ruler"
     );
 
     let overview = html.find("id=\"overview\"").expect("overview");
@@ -1263,19 +1271,27 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         "navigator window, marker ticks, and snap feedback must be styled"
     );
     assert!(
-        css.contains(".timeline-rail")
-            && css.contains("#marker-layer {\n  position: absolute;\n  inset: 0;")
-            && css.contains(".ruler {\n  position: relative;\n  height: 30px;")
-            && css.contains(".ruler .lab {\n  position: absolute;\n  top: 17px;")
+        css.contains(".timeline-main {\n  position: relative;\n  height: 56px;")
+            && css.contains("#timeline::before")
+            && css.contains("background: #e5164f;")
+            && css.contains("#marker-layer {\n  position: absolute;\n  left: 0;\n  right: 0;\n  top: 18px;")
+            && css.contains(".ruler {\n  position: relative;\n  height: 28px;")
+            && css.contains(".ruler .tick.micro")
+            && css.contains(".ruler .lab {\n  position: absolute;\n  top: 13px;")
             && css.contains(".marker .glyph {\n  flex: 0 0 auto;\n  width: 15px;"),
-        "event markers must coexist with the attached time ruler below the track"
+        "event markers must sit on an Outplayed-like timeline band above a dense attached ruler"
     );
     assert!(
-        !css.contains(".timeline-top-tools")
-            && css.contains("#trim-mode-toggle {\n  position: absolute;")
-            && css.contains("right: 6px;")
+        css.contains(".timeline-action-row")
+            && css.contains("#trim-mode-toggle {\n  position: relative;")
             && css.contains("color: #ffffff;"),
-        "the simple scissors trim control must be attached to the track and high contrast"
+        "the simple scissors trim control must be above the track and high contrast"
+    );
+    assert!(
+        js.contains("const minorStep = step / 10;")
+            && js.contains("const isHalf =")
+            && js.contains("tick.className = isHalf ? \"tick minor\" : \"tick micro\";"),
+        "the time ruler must add Outplayed-style dense ticks between major labels"
     );
     assert!(
         css.contains(".marker-death .glyph.img")
