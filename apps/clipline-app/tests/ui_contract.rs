@@ -1272,14 +1272,16 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     );
     assert!(
         css.contains(".timeline-main {\n  position: relative;\n  height: 56px;")
+            && css.contains("#timeline {\n  position: absolute;\n  inset: 0;\n  height: auto;\n  border: 0;\n  border-radius: 0;\n  background: transparent;")
             && css.contains("#timeline::before")
+            && !css.contains("#timeline::after")
             && css.contains("background: #e5164f;")
             && css.contains("#marker-layer {\n  position: absolute;\n  left: 0;\n  right: 0;\n  top: 18px;")
             && css.contains(".ruler {\n  position: relative;\n  height: 28px;")
             && css.contains(".ruler .tick.micro")
             && css.contains(".ruler .lab {\n  position: absolute;\n  top: 13px;")
-            && css.contains(".marker .glyph {\n  flex: 0 0 auto;\n  width: 15px;"),
-        "event markers must sit on an Outplayed-like timeline band above a dense attached ruler"
+            && css.contains(".marker .glyph {\n  flex: 0 0 auto;\n  width: 16px;"),
+        "event markers must sit on a transparent Outplayed-like timeline band above a dense attached ruler"
     );
     assert!(
         css.contains(".timeline-action-row")

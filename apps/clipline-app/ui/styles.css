@@ -2357,8 +2357,7 @@ label span { white-space: nowrap; }
   height: auto;
   border: 0;
   border-radius: 0;
-  background:
-    linear-gradient(180deg, rgba(25, 35, 50, 0.92) 0%, rgba(10, 17, 27, 0.96) 62%, #070d15 100%);
+  background: transparent;
   overflow: hidden;
   cursor: pointer;
   touch-action: none;
@@ -2375,18 +2374,6 @@ label span { white-space: nowrap; }
   pointer-events: none;
   z-index: 1;
 }
-#timeline::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 3px;
-  height: 26px;
-  background: linear-gradient(180deg, rgba(229, 22, 79, 0), rgba(229, 22, 79, 0.08));
-  pointer-events: none;
-  z-index: 1;
-}
-
 /* What you keep stays bright; the trimmed-away ends are dimmed. */
 .dim {
   position: absolute;
@@ -2480,9 +2467,9 @@ label span { white-space: nowrap; }
 .marker {
   position: absolute;
   top: 1px;
-  width: 17px;
-  height: 16px;
-  margin-left: -8.5px;
+  width: 18px;
+  height: 17px;
+  margin-left: -9px;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -2494,14 +2481,14 @@ label span { white-space: nowrap; }
 }
 .marker .glyph {
   flex: 0 0 auto;
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   color: var(--mc, #aeb6c4);
   pointer-events: auto;
   cursor: pointer;
   transition: transform 0.12s ease;
 }
-.marker .glyph svg { width: 15px; height: 15px; display: block; }
+.marker .glyph svg { width: 16px; height: 16px; display: block; }
 /* PNG art rendered as a silhouette mask so it still tints with --mc */
 .marker .glyph.img {
   background-color: var(--mc, #aeb6c4);
