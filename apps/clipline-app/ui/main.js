@@ -154,7 +154,6 @@ let hotkeyCaptureActive = false;
 let trimStart = 0;
 let trimEnd = 0;
 let dragging = null;
-let rafId = 0;
 let overlayTimerId = 0;
 // Timeline zoom: the visible window into the clip. zoomSpan === 0 means fully
 // zoomed out (the whole clip is shown); a smaller span shows [zoomStart, +span].
@@ -3486,8 +3485,6 @@ async function releaseVideoFileHandle() {
 function suspendReviewPlayback() {
   setClipTitleEditing(false);
   audioPreviewSeq += 1;
-  cancelAnimationFrame(rafId);
-  rafId = 0;
   clearOverlayIdleCheck();
   video.pause();
   video.removeAttribute("src");
@@ -3576,8 +3573,6 @@ async function saveClipRename(ev) {
 
 function openClip(clip) {
   audioPreviewSeq += 1;
-  cancelAnimationFrame(rafId);
-  rafId = 0;
   clearOverlayIdleCheck();
   pendingSeek = null;
   currentClip = clip;
@@ -3616,8 +3611,6 @@ function openClip(clip) {
 function closeReview() {
   setClipTitleEditing(false);
   audioPreviewSeq += 1;
-  cancelAnimationFrame(rafId);
-  rafId = 0;
   clearOverlayIdleCheck();
   video.pause();
   video.removeAttribute("src");
@@ -3848,12 +3841,6 @@ function renderOverviewMarkers() {
     tick.style.left = `${percentFor(m.t_s, dur)}%`;
     layer.appendChild(tick);
   }
-}
-
-// Keep playback UI light: media timeupdate owns timeline/follow sync, and this
-// one-shot RAF lets play/pause changes settle before overlay state is applied.
-function animatePlayhead() {
-  updateOverlay();
 }
 
 // Per-event glyphs for the marker pins, keyed by EventKind. Kept here (DOM
@@ -4995,12 +4982,9 @@ video.addEventListener("play", () => {
   syncGameEventRail(video.currentTime || 0);
   paintTimeline();
   scheduleOverlayIdleCheck();
-  cancelAnimationFrame(rafId);
-  rafId = requestAnimationFrame(animatePlayhead);
 });
 video.addEventListener("pause", () => {
   syncPlayState();
-  cancelAnimationFrame(rafId);
   clearOverlayIdleCheck();
   paintTimeline();
   updateOverlay();

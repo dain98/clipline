@@ -806,16 +806,14 @@ fn review_player_owns_all_controls() {
 #[test]
 fn game_event_rail_does_not_run_on_every_animation_frame() {
     let js = main_js();
-    let animate_playhead = js_function_body(&js, "animatePlayhead");
+    let schedule_overlay = js_function_body(&js, "scheduleOverlayIdleCheck");
 
     assert!(
-        !animate_playhead.contains("syncGameEventRail"),
-        "the animated playhead loop must stay cheap; event rail sync should run from coarse media events"
-    );
-    assert!(
-        !animate_playhead.contains("paintTimeline")
-            && !animate_playhead.contains("requestAnimationFrame(animatePlayhead)"),
-        "playback must not run timeline layout writes on every animation frame"
+        !js.contains("function animatePlayhead")
+            && !js.contains("requestAnimationFrame(animatePlayhead)")
+            && !js.contains("cancelAnimationFrame(rafId)")
+            && !js.contains("let rafId"),
+        "playback should not keep vestigial requestAnimationFrame bookkeeping after rail sync moved to media events"
     );
     assert!(
         js.contains("let gameEventRows = []")
@@ -829,8 +827,11 @@ fn game_event_rail_does_not_run_on_every_animation_frame() {
         "timeupdate should keep the event rail following playback without tying it to requestAnimationFrame"
     );
     assert!(
-        js.contains("setTimeout(() => {\n    overlayTimerId = 0;\n    updateOverlay();")
-            && js.contains("clearTimeout(overlayTimerId);"),
+        schedule_overlay.contains("clearOverlayIdleCheck();")
+            && schedule_overlay.contains("updateOverlay();")
+            && schedule_overlay.contains("setTimeout")
+            && schedule_overlay.contains("overlayTimerId = 0;")
+            && schedule_overlay.contains("OVERLAY_HIDE_MS"),
         "overlay idle fade should use a one-shot timer instead of a playback-frame polling loop"
     );
 }
@@ -985,14 +986,14 @@ fn default_audio_preview_is_gated_and_degrades_to_source_on_failure() {
 }
 
 #[test]
-fn open_clip_clears_previous_playback_loop_and_pending_seek() {
+fn open_clip_clears_previous_overlay_timer_and_pending_seek() {
     let js = main_js();
     let open_clip_start = js.find("function openClip(clip)").unwrap();
     let close_review_start = js.find("function closeReview()").unwrap();
     let open_clip = &js[open_clip_start..close_review_start];
-    let cancel = open_clip
-        .find("cancelAnimationFrame(rafId);")
-        .expect("openClip cancels the previous playhead RAF");
+    let clear_overlay = open_clip
+        .find("clearOverlayIdleCheck();")
+        .expect("openClip clears the previous overlay idle timer");
     let clear_seek = open_clip
         .find("pendingSeek = null;")
         .expect("openClip clears pending seek from previous clip");
@@ -1001,8 +1002,8 @@ fn open_clip_clears_previous_playback_loop_and_pending_seek() {
         .expect("openClip assigns current clip");
 
     assert!(
-        cancel < assign_clip,
-        "RAF must be canceled before switching clips"
+        clear_overlay < assign_clip,
+        "overlay idle timer must be cleared before switching clips"
     );
     assert!(
         clear_seek < assign_clip,
@@ -1038,11 +1039,11 @@ fn close_to_tray_suspends_review_playback() {
     );
     assert!(
         suspend_helper.contains("audioPreviewSeq += 1;")
-            && suspend_helper.contains("cancelAnimationFrame(rafId);")
+            && suspend_helper.contains("clearOverlayIdleCheck();")
             && suspend_helper.contains("video.pause();")
             && suspend_helper.contains("video.removeAttribute(\"src\");")
             && suspend_helper.contains("video.load();"),
-        "suspending playback must cancel preview work, stop the RAF loop, and unload the video"
+        "suspending playback must cancel preview work, stop overlay timers, and unload the video"
     );
     assert!(
         suspend_helper.contains("currentClip = null;")
