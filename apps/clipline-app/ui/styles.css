@@ -2075,7 +2075,7 @@ label span { white-space: nowrap; }
   padding: 7px;
 }
 .game-event-rail ol button.game-event-actor-event {
-  grid-template-columns: 38px minmax(46px, 1fr) minmax(46px, 1fr);
+  grid-template-columns: 38px minmax(46px, 1fr) 30px minmax(46px, 1fr);
   gap: 6px;
   min-height: 72px;
   padding: 7px;
@@ -2152,12 +2152,21 @@ label span { white-space: nowrap; }
 }
 .game-event-rail .game-event-kind-icon img {
   display: block;
-  width: 27px;
-  height: 27px;
+  width: 24px;
+  height: 24px;
   margin: auto;
   object-fit: contain;
 }
+.game-event-rail ol button.marker-kill .game-event-kind-icon img {
+  width: 21px;
+  height: 21px;
+}
+.game-event-rail ol button.marker-death .game-event-kind-icon img {
+  width: 32px;
+  height: 32px;
+}
 .game-event-rail .game-event-objective-icon {
+  grid-column: 4;
   justify-self: center;
   width: 40px;
   height: 40px;
