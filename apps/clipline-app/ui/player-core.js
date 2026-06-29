@@ -740,22 +740,12 @@ const PlayerCore = (() => {
     return /^\d+\.\d+\.\d+$/.test(version) ? version : "";
   };
 
-  const dataDragonChampionSquareAsset = (assetKey, options) => {
+  const dataDragonAsset = (segment, assetKey, options, keyPattern) => {
     const version = dataDragonVersion(options);
-    if (!version || !/^[A-Za-z0-9]+$/.test(assetKey)) return "";
-    return `https://ddragon.leagueoflegends.com/cdn/${version}/img/champion/${assetKey}.png`;
-  };
-
-  const dataDragonSummonerSpellAsset = (assetKey, options) => {
-    const version = dataDragonVersion(options);
-    if (!version || !/^Summoner[A-Za-z0-9]+$/.test(assetKey)) return "";
-    return `https://ddragon.leagueoflegends.com/cdn/${version}/img/spell/${assetKey}.png`;
-  };
-
-  const dataDragonItemAsset = (assetKey, options) => {
-    const version = dataDragonVersion(options);
-    if (!version || !/^[0-9]+$/.test(assetKey)) return "";
-    return `https://ddragon.leagueoflegends.com/cdn/${version}/img/item/${assetKey}.png`;
+    const safeSegment = String(segment || "").trim();
+    const safeKey = String(assetKey || "").trim();
+    if (!version || !/^[a-z]+$/.test(safeSegment) || !keyPattern.test(safeKey)) return "";
+    return `https://ddragon.leagueoflegends.com/cdn/${version}/img/${safeSegment}/${safeKey}.png`;
   };
 
   const playerSummaryArray = (summary, source, fallbackKey) => {
@@ -776,7 +766,7 @@ const PlayerCore = (() => {
       if (!value && !assetKey) return null;
       const item = { value: value || assetKey, assetKey };
       if (provider === "riot_data_dragon_summoner_spell") {
-        const asset = dataDragonSummonerSpellAsset(assetKey, options);
+        const asset = dataDragonAsset("spell", assetKey, options, /^Summoner[A-Za-z0-9]+$/);
         if (asset) item.asset = asset;
       }
       return item;
@@ -788,7 +778,7 @@ const PlayerCore = (() => {
       if (!assetKey || !value) return null;
       const item = { value, assetKey };
       if (provider === "riot_data_dragon_item") {
-        const asset = dataDragonItemAsset(assetKey, options);
+        const asset = dataDragonAsset("item", assetKey, options, /^[0-9]+$/);
         if (asset) item.asset = asset;
       }
       return item;
@@ -813,7 +803,7 @@ const PlayerCore = (() => {
           if (typeof field.asset_template === "string" && field.asset_template.includes("{assetKey}")) {
             formatted.asset = field.asset_template.replaceAll("{assetKey}", assetKey);
           } else if (field.asset_provider === "riot_data_dragon_champion_square") {
-            const asset = dataDragonChampionSquareAsset(assetKey, options);
+            const asset = dataDragonAsset("champion", assetKey, options, /^[A-Za-z0-9]+$/);
             if (asset) formatted.asset = asset;
           }
           out.push(formatted);
@@ -1009,7 +999,7 @@ const PlayerCore = (() => {
     if (!displayName || !champion) return null;
     const aliases = eventRailDataDragonAliases(presentation);
     const assetKey = dataDragonChampionKey(champion, aliases);
-    const asset = dataDragonChampionSquareAsset(assetKey, options);
+    const asset = dataDragonAsset("champion", assetKey, options, /^[A-Za-z0-9]+$/);
     const slot = {
       name: displayName,
       champion,
@@ -1022,10 +1012,16 @@ const PlayerCore = (() => {
     return slot;
   };
 
-  const eventAllegiance = (marker, summary, actorSlot) => {
-    const kind = marker && marker.kind;
-    if (kind === "ChampionKill") return "friendly";
-    if (kind === "ChampionDeath") return "enemy";
+  const markerRailConfig = (kind, presentation) => {
+    const configured = markerKindConfig(kind, presentation).rail;
+    return configured && typeof configured === "object" ? configured : {};
+  };
+
+  const eventAllegiance = (summary, actorSlot, railConfig = {}) => {
+    const configured = String(railConfig.allegiance || "").trim();
+    if (configured === "friendly" || configured === "enemy" || configured === "neutral") {
+      return configured;
+    }
     const actorTeam = actorSlot && actorSlot.team ? actorSlot.team : "";
     const ownTeam = localTeam(summary);
     if (!actorTeam || !ownTeam) return "neutral";
@@ -1036,31 +1032,33 @@ const PlayerCore = (() => {
     const kind = marker && marker.kind ? marker.kind : "Other";
     const category = markerCategory(kind, presentation);
     const label = markerLabel(kind, presentation);
+    const railConfig = markerRailConfig(kind, presentation);
     const item = {
       layout: "text",
       kind,
       category,
-      allegiance: eventAllegiance(marker, summary, null),
+      allegiance: eventAllegiance(summary, null, railConfig),
       label,
       text: markerEventText(marker, presentation),
     };
     const icon = eventRailIcon(kind, presentation);
     if (icon) item.icon = icon;
 
-    if (kind === "ChampionKill" || kind === "ChampionDeath") {
+    const railLayout = String(railConfig.layout || "").trim();
+    if (railLayout === "duel") {
       const actor = participantSlot(marker && marker.actor, summary, presentation, options);
       const victim = participantSlot(marker && marker.victim, summary, presentation, options);
       if (actor && victim) {
         item.layout = "duel";
-        item.allegiance = eventAllegiance(marker, summary, actor);
+        item.allegiance = eventAllegiance(summary, actor, railConfig);
         item.actor = actor;
         item.victim = victim;
       }
-    } else if (item.icon && (category === "objective" || category === "structure")) {
+    } else if (railLayout === "actor_event" && item.icon) {
       const actor = participantSlot(marker && marker.actor, summary, presentation, options);
       if (actor) {
         item.layout = "actor_event";
-        item.allegiance = eventAllegiance(marker, summary, actor);
+        item.allegiance = eventAllegiance(summary, actor, railConfig);
         item.actor = actor;
       }
     }

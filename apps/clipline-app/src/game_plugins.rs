@@ -6,7 +6,7 @@
 //! anti-cheat-safe: no injection, no memory reads, no game-process hooks. Event
 //! ingestion stays behind built-in capability names.
 
-use std::sync::mpsc::Receiver;
+use std::sync::{mpsc::Receiver, OnceLock};
 use std::time::Instant;
 
 use clipline_capture::windows::CapturableWindow;
@@ -291,10 +291,22 @@ pub fn ensure_plugin_icon_cached(profile_id: &str, exe_path: &str) {
     }
 }
 
-pub fn all() -> Vec<GamePlugin> {
-    vec![GamePlugin {
-        manifest: league_profile_manifest(),
-    }]
+pub fn all() -> &'static [GamePlugin] {
+    static PROFILES: OnceLock<Vec<GamePlugin>> = OnceLock::new();
+    PROFILES
+        .get_or_init(|| {
+            vec![GamePlugin {
+                manifest: league_profile_manifest(),
+            }]
+        })
+        .as_slice()
+}
+
+pub fn catalog() -> &'static [GamePluginInfo] {
+    static CATALOG: OnceLock<Vec<GamePluginInfo>> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| all().iter().map(GamePlugin::info).collect())
+        .as_slice()
 }
 
 pub fn contains(id: &str) -> bool {
@@ -337,7 +349,7 @@ pub fn spawn_event_source(
     context: GameEventSourceContext,
 ) -> Option<Receiver<PollerMsg>> {
     let id = profile_id?;
-    let profile = all().into_iter().find(|profile| profile.id() == id)?;
+    let profile = all().iter().find(|profile| profile.id() == id)?;
     let spawn = profile
         .manifest
         .event_source
@@ -425,11 +437,31 @@ const LEAGUE_PROFILE_MANIFEST_JSON: &str = r#"{
       "version": "16.13.1"
     },
     "marker_kinds": {
-      "ChampionKill": { "category": "kill", "icon": "assets/markers/kill.png" },
-      "ChampionDeath": { "category": "death", "icon": "assets/markers/death.png" },
-      "DragonKill": { "category": "objective", "icon": "assets/markers/dragon.png" },
-      "BaronKill": { "category": "objective", "icon": "assets/markers/baron.png" },
-      "TurretKilled": { "category": "structure", "icon": "assets/markers/turret.png" }
+      "ChampionKill": {
+        "category": "kill",
+        "icon": "assets/markers/kill.png",
+        "rail": { "layout": "duel", "allegiance": "friendly" }
+      },
+      "ChampionDeath": {
+        "category": "death",
+        "icon": "assets/markers/death.png",
+        "rail": { "layout": "duel", "allegiance": "enemy" }
+      },
+      "DragonKill": {
+        "category": "objective",
+        "icon": "assets/markers/dragon.png",
+        "rail": { "layout": "actor_event", "allegiance": "actor_team" }
+      },
+      "BaronKill": {
+        "category": "objective",
+        "icon": "assets/markers/baron.png",
+        "rail": { "layout": "actor_event", "allegiance": "actor_team" }
+      },
+      "TurretKilled": {
+        "category": "structure",
+        "icon": "assets/markers/turret.png",
+        "rail": { "layout": "actor_event", "allegiance": "actor_team" }
+      }
     },
     "marker_categories": {
       "kill": { "singular": "kill", "plural": "kills", "glyph": "✕" },
@@ -622,7 +654,7 @@ mod tests {
     #[test]
     fn league_profile_has_no_install_state_but_keeps_presentation() {
         let profile = all()
-            .into_iter()
+            .iter()
             .find(|profile| profile.id() == LEAGUE_OF_LEGENDS_ID)
             .expect("league profile");
         let info = profile.info();
@@ -652,6 +684,23 @@ mod tests {
         );
         assert!(presentation
             .pointer("/marker_kinds/ChampionKill/icon")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+    }
+
+    #[test]
+    fn profile_records_and_resolved_info_are_cached() {
+        let first_profiles = all();
+        let second_profiles = all();
+        assert_eq!(first_profiles.as_ptr(), second_profiles.as_ptr());
+
+        let first_catalog = catalog();
+        let second_catalog = catalog();
+        assert_eq!(first_catalog.as_ptr(), second_catalog.as_ptr());
+        assert!(first_catalog[0]
+            .presentation
+            .as_ref()
+            .and_then(|presentation| presentation.pointer("/event_rail/icons/ChampionKill"))
             .and_then(serde_json::Value::as_str)
             .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
     }

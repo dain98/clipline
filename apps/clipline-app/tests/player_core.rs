@@ -1667,7 +1667,8 @@ fn game_event_rail_item_formats_duel_with_data_dragon_portraits() {
           marker_kinds: {
             ChampionKill: {
               category: 'kill',
-              icon: 'data:image/png;base64,kill-icon'
+              icon: 'data:image/png;base64,kill-icon',
+              rail: { layout: 'duel', allegiance: 'friendly' }
             }
           }
         };
@@ -1702,7 +1703,8 @@ fn game_event_rail_item_marks_deaths_enemy() {
           marker_kinds: {
             ChampionDeath: {
               category: 'death',
-              icon: 'data:image/png;base64,death-icon'
+              icon: 'data:image/png;base64,death-icon',
+              rail: { layout: 'duel', allegiance: 'enemy' }
             }
           }
         };
@@ -1737,7 +1739,8 @@ fn game_event_rail_item_prefers_event_rail_icons_over_timeline_marker_icons() {
           marker_kinds: {
             ChampionDeath: {
               category: 'death',
-              icon: 'data:image/png;base64,timeline-death'
+              icon: 'data:image/png;base64,timeline-death',
+              rail: { layout: 'duel', allegiance: 'enemy' }
             }
           },
           event_rail: {
@@ -1760,6 +1763,44 @@ fn game_event_rail_item_prefers_event_rail_icons_over_timeline_marker_icons() {
 }
 
 #[test]
+fn game_event_rail_item_uses_manifest_rail_layout_and_allegiance() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const CUSTOM_RAIL_SUMMARY = {
+          player_name: 'dain',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'dain', champion_name: 'Nautilus', team: 'ORDER' },
+            { player_name: 'Kcrystal', champion_name: 'Zed', team: 'CHAOS' }
+          ]
+        };
+        const CUSTOM_RAIL_PRESENTATION = {
+          marker_kinds: {
+            CustomElimination: {
+              category: 'kill',
+              icon: 'data:image/png;base64,custom-icon',
+              rail: {
+                layout: 'duel',
+                allegiance: 'actor_team'
+              }
+            }
+          }
+        };
+        "#,
+    ))
+    .expect("define custom rail inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'CustomElimination', actor: 'Kcrystal', victim: 'dain', t_s: 160 }, CUSTOM_RAIL_SUMMARY, CUSTOM_RAIL_PRESENTATION, {})"
+        ),
+        r#"{"layout":"duel","kind":"CustomElimination","category":"kill","allegiance":"enemy","label":"Custom Elimination","text":"Custom Elimination · Kcrystal","icon":"data:image/png;base64,custom-icon","actor":{"name":"Kcrystal","champion":"Zed","team":"CHAOS","assetKey":"Zed","initials":"KC","local":false},"victim":{"name":"dain","champion":"Nautilus","team":"ORDER","assetKey":"Nautilus","initials":"DA","local":true}}"#
+    );
+}
+
+#[test]
 fn game_event_rail_item_formats_actor_objectives_with_portrait_and_icon() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(
@@ -1776,7 +1817,8 @@ fn game_event_rail_item_formats_actor_objectives_with_portrait_and_icon() {
           marker_kinds: {
             TurretKilled: {
               category: 'structure',
-              icon: 'data:image/png;base64,turret-icon'
+              icon: 'data:image/png;base64,turret-icon',
+              rail: { layout: 'actor_event', allegiance: 'actor_team' }
             }
           }
         };
@@ -1803,7 +1845,8 @@ fn game_event_rail_item_falls_back_without_participants() {
           marker_kinds: {
             ChampionKill: {
               category: 'kill',
-              icon: 'data:image/png;base64,kill-icon'
+              icon: 'data:image/png;base64,kill-icon',
+              rail: { layout: 'duel', allegiance: 'friendly' }
             }
           }
         };
