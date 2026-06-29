@@ -1141,6 +1141,11 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
             && css.contains("-webkit-mask: var(--marker-img) center / 190% no-repeat"),
         "death marker art has extra transparent padding and must be scaled to match kill markers"
     );
+    assert!(
+        css.contains(".marker .glyph.img")
+            && css.contains("mask: var(--marker-img) center / contain no-repeat;\n  filter:\n    drop-shadow(1px 0 0 rgba(2, 6, 23, 0.9))"),
+        "timeline marker image glyphs must use the same black alpha-outline as event rail icons"
+    );
 }
 
 #[test]

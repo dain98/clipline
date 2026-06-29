@@ -2431,6 +2431,12 @@ label span { white-space: nowrap; }
   background-color: var(--mc, #aeb6c4);
   -webkit-mask: var(--marker-img) center / contain no-repeat;
           mask: var(--marker-img) center / contain no-repeat;
+  filter:
+    drop-shadow(1px 0 0 rgba(2, 6, 23, 0.9))
+    drop-shadow(-1px 0 0 rgba(2, 6, 23, 0.9))
+    drop-shadow(0 1px 0 rgba(2, 6, 23, 0.9))
+    drop-shadow(0 -1px 0 rgba(2, 6, 23, 0.9))
+    drop-shadow(0 1px 1px rgba(2, 6, 23, 0.6));
 }
 .marker-death .glyph.img {
   -webkit-mask: var(--marker-img) center / 190% no-repeat;
