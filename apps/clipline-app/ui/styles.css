@@ -2074,6 +2074,10 @@ label span { white-space: nowrap; }
   min-height: 72px;
   padding: 7px;
 }
+.game-event-rail ol button.game-event-duel .game-event-kind-icon {
+  align-self: start;
+  margin-top: 7px;
+}
 .game-event-rail ol button.game-event-actor-event {
   grid-template-columns: 38px minmax(46px, 1fr) 30px minmax(46px, 1fr);
   gap: 6px;
@@ -2162,8 +2166,8 @@ label span { white-space: nowrap; }
   height: 21px;
 }
 .game-event-rail ol button.marker-death .game-event-kind-icon img {
-  width: 32px;
-  height: 32px;
+  width: 42px;
+  height: 42px;
 }
 .game-event-rail .game-event-objective-icon {
   grid-column: 4;
