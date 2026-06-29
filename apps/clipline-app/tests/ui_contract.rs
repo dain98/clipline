@@ -25,9 +25,9 @@ fn styles_css() -> String {
     fs::read_to_string(path).expect("read ui/styles.css")
 }
 
-fn marker_png_alpha_bounds(name: &str) -> ((u32, u32), (u32, u32)) {
+fn marker_png_alpha_bounds(asset_dir: &str, name: &str) -> ((u32, u32), (u32, u32)) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("ui/assets/markers")
+        .join(asset_dir)
         .join(name);
     let file = fs::File::open(&path).unwrap_or_else(|err| panic!("open {path:?}: {err}"));
     let decoder = png::Decoder::new(BufReader::new(file));
@@ -1359,6 +1359,10 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
 
 #[test]
 fn timeline_marker_pngs_have_matching_alpha_height() {
+    let marker_asset_dirs = [
+        "ui/assets/markers",
+        "plugin-seeds/league_of_legends/assets/markers",
+    ];
     let marker_names = [
         "baron.png",
         "death.png",
@@ -1367,13 +1371,19 @@ fn timeline_marker_pngs_have_matching_alpha_height() {
         "turret.png",
     ];
 
-    for name in marker_names {
-        let (canvas, visible) = marker_png_alpha_bounds(name);
-        assert_eq!(canvas, (320, 320), "{name} canvas must match the other timeline markers");
-        assert_eq!(
-            visible.1, 280,
-            "{name} visible alpha height must match the other timeline markers"
-        );
+    for asset_dir in marker_asset_dirs {
+        for name in marker_names {
+            let (canvas, visible) = marker_png_alpha_bounds(asset_dir, name);
+            assert_eq!(
+                canvas,
+                (320, 320),
+                "{asset_dir}/{name} canvas must match the other timeline markers"
+            );
+            assert_eq!(
+                visible.1, 280,
+                "{asset_dir}/{name} visible alpha height must match the other timeline markers"
+            );
+        }
     }
 
     let css = styles_css();

@@ -12,3 +12,7 @@ listed in `THIRD-PARTY-NOTICES.md`.
 They are loaded through the plugin manifest and rendered in League review
 timeline surfaces. Right-side event rail icons live separately in
 `assets/event-rail/`.
+
+Keep each marker PNG on a 320x320 transparent canvas with a 280px-tall visible
+alpha box, centered vertically. The timeline relies on plugin marker assets
+having the same alpha bounds as the fallback UI marker assets.
