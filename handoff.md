@@ -307,6 +307,9 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-29):
+- Nightly 0.1.21 contains the simple timeline editor from PR #66. The previous public nightly
+  metadata was 0.1.20, so the app and Tauri package versions were bumped to 0.1.21 for updater
+  eligibility.
 - The review deck now defaults to a simple Outplayed-style timeline: whole-clip browse view first,
   a scissors button enters local trim mode around the playhead, and `Create Clip` uses the existing
   keyframe-aligned export path. The previous navigator/zoom/snap editor is still available via the
