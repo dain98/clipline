@@ -617,7 +617,7 @@ fn review_player_owns_all_controls() {
             && styles_css().contains(".game-event-rail ol button.marker-death .game-event-kind-icon img")
             && styles_css().contains("width: 36px;\n  height: 36px;")
             && styles_css().contains("border: 0;\n  border-radius: 0;\n  background: transparent;")
-            && styles_css().contains("filter:\n    drop-shadow(1px 0 0 rgba(226, 232, 240, 0.42))")
+            && styles_css().contains("filter:\n    drop-shadow(1px 0 0 rgba(2, 6, 23, 0.9))")
             && styles_css().contains(".game-event-name")
             && styles_css().contains(".game-event-rail:hover .game-event-rail-tab")
             && styles_css().contains("--game-event-rail-pad: 10px;")
