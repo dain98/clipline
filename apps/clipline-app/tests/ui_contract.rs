@@ -1214,13 +1214,20 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
 
     // The whole-clip navigator sits between the ruler and the export row.
     let trim_toggle = html.find("id=\"trim-mode-toggle\"").expect("trim toggle");
+    let timeline_stack = html.find("class=\"timeline-stack\"").expect("timeline stack");
     let timeline = html.find("id=\"timeline\"").expect("timeline");
+    let timeline_rail = html.find("class=\"timeline-rail\"").expect("timeline rail");
+    let marker_layer = html.find("id=\"marker-layer\"").expect("marker layer");
+    let ruler = html.find("id=\"ruler\"").expect("ruler");
     assert!(
-        trim_toggle < timeline,
-        "the simple scissors trim control must sit above the timeline"
+        timeline_stack < trim_toggle && trim_toggle < timeline,
+        "the simple scissors trim control must be attached to the timeline stack, above the track"
+    );
+    assert!(
+        timeline < timeline_rail && timeline_rail < marker_layer && marker_layer < ruler,
+        "event markers and time markers must share the attached ruler rail below the video track"
     );
 
-    let ruler = html.find("id=\"ruler\"").expect("ruler");
     let overview = html.find("id=\"overview\"").expect("overview");
     let export_row = html.find("class=\"export-row\"").expect("export row");
     assert!(
@@ -1256,15 +1263,19 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         "navigator window, marker ticks, and snap feedback must be styled"
     );
     assert!(
-        css.contains("padding-bottom: 25px; /* the band the glyphs ride in, below the track */")
-            && css.contains("flex-direction: column-reverse;")
-            && css.contains("margin-bottom: 2px;"),
-        "timeline markers must ride below the track near the ruler labels"
+        css.contains(".timeline-rail")
+            && css.contains("#marker-layer {\n  position: absolute;\n  inset: 0;")
+            && css.contains(".ruler {\n  position: relative;\n  height: 30px;")
+            && css.contains(".ruler .lab {\n  position: absolute;\n  top: 17px;")
+            && css.contains(".marker .glyph {\n  flex: 0 0 auto;\n  width: 15px;"),
+        "event markers must coexist with the attached time ruler below the track"
     );
     assert!(
-        css.contains(".timeline-top-tools")
-            && css.contains("#trim-mode-toggle {\n  color: #ffffff;"),
-        "the simple scissors trim control must be top-aligned and high contrast"
+        !css.contains(".timeline-top-tools")
+            && css.contains("#trim-mode-toggle {\n  position: absolute;")
+            && css.contains("right: 6px;")
+            && css.contains("color: #ffffff;"),
+        "the simple scissors trim control must be attached to the track and high contrast"
     );
     assert!(
         css.contains(".marker-death .glyph.img")

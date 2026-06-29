@@ -2417,24 +2417,30 @@ label span { white-space: nowrap; }
 #trim-band:hover { background: rgba(61, 123, 253, 0.22); }
 #trim-band.grabbing { cursor: grabbing; background: rgba(61, 123, 253, 0.26); }
 
-/* Event markers ride below the track, on the same side as the time ruler. */
 .timeline-stack {
   position: relative;
-  padding-bottom: 25px; /* the band the glyphs ride in, below the track */
+  display: grid;
+  gap: 2px;
+}
+.timeline-rail {
+  position: relative;
+  height: 30px;
+  min-width: 0;
 }
 #marker-layer {
   position: absolute;
   inset: 0;
-  pointer-events: none; /* clicks fall through to the track; glyphs re-enable */
+  z-index: 2;
+  pointer-events: none;
 }
 .marker {
   position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 22px;
-  margin-left: -11px;
+  top: 1px;
+  width: 17px;
+  height: 16px;
+  margin-left: -8.5px;
   display: flex;
-  flex-direction: column-reverse;
+  justify-content: center;
   align-items: center;
   border: 0;
   padding: 0;
@@ -2444,14 +2450,14 @@ label span { white-space: nowrap; }
 }
 .marker .glyph {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
+  width: 15px;
+  height: 15px;
   color: var(--mc, #aeb6c4);
   pointer-events: auto;
   cursor: pointer;
   transition: transform 0.12s ease;
 }
-.marker .glyph svg { width: 20px; height: 20px; display: block; }
+.marker .glyph svg { width: 15px; height: 15px; display: block; }
 /* PNG art rendered as a silhouette mask so it still tints with --mc */
 .marker .glyph.img {
   background-color: var(--mc, #aeb6c4);
@@ -2469,17 +2475,10 @@ label span { white-space: nowrap; }
           mask: var(--marker-img) center / 190% no-repeat;
 }
 .marker .hair {
-  flex: 1 1 auto;
-  width: 1px;
-  margin-bottom: 2px;
-  background: linear-gradient(
-    to top,
-    var(--hair-top, rgba(174, 182, 196, 0.55)),
-    var(--hair-bot, rgba(174, 182, 196, 0.16))
-  );
+  display: none;
 }
 .marker:hover { z-index: 6; filter: brightness(1.32); }
-.marker:hover .glyph { transform: translateY(1px); }
+.marker:hover .glyph { transform: translateY(-1px); }
 
 /* whisper of category color — light glyph + matching hairline, never loud */
 .marker-kill { --mc: #ff9b9e; --hair-top: rgba(255, 97, 102, 0.6); --hair-bot: rgba(255, 97, 102, 0.12); }
@@ -2491,15 +2490,16 @@ label span { white-space: nowrap; }
 
 .ruler {
   position: relative;
-  height: 22px;
-  margin-top: -3px;
+  height: 30px;
+  margin-top: 0;
   color: var(--muted);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
+  z-index: 1;
 }
 .ruler .tick {
   position: absolute;
-  top: 0;
+  top: 3px;
   width: 1px;
   height: 4px;
   background: #313a48;
@@ -2510,18 +2510,13 @@ label span { white-space: nowrap; }
 }
 .ruler .lab {
   position: absolute;
-  top: 9px;
+  top: 17px;
   transform: translateX(-50%);
   white-space: nowrap;
 }
 .ruler .lab.first { transform: none; }
 
 /* ---- timeline navigator (whole-clip minimap + zoom/snap controls) ---- */
-.timeline-top-tools {
-  display: flex;
-  justify-content: flex-end;
-  min-height: 28px;
-}
 .nav-row {
   display: flex;
   align-items: center;
@@ -2622,13 +2617,17 @@ label span { white-space: nowrap; }
 .timeline-tools button:hover { background: rgba(255, 255, 255, 0.1); }
 .timeline-tools button svg { display: block; width: 100%; height: 100%; }
 #trim-mode-toggle {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 8;
   color: #ffffff;
   width: 34px;
-  height: 28px;
+  height: 20px;
   min-width: 0;
-  padding: 6px;
+  padding: 3px 6px;
   border: 1px solid rgba(255, 255, 255, 0.28);
-  border-radius: 6px;
+  border-radius: 5px;
   background: rgba(255, 255, 255, 0.08);
 }
 #trim-mode-toggle:hover {
@@ -2651,7 +2650,6 @@ label span { white-space: nowrap; }
   border-color: rgba(255, 255, 255, 0.62);
   background: rgba(61, 123, 253, 0.38);
 }
-.deck.legacy-timeline .timeline-top-tools { display: none; }
 .deck.simple-timeline .nav-row { display: none; }
 .deck.simple-timeline #overview,
 .deck.simple-timeline #zoom-out,
