@@ -813,6 +813,11 @@ fn game_event_rail_does_not_run_on_every_animation_frame() {
         "the animated playhead loop must stay cheap; event rail sync should run from coarse media events"
     );
     assert!(
+        !animate_playhead.contains("paintTimeline")
+            && !animate_playhead.contains("requestAnimationFrame(animatePlayhead)"),
+        "playback must not run timeline layout writes on every animation frame"
+    );
+    assert!(
         js.contains("let gameEventRows = []")
             && js.contains("gameEventRows.push(button)")
             && !js.contains("document.querySelectorAll(\"[data-game-event-index]\")"),
@@ -822,6 +827,11 @@ fn game_event_rail_does_not_run_on_every_animation_frame() {
         js.contains("video.addEventListener(\"timeupdate\"")
             && js.contains("syncGameEventRail(video.currentTime || 0);"),
         "timeupdate should keep the event rail following playback without tying it to requestAnimationFrame"
+    );
+    assert!(
+        js.contains("setTimeout(() => {\n    overlayTimerId = 0;\n    updateOverlay();")
+            && js.contains("clearTimeout(overlayTimerId);"),
+        "overlay idle fade should use a one-shot timer instead of a playback-frame polling loop"
     );
 }
 

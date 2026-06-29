@@ -26,6 +26,7 @@ const {
   fmtTenths,
   fmtAgo,
   overlayVisible,
+  OVERLAY_HIDE_MS,
   clampTime,
   percentFor,
   percentForView,
@@ -154,6 +155,7 @@ let trimStart = 0;
 let trimEnd = 0;
 let dragging = null;
 let rafId = 0;
+let overlayTimerId = 0;
 // Timeline zoom: the visible window into the clip. zoomSpan === 0 means fully
 // zoomed out (the whole clip is shown); a smaller span shows [zoomStart, +span].
 let zoomStart = 0;
@@ -3486,6 +3488,7 @@ function suspendReviewPlayback() {
   audioPreviewSeq += 1;
   cancelAnimationFrame(rafId);
   rafId = 0;
+  clearOverlayIdleCheck();
   video.pause();
   video.removeAttribute("src");
   video.load();
@@ -3575,6 +3578,7 @@ function openClip(clip) {
   audioPreviewSeq += 1;
   cancelAnimationFrame(rafId);
   rafId = 0;
+  clearOverlayIdleCheck();
   pendingSeek = null;
   currentClip = clip;
   currentReviewMediaPath = clip.path;
@@ -3613,6 +3617,8 @@ function closeReview() {
   setClipTitleEditing(false);
   audioPreviewSeq += 1;
   cancelAnimationFrame(rafId);
+  rafId = 0;
+  clearOverlayIdleCheck();
   video.pause();
   video.removeAttribute("src");
   video.load();
@@ -3844,13 +3850,10 @@ function renderOverviewMarkers() {
   }
 }
 
-// timeupdate fires ~4 Hz; animate the playhead per-frame while playing.
-// The same loop re-evaluates overlay fade (no timers to manage).
+// Keep playback UI light: media timeupdate owns timeline/follow sync, and this
+// one-shot RAF lets play/pause changes settle before overlay state is applied.
 function animatePlayhead() {
-  maybeFollow(video.currentTime || 0);
-  paintTimeline();
   updateOverlay();
-  if (!video.paused && !video.ended) rafId = requestAnimationFrame(animatePlayhead);
 }
 
 // Per-event glyphs for the marker pins, keyed by EventKind. Kept here (DOM
@@ -4040,17 +4043,35 @@ function syncVolume() {
 /* ---- overlay visibility (PlayerCore.overlayVisible policy) ---- */
 
 let lastActivityMs = 0;
+let overlayIdle = null;
 
 function noteActivity() {
   lastActivityMs = performance.now();
-  updateOverlay();
+  scheduleOverlayIdleCheck();
 }
 
 function updateOverlay() {
   const idleMs = performance.now() - lastActivityMs;
-  document
-    .querySelector(".stage")
-    .classList.toggle("idle", !overlayVisible(video.paused, idleMs));
+  const nextIdle = !overlayVisible(video.paused, idleMs);
+  if (overlayIdle === nextIdle) return;
+  stage.classList.toggle("idle", nextIdle);
+  overlayIdle = nextIdle;
+}
+
+function clearOverlayIdleCheck() {
+  clearTimeout(overlayTimerId);
+  overlayTimerId = 0;
+}
+
+function scheduleOverlayIdleCheck() {
+  clearOverlayIdleCheck();
+  updateOverlay();
+  if (video.paused || video.ended) return;
+  const remainingMs = Math.max(0, OVERLAY_HIDE_MS - (performance.now() - lastActivityMs));
+  overlayTimerId = setTimeout(() => {
+    overlayTimerId = 0;
+    updateOverlay();
+  }, remainingMs + 30);
 }
 
 function toggleMute() {
@@ -4972,15 +4993,20 @@ video.addEventListener("click", togglePlay);
 video.addEventListener("play", () => {
   syncPlayState();
   syncGameEventRail(video.currentTime || 0);
+  paintTimeline();
+  scheduleOverlayIdleCheck();
   cancelAnimationFrame(rafId);
   rafId = requestAnimationFrame(animatePlayhead);
 });
 video.addEventListener("pause", () => {
   syncPlayState();
   cancelAnimationFrame(rafId);
+  clearOverlayIdleCheck();
   paintTimeline();
+  updateOverlay();
 });
 video.addEventListener("timeupdate", () => {
+  maybeFollow(video.currentTime || 0);
   paintTimeline();
   syncGameEventRail(video.currentTime || 0);
 });
