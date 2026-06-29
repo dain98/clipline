@@ -9,3 +9,7 @@ Games owns the underlying League of Legends artwork and trademarks; Clipline
 does not claim third-party rights over these images.
 
 Timeline marker icons live separately in `assets/markers/`.
+
+Keep each event rail PNG on a 320x320 transparent canvas with a 280px-tall
+visible alpha box, centered vertically. The match events sidebar relies on
+matching alpha bounds instead of per-icon CSS sizing overrides.

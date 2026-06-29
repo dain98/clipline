@@ -1100,6 +1100,28 @@ fn timeline_view_window_maps_positions_and_pointer() {
 }
 
 #[test]
+fn quick_trim_range_centers_on_playhead_and_clamps_to_clip() {
+    let mut ctx = player_core_context();
+
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.quickTrimRange(50, 120)"),
+        r#"{"start":35,"end":65}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.quickTrimRange(4, 120)"),
+        r#"{"start":0,"end":30}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.quickTrimRange(118, 120)"),
+        r#"{"start":90,"end":120}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.quickTrimRange(8, 12)"),
+        r#"{"start":0,"end":12}"#
+    );
+}
+
+#[test]
 fn zoom_view_keeps_the_anchor_time_fixed() {
     let mut ctx = player_core_context();
     // Zoom in to half span, anchored mid-window: the center time stays put.

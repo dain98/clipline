@@ -2,6 +2,7 @@
 //! the browser owns nothing, and the UI stays split into testable assets.
 
 use std::fs;
+use std::io::BufReader;
 use std::path::Path;
 
 fn index_html() -> String {
@@ -22,6 +23,82 @@ fn player_core_js() -> String {
 fn styles_css() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/styles.css");
     fs::read_to_string(path).expect("read ui/styles.css")
+}
+
+fn css_rule_body<'a>(source: &'a str, selector: &str) -> &'a str {
+    let selector_start = source
+        .find(selector)
+        .unwrap_or_else(|| panic!("missing CSS selector {selector}"));
+    let body_start = source[selector_start..]
+        .find('{')
+        .map(|offset| selector_start + offset + 1)
+        .unwrap_or_else(|| panic!("missing CSS block for {selector}"));
+    let mut depth = 1usize;
+    for (offset, ch) in source[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[body_start..body_start + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated CSS block for {selector}");
+}
+
+fn css_decl_value<'a>(rule_body: &'a str, property: &str) -> Option<&'a str> {
+    rule_body.split(';').find_map(|declaration| {
+        let (name, value) = declaration.trim().split_once(':')?;
+        (name.trim() == property).then(|| value.trim())
+    })
+}
+
+fn marker_png_alpha_bounds(asset_dir: &str, name: &str) -> ((u32, u32), (u32, u32)) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(asset_dir)
+        .join(name);
+    let file = fs::File::open(&path).unwrap_or_else(|err| panic!("open {path:?}: {err}"));
+    let decoder = png::Decoder::new(BufReader::new(file));
+    let mut reader = decoder
+        .read_info()
+        .unwrap_or_else(|err| panic!("decode {path:?}: {err}"));
+    let mut bytes = vec![0; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut bytes)
+        .unwrap_or_else(|err| panic!("read {path:?}: {err}"));
+    assert_eq!(
+        (info.color_type, info.bit_depth),
+        (png::ColorType::Rgba, png::BitDepth::Eight),
+        "{name} must stay an 8-bit RGBA PNG so CSS masks use its alpha channel"
+    );
+
+    let row_stride = info.width as usize * 4;
+    let frame = &bytes[..info.buffer_size()];
+    let mut min_x = info.width;
+    let mut min_y = info.height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut found = false;
+    for y in 0..info.height {
+        for x in 0..info.width {
+            let alpha = frame[y as usize * row_stride + x as usize * 4 + 3];
+            if alpha > 0 {
+                found = true;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    assert!(found, "{name} must include non-transparent marker art");
+    (
+        (info.width, info.height),
+        (max_x - min_x + 1, max_y - min_y + 1),
+    )
 }
 
 fn js_function_body<'a>(source: &'a str, name: &str) -> &'a str {
@@ -210,6 +287,7 @@ fn review_player_owns_all_controls() {
         "id=\"zoom-fit\"",
         "id=\"zoom-in\"",
         "id=\"snap-toggle\"",
+        "id=\"trim-mode-toggle\"",
         "id=\"audio-track-panel\"",
         "id=\"audio-track-summary\"",
         "id=\"audio-track-list\"",
@@ -246,6 +324,7 @@ fn review_player_owns_all_controls() {
         "id=\"set-open-on-startup\"",
         "id=\"set-close-to-tray\"",
         "id=\"set-minimize-to-tray\"",
+        "id=\"set-legacy-timeline-editor\"",
         "id=\"set-update-channel\"",
         "id=\"check-updates\"",
         "id=\"update-status\"",
@@ -371,10 +450,12 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains("Close to Tray")
             && html.contains("Minimize to Tray")
+            && html.contains("Legacy timeline editor")
             && html.contains("Updates")
             && html.contains("value=\"stable\" disabled")
             && main_js().contains("close_to_tray")
             && main_js().contains("minimize_to_tray")
+            && main_js().contains("legacy_timeline_editor")
             && main_js().contains("update_channel")
             && main_js().contains("check_for_updates")
             && main_js().contains("install_update")
@@ -385,6 +466,15 @@ fn review_player_owns_all_controls() {
             && app_rs().contains("tauri_plugin_updater::Builder::new().build()")
             && main_js().contains("minimize_main_window"),
         "general settings must expose and persist tray close/minimize/preview/update behavior"
+    );
+    assert!(
+        main_js().contains("function setSimpleTrimMode(active)")
+            && main_js().contains("function applyTimelineEditorPreference()")
+            && main_js().contains("quickTrimRange(")
+            && styles_css().contains(".deck.simple-timeline")
+            && styles_css().contains(".deck.simple-trim-active")
+            && styles_css().contains(".deck.legacy-timeline"),
+        "review timeline must default to simple trim mode while preserving the legacy editor mode"
     );
     assert!(
         main_js().contains("requestWindowClose")
@@ -679,9 +769,8 @@ fn review_player_owns_all_controls() {
             && styles_css().contains(".game-event-rail ol button.game-event-duel .game-event-kind-icon")
             && styles_css().contains("width: 34px;\n  height: 34px;\n  overflow: visible;")
             && !styles_css().contains("align-self: start;\n  margin-top: 7px;")
-            && styles_css().contains(".game-event-rail ol button.marker-kill .game-event-kind-icon img")
-            && styles_css().contains(".game-event-rail ol button.marker-death .game-event-kind-icon img")
-            && styles_css().contains("width: 36px;\n  height: 36px;")
+            && !styles_css().contains(".game-event-rail ol button.marker-kill .game-event-kind-icon img")
+            && !styles_css().contains(".game-event-rail ol button.marker-death .game-event-kind-icon img")
             && styles_css().contains("border: 0;\n  border-radius: 0;\n  background: transparent;")
             && styles_css().contains("filter:\n    drop-shadow(1px 0 0 rgba(2, 6, 23, 0.9))")
             && styles_css().contains(".game-event-name")
@@ -1200,7 +1289,31 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     let css = styles_css();
 
     // The whole-clip navigator sits between the ruler and the export row.
+    let trim_toggle = html.find("id=\"trim-mode-toggle\"").expect("trim toggle");
+    let timeline_stack = html
+        .find("class=\"timeline-stack\"")
+        .expect("timeline stack");
+    let action_row = html
+        .find("class=\"timeline-action-row\"")
+        .expect("timeline action row");
+    let timeline_main = html.find("class=\"timeline-main\"").expect("timeline main");
+    let timeline = html.find("id=\"timeline\"").expect("timeline");
+    let marker_layer = html.find("id=\"marker-layer\"").expect("marker layer");
     let ruler = html.find("id=\"ruler\"").expect("ruler");
+    assert!(
+        timeline_stack < action_row
+            && action_row < trim_toggle
+            && trim_toggle < timeline_main
+            && timeline_main < timeline,
+        "the simple scissors trim control must sit in its own row above the timeline band"
+    );
+    assert!(
+        timeline < marker_layer
+            && marker_layer < ruler
+            && !html.contains("class=\"timeline-rail\""),
+        "event markers must live on the timeline band above the attached time ruler"
+    );
+
     let overview = html.find("id=\"overview\"").expect("overview");
     let export_row = html.find("class=\"export-row\"").expect("export row");
     assert!(
@@ -1235,16 +1348,142 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         css.contains("#overview-window") && css.contains(".ov-marker") && css.contains(".snapped"),
         "navigator window, marker ticks, and snap feedback must be styled"
     );
+    let action_row_rule = css_rule_body(&css, ".timeline-action-row");
+    let timeline_main_rule = css_rule_body(&css, ".timeline-main");
+    let timeline_rule = css_rule_body(&css, "#timeline");
+    let timeline_progress_rule = css_rule_body(&css, "#timeline::before");
+    let marker_layer_rule = css_rule_body(&css, "#marker-layer");
+    let ruler_rule = css_rule_body(&css, ".ruler");
+    let ruler_tick_rule = css_rule_body(&css, ".ruler .tick.micro");
+    let ruler_lab_rule = css_rule_body(&css, ".ruler .lab");
+    let marker_glyph_rule = css_rule_body(&css, ".marker .glyph");
+    let marker_image_rule = css_rule_body(&css, ".marker .glyph.img");
     assert!(
-        css.contains(".marker-death .glyph.img")
-            && css.contains("-webkit-mask: var(--marker-img) center / 190% no-repeat"),
-        "death marker art has extra transparent padding and must be scaled to match kill markers"
+        css_decl_value(action_row_rule, "display").is_some()
+            && css_decl_value(action_row_rule, "justify-content").is_some()
+            && css_decl_value(timeline_main_rule, "position").is_some()
+            && css_decl_value(timeline_main_rule, "border") == Some("0")
+            && css_decl_value(timeline_main_rule, "overflow").is_some()
+            && css_decl_value(timeline_rule, "position").is_some()
+            && css_decl_value(timeline_rule, "border") == Some("0")
+            && css_decl_value(timeline_rule, "background") == Some("transparent")
+            && css_decl_value(timeline_progress_rule, "background").is_some()
+            && !css.contains("#timeline::after")
+            && css_decl_value(marker_layer_rule, "position").is_some()
+            && css_decl_value(marker_layer_rule, "pointer-events").is_some()
+            && css_decl_value(ruler_rule, "position").is_some()
+            && css_decl_value(ruler_rule, "border") == Some("0")
+            && css_decl_value(ruler_tick_rule, "height").is_some()
+            && css_decl_value(ruler_lab_rule, "position").is_some()
+            && css_decl_value(marker_glyph_rule, "width").is_some()
+            && css_decl_value(marker_glyph_rule, "height").is_some()
+            && css_decl_value(marker_image_rule, "mask").is_some()
+            && css_decl_value(marker_image_rule, "filter")
+                .is_some_and(|value| value.contains("drop-shadow")),
+        "event markers must sit on a borderless timeline band above a dense attached ruler"
+    );
+    assert!(
+        css_decl_value(action_row_rule, "display").is_some()
+            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "position").is_some()
+            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "color") == Some("#ffffff"),
+        "the simple scissors trim control must be above the track and high contrast"
+    );
+    assert!(
+        css_decl_value(
+            css_rule_body(&css, "#trim-mode-toggle.active"),
+            "background"
+        )
+        .is_none()
+            && css_decl_value(
+                css_rule_body(&css, ".deck.simple-trim-active #trim-mode-toggle"),
+                "background"
+            )
+            .is_some(),
+        "the simple trim deck state must own the active scissors background"
+    );
+    assert!(
+        js.contains("const minorStep = step / 10;")
+            && js.contains("const isHalf =")
+            && js.contains("tick.className = isHalf ? \"tick minor\" : \"tick micro\";"),
+        "the time ruler must add Outplayed-style dense ticks between major labels"
+    );
+    assert!(
+        js.contains("const MARKER_LEAD_S = 1;")
+            && js.contains("seekTo(markerTime - MARKER_LEAD_S, { keepGameEventSelection: true });")
+            && js.contains("seekTo(m.t_s - MARKER_LEAD_S);"),
+        "clicking timeline and event-rail markers must start one second before the event"
+    );
+    assert!(
+        !css.contains(".marker-death .glyph.img") && !css.contains("190% no-repeat"),
+        "normalized marker PNGs must not need per-kind timeline mask scaling"
     );
     assert!(
         css.contains(".marker .glyph.img")
             && css.contains("mask: var(--marker-img) center / contain no-repeat;\n  filter:\n    drop-shadow(1px 0 0 rgba(2, 6, 23, 0.9))"),
         "timeline marker image glyphs must use the same black alpha-outline as event rail icons"
     );
+}
+
+#[test]
+fn timeline_marker_pngs_have_matching_alpha_height() {
+    let marker_asset_dirs = [
+        "ui/assets/markers",
+        "plugin-seeds/league_of_legends/assets/markers",
+    ];
+    let marker_names = [
+        "baron.png",
+        "death.png",
+        "dragon.png",
+        "kill.png",
+        "turret.png",
+    ];
+
+    for asset_dir in marker_asset_dirs {
+        for name in marker_names {
+            let (canvas, visible) = marker_png_alpha_bounds(asset_dir, name);
+            assert_eq!(
+                canvas,
+                (320, 320),
+                "{asset_dir}/{name} canvas must match the other timeline markers"
+            );
+            assert_eq!(
+                visible.1, 280,
+                "{asset_dir}/{name} visible alpha height must match the other timeline markers"
+            );
+        }
+    }
+
+    let css = styles_css();
+    assert!(
+        !css.contains(".game-event-rail ol button.marker-kill .game-event-kind-icon img")
+            && !css.contains(".game-event-rail ol button.marker-death .game-event-kind-icon img"),
+        "normalized marker PNGs must not need per-kind event rail image sizing"
+    );
+}
+
+#[test]
+fn league_event_rail_pngs_have_matching_alpha_height() {
+    let event_rail_icon_names = [
+        "baron.png",
+        "death.png",
+        "dragon.png",
+        "kill.png",
+        "turret.png",
+    ];
+
+    for name in event_rail_icon_names {
+        let (canvas, visible) =
+            marker_png_alpha_bounds("plugin-seeds/league_of_legends/assets/event-rail", name);
+        assert_eq!(
+            canvas,
+            (320, 320),
+            "league event rail {name} canvas must match the other match event icons"
+        );
+        assert_eq!(
+            visible.1, 280,
+            "league event rail {name} visible alpha height must match the other match event icons"
+        );
+    }
 }
 
 #[test]

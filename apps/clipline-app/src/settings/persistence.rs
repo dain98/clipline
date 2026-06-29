@@ -85,6 +85,8 @@ impl AppSettings {
             close_to_tray: bool_field(object, "close_to_tray").unwrap_or(defaults.close_to_tray),
             minimize_to_tray: bool_field(object, "minimize_to_tray")
                 .unwrap_or(defaults.minimize_to_tray),
+            legacy_timeline_editor: bool_field(object, "legacy_timeline_editor")
+                .unwrap_or(defaults.legacy_timeline_editor),
             update_channel: deserialize_field(object, "update_channel")
                 .map(normalize_channel)
                 .unwrap_or(defaults.update_channel),

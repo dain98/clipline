@@ -46,6 +46,7 @@ const {
   SNAP_THRESHOLD_PX,
   DEFAULT_FINE_STEP_S,
   resolveTrim,
+  quickTrimRange,
   trimDrag,
   slideTrim,
   trimSummary,
@@ -153,6 +154,7 @@ let updateCheckRunning = false;
 let hotkeyCaptureActive = false;
 let trimStart = 0;
 let trimEnd = 0;
+let simpleTrimMode = false;
 let dragging = null;
 let overlayTimerId = 0;
 // Timeline zoom: the visible window into the clip. zoomSpan === 0 means fully
@@ -410,6 +412,7 @@ function fillSettings(s) {
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
   $("set-minimize-to-tray").checked = !!s.minimize_to_tray;
+  $("set-legacy-timeline-editor").checked = !!s.legacy_timeline_editor;
   $("set-update-channel").value = s.update_channel || "nightly";
   fillCloudSettings(cloud);
   endHotkeyCapture("Click the field to record a new shortcut.");
@@ -424,6 +427,7 @@ function fillSettings(s) {
   updateGameDetectionStatus();
   updateCaptureStatus();
   syncUploadClipButton();
+  applyTimelineEditorPreference();
   renderClips();
 }
 
@@ -481,6 +485,7 @@ function readSettings() {
     open_on_startup: $("set-open-on-startup").checked,
     close_to_tray: $("set-close-to-tray").checked,
     minimize_to_tray: $("set-minimize-to-tray").checked,
+    legacy_timeline_editor: $("set-legacy-timeline-editor").checked,
     update_channel: $("set-update-channel").value,
     cloud: readCloudSettings(),
   };
@@ -3578,6 +3583,7 @@ function openClip(clip) {
   currentClip = clip;
   currentReviewMediaPath = clip.path;
   currentReviewAudioKey = null;
+  simpleTrimMode = false;
   resetSelectedAudioTracks(clip);
   $("error").textContent = "";
   setDeckStatus("");
@@ -3596,6 +3602,7 @@ function openClip(clip) {
   setTrim(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
   renderOverviewMarkers();
   applyView({ start: 0, span: 0 });
+  applyTimelineEditorPreference();
   renderAudioTrackPanel();
   renderGameEventRail(clip);
   renderGameMetadataPanel(clip);
@@ -3616,12 +3623,14 @@ function closeReview() {
   video.removeAttribute("src");
   video.load();
   currentClip = null;
+  simpleTrimMode = false;
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
   syncReviewLocalActions();
   syncUploadClipButton();
   selectedAudioTrackIds = new Set();
   resetZoom();
+  applyTimelineEditorPreference();
   updateViews();
   setDeckStatus("");
   $("stage-note").textContent = "";
@@ -3676,6 +3685,57 @@ function setTrim(start, end) {
   trimEnd = next.end;
   $("trim-summary").textContent = trimSummary(trimStart, trimEnd);
   paintTimeline();
+}
+
+function legacyTimelineEnabled() {
+  return !!(currentSettings && currentSettings.legacy_timeline_editor);
+}
+
+function applyTimelineEditorPreference() {
+  const deck = document.querySelector(".deck");
+  if (!deck) return;
+  const legacy = legacyTimelineEnabled();
+  if (legacy) simpleTrimMode = false;
+  deck.classList.toggle("legacy-timeline", legacy);
+  deck.classList.toggle("simple-timeline", !legacy);
+  deck.classList.toggle("simple-trim-active", !legacy && simpleTrimMode);
+
+  const toggle = $("trim-mode-toggle");
+  toggle.disabled = legacy;
+  toggle.hidden = legacy;
+  toggle.classList.toggle("active", !legacy && simpleTrimMode);
+  toggle.setAttribute("aria-pressed", String(!legacy && simpleTrimMode));
+  toggle.title = simpleTrimMode ? "Exit trim mode" : "Trim clip";
+
+  const exportLabel = $("export-clip").querySelector("span");
+  if (exportLabel) exportLabel.textContent = !legacy && simpleTrimMode ? "Create Clip" : "Clip";
+  $("timeline").title = legacy
+    ? "Click to seek · drag the selection to slide · drag the edges to trim · scroll to zoom"
+    : simpleTrimMode
+      ? "Drag the handles to trim · drag the selection to slide · click to seek"
+      : "Click to seek · press Trim clip to create a clip";
+  paintTimeline();
+}
+
+function setSimpleTrimMode(active) {
+  if (legacyTimelineEnabled()) {
+    simpleTrimMode = false;
+    applyTimelineEditorPreference();
+    return;
+  }
+  simpleTrimMode = !!active;
+  if (simpleTrimMode && currentClip) {
+    const dur = clipDuration();
+    const range = quickTrimRange(video.currentTime || 0, dur);
+    setTrim(range.start, range.end);
+    if (dur > 0) {
+      noteViewActivity();
+      applyView(viewForRange(range.start, range.end, dur, 0.08));
+    }
+  } else if (currentClip) {
+    zoomFit();
+  }
+  applyTimelineEditorPreference();
 }
 
 // The slice of the clip the timeline currently shows. Normalized every read so
@@ -3873,7 +3933,7 @@ const MARKER_ICON_FALLBACK = {
 };
 // Clicking a marker starts playback this many seconds before the event, so its
 // lead-up plays rather than dropping the viewer right on the moment.
-const MARKER_LEAD_S = 3;
+const MARKER_LEAD_S = 1;
 // Game-authentic art for the kinds that actually reach the review timeline
 // (is_timeline_marker). Used as a CSS mask so each silhouette still tints with
 // its category color (--mc); kinds without art fall back to the SVGs above.
@@ -3945,16 +4005,19 @@ function renderRuler() {
   const viewEnd = view.start + view.span;
   const pct = (t) => percentForView(t, view.start, view.span);
   const marks = rulerMarksRange(view.start, view.span, 8);
-  // Minor ticks between the labeled majors give the ruler a fine, precise feel.
+  // Dense ticks between the labeled majors mirror clipping tools: quick spatial
+  // reference without turning the timeline into a data graph.
   if (marks.length >= 2) {
     const step = marks[1].t - marks[0].t;
-    const minorStep = step / 3;
+    const minorStep = step / 10;
     const isMajor = (t) => marks.some((m) => Math.abs(m.t - t) < minorStep / 2);
     const firstMinor = Math.ceil(view.start / minorStep - 1e-9) * minorStep;
     for (let t = firstMinor; t <= viewEnd + 1e-6; t += minorStep) {
       if (t <= 0 || isMajor(t)) continue;
       const tick = document.createElement("i");
-      tick.className = "tick";
+      const divisionsFromFirst = Math.round((t - marks[0].t) / minorStep);
+      const isHalf = divisionsFromFirst % 5 === 0;
+      tick.className = isHalf ? "tick minor" : "tick micro";
       tick.style.left = `${pct(t)}%`;
       root.appendChild(tick);
     }
@@ -4216,6 +4279,7 @@ const ZOOM_SENSITIVITY = 0.0015;
 function onTimelineWheel(ev) {
   const dur = clipDuration();
   if (!currentClip || !(dur > 0)) return;
+  if (!legacyTimelineEnabled() && !simpleTrimMode) return;
   ev.preventDefault();
   noteViewActivity();
   const rect = $("timeline").getBoundingClientRect();
@@ -5063,6 +5127,7 @@ $("upload-dialog").addEventListener("click", (ev) => {
   if (ev.target === $("upload-dialog")) closeUploadDialog();
 });
 
+$("trim-mode-toggle").addEventListener("click", () => setSimpleTrimMode(!simpleTrimMode));
 $("zoom-in").addEventListener("click", () => zoomAtPlayhead(0.5));
 $("zoom-out").addEventListener("click", () => zoomAtPlayhead(2));
 // Plain click frames the trim selection (the editing default); Shift-click fits
@@ -5191,16 +5256,30 @@ document.addEventListener("keydown", (ev) => {
     case "step-frame": stepFrame(intent.dir); break;
     case "seek-to": seekTo(intent.seconds); break;
     case "seek-to-end": seekTo(clipDuration()); break;
-    case "set-in": setTrim(video.currentTime || 0, trimEnd); break;
-    case "set-out": setTrim(trimStart, video.currentTime || 0); break;
+    case "set-in":
+      if (!legacyTimelineEnabled() && !simpleTrimMode) setSimpleTrimMode(true);
+      setTrim(video.currentTime || 0, trimEnd);
+      break;
+    case "set-out":
+      if (!legacyTimelineEnabled() && !simpleTrimMode) setSimpleTrimMode(true);
+      setTrim(trimStart, video.currentTime || 0);
+      break;
     case "next-marker": jumpMarker(1); break;
     case "prev-marker": jumpMarker(-1); break;
     case "next-edit": jumpEdit(1); break;
     case "prev-edit": jumpEdit(-1); break;
-    case "zoom": zoomAtPlayhead(intent.factor); break;
-    case "zoom-fit": zoomFit(); break;
-    case "zoom-selection": zoomToSelection(); break;
-    case "toggle-snap": toggleSnap(); break;
+    case "zoom":
+      if (legacyTimelineEnabled() || simpleTrimMode) zoomAtPlayhead(intent.factor);
+      break;
+    case "zoom-fit":
+      if (legacyTimelineEnabled() || simpleTrimMode) zoomFit();
+      break;
+    case "zoom-selection":
+      if (legacyTimelineEnabled() || simpleTrimMode) zoomToSelection();
+      break;
+    case "toggle-snap":
+      if (legacyTimelineEnabled()) toggleSnap();
+      break;
     case "close": closeReview(); break;
   }
 });

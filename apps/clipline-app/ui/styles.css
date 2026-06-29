@@ -2148,14 +2148,6 @@ label span { white-space: nowrap; }
     drop-shadow(0 -1px 0 rgba(2, 6, 23, 0.9))
     drop-shadow(0 1px 1px rgba(2, 6, 23, 0.6));
 }
-.game-event-rail ol button.marker-kill .game-event-kind-icon img {
-  width: 21px;
-  height: 21px;
-}
-.game-event-rail ol button.marker-death .game-event-kind-icon img {
-  width: 36px;
-  height: 36px;
-}
 .game-event-rail .game-event-objective-icon {
   grid-column: 4;
   justify-self: center;
@@ -2352,16 +2344,28 @@ label span { white-space: nowrap; }
 }
 
 #timeline {
-  position: relative;
-  height: 28px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: #1d2430;
+  position: absolute;
+  inset: 0;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   overflow: hidden;
   cursor: pointer;
   touch-action: none;
 }
-
+#timeline::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: #e5164f;
+  box-shadow: 0 -1px 9px rgba(229, 22, 79, 0.42);
+  pointer-events: none;
+  z-index: 1;
+}
 /* What you keep stays bright; the trimmed-away ends are dimmed. */
 .dim {
   position: absolute;
@@ -2369,6 +2373,7 @@ label span { white-space: nowrap; }
   bottom: 0;
   background: rgba(8, 10, 14, 0.62);
   pointer-events: none;
+  z-index: 2;
 }
 #dim-in { left: 0; width: 0; border-right: 1px solid var(--line-strong); }
 #dim-out { right: 0; width: 0; border-left: 1px solid var(--line-strong); }
@@ -2417,26 +2422,45 @@ label span { white-space: nowrap; }
 #trim-band:hover { background: rgba(61, 123, 253, 0.22); }
 #trim-band.grabbing { cursor: grabbing; background: rgba(61, 123, 253, 0.26); }
 
-/* Event markers: a small flat glyph rides just above the track, tied to the
-   exact moment by a fading hairline. Restrained, Outplayed-style — the track
-   stays clean and fully clickable (only the glyph itself is a marker target). */
 .timeline-stack {
   position: relative;
-  padding-top: 25px; /* the band the glyphs ride in, above the track */
+  display: grid;
+  gap: 0;
+}
+.timeline-action-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  height: 26px;
+  min-width: 0;
+  margin-bottom: 8px;
+}
+.timeline-main {
+  position: relative;
+  height: 56px;
+  min-width: 0;
+  border: 0;
+  border-radius: 7px 7px 0 0;
+  background: #12161d;
+  overflow: hidden;
 }
 #marker-layer {
   position: absolute;
-  inset: 0;
-  pointer-events: none; /* clicks fall through to the track; glyphs re-enable */
+  left: 0;
+  right: 0;
+  top: 18px;
+  height: 22px;
+  z-index: 7;
+  pointer-events: none;
 }
 .marker {
   position: absolute;
   top: 0;
-  bottom: 0;
-  width: 22px;
-  margin-left: -11px;
+  width: 20px;
+  height: 20px;
+  margin-left: -10px;
   display: flex;
-  flex-direction: column;
+  justify-content: center;
   align-items: center;
   border: 0;
   padding: 0;
@@ -2446,14 +2470,14 @@ label span { white-space: nowrap; }
 }
 .marker .glyph {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   color: var(--mc, #aeb6c4);
   pointer-events: auto;
   cursor: pointer;
   transition: transform 0.12s ease;
 }
-.marker .glyph svg { width: 20px; height: 20px; display: block; }
+.marker .glyph svg { width: 18px; height: 18px; display: block; }
 /* PNG art rendered as a silhouette mask so it still tints with --mc */
 .marker .glyph.img {
   background-color: var(--mc, #aeb6c4);
@@ -2466,19 +2490,8 @@ label span { white-space: nowrap; }
     drop-shadow(0 -1px 0 rgba(2, 6, 23, 0.9))
     drop-shadow(0 1px 1px rgba(2, 6, 23, 0.6));
 }
-.marker-death .glyph.img {
-  -webkit-mask: var(--marker-img) center / 190% no-repeat;
-          mask: var(--marker-img) center / 190% no-repeat;
-}
 .marker .hair {
-  flex: 1 1 auto;
-  width: 1px;
-  margin-top: 2px;
-  background: linear-gradient(
-    to bottom,
-    var(--hair-top, rgba(174, 182, 196, 0.55)),
-    var(--hair-bot, rgba(174, 182, 196, 0.16))
-  );
+  display: none;
 }
 .marker:hover { z-index: 6; filter: brightness(1.32); }
 .marker:hover .glyph { transform: translateY(-1px); }
@@ -2493,26 +2506,40 @@ label span { white-space: nowrap; }
 
 .ruler {
   position: relative;
-  height: 22px;
-  margin-top: -3px;
+  height: 28px;
+  margin-top: 0;
+  border: 0;
+  border-radius: 0 0 7px 7px;
+  background: #12161d;
   color: var(--muted);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
+  z-index: 1;
 }
 .ruler .tick {
   position: absolute;
   top: 0;
   width: 1px;
   height: 4px;
-  background: #313a48;
+  background: #3b4454;
+  opacity: 0.72;
+}
+.ruler .tick.micro {
+  height: 3px;
+  opacity: 0.5;
+}
+.ruler .tick.minor {
+  height: 6px;
+  opacity: 0.74;
 }
 .ruler .tick.major {
-  height: 7px;
+  height: 8px;
   background: var(--line-strong);
+  opacity: 0.9;
 }
 .ruler .lab {
   position: absolute;
-  top: 9px;
+  top: 13px;
   transform: translateX(-50%);
   white-space: nowrap;
 }
@@ -2618,10 +2645,62 @@ label span { white-space: nowrap; }
 }
 .timeline-tools button:hover { background: rgba(255, 255, 255, 0.1); }
 .timeline-tools button svg { display: block; width: 100%; height: 100%; }
+#trim-mode-toggle {
+  position: relative;
+  z-index: 8;
+  color: #ffffff;
+  width: 30px;
+  height: 24px;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+}
+#trim-mode-toggle:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.46);
+}
+#trim-mode-toggle svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+}
 #snap-toggle.active {
   color: var(--accent);
   border-color: var(--accent);
   background: rgba(61, 123, 253, 0.12);
+}
+#trim-mode-toggle.active {
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.62);
+}
+.deck.simple-timeline .nav-row { display: none; }
+.deck.simple-timeline #overview,
+.deck.simple-timeline #zoom-out,
+.deck.simple-timeline #zoom-fit,
+.deck.simple-timeline #zoom-in,
+.deck.simple-timeline #snap-toggle,
+.deck.legacy-timeline #trim-mode-toggle {
+  display: none;
+}
+.deck.simple-timeline:not(.simple-trim-active) #dim-in,
+.deck.simple-timeline:not(.simple-trim-active) #dim-out,
+.deck.simple-timeline:not(.simple-trim-active) #handle-in,
+.deck.simple-timeline:not(.simple-trim-active) #handle-out,
+.deck.simple-timeline:not(.simple-trim-active) #trim-band,
+.deck.simple-timeline:not(.simple-trim-active) #export-clip,
+.deck.simple-timeline:not(.simple-trim-active) .trim-readout {
+  display: none !important;
+}
+.deck.simple-timeline:not(.simple-trim-active) .export-row {
+  min-height: 0;
+}
+.deck.simple-trim-active #trim-mode-toggle {
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.62);
+  background: rgba(229, 22, 79, 0.26);
 }
 
 .audio-track-panel {
