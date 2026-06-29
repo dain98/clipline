@@ -2455,10 +2455,10 @@ label span { white-space: nowrap; }
 }
 .marker {
   position: absolute;
-  top: 1px;
-  width: 18px;
-  height: 17px;
-  margin-left: -9px;
+  top: 0;
+  width: 20px;
+  height: 20px;
+  margin-left: -10px;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -2470,14 +2470,14 @@ label span { white-space: nowrap; }
 }
 .marker .glyph {
   flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   color: var(--mc, #aeb6c4);
   pointer-events: auto;
   cursor: pointer;
   transition: transform 0.12s ease;
 }
-.marker .glyph svg { width: 16px; height: 16px; display: block; }
+.marker .glyph svg { width: 18px; height: 18px; display: block; }
 /* PNG art rendered as a silhouette mask so it still tints with --mc */
 .marker .glyph.img {
   background-color: var(--mc, #aeb6c4);

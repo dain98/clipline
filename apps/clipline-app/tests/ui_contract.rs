@@ -1328,7 +1328,10 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
             && css.contains(".ruler {\n  position: relative;\n  height: 28px;\n  margin-top: 0;\n  border: 0;\n  border-radius: 0 0 7px 7px;\n  background: #12161d;")
             && css.contains(".ruler .tick.micro")
             && css.contains(".ruler .lab {\n  position: absolute;\n  top: 13px;")
-            && css.contains(".marker .glyph {\n  flex: 0 0 auto;\n  width: 16px;"),
+            && css.contains(
+                ".marker .glyph {\n  flex: 0 0 auto;\n  width: 18px;\n  height: 18px;"
+            )
+            && css.contains(".marker .glyph svg { width: 18px; height: 18px; display: block; }"),
         "event markers must sit on a borderless, app-toned timeline band above a dense attached ruler"
     );
     assert!(
