@@ -15,6 +15,7 @@ const PlayerCore = (() => {
   const SNAP_THRESHOLD_PX = 8;
   // Fine-step fallback when the clip's true frame rate is unknown.
   const DEFAULT_FINE_STEP_S = 1 / 60;
+  const QUICK_TRIM_WINDOW_S = 30;
 
   // YouTube grammar: controls pin while paused, fade when playing and idle.
   const overlayVisible = (paused, idleMs) => paused || idleMs < OVERLAY_HIDE_MS;
@@ -429,6 +430,14 @@ const PlayerCore = (() => {
       nextStart = Math.max(0, nextEnd - MIN_TRIM_GAP_S);
     }
     return { start: nextStart, end: nextEnd };
+  };
+
+  const quickTrimRange = (playhead, duration, windowS = QUICK_TRIM_WINDOW_S) => {
+    if (!(duration > 0)) return { start: 0, end: 0 };
+    const span = Math.min(duration, Math.max(MIN_TRIM_GAP_S, windowS));
+    const center = clampTime(Number.isFinite(playhead) ? playhead : 0, duration);
+    const start = Math.max(0, Math.min(duration - span, center - span / 2));
+    return { start, end: start + span };
   };
 
   const trimDrag = (kind, time, start, end, duration) => {
@@ -1422,6 +1431,7 @@ const PlayerCore = (() => {
     DEFAULT_FOLLOW_MODE,
     SNAP_THRESHOLD_PX,
     DEFAULT_FINE_STEP_S,
+    QUICK_TRIM_WINDOW_S,
     overlayVisible,
     videoDecodeProbes,
     encoderCodecCaveat,
@@ -1455,6 +1465,7 @@ const PlayerCore = (() => {
     frameStep,
     editPoints,
     resolveTrim,
+    quickTrimRange,
     trimDrag,
     slideTrim,
     trimSummary,

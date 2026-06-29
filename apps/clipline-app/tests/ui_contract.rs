@@ -210,6 +210,7 @@ fn review_player_owns_all_controls() {
         "id=\"zoom-fit\"",
         "id=\"zoom-in\"",
         "id=\"snap-toggle\"",
+        "id=\"trim-mode-toggle\"",
         "id=\"audio-track-panel\"",
         "id=\"audio-track-summary\"",
         "id=\"audio-track-list\"",
@@ -246,6 +247,7 @@ fn review_player_owns_all_controls() {
         "id=\"set-open-on-startup\"",
         "id=\"set-close-to-tray\"",
         "id=\"set-minimize-to-tray\"",
+        "id=\"set-legacy-timeline-editor\"",
         "id=\"set-update-channel\"",
         "id=\"check-updates\"",
         "id=\"update-status\"",
@@ -371,10 +373,12 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains("Close to Tray")
             && html.contains("Minimize to Tray")
+            && html.contains("Legacy timeline editor")
             && html.contains("Updates")
             && html.contains("value=\"stable\" disabled")
             && main_js().contains("close_to_tray")
             && main_js().contains("minimize_to_tray")
+            && main_js().contains("legacy_timeline_editor")
             && main_js().contains("update_channel")
             && main_js().contains("check_for_updates")
             && main_js().contains("install_update")
@@ -385,6 +389,15 @@ fn review_player_owns_all_controls() {
             && app_rs().contains("tauri_plugin_updater::Builder::new().build()")
             && main_js().contains("minimize_main_window"),
         "general settings must expose and persist tray close/minimize/preview/update behavior"
+    );
+    assert!(
+        main_js().contains("function setSimpleTrimMode(active)")
+            && main_js().contains("function applyTimelineEditorPreference()")
+            && main_js().contains("quickTrimRange(")
+            && styles_css().contains(".deck.simple-timeline")
+            && styles_css().contains(".deck.simple-trim-active")
+            && styles_css().contains(".deck.legacy-timeline"),
+        "review timeline must default to simple trim mode while preserving the legacy editor mode"
     );
     assert!(
         main_js().contains("requestWindowClose")

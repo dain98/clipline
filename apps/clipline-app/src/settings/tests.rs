@@ -44,6 +44,8 @@ fn defaults_match_current_recorder_behavior() {
     assert!(settings.close_to_tray);
     assert!(!settings.minimize_to_tray);
     assert_eq!(settings.update_channel, UpdateChannel::Nightly);
+    assert!(!settings.legacy_timeline_editor);
+    assert_eq!(serialized["legacy_timeline_editor"], false);
 }
 
 #[test]
@@ -93,6 +95,30 @@ fn legacy_settings_default_capture_region() {
     assert!(!settings.minimize_to_tray);
     assert_eq!(settings.update_channel, UpdateChannel::Nightly);
     assert!(settings.validate().is_ok());
+}
+
+#[test]
+fn load_preserves_legacy_timeline_editor_preference() {
+    let settings = AppSettings::load_from_object(
+        serde_json::from_str::<Value>(
+            r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "buffer_seconds": 75.0,
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 12.0,
+                "fps": 60,
+                "disk_quota_gb": 10.0,
+                "hotkey": "Alt+F10",
+                "legacy_timeline_editor": true
+            }"#,
+        )
+        .unwrap()
+        .as_object()
+        .unwrap(),
+    );
+
+    assert!(settings.legacy_timeline_editor);
 }
 
 #[test]

@@ -81,6 +81,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub minimize_to_tray: bool,
     #[serde(default)]
+    pub legacy_timeline_editor: bool,
+    #[serde(default)]
     pub update_channel: UpdateChannel,
     #[serde(default)]
     pub cloud: CloudSettings,
@@ -117,6 +119,7 @@ impl Default for AppSettings {
             open_on_startup: false,
             close_to_tray: true,
             minimize_to_tray: false,
+            legacy_timeline_editor: false,
             update_channel: UpdateChannel::Nightly,
             cloud: CloudSettings::default(),
         }

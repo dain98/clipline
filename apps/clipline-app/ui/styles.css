@@ -2623,6 +2623,37 @@ label span { white-space: nowrap; }
   border-color: var(--accent);
   background: rgba(61, 123, 253, 0.12);
 }
+#trim-mode-toggle.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(61, 123, 253, 0.12);
+}
+.deck.simple-timeline .nav-row {
+  justify-content: flex-end;
+}
+.deck.simple-timeline #overview,
+.deck.simple-timeline #zoom-out,
+.deck.simple-timeline #zoom-fit,
+.deck.simple-timeline #zoom-in,
+.deck.simple-timeline #snap-toggle,
+.deck.legacy-timeline #trim-mode-toggle {
+  display: none;
+}
+.deck.simple-timeline:not(.simple-trim-active) #dim-in,
+.deck.simple-timeline:not(.simple-trim-active) #dim-out,
+.deck.simple-timeline:not(.simple-trim-active) #handle-in,
+.deck.simple-timeline:not(.simple-trim-active) #handle-out,
+.deck.simple-timeline:not(.simple-trim-active) #trim-band,
+.deck.simple-timeline:not(.simple-trim-active) #export-clip,
+.deck.simple-timeline:not(.simple-trim-active) .trim-readout {
+  display: none !important;
+}
+.deck.simple-timeline:not(.simple-trim-active) .export-row {
+  min-height: 0;
+}
+.deck.simple-trim-active #trim-mode-toggle {
+  color: var(--accent);
+}
 
 .audio-track-panel {
   border-top: 1px solid var(--line);
