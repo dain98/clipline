@@ -345,6 +345,10 @@ impl GamePlugin {
             }
         }
 
+        if let Some(card_icon_src) = presentation.pointer_mut("/gallery/card/icon/src") {
+            self.resolve_package_icon_value(card_icon_src);
+        }
+
         Some(presentation)
     }
 
@@ -461,10 +465,10 @@ pub fn known_first_party_package_release(plugin_id: &str) -> Option<KnownFirstPa
     match plugin_id {
         LEAGUE_OF_LEGENDS_ID => Some(KnownFirstPartyPackageRelease {
             plugin_id: LEAGUE_OF_LEGENDS_ID,
-            version: Version::parse("1.3.4").expect("known League package version is valid"),
+            version: Version::parse("1.3.5").expect("known League package version is valid"),
             source_label: "clipline-plugin-league-of-legends",
-            url: "https://github.com/dain98/clipline-plugin-league-of-legends/releases/download/v1.3.4/clipline-plugin-league-of-legends-1.3.4.zip",
-            sha256: "d59d4c393340e3892d5281f9ff92e87847d15c91c67eaf2c40f53ba96e73a396",
+            url: "https://github.com/dain98/clipline-plugin-league-of-legends/releases/download/v1.3.5/clipline-plugin-league-of-legends-1.3.5.zip",
+            sha256: "3eaf6e9b806c4bc7e9c733ba6a8c5b50a12697d390e686391d3b344f12a1bc5f",
         }),
         _ => None,
     }
@@ -903,7 +907,7 @@ fn install_state(receipt: &InstalledPluginRecord) -> &'static str {
 
 const LEAGUE_SEED_MANIFEST_JSON: &str = r#"{
   "schema_version": 1,
-  "package_version": "1.2.5",
+  "package_version": "1.2.6",
   "id": "league_of_legends",
   "name": "League of Legends",
   "summary": "Auto-records full matches when the in-game window is active.",
@@ -933,7 +937,32 @@ const LEAGUE_SEED_MANIFEST_JSON: &str = r#"{
     },
     "gallery": {
       "summary": "player_summary_kda",
-      "full_session_title": "summary"
+      "full_session_title": "summary",
+      "card": {
+        "title": "summary_for_full_session",
+        "icon": {
+          "type": "portrait",
+          "source": "player_summary.champion_name",
+          "label": "Champion",
+          "asset_provider": "riot_data_dragon_champion_square",
+          "asset_key_format": "data_dragon_champion",
+          "asset_aliases": {
+            "belveth": "Belveth",
+            "cho'gath": "Chogath",
+            "dr. mundo": "DrMundo",
+            "kai'sa": "Kaisa",
+            "kha'zix": "Khazix",
+            "k'sante": "KSante",
+            "kog'maw": "KogMaw",
+            "leblanc": "Leblanc",
+            "nunu & willump": "Nunu",
+            "rek'sai": "Reksai",
+            "renata glasc": "Renata",
+            "vel'koz": "Velkoz",
+            "wukong": "MonkeyKing"
+          }
+        }
+      }
     },
     "event_rail": {
       "enabled": true,
@@ -1185,6 +1214,24 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("MonkeyKing")
         );
+        assert_eq!(
+            presentation
+                .pointer("/gallery/card/title")
+                .and_then(serde_json::Value::as_str),
+            Some("summary_for_full_session")
+        );
+        assert_eq!(
+            presentation
+                .pointer("/gallery/card/icon/asset_provider")
+                .and_then(serde_json::Value::as_str),
+            Some("riot_data_dragon_champion_square")
+        );
+        assert_eq!(
+            presentation
+                .pointer("/gallery/card/icon/asset_aliases/vel'koz")
+                .and_then(serde_json::Value::as_str),
+            Some("Velkoz")
+        );
     }
 
     #[test]
@@ -1202,6 +1249,7 @@ mod tests {
         std::fs::write(plugin_dir.join("assets/markers/kill.png"), b"kill-icon").unwrap();
         std::fs::write(plugin_dir.join("assets/event-rail/kill.png"), b"rail-kill-icon")
             .unwrap();
+        std::fs::write(plugin_dir.join("assets/games/card-logo.png"), b"card-logo").unwrap();
         std::fs::write(
             plugin_dir.join(PLUGIN_MANIFEST_FILE),
             r#"{
@@ -1222,6 +1270,15 @@ mod tests {
                 "event_rail": {
                   "icons": {
                     "ChampionKill": "assets/event-rail/kill.png"
+                  }
+                },
+                "gallery": {
+                  "card": {
+                    "icon": {
+                      "type": "asset",
+                      "src": "assets/games/card-logo.png",
+                      "label": "Card logo"
+                    }
                   }
                 }
               }
@@ -1261,6 +1318,14 @@ mod tests {
             marker_icon, rail_icon,
             "event rail icons should resolve independently from timeline marker icons"
         );
+        let card_icon = presentation
+            .pointer("/gallery/card/icon/src")
+            .and_then(serde_json::Value::as_str)
+            .expect("gallery card icon");
+        assert!(
+            card_icon.starts_with("data:image/png;base64,"),
+            "gallery card icons should be package-relative data URLs, got {card_icon}"
+        );
     }
 
     #[test]
@@ -1281,8 +1346,8 @@ mod tests {
 
         let info = plugin.info();
 
-        assert_eq!(release.version.to_string(), "1.3.4");
-        assert_eq!(info.latest_version.as_deref(), Some("1.3.4"));
+        assert_eq!(release.version.to_string(), "1.3.5");
+        assert_eq!(info.latest_version.as_deref(), Some("1.3.5"));
         assert_eq!(
             info.latest_source_label.as_deref(),
             Some("clipline-plugin-league-of-legends")

@@ -55,8 +55,8 @@ const {
   markerDigest,
   gameEventActiveIndex,
   gameEventRailItem,
-  playerSummaryLabel,
   playerSummaryFields,
+  galleryCardPreview,
   rulerMarksRange,
   sessionGroups,
   formatClipTitle,
@@ -2377,14 +2377,6 @@ function pluginGalleryPolicy(clip) {
   return presentation && presentation.gallery ? presentation.gallery : null;
 }
 
-function clipGameSummary(clip) {
-  const gallery = pluginGalleryPolicy(clip);
-  if (gallery && gallery.summary === "player_summary_kda") {
-    return playerSummaryLabel(clip && clip.markers ? clip.markers.player_summary : null);
-  }
-  return "";
-}
-
 function markerDisplayLabel(marker, presentation) {
   const kind = marker && marker.kind ? marker.kind : "Other";
   const configured = presentation
@@ -2656,20 +2648,15 @@ function renderGameMetadataPanel(clip = currentClip) {
   panel.hidden = false;
 }
 
-function usesFallbackTitleForPluginClip(clip) {
-  const gallery = pluginGalleryPolicy(clip);
-  return Boolean(gallery && gallery.summary === "player_summary_kda");
-}
-
-function isPluginSummaryFullSessionTitle(clip, kind, summary) {
-  const gallery = pluginGalleryPolicy(clip);
-  return Boolean(kind === "session" && summary && gallery && gallery.full_session_title === "summary");
-}
-
-function clipLibraryTitle(clip, fallbackTitle) {
-  if (usesFallbackTitleForPluginClip(clip)) return fallbackTitle;
-  const clipName = clip && String(clip.name || "").trim();
-  return clipName || fallbackTitle;
+function clipGalleryCardPreview(clip, kind, fallbackTitle) {
+  const presentation = pluginPresentationForClip(clip);
+  return galleryCardPreview(
+    clip,
+    kind,
+    fallbackTitle,
+    presentation,
+    { data_dragon: presentation && presentation.data_dragon },
+  );
 }
 
 function cloudVisibilityEl(record) {
@@ -2867,11 +2854,11 @@ function clipCard(c) {
   const duration = Number.isFinite(c.duration_s)
     ? c.duration_s
     : (c.markers ? c.markers.duration_s : NaN);
-  const gameMeta = clipGameSummary(c);
-  const gameSessionTitle = isPluginSummaryFullSessionTitle(c, kind, gameMeta);
   const fallbackTitle = formatClipTitle(
     when.getMonth(), when.getDate(), when.getHours(), when.getMinutes());
-  const cardTitle = gameSessionTitle ? gameMeta : clipLibraryTitle(c, fallbackTitle);
+  const cardPreview = clipGalleryCardPreview(c, kind, fallbackTitle);
+  const cardTitleUsesSummary = cardPreview.titleSource === "summary";
+  const cardTitle = cardPreview.title || fallbackTitle;
 
   // Thumbnail: gradient placeholder + lazily-loaded poster, with the kind chip,
   // a hover delete, a play glyph, the duration, and marker ticks layered on.
@@ -2933,18 +2920,26 @@ function clipCard(c) {
   meta.className = "card-meta";
   const nameRow = document.createElement("div");
   nameRow.className = "card-name";
+  const previewIcon = cardPreview.icon && cardPreview.icon.url ? cardPreview.icon : null;
   const game = clipGameIcon(c);
-  if (game) {
+  const cardIcon = previewIcon || (game ? { type: "game", url: game.url, label: game.label } : null);
+  if (cardIcon) {
     const gi = document.createElement("img");
-    gi.className = "card-game-ico";
-    gi.src = game.url;
+    gi.className = "card-game-ico" + (cardIcon.type === "portrait" ? " portrait" : "");
+    gi.src = cardIcon.url;
     gi.alt = "";
-    gi.title = game.label;
+    gi.title = cardIcon.label || (game ? game.label : "");
     // Fall back to a neutral glyph if the icon can't load.
     gi.addEventListener("error", () => {
+      if (previewIcon && game && gi.src !== game.url) {
+        gi.className = "card-game-ico";
+        gi.src = game.url;
+        gi.title = game.label;
+        return;
+      }
       const ph = document.createElement("div");
       ph.className = "card-game-ico placeholder";
-      ph.title = game.label;
+      ph.title = cardIcon.label || (game ? game.label : "");
       ph.innerHTML = GENERIC_GAME_ICON; // static markup, safe
       gi.replaceWith(ph);
     });
@@ -2964,14 +2959,14 @@ function clipCard(c) {
   if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s));
   infoParts.push(`${c.size_mb.toFixed(1)} MB`);
   infoParts.push(fmtAgo(Date.now() / 1000, c.modified_unix));
-  if (!gameMeta && digest) infoParts.push(digest);
+  if (!cardPreview.summary && digest) infoParts.push(digest);
   info.textContent = infoParts.join(" · ");
 
   meta.append(nameRow, info);
-  if (gameMeta && !gameSessionTitle) {
+  if (cardPreview.summary && !cardTitleUsesSummary) {
     const detail = document.createElement("div");
     detail.className = "game-meta";
-    detail.textContent = gameMeta;
+    detail.textContent = cardPreview.summary;
     meta.appendChild(detail);
   }
 

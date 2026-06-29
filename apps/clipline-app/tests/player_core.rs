@@ -1502,6 +1502,88 @@ fn player_summary_fields_resolve_data_dragon_portraits() {
 }
 
 #[test]
+fn gallery_card_preview_uses_declarative_title_and_icon() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const CARD_CLIP = {
+          markers: {
+            player_summary: {
+              champion_name: "Vel'Koz",
+              kills: 11,
+              deaths: 19,
+              assists: 34
+            }
+          }
+        };
+        const CARD_PRESENTATION = {
+          data_dragon: { version: '16.13.1' },
+          gallery: {
+            summary: 'player_summary_kda',
+            card: {
+              title: 'summary_for_full_session',
+              icon: {
+                type: 'portrait',
+                source: 'player_summary.champion_name',
+                label: 'Champion',
+                asset_provider: 'riot_data_dragon_champion_square',
+                asset_key_format: 'data_dragon_champion',
+                asset_aliases: { "vel'koz": 'Velkoz' }
+              }
+            }
+          }
+        };
+        "#,
+    ))
+    .expect("define gallery card preview");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.galleryCardPreview(CARD_CLIP, 'session', 'Jun 28 · 12:15 PM', CARD_PRESENTATION, { data_dragon: CARD_PRESENTATION.data_dragon })"
+        ),
+        r#"{"title":"Vel'Koz | 11/19/34","titleSource":"summary","summary":"Vel'Koz | 11/19/34","icon":{"type":"portrait","url":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Velkoz.png","label":"Vel'Koz"}}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.galleryCardPreview(CARD_CLIP, 'replay', 'Jun 28 · 12:15 PM', CARD_PRESENTATION, { data_dragon: CARD_PRESENTATION.data_dragon })"
+        ),
+        r#"{"title":"Jun 28 · 12:15 PM","titleSource":"clip","summary":"Vel'Koz | 11/19/34","icon":{"type":"portrait","url":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Velkoz.png","label":"Vel'Koz"}}"#
+    );
+}
+
+#[test]
+fn gallery_card_preview_accepts_plugin_asset_icons() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const ASSET_PRESENTATION = {
+          gallery: {
+            card: {
+              title: 'clip',
+              icon: {
+                type: 'asset',
+                src: 'data:image/png;base64,plugin-logo',
+                label: 'Arena logo'
+              }
+            }
+          }
+        };
+        "#,
+    ))
+    .expect("define gallery card asset icon");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.galleryCardPreview({ name: 'Named clip', markers: {} }, 'trim', 'Custom title', ASSET_PRESENTATION)"
+        ),
+        r#"{"title":"Named clip","titleSource":"clip","summary":"","icon":{"type":"asset","url":"data:image/png;base64,plugin-logo","label":"Arena logo"}}"#
+    );
+}
+
+#[test]
 fn game_event_rail_item_formats_duel_with_data_dragon_portraits() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(

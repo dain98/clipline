@@ -764,6 +764,55 @@ const PlayerCore = (() => {
     return out;
   };
 
+  const galleryCardIcon = (summary, iconConfig, options = {}) => {
+    if (!iconConfig || typeof iconConfig !== "object") return null;
+    const type = String(iconConfig.type || "").trim();
+    if (type === "asset") {
+      const url = String(iconConfig.src || iconConfig.url || "").trim();
+      if (!url) return null;
+      const label = String(iconConfig.label || "").trim();
+      return { type, url, label };
+    }
+    if (type === "portrait" || type === "player_summary_portrait") {
+      const field = { ...iconConfig, type: "portrait" };
+      const [portrait] = playerSummaryFields(summary, [field], options);
+      if (!portrait || !portrait.asset) return null;
+      return {
+        type: "portrait",
+        url: portrait.asset,
+        label: portrait.value || portrait.label || "",
+      };
+    }
+    return null;
+  };
+
+  const galleryCardPreview = (clip, kind = "", fallbackTitle = "", presentation = null, options = {}) => {
+    const gallery = presentation && presentation.gallery && typeof presentation.gallery === "object"
+      ? presentation.gallery
+      : {};
+    const card = gallery.card && typeof gallery.card === "object" ? gallery.card : {};
+    const markers = clip && clip.markers && typeof clip.markers === "object" ? clip.markers : {};
+    const summary = markers.player_summary || null;
+    const summaryLabel = gallery.summary === "player_summary_kda" ? playerSummaryLabel(summary) : "";
+    const fallback = String(fallbackTitle || "").trim();
+    const clipName = clip && typeof clip.name === "string" ? clip.name.trim() : "";
+    const legacyTitlePolicy = gallery.full_session_title === "summary" ? "summary_for_full_session" : "clip";
+    const titlePolicy = typeof card.title === "string" && card.title.trim()
+      ? card.title.trim()
+      : legacyTitlePolicy;
+    const usesSummaryTitle = summaryLabel
+      && (titlePolicy === "summary" || (titlePolicy === "summary_for_full_session" && kind === "session"));
+    const clipTitle = titlePolicy === "clip" && clipName ? clipName : fallback;
+    const out = {
+      title: usesSummaryTitle ? summaryLabel : clipTitle,
+      titleSource: usesSummaryTitle ? "summary" : "clip",
+      summary: summaryLabel,
+    };
+    const icon = galleryCardIcon(summary, card.icon, options);
+    if (icon) out.icon = icon;
+    return out;
+  };
+
   const markerLabel = (kind, presentation) => {
     const configured = markerKindConfig(kind, presentation);
     return String(
@@ -1304,6 +1353,7 @@ const PlayerCore = (() => {
     markerDigest,
     playerSummaryLabel,
     playerSummaryFields,
+    galleryCardPreview,
     gameEventRailItem,
     rulerMarks,
     rulerMarksRange,

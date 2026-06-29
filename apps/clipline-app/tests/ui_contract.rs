@@ -14,6 +14,11 @@ fn main_js() -> String {
     fs::read_to_string(path).expect("read ui/main.js")
 }
 
+fn player_core_js() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/player-core.js");
+    fs::read_to_string(path).expect("read ui/player-core.js")
+}
+
 fn styles_css() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/styles.css");
     fs::read_to_string(path).expect("read ui/styles.css")
@@ -554,7 +559,7 @@ fn review_player_owns_all_controls() {
     );
     assert!(
         main_js().contains("function pluginPresentationForClip(clip)")
-            && main_js().contains("function clipGameSummary(clip)")
+            && main_js().contains("function clipGalleryCardPreview(clip, kind, fallbackTitle)")
             && main_js().contains("function renderGameEventRail")
             && main_js().contains("gameEventRailItem")
             && main_js().contains("game-event-duel")
@@ -578,25 +583,24 @@ fn review_player_owns_all_controls() {
             && main_js().contains("presentation.event_rail")
             && main_js().contains("presentation.metadata_panel")
             && main_js().contains("playerSummaryFields")
+            && main_js().contains("galleryCardPreview")
             && main_js().contains("data_dragon: presentation && presentation.data_dragon")
             && main_js().contains("data-game-event-index")
-            && main_js().contains("gallery.summary === \"player_summary_kda\"")
-            && main_js().contains("const gameMeta = clipGameSummary(c)")
-            && main_js().contains(
-                "const gameSessionTitle = isPluginSummaryFullSessionTitle(c, kind, gameMeta)"
-            )
-            && main_js().contains("? gameMeta")
-            && main_js().contains("function clipLibraryTitle(clip, fallbackTitle)")
-            && main_js().contains("if (usesFallbackTitleForPluginClip(clip)) return fallbackTitle")
-            && main_js().contains("const clipName = clip && String(clip.name || \"\").trim()")
-            && main_js().contains("return clipName || fallbackTitle")
+            && player_core_js().contains("gallery.summary === \"player_summary_kda\"")
+            && player_core_js().contains("titlePolicy === \"summary_for_full_session\"")
+            && main_js().contains("const cardPreview = clipGalleryCardPreview(c, kind, fallbackTitle)")
+            && main_js().contains("cardPreview.titleSource === \"summary\"")
+            && main_js().contains("cardPreview.icon")
+            && styles_css().contains(".card-game-ico.portrait")
+            && player_core_js().contains("const clipName = clip && typeof clip.name === \"string\" ? clip.name.trim() : \"\"")
+            && player_core_js().contains("titlePolicy === \"clip\" && clipName ? clipName : fallback")
             && main_js().contains("detail.className = \"game-meta\"")
-            && main_js().contains("if (gameMeta && !gameSessionTitle)")
+            && main_js().contains("if (cardPreview.summary && !cardTitleUsesSummary)")
             && main_js().contains("const infoParts = []")
             && main_js().contains(
                 "if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s))"
             )
-            && main_js().contains("if (!gameMeta && digest) infoParts.push(digest)")
+            && main_js().contains("if (!cardPreview.summary && digest) infoParts.push(digest)")
             && !main_js().contains("LEAGUE_OF_LEGENDS_ID")
             && !main_js().contains("isLeagueClip")
             && !main_js().contains("function renderGamePanel")
