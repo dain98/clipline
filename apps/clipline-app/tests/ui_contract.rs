@@ -14,6 +14,11 @@ fn main_js() -> String {
     fs::read_to_string(path).expect("read ui/main.js")
 }
 
+fn player_core_js() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/player-core.js");
+    fs::read_to_string(path).expect("read ui/player-core.js")
+}
+
 fn styles_css() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/styles.css");
     fs::read_to_string(path).expect("read ui/styles.css")
@@ -169,6 +174,13 @@ fn review_player_owns_all_controls() {
         "id=\"overview-window\"",
         "id=\"overview-window-l\"",
         "id=\"overview-window-r\"",
+        "id=\"game-event-rail\"",
+        "id=\"game-event-rail-title\"",
+        "id=\"game-event-rail-summary\"",
+        "id=\"game-event-rail-toggle\"",
+        "id=\"game-event-list\"",
+        "id=\"game-metadata-panel\"",
+        "id=\"game-metadata-fields\"",
         "id=\"zoom-out\"",
         "id=\"zoom-fit\"",
         "id=\"zoom-in\"",
@@ -517,6 +529,13 @@ fn review_player_owns_all_controls() {
         "settings must expose the Games tab and custom game action"
     );
     assert!(
+        html.contains(">Supported games<")
+            && html.contains("loading supported games...")
+            && !html.contains(">Game plugins<")
+            && !html.contains("loading game plugins..."),
+        "Settings > Games must name built-in integrations as supported games"
+    );
+    assert!(
         main_js().contains("gameRecordingModeControl")
             && main_js().contains("custom-game-recording-mode")
             && main_js().contains("recording_mode")
@@ -529,33 +548,142 @@ fn review_player_owns_all_controls() {
         main_js().contains("await invoke(\"list_game_plugins\")")
             && main_js().contains("renderGamePlugins")
             && main_js().contains("gamePluginSettings")
+            && main_js().contains("plugin.presentation")
             && main_js().contains("games.plugins")
             && main_js().contains("dataset.gamePluginEnabled")
             && main_js().contains("game-plugin-mode-")
             && main_js().contains("normalizeGamePluginId")
             && main_js().contains("Takes priority over matching custom games.")
+            && !main_js().contains("check_game_plugin_package")
+            && !main_js().contains("update_game_plugin_package")
+            && !main_js().contains("reinstall_game_plugin_package")
+            && !main_js().contains("reset_game_plugin_to_seed")
+            && !main_js().contains("plugin.latest_version")
+            && !main_js().contains("plugin.latest_source_label")
+            && !main_js().contains("dataset.gamePluginAction")
+            && !styles_css().contains(".game-plugin-actions")
             && styles_css().contains(".game-profile-mode"),
-        "supported games must render from backend game plugins, not hardcoded rows"
+        "supported games must render from backend profiles without package install/update actions"
     );
     assert!(
-        main_js().contains("const leagueMeta = playerSummaryLabel")
-            && main_js().contains(
-                "const leagueSessionTitle = isLeagueFullSessionClip(c, kind) && leagueMeta"
-            )
-            && main_js().contains("? leagueMeta")
-            && main_js().contains("function clipLibraryTitle(clip, fallbackTitle)")
-            && main_js().contains("if (isLeagueClip(clip)) return fallbackTitle")
-            && main_js().contains("const clipName = clip && String(clip.name || \"\").trim()")
-            && main_js().contains("return clipName || fallbackTitle")
-            && main_js().contains("detail.className = \"league-meta\"")
-            && main_js().contains("if (leagueMeta && !leagueSessionTitle)")
+        main_js().contains("empty.textContent = \"no supported games available\"")
+            && !main_js().contains("not installed")
+            && !main_js().contains("repair available")
+            && !main_js().contains("Package is current"),
+        "Settings > Games copy should describe built-in supported games, not installable packages"
+    );
+    assert!(
+        !app_rs().contains("check_game_plugin_package")
+            && !app_rs().contains("update_game_plugin_package")
+            && !app_rs().contains("reinstall_game_plugin_package")
+            && !app_rs().contains("reset_game_plugin_to_seed")
+            && !app_rs().contains("seed_bundled_plugins")
+            && !app_rs().contains("plugin_install_root"),
+        "Clipline should not expose installable game package commands"
+    );
+    assert!(
+        main_js().contains("function pluginPresentationForClip(clip)")
+            && main_js().contains("function clipGalleryCardPreview(clip, kind, fallbackTitle)")
+            && main_js().contains("function renderGameEventRail")
+            && main_js().contains("gameEventRailItem")
+            && main_js().contains("game-event-duel")
+            && main_js().contains("game-event-actor-event")
+            && main_js().contains("game-event-objective-icon")
+            && !main_js().contains("game-event-objective-label")
+            && main_js().contains("game-event-portrait")
+            && main_js().contains("game-event-kind-icon")
+            && main_js().contains("function syncGameEventRail")
+            && main_js().contains("function setGameEventRailCollapsed")
+            && main_js().contains("function selectGameEvent")
+            && main_js().contains("function clearGameEventSelection")
+            && main_js().contains("gameEventActiveIndex")
+            && main_js().contains("keepGameEventSelection")
+            && main_js().contains("gameEventRailCollapsed")
+            && main_js().contains("event-rail-collapsed")
+            && main_js().contains("game-event-rail-toggle\").addEventListener(\"click\"")
+            && main_js().contains("setGameEventRailCollapsed(!gameEventRailCollapsed)")
+            && main_js().contains("syncGameEventRail(video.currentTime || 0, { force: true })")
+            && main_js().contains("function renderGameMetadataPanel")
+            && main_js().contains("function renderMetadataIconList(field)")
+            && main_js().contains("field.type === \"summoner_spells\" || field.type === \"item_build\"")
+            && main_js().contains("presentation.event_rail")
+            && main_js().contains("presentation.metadata_panel")
+            && main_js().contains("playerSummaryFields")
+            && main_js().contains("galleryCardPreview")
+            && main_js().contains("data_dragon: presentation && presentation.data_dragon")
+            && main_js().contains("data-game-event-index")
+            && player_core_js().contains("gallery.summary === \"player_summary_kda\"")
+            && player_core_js().contains("titlePolicy === \"summary_for_full_session\"")
+            && player_core_js().contains("playerSummaryStatsLabel")
+            && player_core_js().contains("type === \"cs_per_min\"")
+            && main_js().contains("const cardPreview = clipGalleryCardPreview(c, kind, fallbackTitle)")
+            && main_js().contains("cardPreview.titleSource === \"summary\"")
+            && main_js().contains("cardPreview.icon")
+            && styles_css().contains(".card-game-ico.portrait")
+            && styles_css().contains(".game-metadata-icons.summoner_spells")
+            && styles_css().contains(".game-metadata-icons.item_build")
+            && player_core_js().contains("const dataDragonAsset =")
+            && !player_core_js().contains("dataDragonChampionSquareAsset")
+            && !player_core_js().contains("dataDragonSummonerSpellAsset")
+            && !player_core_js().contains("dataDragonItemAsset")
+            && player_core_js().contains("const clipName = clip && typeof clip.name === \"string\" ? clip.name.trim() : \"\"")
+            && player_core_js().contains("titlePolicy === \"clip\" && clipName ? clipName : fallback")
+            && player_core_js().contains("const markerRailConfig =")
+            && !player_core_js().contains("kind === \"ChampionKill\"")
+            && !player_core_js().contains("kind === \"ChampionDeath\"")
+            && main_js().contains("detail.className = \"game-meta\"")
+            && main_js().contains("if (cardPreview.summary && !cardTitleUsesSummary)")
             && main_js().contains("const infoParts = []")
             && main_js().contains(
                 "if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s))"
             )
-            && main_js().contains("if (!leagueMeta && digest) infoParts.push(digest)")
-            && styles_css().contains(".clip .league-meta"),
-        "League rows must keep their title rules while non-League rows use actual clip names"
+            && main_js().contains("if (!cardPreview.summary && digest) infoParts.push(digest)")
+            && !main_js().contains("LEAGUE_OF_LEGENDS_ID")
+            && !main_js().contains("isLeagueClip")
+            && !main_js().contains("function renderGamePanel")
+            && index_html().contains("aria-controls=\"game-event-list\"")
+            && styles_css().contains(".review-body.has-event-rail.event-rail-collapsed")
+            && styles_css().contains(".game-event-rail-tab")
+            && styles_css().contains(".game-event-row-friendly")
+            && styles_css().contains(".game-event-row-enemy")
+            && styles_css().contains(".game-event-rail ol button.game-event-row-friendly")
+            && styles_css().contains(".game-event-rail ol button.game-event-row-enemy")
+            && styles_css().contains(".game-event-rail .game-event-objective-icon")
+            && styles_css().contains("grid-column: 4;")
+            && styles_css().contains("grid-template-columns: 38px minmax(46px, 1fr) 34px minmax(46px, 1fr);")
+            && styles_css().contains(".game-event-rail ol button.game-event-duel .game-event-kind-icon")
+            && styles_css().contains("width: 34px;\n  height: 34px;\n  overflow: visible;")
+            && !styles_css().contains("align-self: start;\n  margin-top: 7px;")
+            && styles_css().contains(".game-event-rail ol button.marker-kill .game-event-kind-icon img")
+            && styles_css().contains(".game-event-rail ol button.marker-death .game-event-kind-icon img")
+            && styles_css().contains("width: 36px;\n  height: 36px;")
+            && styles_css().contains("border: 0;\n  border-radius: 0;\n  background: transparent;")
+            && styles_css().contains("filter:\n    drop-shadow(1px 0 0 rgba(2, 6, 23, 0.9))")
+            && styles_css().contains(".game-event-name")
+            && styles_css().contains(".game-event-rail:hover .game-event-rail-tab")
+            && styles_css().contains("--game-event-rail-pad: 10px;")
+            && styles_css().contains("left: 0;")
+            && !styles_css().contains("left: var(--game-event-rail-pad);")
+            && styles_css().contains("top: 50%;")
+            && styles_css().contains("transform: translate(-100%, -50%)")
+            && styles_css().contains(".game-event-rail::before")
+            && styles_css().contains("left: -34px;")
+            && styles_css().contains("height: 72px;")
+            && styles_css().contains("pointer-events: auto;")
+            && styles_css().contains("transition: opacity 120ms ease, background 120ms ease;")
+            && styles_css().contains(".game-event-rail-tab:active")
+            && !styles_css().contains("translate(calc(-100% + 8px), -50%)")
+            && !styles_css().contains("transition: opacity 120ms ease, transform")
+            && styles_css().contains("padding: var(--game-event-rail-pad);")
+            && styles_css().contains(".game-event-rail.is-collapsed")
+            && index_html().contains(
+                "<svg class=\"i-collapse\" viewBox=\"0 0 24 24\"><path d=\"M8.6 16.6 10 18l6-6-6-6-1.4 1.4 4.6 4.6-4.6 4.6z\"/></svg>"
+            )
+            && index_html().contains(
+                "<svg class=\"i-expand\" viewBox=\"0 0 24 24\"><path d=\"M15.4 7.4 14 6l-6 6 6 6 1.4-1.4L10.8 12l4.6-4.6z\"/></svg>"
+            )
+            && styles_css().contains(".clip .game-meta"),
+        "plugin-driven game rows must keep League title/KDA behavior and render right-side events plus declarative bottom metadata"
     );
     assert!(
         !index_html().contains("game-profile planned"),
@@ -1053,6 +1181,11 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         css.contains(".marker-death .glyph.img")
             && css.contains("-webkit-mask: var(--marker-img) center / 190% no-repeat"),
         "death marker art has extra transparent padding and must be scaled to match kill markers"
+    );
+    assert!(
+        css.contains(".marker .glyph.img")
+            && css.contains("mask: var(--marker-img) center / contain no-repeat;\n  filter:\n    drop-shadow(1px 0 0 rgba(2, 6, 23, 0.9))"),
+        "timeline marker image glyphs must use the same black alpha-outline as event rail icons"
     );
 }
 

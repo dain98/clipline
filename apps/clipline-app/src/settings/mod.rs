@@ -144,6 +144,7 @@ impl AppSettings {
             active_game_plugin_id: None,
             active_game: None,
             media_dir: self.media_dir_path()?,
+            recover_abandoned_recordings: true,
             lol_url,
             replay_window_s: self.replay_window_s,
             buffer_bytes: estimated_buffer_bytes(

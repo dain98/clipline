@@ -471,6 +471,23 @@ const PlayerCore = (() => {
     return markers.length === 1 ? "1 marker" : `${markers.length} markers`;
   };
 
+  const gameEventActiveIndex = (markers, currentTime, selectedIndex = -1) => {
+    const list = Array.isArray(markers) ? markers : [];
+    if (!list.length) return -1;
+    const t = Number.isFinite(currentTime) ? currentTime : 0;
+    const selected = Number(selectedIndex);
+    if (Number.isInteger(selected) && selected >= 0 && selected < list.length) {
+      const selectedTime = Number(list[selected].t_s) || 0;
+      if (t < selectedTime - 0.15) return selected;
+    }
+    let active = -1;
+    for (let i = 0; i < list.length; i += 1) {
+      if ((Number(list[i].t_s) || 0) <= t + 0.15) active = i;
+      else break;
+    }
+    return active;
+  };
+
   const audioTrackId = (track) => String((track && track.id) || "");
 
   const audioTrackKind = (track) => String((track && track.kind) || "");
@@ -558,7 +575,7 @@ const PlayerCore = (() => {
     ).length;
 
   // EventKind variant name -> visual category. Unknown kinds degrade to info.
-  const MARKER_CATEGORIES = {
+  const DEFAULT_MARKER_KINDS = {
     ChampionKill: "kill",
     ChampionDeath: "death",
     FirstBlood: "kill",
@@ -571,38 +588,68 @@ const PlayerCore = (() => {
     InhibKilled: "structure",
     FirstBrick: "structure",
   };
-  const MARKER_GLYPHS = {
-    kill: "✕",
-    death: "✕",
-    spree: "★",
-    objective: "◆",
-    structure: "▣",
-    info: "•",
+  const DEFAULT_MARKER_CATEGORIES = {
+    kill: { singular: "kill", plural: "kills", glyph: "✕" },
+    death: { singular: "death", plural: "deaths", glyph: "✕" },
+    spree: { singular: "spree", plural: "sprees", glyph: "★" },
+    objective: { singular: "objective", plural: "objectives", glyph: "◆" },
+    structure: { singular: "structure", plural: "structures", glyph: "▣" },
+    info: { singular: "event", plural: "events", glyph: "•" },
   };
 
-  const markerStyle = (kind) => {
-    const cls = MARKER_CATEGORIES[kind] || "info";
-    return { glyph: MARKER_GLYPHS[cls], cls };
+  const markerKindConfig = (kind, presentation) => {
+    const configured = presentation && presentation.marker_kinds
+      ? presentation.marker_kinds[kind]
+      : null;
+    return configured && typeof configured === "object" ? configured : {};
   };
 
-  const DIGEST_NOUNS = {
-    kill: ["kill", "kills"],
-    death: ["death", "deaths"],
-    spree: ["spree", "sprees"],
-    objective: ["objective", "objectives"],
-    structure: ["structure", "structures"],
-    info: ["event", "events"],
+  const markerCategoryConfig = (category, presentation) => {
+    const configured = presentation && presentation.marker_categories
+      ? presentation.marker_categories[category]
+      : null;
+    return configured && typeof configured === "object" ? configured : {};
   };
 
-  const markerDigest = (markers) => {
+  const markerCategory = (kind, presentation) => {
+    const configured = markerKindConfig(kind, presentation);
+    return String(configured.category || DEFAULT_MARKER_KINDS[kind] || "info");
+  };
+
+  const markerCategoryMeta = (category, presentation) => {
+    const configured = markerCategoryConfig(category, presentation);
+    const fallback = DEFAULT_MARKER_CATEGORIES[category] || DEFAULT_MARKER_CATEGORIES.info;
+    return {
+      singular: String(configured.singular || fallback.singular),
+      plural: String(configured.plural || fallback.plural),
+      glyph: String(configured.glyph || fallback.glyph),
+    };
+  };
+
+  const markerStyle = (kind, presentation = null) => {
+    const configured = markerKindConfig(kind, presentation);
+    const cls = markerCategory(kind, presentation);
+    const category = markerCategoryMeta(cls, presentation);
+    return { glyph: String(configured.glyph || category.glyph), cls };
+  };
+
+  const markerDigest = (markers, presentation = null) => {
     const counts = {};
     for (const m of markers) {
-      const cls = MARKER_CATEGORIES[m.kind] || "info";
+      const cls = markerCategory(m.kind, presentation);
       counts[cls] = (counts[cls] || 0) + 1;
     }
-    return Object.keys(DIGEST_NOUNS)
+    const configuredOrder = Object.keys((presentation && presentation.marker_categories) || {});
+    const order = [
+      ...configuredOrder,
+      ...Object.keys(DEFAULT_MARKER_CATEGORIES).filter((cls) => !configuredOrder.includes(cls)),
+    ];
+    return order
       .filter((cls) => counts[cls])
-      .map((cls) => `${counts[cls]} ${DIGEST_NOUNS[cls][counts[cls] === 1 ? 0 : 1]}`)
+      .map((cls) => {
+        const meta = markerCategoryMeta(cls, presentation);
+        return `${counts[cls]} ${counts[cls] === 1 ? meta.singular : meta.plural}`;
+      })
       .join(" · ");
   };
 
@@ -610,11 +657,413 @@ const PlayerCore = (() => {
     if (!summary) return "";
     const champion = String(summary.champion_name || "").trim();
     if (!champion) return "";
+    const kda = playerSummaryKda(summary);
+    if (!kda) return "";
+    return `${champion} | ${kda}`;
+  };
+
+  const playerSummaryKda = (summary) => {
+    if (!summary) return "";
     const stat = (value) => {
       const n = Number(value);
       return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
     };
-    return `${champion} | ${stat(summary.kills)}/${stat(summary.deaths)}/${stat(summary.assists)}`;
+    return `${stat(summary.kills)}/${stat(summary.deaths)}/${stat(summary.assists)}`;
+  };
+
+  const playerSummaryKdaRatio = (summary) => {
+    if (!summary) return "";
+    const stat = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+    };
+    const kills = stat(summary.kills);
+    const deaths = stat(summary.deaths);
+    const assists = stat(summary.assists);
+    const impact = kills + assists;
+    if (deaths === 0 && impact > 0) return "Perfect KDA";
+    const ratio = deaths === 0 ? 0 : impact / deaths;
+    return `${ratio.toFixed(2)} KDA`;
+  };
+
+  const summaryStat = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? String(Math.floor(n)) : "";
+  };
+
+  const playerSummaryValue = (summary, source) => {
+    if (!summary || typeof source !== "string" || !source.startsWith("player_summary.")) {
+      return "";
+    }
+    const key = source.slice("player_summary.".length);
+    if (!/^[a-z0-9_]+$/i.test(key)) return "";
+    const value = summary[key];
+    if (typeof value === "string") return value.trim();
+    if (typeof value === "number") return summaryStat(value);
+    return "";
+  };
+
+  const metadataAssetKey = (value) => String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  const dataDragonLookupKey = (value) => String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+
+  const dataDragonChampionKey = (value, aliases = {}) => {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    const lookup = dataDragonLookupKey(raw);
+    if (aliases && typeof aliases === "object") {
+      for (const [alias, key] of Object.entries(aliases)) {
+        const resolved = String(key || "").trim();
+        if (dataDragonLookupKey(alias) === lookup && /^[A-Za-z0-9]+$/.test(resolved)) {
+          return resolved;
+        }
+      }
+    }
+    return (raw.match(/[A-Za-z0-9]+/g) || [])
+      .map((part) => part ? `${part[0].toUpperCase()}${part.slice(1)}` : "")
+      .join("");
+  };
+
+  const dataDragonVersion = (options) => {
+    const version = options
+      && options.data_dragon
+      && typeof options.data_dragon.version === "string"
+      ? options.data_dragon.version.trim()
+      : "";
+    return /^\d+\.\d+\.\d+$/.test(version) ? version : "";
+  };
+
+  const dataDragonAsset = (segment, assetKey, options, keyPattern) => {
+    const version = dataDragonVersion(options);
+    const safeSegment = String(segment || "").trim();
+    const safeKey = String(assetKey || "").trim();
+    if (!version || !/^[a-z]+$/.test(safeSegment) || !keyPattern.test(safeKey)) return "";
+    return `https://ddragon.leagueoflegends.com/cdn/${version}/img/${safeSegment}/${safeKey}.png`;
+  };
+
+  const playerSummaryArray = (summary, source, fallbackKey) => {
+    if (!summary) return [];
+    const key = typeof source === "string" && source.startsWith("player_summary.")
+      ? source.slice("player_summary.".length)
+      : fallbackKey;
+    if (!/^[a-z0-9_]+$/i.test(key)) return [];
+    return Array.isArray(summary[key]) ? summary[key] : [];
+  };
+
+  const summaryIconItem = (entry, type, field, options) => {
+    if (!entry || typeof entry !== "object") return null;
+    const provider = String(field.asset_provider || "").trim();
+    if (type === "summoner_spells") {
+      const value = String(entry.name || entry.display_name || "").trim();
+      const assetKey = String(entry.asset_key || "").trim();
+      if (!value && !assetKey) return null;
+      const item = { value: value || assetKey, assetKey };
+      if (provider === "riot_data_dragon_summoner_spell") {
+        const asset = dataDragonAsset("spell", assetKey, options, /^Summoner[A-Za-z0-9]+$/);
+        if (asset) item.asset = asset;
+      }
+      return item;
+    }
+    if (type === "item_build") {
+      const id = Number(entry.id);
+      const assetKey = Number.isFinite(id) && id > 0 ? String(Math.floor(id)) : "";
+      const value = String(entry.name || assetKey || "").trim();
+      if (!assetKey || !value) return null;
+      const item = { value, assetKey };
+      if (provider === "riot_data_dragon_item") {
+        const asset = dataDragonAsset("item", assetKey, options, /^[0-9]+$/);
+        if (asset) item.asset = asset;
+      }
+      return item;
+    }
+    return null;
+  };
+
+  const playerSummaryFields = (summary, fields = [], options = {}) => {
+    if (!summary || !Array.isArray(fields)) return [];
+    const out = [];
+    for (const field of fields) {
+      if (!field || typeof field !== "object") continue;
+      const type = String(field.type || "stat");
+      const label = String(field.label || "").trim();
+      if (type === "portrait") {
+        const value = playerSummaryValue(summary, field.source || "player_summary.champion_name");
+        if (value) {
+          const assetKey = field.asset_key_format === "data_dragon_champion"
+            ? dataDragonChampionKey(value, field.asset_aliases)
+            : metadataAssetKey(value);
+          const formatted = { type, label, value, assetKey };
+          if (typeof field.asset_template === "string" && field.asset_template.includes("{assetKey}")) {
+            formatted.asset = field.asset_template.replaceAll("{assetKey}", assetKey);
+          } else if (field.asset_provider === "riot_data_dragon_champion_square") {
+            const asset = dataDragonAsset("champion", assetKey, options, /^[A-Za-z0-9]+$/);
+            if (asset) formatted.asset = asset;
+          }
+          out.push(formatted);
+        }
+      } else if (type === "champion") {
+        const value = playerSummaryValue(summary, field.source || "player_summary.champion_name");
+        if (value) out.push({ type, label, value });
+      } else if (type === "kda") {
+        const kills = summaryStat(summary.kills);
+        const deaths = summaryStat(summary.deaths);
+        const assists = summaryStat(summary.assists);
+        if (kills || deaths || assists) {
+          const formatted = { type, label, value: `${kills || "0"}/${deaths || "0"}/${assists || "0"}` };
+          if (field.secondary === "kda_ratio") {
+            const secondary = playerSummaryKdaRatio(summary);
+            if (secondary) formatted.secondary = secondary;
+          }
+          out.push(formatted);
+        }
+      } else if (type === "summoner_spells" || type === "item_build") {
+        const fallbackKey = type === "summoner_spells" ? "summoner_spells" : "items";
+        const maxItems = Number(field.max_items);
+        const limit = Number.isFinite(maxItems) && maxItems > 0 ? Math.floor(maxItems) : 8;
+        const items = playerSummaryArray(summary, field.source, fallbackKey)
+          .slice(0, limit)
+          .map((entry) => summaryIconItem(entry, type, field, options))
+          .filter(Boolean);
+        if (items.length) out.push({ type, label, items });
+      } else if (type === "stat") {
+        const value = playerSummaryValue(summary, field.source);
+        if (value) out.push({ type, label, value });
+      }
+    }
+    return out;
+  };
+
+  const galleryCardIcon = (summary, iconConfig, options = {}) => {
+    if (!iconConfig || typeof iconConfig !== "object") return null;
+    const type = String(iconConfig.type || "").trim();
+    if (type === "asset") {
+      const url = String(iconConfig.src || iconConfig.url || "").trim();
+      if (!url) return null;
+      const label = String(iconConfig.label || "").trim();
+      return { type, url, label };
+    }
+    if (type === "portrait" || type === "player_summary_portrait") {
+      const field = { ...iconConfig, type: "portrait" };
+      const [portrait] = playerSummaryFields(summary, [field], options);
+      if (!portrait || !portrait.asset) return null;
+      return {
+        type: "portrait",
+        url: portrait.asset,
+        label: portrait.value || portrait.label || "",
+      };
+    }
+    return null;
+  };
+
+  const playerSummaryCsPerMin = (summary, label = "CS/min") => {
+    if (!summary) return "";
+    const creepScore = Number(summary.creep_score);
+    const gameTimeS = Number(summary.game_time_s);
+    if (!Number.isFinite(creepScore) || creepScore < 0) return "";
+    if (!Number.isFinite(gameTimeS) || gameTimeS <= 0) return "";
+    const value = creepScore / (gameTimeS / 60);
+    if (!Number.isFinite(value)) return "";
+    const suffix = String(label || "CS/min").trim() || "CS/min";
+    return `${value.toFixed(1)} ${suffix}`;
+  };
+
+  const playerSummaryStatsLabel = (summary, formatConfig) => {
+    if (!summary || !formatConfig || typeof formatConfig !== "object") return "";
+    if (formatConfig.type !== "player_summary_stats") return "";
+    const stats = Array.isArray(formatConfig.stats) ? formatConfig.stats : [];
+    const parts = [];
+    for (const statConfig of stats) {
+      if (!statConfig || typeof statConfig !== "object") continue;
+      const type = String(statConfig.type || "").trim();
+      if (type === "kda") {
+        const kda = playerSummaryKda(summary);
+        if (kda) parts.push(kda);
+      } else if (type === "cs_per_min") {
+        const csPerMin = playerSummaryCsPerMin(summary, statConfig.label);
+        if (csPerMin) parts.push(csPerMin);
+      }
+    }
+    const separator = typeof formatConfig.separator === "string" && formatConfig.separator
+      ? formatConfig.separator
+      : " | ";
+    return parts.join(separator);
+  };
+
+  const galleryCardPreview = (clip, kind = "", fallbackTitle = "", presentation = null, options = {}) => {
+    const gallery = presentation && presentation.gallery && typeof presentation.gallery === "object"
+      ? presentation.gallery
+      : {};
+    const card = gallery.card && typeof gallery.card === "object" ? gallery.card : {};
+    const markers = clip && clip.markers && typeof clip.markers === "object" ? clip.markers : {};
+    const summary = markers.player_summary || null;
+    const summaryLabel = gallery.summary === "player_summary_kda" ? playerSummaryLabel(summary) : "";
+    const cardSummaryLabel = playerSummaryStatsLabel(summary, card.title_format) || summaryLabel;
+    const fallback = String(fallbackTitle || "").trim();
+    const clipName = clip && typeof clip.name === "string" ? clip.name.trim() : "";
+    const legacyTitlePolicy = gallery.full_session_title === "summary" ? "summary_for_full_session" : "clip";
+    const titlePolicy = typeof card.title === "string" && card.title.trim()
+      ? card.title.trim()
+      : legacyTitlePolicy;
+    const usesSummaryTitle = cardSummaryLabel
+      && (titlePolicy === "summary" || (titlePolicy === "summary_for_full_session" && kind === "session"));
+    const clipTitle = titlePolicy === "clip" && clipName ? clipName : fallback;
+    const out = {
+      title: usesSummaryTitle ? cardSummaryLabel : clipTitle,
+      titleSource: usesSummaryTitle ? "summary" : "clip",
+      summary: summaryLabel,
+    };
+    const icon = galleryCardIcon(summary, card.icon, options);
+    if (icon) out.icon = icon;
+    return out;
+  };
+
+  const markerLabel = (kind, presentation) => {
+    const configured = markerKindConfig(kind, presentation);
+    return String(
+      configured.label
+        || String(kind || "Other").replace(/([a-z])([A-Z])/g, "$1 $2")
+    );
+  };
+
+  const eventRailIcon = (kind, presentation) => {
+    const icons = presentation
+      && presentation.event_rail
+      && presentation.event_rail.icons
+      && typeof presentation.event_rail.icons === "object"
+      ? presentation.event_rail.icons
+      : null;
+    const configured = icons && typeof icons[kind] === "string" ? icons[kind] : "";
+    if (configured.trim()) return configured.trim();
+    const markerIcon = markerKindConfig(kind, presentation).icon;
+    return typeof markerIcon === "string" ? markerIcon.trim() : "";
+  };
+
+  const markerEventText = (marker, presentation) => {
+    const label = markerLabel(marker && marker.kind, presentation);
+    const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
+    return `${label}${actor}`;
+  };
+
+  const playerIdentityKey = (value) => {
+    const trimmed = String(value || "").trim();
+    const withoutTag = trimmed.split("#")[0].trim();
+    return withoutTag.toLowerCase();
+  };
+
+  const playerInitials = (value) => {
+    const letters = String(value || "").match(/[A-Za-z0-9]/g) || [];
+    return (letters.slice(0, 2).join("").toUpperCase() || "?").slice(0, 2);
+  };
+
+  const eventRailDataDragonAliases = (presentation) => {
+    const fields = presentation
+      && presentation.metadata_panel
+      && Array.isArray(presentation.metadata_panel.fields)
+      ? presentation.metadata_panel.fields
+      : [];
+    const portrait = fields.find((field) =>
+      field
+        && field.asset_key_format === "data_dragon_champion"
+        && field.asset_aliases
+        && typeof field.asset_aliases === "object"
+    );
+    return portrait ? portrait.asset_aliases : {};
+  };
+
+  const participantForName = (summary, name) => {
+    const key = playerIdentityKey(name);
+    if (!key || !summary || !Array.isArray(summary.participants)) return null;
+    return summary.participants.find((participant) =>
+      playerIdentityKey(participant && participant.player_name) === key
+        || playerIdentityKey(participant && participant.champion_name) === key
+    ) || null;
+  };
+
+  const localPlayerKey = (summary) =>
+    playerIdentityKey(summary && (summary.player_name || summary.champion_name));
+
+  const localTeam = (summary) => String(summary && summary.team || "").trim();
+
+  const participantSlot = (name, summary, presentation, options) => {
+    const participant = participantForName(summary, name);
+    if (!participant) return null;
+    const displayName = String(name || participant.player_name || participant.champion_name || "").trim();
+    const champion = String(participant.champion_name || "").trim();
+    if (!displayName || !champion) return null;
+    const aliases = eventRailDataDragonAliases(presentation);
+    const assetKey = dataDragonChampionKey(champion, aliases);
+    const asset = dataDragonAsset("champion", assetKey, options, /^[A-Za-z0-9]+$/);
+    const slot = {
+      name: displayName,
+      champion,
+      team: String(participant.team || "").trim(),
+      assetKey,
+    };
+    if (asset) slot.asset = asset;
+    slot.initials = playerInitials(displayName);
+    slot.local = playerIdentityKey(displayName) === localPlayerKey(summary);
+    return slot;
+  };
+
+  const markerRailConfig = (kind, presentation) => {
+    const configured = markerKindConfig(kind, presentation).rail;
+    return configured && typeof configured === "object" ? configured : {};
+  };
+
+  const eventAllegiance = (summary, actorSlot, railConfig = {}) => {
+    const configured = String(railConfig.allegiance || "").trim();
+    if (configured === "friendly" || configured === "enemy" || configured === "neutral") {
+      return configured;
+    }
+    const actorTeam = actorSlot && actorSlot.team ? actorSlot.team : "";
+    const ownTeam = localTeam(summary);
+    if (!actorTeam || !ownTeam) return "neutral";
+    return actorTeam === ownTeam ? "friendly" : "enemy";
+  };
+
+  const gameEventRailItem = (marker, summary = null, presentation = null, options = {}) => {
+    const kind = marker && marker.kind ? marker.kind : "Other";
+    const category = markerCategory(kind, presentation);
+    const label = markerLabel(kind, presentation);
+    const railConfig = markerRailConfig(kind, presentation);
+    const item = {
+      layout: "text",
+      kind,
+      category,
+      allegiance: eventAllegiance(summary, null, railConfig),
+      label,
+      text: markerEventText(marker, presentation),
+    };
+    const icon = eventRailIcon(kind, presentation);
+    if (icon) item.icon = icon;
+
+    const railLayout = String(railConfig.layout || "").trim();
+    if (railLayout === "duel") {
+      const actor = participantSlot(marker && marker.actor, summary, presentation, options);
+      const victim = participantSlot(marker && marker.victim, summary, presentation, options);
+      if (actor && victim) {
+        item.layout = "duel";
+        item.allegiance = eventAllegiance(summary, actor, railConfig);
+        item.actor = actor;
+        item.victim = victim;
+      }
+    } else if (railLayout === "actor_event" && item.icon) {
+      const actor = participantSlot(marker && marker.actor, summary, presentation, options);
+      if (actor) {
+        item.layout = "actor_event";
+        item.allegiance = eventAllegiance(summary, actor, railConfig);
+        item.actor = actor;
+      }
+    }
+
+    return item;
   };
 
   const RULER_STEPS_S = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
@@ -1012,6 +1461,7 @@ const PlayerCore = (() => {
     nextMarker,
     prevMarker,
     markerSummary,
+    gameEventActiveIndex,
     defaultAudioTrackIds,
     selectedAudioTrackIds,
     selectionNeedsPreview,
@@ -1021,6 +1471,9 @@ const PlayerCore = (() => {
     markerStyle,
     markerDigest,
     playerSummaryLabel,
+    playerSummaryFields,
+    galleryCardPreview,
+    gameEventRailItem,
     rulerMarks,
     rulerMarksRange,
     sessionGroups,

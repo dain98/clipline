@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::Mutex;
 
-use clipline_events::{is_timeline_marker, ClipMarker, ClipMarkers, GameId};
+use clipline_events::{is_timeline_marker, ClipMarker, ClipMarkers};
 use clipline_mp4::{
     remux_with_mixed_audio_track, remux_with_selected_audio_tracks, trim_keyframe_aligned_file,
 };
@@ -229,15 +229,11 @@ fn push_clips_from(
 /// with a matching plugin resolve to an icon in the UI.
 fn game_from_markers(markers: Option<&ClipMarkers>) -> Option<ClipGame> {
     let game_id = markers?.markers.first()?.event.game_id;
-    let plugin_id = match game_id {
-        GameId::LeagueOfLegends => crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
-        // Valorant / CS2 have no plugin (and no icon) yet.
-        _ => return None,
-    };
+    let plugin_id = crate::game_plugins::plugin_id_for_game_id(game_id);
     let name = crate::game_plugins::all()
         .iter()
-        .find(|plugin| plugin.id == plugin_id)
-        .map(|plugin| plugin.name.to_string())?;
+        .find(|plugin| plugin.id() == plugin_id)
+        .map(|plugin| plugin.manifest.name.clone())?;
     Some(ClipGame {
         id: plugin_id.to_string(),
         name,
@@ -1226,6 +1222,13 @@ mod tests {
                 kills: 3,
                 deaths: 4,
                 assists: 23,
+                creep_score: None,
+                game_time_s: None,
+                player_name: String::new(),
+                team: String::new(),
+                participants: Vec::new(),
+                summoner_spells: Vec::new(),
+                items: Vec::new(),
             }),
             audio_tracks: Vec::new(),
             markers: vec![marker(0.5), marker(1.5), marker(2.5)],
@@ -1258,6 +1261,13 @@ mod tests {
                 kills: 3,
                 deaths: 4,
                 assists: 23,
+                creep_score: None,
+                game_time_s: None,
+                player_name: String::new(),
+                team: String::new(),
+                participants: Vec::new(),
+                summoner_spells: Vec::new(),
+                items: Vec::new(),
             }),
             audio_tracks: Vec::new(),
             markers: vec![
@@ -1309,6 +1319,13 @@ mod tests {
                 kills: 3,
                 deaths: 4,
                 assists: 23,
+                creep_score: None,
+                game_time_s: None,
+                player_name: String::new(),
+                team: String::new(),
+                participants: Vec::new(),
+                summoner_spells: Vec::new(),
+                items: Vec::new(),
             }),
             audio_tracks: Vec::new(),
             markers: Vec::new(),

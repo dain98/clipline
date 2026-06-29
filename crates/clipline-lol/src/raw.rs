@@ -55,8 +55,40 @@ pub struct PlayerListEntry {
     pub riot_id: Option<String>,
     #[serde(rename = "championName", default)]
     pub champion_name: String,
+    #[serde(rename = "team", default)]
+    pub team: String,
+    #[serde(default)]
+    pub items: Vec<PlayerItemEntry>,
+    #[serde(rename = "summonerSpells", default)]
+    pub summoner_spells: PlayerSummonerSpells,
     #[serde(rename = "scores", default)]
     pub scores: PlayerScores,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PlayerItemEntry {
+    #[serde(rename = "itemID", alias = "itemId", alias = "id", default)]
+    pub item_id: u32,
+    #[serde(rename = "displayName", default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub slot: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PlayerSummonerSpells {
+    #[serde(rename = "summonerSpellOne")]
+    pub one: Option<PlayerSummonerSpellEntry>,
+    #[serde(rename = "summonerSpellTwo")]
+    pub two: Option<PlayerSummonerSpellEntry>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PlayerSummonerSpellEntry {
+    #[serde(rename = "displayName", default)]
+    pub display_name: String,
+    #[serde(rename = "rawDisplayName", default)]
+    pub raw_display_name: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -67,6 +99,8 @@ pub struct PlayerScores {
     pub deaths: u32,
     #[serde(default)]
     pub assists: u32,
+    #[serde(rename = "creepScore", default)]
+    pub creep_score: Option<u32>,
 }
 
 #[cfg(test)]
@@ -127,15 +161,18 @@ mod tests {
             "summonerName": "dain",
             "riotId": "Dain#NA1",
             "championName": "Nautilus",
-            "scores": { "kills": 3, "deaths": 4, "assists": 23 }
+            "team": "ORDER",
+            "scores": { "kills": 3, "deaths": 4, "assists": 23, "creepScore": 187 }
           }
         ]"#;
         let players: Vec<PlayerListEntry> = serde_json::from_str(json).unwrap();
         assert_eq!(players[0].summoner_name, "dain");
         assert_eq!(players[0].riot_id.as_deref(), Some("Dain#NA1"));
         assert_eq!(players[0].champion_name, "Nautilus");
+        assert_eq!(players[0].team, "ORDER");
         assert_eq!(players[0].scores.kills, 3);
         assert_eq!(players[0].scores.deaths, 4);
         assert_eq!(players[0].scores.assists, 23);
+        assert_eq!(players[0].scores.creep_score, Some(187));
     }
 }

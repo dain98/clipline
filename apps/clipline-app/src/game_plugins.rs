@@ -1,21 +1,25 @@
-//! Built-in game plugin registry.
+//! First-party supported game registry.
 //!
-//! A game plugin describes how Clipline should recognize a game's real
-//! in-game window from normal Win32 window/process metadata. Plugins must stay
-//! anti-cheat-safe: no injection, no memory reads, no game-process hooks.
+//! A supported game profile describes how Clipline should recognize a game's
+//! real in-game window from normal Win32 window/process metadata, plus how its
+//! clips should be presented in the review UI. Profiles must stay
+//! anti-cheat-safe: no injection, no memory reads, no game-process hooks. Event
+//! ingestion stays behind built-in capability names.
 
-use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
+use std::sync::{mpsc::Receiver, OnceLock};
 use std::time::Instant;
 
 use clipline_capture::windows::CapturableWindow;
+use clipline_events::GameId;
+use serde::{Deserialize, Serialize};
 
 use crate::markers::PollerMsg;
 use crate::settings::{GamePluginSettings, GameRecordingMode, GameSettings};
 
 pub const LEAGUE_OF_LEGENDS_ID: &str = "league_of_legends";
+pub const LEAGUE_LIVE_CLIENT_EVENT_SOURCE: &str = "league_live_client";
+pub const GAME_PROFILE_SCHEMA_VERSION: u32 = 1;
 
-pub type WindowMatcher = for<'a> fn(&'a [CapturableWindow]) -> Option<&'a CapturableWindow>;
 pub type EventSourceSpawner = fn(GameEventSourceContext) -> Receiver<PollerMsg>;
 
 #[derive(Clone, Debug)]
@@ -32,83 +36,243 @@ pub struct GamePluginInfo {
     pub default_enabled: bool,
     pub default_recording_mode: GameRecordingMode,
     pub event_markers: bool,
-    /// Icon for the UI: the plugin's bundled icon URL, or a cached icon
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<serde_json::Value>,
+    /// Icon for the UI: the profile's bundled icon URL, or a cached icon
     /// extracted from the running game's executable. None when neither exists.
     pub icon: Option<String>,
 }
 
-pub struct GamePlugin {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub summary: &'static str,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameProfileManifest {
+    pub schema_version: u32,
+    pub id: String,
+    pub name: String,
+    pub summary: String,
     pub default_enabled: bool,
     pub default_recording_mode: GameRecordingMode,
-    /// Bundled icon shipped with the plugin (a webview-relative URL). When
-    /// None, the icon is extracted from the game's executable on detection.
-    pub icon: Option<&'static str>,
-    pub match_window: WindowMatcher,
-    pub event_source: Option<EventSourceSpawner>,
+    #[serde(default)]
+    pub icon: Option<GameProfileIcon>,
+    pub window_match: WindowMatchRule,
+    #[serde(default)]
+    pub event_source: Option<String>,
+    #[serde(default)]
+    pub presentation: Option<serde_json::Value>,
+}
+
+impl GameProfileManifest {
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let manifest: Self = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.schema_version != GAME_PROFILE_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported game profile schema {}; expected {}",
+                self.schema_version, GAME_PROFILE_SCHEMA_VERSION
+            ));
+        }
+        validate_game_profile_id(&self.id)?;
+        if self.name.trim().is_empty() {
+            return Err("game profile name is required".into());
+        }
+        if self.summary.trim().is_empty() {
+            return Err("game profile summary is required".into());
+        }
+        self.window_match.validate()?;
+        if let Some(event_source) = self.event_source.as_deref() {
+            if event_source_spawner(event_source).is_none() {
+                return Err(format!("unsupported game event source {event_source:?}"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn match_window<'a>(
+        &self,
+        windows: &'a [CapturableWindow],
+    ) -> Option<&'a CapturableWindow> {
+        self.window_match.match_window(windows)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GameProfileIcon {
+    UiAsset { path: String },
+    File { path: String },
+    DataUrl { data: String },
+    Extracted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowMatchRule {
+    pub exe_name: String,
+    #[serde(default = "default_window_selection")]
+    pub selection: WindowSelection,
+}
+
+impl WindowMatchRule {
+    fn validate(&self) -> Result<(), String> {
+        if self.exe_name.trim().is_empty() {
+            return Err("game profile window matcher exe_name is required".into());
+        }
+        Ok(())
+    }
+
+    fn match_window<'a>(&self, windows: &'a [CapturableWindow]) -> Option<&'a CapturableWindow> {
+        let exe_name = self.exe_name.trim();
+        match self.selection {
+            WindowSelection::LongestTitle => windows
+                .iter()
+                .filter(|window| window.exe_name.eq_ignore_ascii_case(exe_name))
+                .max_by_key(|window| window.title.len()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowSelection {
+    LongestTitle,
+}
+
+fn default_window_selection() -> WindowSelection {
+    WindowSelection::LongestTitle
+}
+
+#[derive(Debug, Clone)]
+pub struct GamePlugin {
+    pub manifest: GameProfileManifest,
 }
 
 impl GamePlugin {
+    pub fn id(&self) -> &str {
+        &self.manifest.id
+    }
+
     pub fn default_settings(&self) -> GamePluginSettings {
         GamePluginSettings {
-            enabled: self.default_enabled,
-            recording_mode: self.default_recording_mode,
+            enabled: self.manifest.default_enabled,
+            recording_mode: self.manifest.default_recording_mode,
         }
     }
 
     pub fn settings(&self, settings: &GameSettings) -> GamePluginSettings {
         settings
             .plugins
-            .get(self.id)
+            .get(self.id())
             .cloned()
             .unwrap_or_else(|| self.default_settings())
     }
 
     pub fn info(&self) -> GamePluginInfo {
         GamePluginInfo {
-            id: self.id.into(),
-            name: self.name.into(),
-            summary: self.summary.into(),
-            default_enabled: self.default_enabled,
-            default_recording_mode: self.default_recording_mode,
-            event_markers: self.event_source.is_some(),
+            id: self.id().into(),
+            name: self.manifest.name.clone(),
+            summary: self.manifest.summary.clone(),
+            default_enabled: self.manifest.default_enabled,
+            default_recording_mode: self.manifest.default_recording_mode,
+            event_markers: self
+                .manifest
+                .event_source
+                .as_deref()
+                .and_then(event_source_spawner)
+                .is_some(),
+            presentation: self.presentation_value(),
             icon: self.icon_string(),
         }
     }
 
-    /// Resolve the plugin's icon for the UI: prefer the bundled icon, else a
+    pub fn match_window<'a>(
+        &self,
+        windows: &'a [CapturableWindow],
+    ) -> Option<&'a CapturableWindow> {
+        self.manifest.match_window(windows)
+    }
+
+    /// Resolve the profile's icon for the UI: prefer the bundled icon, else a
     /// previously-cached icon extracted from the running game's executable.
     fn icon_string(&self) -> Option<String> {
-        if let Some(icon) = self.icon {
-            return Some(icon.to_string());
+        match self.manifest.icon.as_ref()? {
+            GameProfileIcon::UiAsset { path } => Some(path.clone()),
+            GameProfileIcon::DataUrl { data } => Some(data.clone()),
+            GameProfileIcon::File { path } => first_party_asset_data_url(path),
+            GameProfileIcon::Extracted => {
+                let cache = game_profile_icon_cache_path(self.id())?;
+                let bytes = std::fs::read(&cache).ok()?;
+                Some(crate::game_icon::png_data_url(&bytes))
+            }
         }
-        let cache = plugin_icon_cache_path(self.id)?;
-        let bytes = std::fs::read(&cache).ok()?;
-        Some(crate::game_icon::png_data_url(&bytes))
+    }
+
+    fn presentation_value(&self) -> Option<serde_json::Value> {
+        let mut presentation = self.manifest.presentation.clone()?;
+
+        if let Some(marker_kinds) = presentation
+            .get_mut("marker_kinds")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for config in marker_kinds.values_mut() {
+                let Some(icon_value) = config.get_mut("icon") else {
+                    continue;
+                };
+                resolve_profile_asset_value(icon_value);
+            }
+        }
+
+        if let Some(event_rail_icons) = presentation
+            .pointer_mut("/event_rail/icons")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for icon_value in event_rail_icons.values_mut() {
+                resolve_profile_asset_value(icon_value);
+            }
+        }
+
+        if let Some(card_icon_src) = presentation.pointer_mut("/gallery/card/icon/src") {
+            resolve_profile_asset_value(card_icon_src);
+        }
+
+        Some(presentation)
+    }
+
+    fn uses_extracted_icon(&self) -> bool {
+        matches!(self.manifest.icon, Some(GameProfileIcon::Extracted) | None)
     }
 }
 
-fn plugin_icon_cache_path(plugin_id: &str) -> Option<PathBuf> {
-    // Plugin ids are simple slugs; reject anything that could escape the dir.
-    if plugin_id.is_empty() || plugin_id.contains(['/', '\\', '.']) {
+fn resolve_profile_asset_value(icon_value: &mut serde_json::Value) {
+    let Some(icon_path) = icon_value.as_str() else {
+        return;
+    };
+    let Some(data_url) = first_party_asset_data_url(icon_path) else {
+        return;
+    };
+    *icon_value = serde_json::Value::String(data_url);
+}
+
+fn game_profile_icon_cache_path(profile_id: &str) -> Option<std::path::PathBuf> {
+    // Profile ids are simple slugs; reject anything that could escape the dir.
+    if profile_id.is_empty() || profile_id.contains(['/', '\\', '.']) {
         return None;
     }
-    Some(crate::settings::icon_cache_dir().join(format!("{plugin_id}.png")))
+    Some(crate::settings::icon_cache_dir().join(format!("{profile_id}.png")))
 }
 
-/// Cache an icon-less plugin's icon by extracting it from the running game's
-/// executable. No-op for plugins that ship an icon or already have a cache.
+/// Cache an icon-less profile's icon by extracting it from the running game's
+/// executable. No-op for profiles that ship an icon or already have a cache.
 /// Cheap to call on the detection poll loop: it short-circuits before any work.
-pub fn ensure_plugin_icon_cached(plugin_id: &str, exe_path: &str) {
+pub fn ensure_plugin_icon_cached(profile_id: &str, exe_path: &str) {
     let needs_extraction = all()
         .iter()
-        .any(|plugin| plugin.id == plugin_id && plugin.icon.is_none());
+        .any(|profile| profile.id() == profile_id && profile.uses_extracted_icon());
     if !needs_extraction {
         return;
     }
-    let Some(cache) = plugin_icon_cache_path(plugin_id) else {
+    let Some(cache) = game_profile_icon_cache_path(profile_id) else {
         return;
     };
     if cache.exists() {
@@ -128,62 +292,451 @@ pub fn ensure_plugin_icon_cached(plugin_id: &str, exe_path: &str) {
 }
 
 pub fn all() -> &'static [GamePlugin] {
-    &GAME_PLUGINS
+    static PROFILES: OnceLock<Vec<GamePlugin>> = OnceLock::new();
+    PROFILES
+        .get_or_init(|| {
+            vec![GamePlugin {
+                manifest: league_profile_manifest(),
+            }]
+        })
+        .as_slice()
+}
+
+pub fn catalog() -> &'static [GamePluginInfo] {
+    static CATALOG: OnceLock<Vec<GamePluginInfo>> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| all().iter().map(GamePlugin::info).collect())
+        .as_slice()
 }
 
 pub fn contains(id: &str) -> bool {
-    all().iter().any(|plugin| plugin.id == id)
+    all().iter().any(|profile| profile.id() == id)
 }
 
-pub fn has_event_source(plugin_id: Option<&str>) -> bool {
-    let Some(id) = plugin_id else {
+pub fn plugin_id_for_game_id(game_id: GameId) -> &'static str {
+    match game_id {
+        GameId::LeagueOfLegends => LEAGUE_OF_LEGENDS_ID,
+        GameId::Valorant => "valorant",
+        GameId::Cs2 => "cs2",
+    }
+}
+
+pub fn display_name_for_game_id(game_id: GameId) -> &'static str {
+    match game_id {
+        GameId::LeagueOfLegends => "League of Legends",
+        GameId::Valorant => "Valorant",
+        GameId::Cs2 => "CS2",
+    }
+}
+
+pub fn has_event_source(profile_id: Option<&str>) -> bool {
+    let Some(id) = profile_id else {
         return false;
     };
-    all()
-        .iter()
-        .any(|plugin| plugin.id == id && plugin.event_source.is_some())
+    all().iter().any(|profile| {
+        profile.id() == id
+            && profile
+                .manifest
+                .event_source
+                .as_deref()
+                .and_then(event_source_spawner)
+                .is_some()
+    })
 }
 
 pub fn spawn_event_source(
-    plugin_id: Option<&str>,
+    profile_id: Option<&str>,
     context: GameEventSourceContext,
 ) -> Option<Receiver<PollerMsg>> {
-    let id = plugin_id?;
-    all()
-        .iter()
-        .find(|plugin| plugin.id == id)
-        .and_then(|plugin| plugin.event_source.map(|spawn| spawn(context)))
+    let id = profile_id?;
+    let profile = all().iter().find(|profile| profile.id() == id)?;
+    let spawn = profile
+        .manifest
+        .event_source
+        .as_deref()
+        .and_then(event_source_spawner)?;
+    Some(spawn(context))
 }
 
-static GAME_PLUGINS: [GamePlugin; 1] = [GamePlugin {
-    id: LEAGUE_OF_LEGENDS_ID,
-    name: "League of Legends",
-    summary: "Auto-records full matches when the in-game window is active.",
-    default_enabled: true,
-    default_recording_mode: GameRecordingMode::FullSession,
-    icon: Some("assets/games/league-of-legends.png"),
-    match_window: league_of_legends::match_window,
-    event_source: Some(league_of_legends::spawn_event_source),
-}];
+pub fn league_profile_manifest() -> GameProfileManifest {
+    GameProfileManifest::from_json(LEAGUE_PROFILE_MANIFEST_JSON)
+        .expect("built-in League profile manifest is valid")
+}
+
+fn event_source_spawner(name: &str) -> Option<EventSourceSpawner> {
+    match name {
+        LEAGUE_LIVE_CLIENT_EVENT_SOURCE => Some(league_of_legends::spawn_event_source),
+        _ => None,
+    }
+}
+
+fn validate_game_profile_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.contains(['/', '\\', '.'])
+        || id
+            .chars()
+            .any(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+    {
+        return Err(format!("invalid game profile id {id:?}"));
+    }
+    Ok(())
+}
+
+fn first_party_asset_data_url(path: &str) -> Option<String> {
+    let bytes: &[u8] = match path {
+        "assets/games/league-of-legends.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/games/league-of-legends.png")
+        }
+        "assets/markers/kill.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/markers/kill.png")
+        }
+        "assets/markers/death.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/markers/death.png")
+        }
+        "assets/markers/dragon.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/markers/dragon.png")
+        }
+        "assets/markers/baron.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/markers/baron.png")
+        }
+        "assets/markers/turret.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/markers/turret.png")
+        }
+        "assets/event-rail/kill.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/event-rail/kill.png")
+        }
+        "assets/event-rail/death.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/event-rail/death.png")
+        }
+        "assets/event-rail/dragon.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/event-rail/dragon.png")
+        }
+        "assets/event-rail/baron.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/event-rail/baron.png")
+        }
+        "assets/event-rail/turret.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/event-rail/turret.png")
+        }
+        _ => return None,
+    };
+    Some(crate::game_icon::png_data_url(bytes))
+}
+
+const LEAGUE_PROFILE_MANIFEST_JSON: &str = r#"{
+  "schema_version": 1,
+  "id": "league_of_legends",
+  "name": "League of Legends",
+  "summary": "Auto-records full matches when the in-game window is active.",
+  "default_enabled": true,
+  "default_recording_mode": "full_session",
+  "icon": { "type": "file", "path": "assets/games/league-of-legends.png" },
+  "window_match": { "exe_name": "League of Legends.exe", "selection": "longest_title" },
+  "event_source": "league_live_client",
+  "presentation": {
+    "data_dragon": {
+      "version": "16.13.1"
+    },
+    "marker_kinds": {
+      "ChampionKill": {
+        "category": "kill",
+        "icon": "assets/markers/kill.png",
+        "rail": { "layout": "duel", "allegiance": "friendly" }
+      },
+      "ChampionDeath": {
+        "category": "death",
+        "icon": "assets/markers/death.png",
+        "rail": { "layout": "duel", "allegiance": "enemy" }
+      },
+      "DragonKill": {
+        "category": "objective",
+        "icon": "assets/markers/dragon.png",
+        "rail": { "layout": "actor_event", "allegiance": "actor_team" }
+      },
+      "BaronKill": {
+        "category": "objective",
+        "icon": "assets/markers/baron.png",
+        "rail": { "layout": "actor_event", "allegiance": "actor_team" }
+      },
+      "TurretKilled": {
+        "category": "structure",
+        "icon": "assets/markers/turret.png",
+        "rail": { "layout": "actor_event", "allegiance": "actor_team" }
+      }
+    },
+    "marker_categories": {
+      "kill": { "singular": "kill", "plural": "kills", "glyph": "✕" },
+      "death": { "singular": "death", "plural": "deaths", "glyph": "✕" },
+      "spree": { "singular": "spree", "plural": "sprees", "glyph": "★" },
+      "objective": { "singular": "objective", "plural": "objectives", "glyph": "◆" },
+      "structure": { "singular": "structure", "plural": "structures", "glyph": "▣" },
+      "info": { "singular": "event", "plural": "events", "glyph": "•" }
+    },
+    "gallery": {
+      "summary": "player_summary_kda",
+      "full_session_title": "summary",
+      "card": {
+        "title": "summary_for_full_session",
+        "title_format": {
+          "type": "player_summary_stats",
+          "separator": " | ",
+          "stats": [
+            { "type": "kda" },
+            { "type": "cs_per_min", "label": "CS/min" }
+          ]
+        },
+        "icon": {
+          "type": "portrait",
+          "source": "player_summary.champion_name",
+          "label": "Champion",
+          "asset_provider": "riot_data_dragon_champion_square",
+          "asset_key_format": "data_dragon_champion",
+          "asset_aliases": {
+            "belveth": "Belveth",
+            "cho'gath": "Chogath",
+            "dr. mundo": "DrMundo",
+            "kai'sa": "Kaisa",
+            "kha'zix": "Khazix",
+            "k'sante": "KSante",
+            "kog'maw": "KogMaw",
+            "leblanc": "Leblanc",
+            "nunu & willump": "Nunu",
+            "rek'sai": "Reksai",
+            "renata glasc": "Renata",
+            "vel'koz": "Velkoz",
+            "wukong": "MonkeyKing"
+          }
+        }
+      }
+    },
+    "event_rail": {
+      "enabled": true,
+      "title": "Match events",
+      "layout": "kill_feed",
+      "icons": {
+        "ChampionKill": "assets/event-rail/kill.png",
+        "ChampionDeath": "assets/event-rail/death.png",
+        "DragonKill": "assets/event-rail/dragon.png",
+        "BaronKill": "assets/event-rail/baron.png",
+        "TurretKilled": "assets/event-rail/turret.png"
+      }
+    },
+    "metadata_panel": {
+      "enabled": true,
+      "fields": [
+        {
+          "type": "portrait",
+          "source": "player_summary.champion_name",
+          "label": "Champion",
+          "asset_provider": "riot_data_dragon_champion_square",
+          "asset_key_format": "data_dragon_champion",
+          "asset_aliases": {
+            "belveth": "Belveth",
+            "cho'gath": "Chogath",
+            "dr. mundo": "DrMundo",
+            "kai'sa": "Kaisa",
+            "kha'zix": "Khazix",
+            "k'sante": "KSante",
+            "kog'maw": "KogMaw",
+            "leblanc": "Leblanc",
+            "nunu & willump": "Nunu",
+            "rek'sai": "Reksai",
+            "renata glasc": "Renata",
+            "vel'koz": "Velkoz",
+            "wukong": "MonkeyKing"
+          }
+        },
+        {
+          "type": "summoner_spells",
+          "source": "player_summary.summoner_spells",
+          "label": "Summoner spells",
+          "asset_provider": "riot_data_dragon_summoner_spell"
+        },
+        { "type": "kda", "secondary": "kda_ratio" },
+        {
+          "type": "item_build",
+          "source": "player_summary.items",
+          "label": "Build",
+          "asset_provider": "riot_data_dragon_item",
+          "max_items": 7
+        }
+      ]
+    }
+  }
+}"#;
 
 mod league_of_legends {
     use std::sync::mpsc::Receiver;
 
-    use clipline_capture::windows::CapturableWindow;
-
     use super::GameEventSourceContext;
     use crate::markers::PollerMsg;
 
-    const IN_GAME_EXE: &str = "League of Legends.exe";
-
-    pub fn match_window(windows: &[CapturableWindow]) -> Option<&CapturableWindow> {
-        windows
-            .iter()
-            .filter(|window| window.exe_name.eq_ignore_ascii_case(IN_GAME_EXE))
-            .max_by_key(|window| window.title.len())
-    }
-
     pub fn spawn_event_source(context: GameEventSourceContext) -> Receiver<PollerMsg> {
         crate::markers::spawn(context.lol_url, context.recording_t0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clipline_capture::windows::CapturableWindow;
+
+    fn window(
+        handle: isize,
+        title: &str,
+        exe_name: &str,
+        exe_path: Option<&str>,
+    ) -> CapturableWindow {
+        CapturableWindow {
+            handle,
+            title: title.into(),
+            process_id: handle as u32,
+            exe_name: exe_name.into(),
+            exe_path: exe_path.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn manifest_rejects_unsupported_schema_versions() {
+        let json = r#"{
+          "schema_version": 2,
+          "id": "league_of_legends",
+          "name": "League of Legends",
+          "summary": "Auto-records full matches when the in-game window is active.",
+          "default_enabled": true,
+          "default_recording_mode": "full_session",
+          "window_match": { "exe_name": "League of Legends.exe", "selection": "longest_title" },
+          "event_source": "league_live_client"
+        }"#;
+
+        let err = GameProfileManifest::from_json(json).unwrap_err();
+
+        assert!(err.contains("unsupported game profile schema"), "{err}");
+    }
+
+    #[test]
+    fn unsupported_event_source_names_are_rejected() {
+        let json = r#"{
+          "schema_version": 1,
+          "id": "future_game",
+          "name": "Future Game",
+          "summary": "Future game profile.",
+          "default_enabled": true,
+          "default_recording_mode": "full_session",
+          "window_match": { "exe_name": "Future.exe", "selection": "longest_title" },
+          "event_source": "future_live_client"
+        }"#;
+
+        let err = GameProfileManifest::from_json(json).unwrap_err();
+
+        assert!(err.contains("unsupported game event source"), "{err}");
+    }
+
+    #[test]
+    fn declarative_league_matcher_preserves_longest_title_behavior() {
+        let manifest = league_profile_manifest();
+        let windows = vec![
+            window(1, "League of Legends", "LeagueClientUx.exe", None),
+            window(2, "League", "League of Legends.exe", None),
+            window(
+                3,
+                "League of Legends (TM) Client",
+                "League of Legends.exe",
+                None,
+            ),
+        ];
+
+        let matched = manifest.match_window(&windows).expect("game window");
+
+        assert_eq!(matched.handle, 3);
+        assert_eq!(matched.exe_name, "League of Legends.exe");
+    }
+
+    #[test]
+    fn league_profile_has_no_install_state_but_keeps_presentation() {
+        let profile = all()
+            .iter()
+            .find(|profile| profile.id() == LEAGUE_OF_LEGENDS_ID)
+            .expect("league profile");
+        let info = profile.info();
+
+        assert_eq!(info.id, LEAGUE_OF_LEGENDS_ID);
+        assert_eq!(info.name, "League of Legends");
+        assert!(info.default_enabled);
+        assert_eq!(info.default_recording_mode, GameRecordingMode::FullSession);
+        assert!(info.event_markers);
+        assert!(info
+            .icon
+            .as_deref()
+            .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+
+        let presentation = info.presentation.expect("league presentation");
+        assert_eq!(
+            presentation
+                .pointer("/event_rail/title")
+                .and_then(serde_json::Value::as_str),
+            Some("Match events")
+        );
+        assert_eq!(
+            presentation
+                .pointer("/metadata_panel/fields/0/asset_provider")
+                .and_then(serde_json::Value::as_str),
+            Some("riot_data_dragon_champion_square")
+        );
+        assert!(presentation
+            .pointer("/marker_kinds/ChampionKill/icon")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+    }
+
+    #[test]
+    fn profile_records_and_resolved_info_are_cached() {
+        let first_profiles = all();
+        let second_profiles = all();
+        assert_eq!(first_profiles.as_ptr(), second_profiles.as_ptr());
+
+        let first_catalog = catalog();
+        let second_catalog = catalog();
+        assert_eq!(first_catalog.as_ptr(), second_catalog.as_ptr());
+        assert!(first_catalog[0]
+            .presentation
+            .as_ref()
+            .and_then(|presentation| presentation.pointer("/event_rail/icons/ChampionKill"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+    }
+
+    #[test]
+    fn league_profile_declares_data_dragon_portrait_provider() {
+        let manifest = league_profile_manifest();
+        let presentation = manifest.presentation.expect("presentation");
+
+        assert_eq!(
+            presentation
+                .pointer("/data_dragon/version")
+                .and_then(serde_json::Value::as_str),
+            Some("16.13.1")
+        );
+        assert_eq!(
+            presentation
+                .pointer("/metadata_panel/fields/0/asset_provider")
+                .and_then(serde_json::Value::as_str),
+            Some("riot_data_dragon_champion_square")
+        );
+        assert_eq!(
+            presentation
+                .pointer("/metadata_panel/fields/0/asset_aliases/wukong")
+                .and_then(serde_json::Value::as_str),
+            Some("MonkeyKing")
+        );
+    }
+
+    #[test]
+    fn game_id_bridge_keeps_existing_ids() {
+        assert_eq!(
+            plugin_id_for_game_id(GameId::LeagueOfLegends),
+            LEAGUE_OF_LEGENDS_ID
+        );
+        assert_eq!(plugin_id_for_game_id(GameId::Valorant), "valorant");
+        assert_eq!(plugin_id_for_game_id(GameId::Cs2), "cs2");
     }
 }

@@ -156,55 +156,73 @@
           </div>
         </header>
 
-        <div class="stage">
-          <div id="stage-frame" class="stage-frame">
-            <video id="video" playsinline></video>
-            <div id="stage-note" class="stage-note"></div>
-            <div id="stage-overlay" class="stage-overlay">
-              <div class="transport">
-                <div class="cluster">
-                  <button id="prev-marker" title="Previous marker (Shift+M)">
-                    <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zM18 6l-8.5 6L18 18z"/></svg>
-                  </button>
-                  <button id="next-marker" title="Next marker (M)">
-                    <svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM6 6l8.5 6L6 18z"/></svg>
-                  </button>
-                  <span id="marker-count" class="hint">no markers</span>
-                </div>
-                <div class="cluster middle">
-                  <button id="seek-back" title="Back 5 s (Left)">
-                    <svg viewBox="0 0 24 24"><path d="M12 5V2L7 7l5 5V8c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/><text x="12" y="16.6" text-anchor="middle" font-size="8" font-weight="600">5</text></svg>
-                  </button>
-                  <button id="play-toggle" class="play-toggle" title="Play / pause (Space)">
-                    <svg class="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                    <svg class="i-pause" viewBox="0 0 24 24"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
-                  </button>
-                  <button id="seek-forward" title="Forward 5 s (Right)">
-                    <svg viewBox="0 0 24 24"><g transform="translate(24,0) scale(-1,1)"><path d="M12 5V2L7 7l5 5V8c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></g><text x="12" y="16.6" text-anchor="middle" font-size="8" font-weight="600">5</text></svg>
-                  </button>
-                  <span id="time-readout">0:00.0 / 0:00.0</span>
-                </div>
-                <div class="cluster right">
-                  <select id="rate-select" title="Playback speed">
-                    <option value="0.5">0.5x</option>
-                    <option value="0.75">0.75x</option>
-                    <option value="1" selected>1x</option>
-                    <option value="1.25">1.25x</option>
-                    <option value="1.5">1.5x</option>
-                    <option value="2">2x</option>
-                  </select>
-                  <div class="volume-group">
-                    <button id="mute-toggle" title="Mute / unmute">
-                      <svg class="i-vol" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16 12c0-1.77-1.02-3.29-2.5-4.03v8.06A4.52 4.52 0 0 0 16 12z"/><path d="M13.5 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
-                      <svg class="i-muted" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M14.8 8.6l1.4-1.4 2.3 2.3 2.3-2.3 1.4 1.4-2.3 2.3 2.3 2.3-1.4 1.4-2.3-2.3-2.3 2.3-1.4-1.4 2.3-2.3z"/></svg>
+        <div class="review-body">
+          <div class="stage">
+            <div id="stage-frame" class="stage-frame">
+              <video id="video" playsinline></video>
+              <div id="stage-note" class="stage-note"></div>
+              <div id="stage-overlay" class="stage-overlay">
+                <div class="transport">
+                  <div class="cluster">
+                    <button id="prev-marker" title="Previous marker (Shift+M)">
+                      <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zM18 6l-8.5 6L18 18z"/></svg>
                     </button>
-                    <input id="volume-slider" type="range" min="0" max="1" step="0.01" value="1" title="Volume" />
+                    <button id="next-marker" title="Next marker (M)">
+                      <svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM6 6l8.5 6L6 18z"/></svg>
+                    </button>
+                    <span id="marker-count" class="hint">no markers</span>
+                  </div>
+                  <div class="cluster middle">
+                    <button id="seek-back" title="Back 5 s (Left)">
+                      <svg viewBox="0 0 24 24"><path d="M12 5V2L7 7l5 5V8c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/><text x="12" y="16.6" text-anchor="middle" font-size="8" font-weight="600">5</text></svg>
+                    </button>
+                    <button id="play-toggle" class="play-toggle" title="Play / pause (Space)">
+                      <svg class="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                      <svg class="i-pause" viewBox="0 0 24 24"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+                    </button>
+                    <button id="seek-forward" title="Forward 5 s (Right)">
+                      <svg viewBox="0 0 24 24"><g transform="translate(24,0) scale(-1,1)"><path d="M12 5V2L7 7l5 5V8c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></g><text x="12" y="16.6" text-anchor="middle" font-size="8" font-weight="600">5</text></svg>
+                    </button>
+                    <span id="time-readout">0:00.0 / 0:00.0</span>
+                  </div>
+                  <div class="cluster right">
+                    <select id="rate-select" title="Playback speed">
+                      <option value="0.5">0.5x</option>
+                      <option value="0.75">0.75x</option>
+                      <option value="1" selected>1x</option>
+                      <option value="1.25">1.25x</option>
+                      <option value="1.5">1.5x</option>
+                      <option value="2">2x</option>
+                    </select>
+                    <div class="volume-group">
+                      <button id="mute-toggle" title="Mute / unmute">
+                        <svg class="i-vol" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16 12c0-1.77-1.02-3.29-2.5-4.03v8.06A4.52 4.52 0 0 0 16 12z"/><path d="M13.5 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+                        <svg class="i-muted" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M14.8 8.6l1.4-1.4 2.3 2.3 2.3-2.3 1.4 1.4-2.3 2.3 2.3 2.3-1.4 1.4-2.3-2.3-2.3 2.3-1.4-1.4 2.3-2.3z"/></svg>
+                      </button>
+                      <input id="volume-slider" type="range" min="0" max="1" step="0.01" value="1" title="Volume" />
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
           </div>
+
+          <aside id="game-event-rail" class="game-event-rail" hidden>
+            <button id="game-event-rail-toggle" class="game-event-rail-tab" type="button" title="Collapse match events" aria-label="Collapse match events" aria-controls="game-event-list" aria-expanded="true">
+              <svg class="i-collapse" viewBox="0 0 24 24"><path d="M8.6 16.6 10 18l6-6-6-6-1.4 1.4 4.6 4.6-4.6 4.6z"/></svg>
+              <svg class="i-expand" viewBox="0 0 24 24"><path d="M15.4 7.4 14 6l-6 6 6 6 1.4-1.4L10.8 12l4.6-4.6z"/></svg>
+            </button>
+            <div class="game-event-rail-head">
+              <strong id="game-event-rail-title"></strong>
+              <span id="game-event-rail-summary"></span>
+            </div>
+            <ol id="game-event-list"></ol>
+          </aside>
         </div>
+
+        <aside id="game-metadata-panel" class="game-metadata-panel" hidden>
+          <div id="game-metadata-fields" class="game-metadata-fields"></div>
+        </aside>
 
         <div class="deck">
           <div class="timeline-stack">
@@ -457,11 +475,11 @@
             </div>
             <div class="setting-row">
               <div class="setting-info">
-                <strong>Game plugins</strong>
+                <strong>Supported games</strong>
                 <span>Enable game-specific capture behavior and recording modes.</span>
               </div>
               <div id="supported-games" class="supported-games">
-                <div class="hint">loading game plugins...</div>
+                <div class="hint">loading supported games...</div>
               </div>
             </div>
             <div class="games-panel">

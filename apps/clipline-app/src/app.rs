@@ -515,7 +515,8 @@ impl RuntimeState {
         if inner.tx.is_none() {
             return Ok((None, None));
         }
-        let next_options = Self::options(inner)?;
+        let mut next_options = Self::options(inner)?;
+        next_options.recover_abandoned_recordings = false;
         let old_tx = inner.tx.take();
         inner.last_save_request = None;
         Ok((old_tx, Some(next_options)))
@@ -1931,6 +1932,26 @@ mod tests {
         assert!(
             inner.last_save_request.is_some(),
             "failed options must not clear debounce state"
+        );
+    }
+
+    #[test]
+    fn prepared_restart_skips_abandoned_recording_recovery() {
+        let (tx, _rx) = mpsc::channel();
+        let mut inner = RuntimeInner {
+            tx: Some(tx),
+            settings: AppSettings::default(),
+            lol_url: None,
+            active_game: None,
+            last_save_request: Some(Instant::now()),
+            decodable_codecs: vec![service::Codec::H264],
+        };
+
+        let (_old_tx, next_options) = RuntimeState::prepare_service_restart(&mut inner).unwrap();
+
+        assert!(
+            !next_options.unwrap().recover_abandoned_recordings,
+            "internal recorder restarts must not recover another active recorder's temp file"
         );
     }
 

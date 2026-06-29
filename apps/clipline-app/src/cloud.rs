@@ -15,7 +15,7 @@ use clipline_cloud_api::{
     sha256_hex, ClipDetailResponse, ClipSummaryResponse, CloudApiError, CloudClient,
     CreateUploadRequest, ListClipsRequest,
 };
-use clipline_events::{ClipMarkers, GameId};
+use clipline_events::ClipMarkers;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::io::AsyncWriteExt;
@@ -1327,14 +1327,10 @@ fn read_clip_game(path: &Path, markers: Option<&ClipMarkers>) -> Option<crate::l
 
 fn game_from_markers(markers: &ClipMarkers) -> Option<crate::library::ClipGame> {
     let game_id = markers.markers.first()?.event.game_id;
-    let id = match game_id {
-        GameId::LeagueOfLegends => "league_of_legends",
-        GameId::Valorant => "valorant",
-        GameId::Cs2 => "cs2",
-    };
+    let id = crate::game_plugins::plugin_id_for_game_id(game_id);
     Some(crate::library::ClipGame {
         id: id.to_string(),
-        name: serde_json_string(&game_id).unwrap_or_else(|| id.to_string()),
+        name: crate::game_plugins::display_name_for_game_id(game_id).to_string(),
     })
 }
 
@@ -1656,12 +1652,6 @@ impl Drop for CredentialFree {
             }
         }
     }
-}
-
-fn serde_json_string<T: Serialize>(value: &T) -> Option<String> {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_string))
 }
 
 fn cloud_error(error: CloudApiError) -> String {

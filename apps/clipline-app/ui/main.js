@@ -53,7 +53,10 @@ const {
   markerSummary,
   markerStyle,
   markerDigest,
-  playerSummaryLabel,
+  gameEventActiveIndex,
+  gameEventRailItem,
+  playerSummaryFields,
+  galleryCardPreview,
   rulerMarksRange,
   sessionGroups,
   formatClipTitle,
@@ -824,13 +827,24 @@ function renderGamePluginModeControl(plugin, settings) {
   return control;
 }
 
+function syncGamePluginCatalog(nextPlugins) {
+  gamePlugins = Array.isArray(nextPlugins) ? nextPlugins : [];
+  renderGamePlugins();
+  updateGameDetectionStatus();
+  if (clipsCache.length) renderClips();
+  if (currentClip) {
+    renderGameEventRail(currentClip);
+    renderGameMetadataPanel(currentClip);
+  }
+}
+
 function renderGamePlugins() {
   const root = $("supported-games");
   root.replaceChildren();
   if (!gamePlugins.length) {
     const empty = document.createElement("div");
     empty.className = "hint";
-    empty.textContent = "no game plugins installed";
+    empty.textContent = "no supported games available";
     root.appendChild(empty);
     return;
   }
@@ -870,7 +884,12 @@ function renderGamePlugins() {
     summary.textContent = gamePluginSummary(plugin, settings);
     meta.append(name, summary);
 
-    row.append(enabled, icon, meta, renderGamePluginModeControl(plugin, settings));
+    row.append(
+      enabled,
+      icon,
+      meta,
+      renderGamePluginModeControl(plugin, settings)
+    );
     root.appendChild(row);
   }
 }
@@ -1433,11 +1452,7 @@ async function ensureVideoEncodersLoaded() {
 
 async function loadGamePlugins() {
   try {
-    gamePlugins = await invoke("list_game_plugins");
-    renderGamePlugins();
-    updateGameDetectionStatus();
-    // Clips may have rendered before plugins loaded; refresh their game icons.
-    if (clipsCache.length) renderClips();
+    syncGamePluginCatalog(await invoke("list_game_plugins"));
   } catch (e) {
     gamePlugins = [];
     $("error").textContent = e;
@@ -1633,7 +1648,7 @@ function updateGameDetectionStatus() {
     } else if (customGames.length) {
       $("game-detection-status").textContent = "No saved custom game is active.";
     } else {
-      $("game-detection-status").textContent = "Enable a game plugin or add a running game window, then save.";
+      $("game-detection-status").textContent = "Enable a supported game or add a running game window, then save.";
     }
   }
 }
@@ -2215,7 +2230,6 @@ const CLIP_KIND_LABELS = {
   session: "Full session",
   trim: "Trimmed export",
 };
-const LEAGUE_OF_LEGENDS_ID = "league_of_legends";
 const CLOUD_VISIBILITY_ICONS = {
   public:
     '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3z"/></svg>',
@@ -2268,18 +2282,356 @@ function clipGameIcon(clip) {
   return null;
 }
 
-function isLeagueFullSessionClip(clip, kind) {
-  return kind === "session" && isLeagueClip(clip);
+function pluginForGameId(gameId) {
+  return gamePlugins.find((plugin) => plugin.id === gameId) || null;
 }
 
-function isLeagueClip(clip) {
-  return clip && clip.game && clip.game.id === LEAGUE_OF_LEGENDS_ID;
+function pluginForClip(clip) {
+  const gameId = clip && clip.game && clip.game.id;
+  return gameId ? pluginForGameId(gameId) : null;
 }
 
-function clipLibraryTitle(clip, fallbackTitle) {
-  if (isLeagueClip(clip)) return fallbackTitle;
-  const clipName = clip && String(clip.name || "").trim();
-  return clipName || fallbackTitle;
+function pluginPresentationForClip(clip) {
+  const plugin = pluginForClip(clip);
+  return plugin && plugin.presentation ? plugin.presentation : null;
+}
+
+function currentPluginPresentation() {
+  return pluginPresentationForClip(currentClip);
+}
+
+function pluginGalleryPolicy(clip) {
+  const presentation = pluginPresentationForClip(clip);
+  return presentation && presentation.gallery ? presentation.gallery : null;
+}
+
+function markerDisplayLabel(marker, presentation) {
+  const kind = marker && marker.kind ? marker.kind : "Other";
+  const configured = presentation
+    && presentation.marker_kinds
+    && presentation.marker_kinds[kind]
+    && typeof presentation.marker_kinds[kind] === "object"
+      ? presentation.marker_kinds[kind]
+      : null;
+  const label = configured && configured.label ? configured.label : kind.replace(/([a-z])([A-Z])/g, "$1 $2");
+  const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
+  return `${fmtDur(marker.t_s)} ${label}${actor}`;
+}
+
+function markerEventText(marker, presentation) {
+  const kind = marker && marker.kind ? marker.kind : "Other";
+  const configured = presentation
+    && presentation.marker_kinds
+    && presentation.marker_kinds[kind]
+    && typeof presentation.marker_kinds[kind] === "object"
+      ? presentation.marker_kinds[kind]
+      : null;
+  const label = configured && configured.label ? configured.label : kind.replace(/([a-z])([A-Z])/g, "$1 $2");
+  const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
+  return `${label}${actor}`;
+}
+
+function gameEventPortrait(slot) {
+  const root = document.createElement("span");
+  root.className = "game-event-participant";
+  const portrait = document.createElement("span");
+  portrait.className = "game-event-portrait";
+  portrait.title = slot.champion ? `${slot.champion} · ${slot.name}` : slot.name;
+  if (slot.asset) {
+    const img = document.createElement("img");
+    img.src = slot.asset;
+    img.alt = slot.champion || slot.name;
+    img.addEventListener("error", () => {
+      img.remove();
+      portrait.textContent = slot.initials || "?";
+    }, { once: true });
+    portrait.appendChild(img);
+  } else {
+    portrait.textContent = slot.initials || "?";
+  }
+  const name = document.createElement("span");
+  name.className = "game-event-name";
+  name.textContent = slot.name || slot.champion || "?";
+  root.append(portrait, name);
+  return root;
+}
+
+function gameEventIcon(view, marker, presentation) {
+  const icon = document.createElement("span");
+  icon.className = "game-event-kind-icon";
+  icon.title = view.label || markerDisplayLabel(marker, presentation);
+  if (view.icon) {
+    const img = document.createElement("img");
+    img.src = view.icon;
+    img.alt = "";
+    img.setAttribute("aria-hidden", "true");
+    img.addEventListener("error", () => {
+      img.remove();
+      icon.textContent = markerStyle(marker.kind, presentation).glyph;
+    }, { once: true });
+    icon.appendChild(img);
+  } else {
+    icon.textContent = markerStyle(marker.kind, presentation).glyph;
+  }
+  return icon;
+}
+
+let activeGameEventIndex = -1;
+let selectedGameEventIndex = -1;
+let selectedGameEventTime = null;
+let gameEventRailCollapsed = false;
+
+function eventRailPolicy(clip) {
+  const presentation = pluginPresentationForClip(clip);
+  return presentation && presentation.event_rail ? presentation.event_rail : null;
+}
+
+function metadataPanelPolicy(clip) {
+  const presentation = pluginPresentationForClip(clip);
+  return presentation && presentation.metadata_panel ? presentation.metadata_panel : null;
+}
+
+function clearGameEventSelection() {
+  selectedGameEventIndex = -1;
+  selectedGameEventTime = null;
+}
+
+function selectGameEvent(index, markerTime) {
+  selectedGameEventIndex = index;
+  selectedGameEventTime = Number.isFinite(markerTime) ? markerTime : null;
+}
+
+function selectedGameEventIndexForTime(currentTime) {
+  if (selectedGameEventIndex < 0 || selectedGameEventTime == null) return -1;
+  if (currentTime >= selectedGameEventTime - 0.15) {
+    clearGameEventSelection();
+    return -1;
+  }
+  return selectedGameEventIndex;
+}
+
+function renderGameEventRail(clip = currentClip) {
+  const rail = $("game-event-rail");
+  const reviewBody = rail ? rail.closest(".review-body") : null;
+  const title = $("game-event-rail-title");
+  const summary = $("game-event-rail-summary");
+  const list = $("game-event-list");
+  const presentation = pluginPresentationForClip(clip);
+  const eventRail = eventRailPolicy(clip);
+  const markers = clip && clip.markers && Array.isArray(clip.markers.markers)
+    ? clip.markers.markers
+    : [];
+  activeGameEventIndex = -1;
+  clearGameEventSelection();
+  if (!eventRail || !eventRail.enabled || !markers.length) {
+    rail.hidden = true;
+    rail.classList.remove("is-collapsed");
+    if (reviewBody) reviewBody.classList.remove("has-event-rail", "event-rail-collapsed");
+    title.textContent = "";
+    summary.textContent = "";
+    list.replaceChildren();
+    return;
+  }
+  title.textContent = eventRail.title || (clip && clip.game ? `${clip.game.name} events` : "Game events");
+  summary.textContent = markerSummary(markers);
+  list.replaceChildren();
+  const playerSummary = clip && clip.markers ? clip.markers.player_summary : null;
+  markers.forEach((marker, index) => {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    const view = gameEventRailItem(marker, playerSummary, presentation, {
+      data_dragon: presentation && presentation.data_dragon,
+    });
+    button.type = "button";
+    button.setAttribute("data-game-event-index", String(index));
+    button.setAttribute("data-game-event-time", String(marker.t_s || 0));
+    button.className = `marker-${view.category} game-event-row-${view.allegiance || "neutral"}`;
+    const time = document.createElement("span");
+    time.className = "game-event-time";
+    time.textContent = fmtDur(marker.t_s || 0);
+    button.title = markerDisplayLabel(marker, presentation);
+    if (view.layout === "duel" && view.actor && view.victim) {
+      button.classList.add("game-event-duel");
+      button.append(
+        time,
+        gameEventPortrait(view.actor),
+        gameEventIcon(view, marker, presentation),
+        gameEventPortrait(view.victim),
+      );
+    } else if (view.layout === "actor_event" && view.actor) {
+      const icon = gameEventIcon(view, marker, presentation);
+      icon.classList.add("game-event-objective-icon");
+      button.classList.add("game-event-actor-event");
+      button.append(
+        time,
+        gameEventPortrait(view.actor),
+        icon,
+      );
+    } else {
+      const label = document.createElement("span");
+      label.className = "game-event-label";
+      label.textContent = view.text || markerEventText(marker, presentation);
+      button.append(time, label);
+    }
+    button.addEventListener("click", () => {
+      const markerTime = marker.t_s || 0;
+      selectGameEvent(index, markerTime);
+      seekTo(markerTime - MARKER_LEAD_S, { keepGameEventSelection: true });
+      video.play().catch(() => syncPlayState());
+    });
+    item.appendChild(button);
+    list.appendChild(item);
+  });
+  rail.hidden = false;
+  if (reviewBody) reviewBody.classList.add("has-event-rail");
+  setGameEventRailCollapsed(gameEventRailCollapsed);
+}
+
+function setGameEventRailCollapsed(collapsed) {
+  gameEventRailCollapsed = Boolean(collapsed);
+  const rail = $("game-event-rail");
+  const reviewBody = rail ? rail.closest(".review-body") : null;
+  const toggle = $("game-event-rail-toggle");
+  if (!rail) return;
+  rail.classList.toggle("is-collapsed", gameEventRailCollapsed);
+  if (reviewBody) {
+    reviewBody.classList.toggle(
+      "event-rail-collapsed",
+      !rail.hidden && gameEventRailCollapsed,
+    );
+  }
+  if (toggle) {
+    const label = gameEventRailCollapsed ? "Expand match events" : "Collapse match events";
+    toggle.title = label;
+    toggle.setAttribute("aria-label", label);
+    toggle.setAttribute("aria-expanded", gameEventRailCollapsed ? "false" : "true");
+  }
+  if (!gameEventRailCollapsed) {
+    syncGameEventRail(video.currentTime || 0, { force: true });
+  }
+}
+
+function syncGameEventRail(currentTime = video.currentTime || 0, options = {}) {
+  const rail = $("game-event-rail");
+  if (!rail || rail.hidden || rail.classList.contains("is-collapsed")) return;
+  const markers = clipMarkers();
+  const selectedIndex = selectedGameEventIndexForTime(currentTime);
+  const next = gameEventActiveIndex(markers, currentTime, selectedIndex);
+  if (next === activeGameEventIndex && !options.force) return;
+  activeGameEventIndex = next;
+  document.querySelectorAll("[data-game-event-index]").forEach((row) => {
+    const active = Number(row.dataset.gameEventIndex) === next;
+    row.classList.toggle("active", active);
+    row.setAttribute("aria-current", active ? "true" : "false");
+    if (active) row.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
+
+function metadataIconFallbackText(value) {
+  const letters = String(value || "").match(/[A-Za-z0-9]/g) || [];
+  return (letters.slice(0, 2).join("").toUpperCase() || "?").slice(0, 2);
+}
+
+function renderMetadataIcon(entry, className) {
+  const icon = document.createElement("span");
+  icon.className = className;
+  icon.title = entry.value || "";
+  icon.setAttribute("aria-label", entry.value || "Metadata icon");
+  if (entry.asset) {
+    const img = document.createElement("img");
+    img.src = entry.asset;
+    img.alt = entry.value || "";
+    img.addEventListener("error", () => {
+      img.remove();
+      icon.textContent = metadataIconFallbackText(entry.value || entry.assetKey);
+    }, { once: true });
+    icon.appendChild(img);
+  } else {
+    icon.textContent = metadataIconFallbackText(entry.value || entry.assetKey);
+  }
+  return icon;
+}
+
+function renderMetadataIconList(field) {
+  const list = document.createElement("div");
+  list.className = `game-metadata-icons ${field.type}`;
+  list.setAttribute("aria-label", field.label || field.type);
+  for (const entry of field.items || []) {
+    list.appendChild(renderMetadataIcon(entry, "game-metadata-icon"));
+  }
+  return list;
+}
+
+function renderGameMetadataPanel(clip = currentClip) {
+  const panel = $("game-metadata-panel");
+  const fieldsRoot = $("game-metadata-fields");
+  const presentation = pluginPresentationForClip(clip);
+  const metadataPanel = metadataPanelPolicy(clip);
+  const summary = clip && clip.markers ? clip.markers.player_summary : null;
+  const fields = metadataPanel && metadataPanel.fields
+    ? playerSummaryFields(summary, metadataPanel.fields, {
+      data_dragon: presentation && presentation.data_dragon,
+    })
+    : [];
+  if (!metadataPanel || !metadataPanel.enabled || !fields.length) {
+    panel.hidden = true;
+    fieldsRoot.replaceChildren();
+    return;
+  }
+  fieldsRoot.replaceChildren();
+  for (const field of fields) {
+    if (field.type === "portrait") {
+      const portrait = document.createElement("div");
+      portrait.className = "game-metadata-portrait";
+      portrait.title = field.value;
+      if (field.asset) {
+        const img = document.createElement("img");
+        img.src = field.asset;
+        img.alt = field.value;
+        img.addEventListener("error", () => {
+          img.remove();
+          portrait.textContent = String(field.value || "?").slice(0, 2).toUpperCase();
+        }, { once: true });
+        portrait.appendChild(img);
+      } else {
+        portrait.textContent = String(field.value || "?").slice(0, 2).toUpperCase();
+      }
+      fieldsRoot.appendChild(portrait);
+      continue;
+    }
+    if (field.type === "summoner_spells" || field.type === "item_build") {
+      fieldsRoot.appendChild(renderMetadataIconList(field));
+      continue;
+    }
+    const item = document.createElement("div");
+    item.className = `game-metadata-field ${field.type}`;
+    if (field.label) {
+      const label = document.createElement("strong");
+      label.textContent = field.label;
+      item.appendChild(label);
+    }
+    const value = document.createElement("span");
+    value.textContent = field.value;
+    item.appendChild(value);
+    if (field.secondary) {
+      const secondary = document.createElement("small");
+      secondary.textContent = field.secondary;
+      item.appendChild(secondary);
+    }
+    fieldsRoot.appendChild(item);
+  }
+  panel.hidden = false;
+}
+
+function clipGalleryCardPreview(clip, kind, fallbackTitle) {
+  const presentation = pluginPresentationForClip(clip);
+  return galleryCardPreview(
+    clip,
+    kind,
+    fallbackTitle,
+    presentation,
+    { data_dragon: presentation && presentation.data_dragon },
+  );
 }
 
 function cloudVisibilityEl(record) {
@@ -2359,6 +2711,14 @@ function cloudClipCard(entry) {
 // Clip names come from disk; build rows with textContent, never innerHTML.
 const CARD_KIND_LABELS = { replay: "Replay", session: "Session", trim: "Trim" };
 // Marker categories → tint var, matching the timeline glyph colors.
+const MARKER_CATEGORY_TICK_VARS = {
+  kill: "--mc-kill",
+  death: "--mc-death",
+  spree: "--mc-spree",
+  objective: "--mc-objective",
+  structure: "--mc-structure",
+  info: "--mc-info",
+};
 const MARKER_TICK_VARS = {
   ChampionKill: "--mc-kill", FirstBlood: "--mc-kill",
   ChampionDeath: "--mc-death",
@@ -2465,14 +2825,15 @@ function clipCard(c) {
   const kind = clipKind(c.name);
   const when = new Date(c.modified_unix * 1000);
   const markers = c.markers ? c.markers.markers : [];
+  const presentation = pluginPresentationForClip(c);
   const duration = Number.isFinite(c.duration_s)
     ? c.duration_s
     : (c.markers ? c.markers.duration_s : NaN);
-  const leagueMeta = playerSummaryLabel(c.markers ? c.markers.player_summary : null);
-  const leagueSessionTitle = isLeagueFullSessionClip(c, kind) && leagueMeta;
   const fallbackTitle = formatClipTitle(
     when.getMonth(), when.getDate(), when.getHours(), when.getMinutes());
-  const cardTitle = leagueSessionTitle ? leagueMeta : clipLibraryTitle(c, fallbackTitle);
+  const cardPreview = clipGalleryCardPreview(c, kind, fallbackTitle);
+  const cardTitleUsesSummary = cardPreview.titleSource === "summary";
+  const cardTitle = cardPreview.title || fallbackTitle;
 
   // Thumbnail: gradient placeholder + lazily-loaded poster, with the kind chip,
   // a hover delete, a play glyph, the duration, and marker ticks layered on.
@@ -2522,7 +2883,8 @@ function clipCard(c) {
     for (const m of markers) {
       const tick = document.createElement("i");
       tick.style.left = Math.max(0, Math.min(100, (m.t_s / duration) * 100)) + "%";
-      const tint = MARKER_TICK_VARS[m.kind];
+      const style = markerStyle(m.kind, presentation);
+      const tint = MARKER_CATEGORY_TICK_VARS[style.cls] || MARKER_TICK_VARS[m.kind];
       if (tint) tick.style.setProperty("--mc", `var(${tint})`);
       strip.appendChild(tick);
     }
@@ -2533,18 +2895,26 @@ function clipCard(c) {
   meta.className = "card-meta";
   const nameRow = document.createElement("div");
   nameRow.className = "card-name";
+  const previewIcon = cardPreview.icon && cardPreview.icon.url ? cardPreview.icon : null;
   const game = clipGameIcon(c);
-  if (game) {
+  const cardIcon = previewIcon || (game ? { type: "game", url: game.url, label: game.label } : null);
+  if (cardIcon) {
     const gi = document.createElement("img");
-    gi.className = "card-game-ico";
-    gi.src = game.url;
+    gi.className = "card-game-ico" + (cardIcon.type === "portrait" ? " portrait" : "");
+    gi.src = cardIcon.url;
     gi.alt = "";
-    gi.title = game.label;
+    gi.title = cardIcon.label || (game ? game.label : "");
     // Fall back to a neutral glyph if the icon can't load.
     gi.addEventListener("error", () => {
+      if (previewIcon && game && gi.src !== game.url) {
+        gi.className = "card-game-ico";
+        gi.src = game.url;
+        gi.title = game.label;
+        return;
+      }
       const ph = document.createElement("div");
       ph.className = "card-game-ico placeholder";
-      ph.title = game.label;
+      ph.title = cardIcon.label || (game ? game.label : "");
       ph.innerHTML = GENERIC_GAME_ICON; // static markup, safe
       gi.replaceWith(ph);
     });
@@ -2559,19 +2929,19 @@ function clipCard(c) {
 
   const info = document.createElement("div");
   info.className = "card-sub";
-  const digest = markerDigest(markers);
+  const digest = markerDigest(markers, presentation);
   const infoParts = [];
   if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s));
   infoParts.push(`${c.size_mb.toFixed(1)} MB`);
   infoParts.push(fmtAgo(Date.now() / 1000, c.modified_unix));
-  if (!leagueMeta && digest) infoParts.push(digest);
+  if (!cardPreview.summary && digest) infoParts.push(digest);
   info.textContent = infoParts.join(" · ");
 
   meta.append(nameRow, info);
-  if (leagueMeta && !leagueSessionTitle) {
+  if (cardPreview.summary && !cardTitleUsesSummary) {
     const detail = document.createElement("div");
-    detail.className = "league-meta";
-    detail.textContent = leagueMeta;
+    detail.className = "game-meta";
+    detail.textContent = cardPreview.summary;
     meta.appendChild(detail);
   }
 
@@ -3223,6 +3593,8 @@ function openClip(clip) {
   renderOverviewMarkers();
   applyView({ start: 0, span: 0 });
   renderAudioTrackPanel();
+  renderGameEventRail(clip);
+  renderGameMetadataPanel(clip);
   renderClips();
   noteActivity();
   requestAnimationFrame(updateStageFrame);
@@ -3251,6 +3623,8 @@ function closeReview() {
   $("stage-note").textContent = "";
   $("marker-layer").replaceChildren();
   renderAudioTrackPanel();
+  renderGameEventRail(null);
+  renderGameMetadataPanel(null);
   renderClips();
 }
 
@@ -3456,9 +3830,10 @@ function renderOverviewMarkers() {
   if (!layer) return;
   layer.replaceChildren();
   const dur = clipDuration();
+  const presentation = currentPluginPresentation();
   for (const m of clipMarkers()) {
     const tick = document.createElement("i");
-    tick.className = `ov-marker marker-${markerStyle(m.kind).cls}`;
+    tick.className = `ov-marker marker-${markerStyle(m.kind, presentation).cls}`;
     tick.style.left = `${percentFor(m.t_s, dur)}%`;
     layer.appendChild(tick);
   }
@@ -3469,6 +3844,7 @@ function renderOverviewMarkers() {
 function animatePlayhead() {
   maybeFollow(video.currentTime || 0);
   paintTimeline();
+  syncGameEventRail(video.currentTime || 0);
   updateOverlay();
   if (!video.paused && !video.ended) rafId = requestAnimationFrame(animatePlayhead);
 }
@@ -3515,17 +3891,26 @@ const MARKER_IMAGES = {
   TurretKilled: "assets/markers/turret.png",
 };
 
+function markerImageForKind(kind, presentation) {
+  const kinds = presentation && presentation.marker_kinds ? presentation.marker_kinds : null;
+  const configured = kinds && kinds[kind] && typeof kinds[kind] === "object"
+    ? kinds[kind].icon
+    : null;
+  return configured || MARKER_IMAGES[kind] || "";
+}
+
 function renderMarkers() {
   const layer = $("marker-layer");
   layer.replaceChildren();
   const view = timelineView();
   const markers = clipMarkers();
+  const presentation = currentPluginPresentation();
   for (const m of markers) {
     const left = percentForView(m.t_s, view.start, view.span);
     // The marker band isn't clipped like the track, so drop glyphs that would
     // ride outside the visible window (a small margin keeps edge glyphs whole).
     if (left < -2 || left > 102) continue;
-    const style = markerStyle(m.kind);
+    const style = markerStyle(m.kind, presentation);
     const marker = document.createElement("button");
     marker.className = `marker marker-${style.cls}`;
     marker.style.left = `${left}%`;
@@ -3533,7 +3918,7 @@ function renderMarkers() {
 
     const glyph = document.createElement("span");
     glyph.className = "glyph";
-    const img = MARKER_IMAGES[m.kind];
+    const img = markerImageForKind(m.kind, presentation);
     if (img) {
       glyph.classList.add("img");
       glyph.style.setProperty("--marker-img", `url("${img}")`);
@@ -3600,8 +3985,9 @@ function renderRuler() {
 // at a time and chain the latest target from the `seeked` event.
 let pendingSeek = null;
 
-function seekTo(time) {
+function seekTo(time, options = {}) {
   if (!currentClip) return;
+  if (!options.keepGameEventSelection) clearGameEventSelection();
   const t = clampTime(time, clipDuration());
   if (video.seeking) {
     pendingSeek = t;
@@ -3611,6 +3997,7 @@ function seekTo(time) {
   }
   maybeFollow(t);
   paintTimeline();
+  syncGameEventRail(t);
 }
 
 video.addEventListener("seeked", () => {
@@ -3621,6 +4008,7 @@ video.addEventListener("seeked", () => {
   }
   maybeFollow(video.currentTime || 0);
   paintTimeline();
+  syncGameEventRail(video.currentTime || 0);
 });
 
 function seekBy(delta) {
@@ -4587,7 +4975,10 @@ video.addEventListener("pause", () => {
   cancelAnimationFrame(rafId);
   paintTimeline();
 });
-video.addEventListener("timeupdate", paintTimeline);
+video.addEventListener("timeupdate", () => {
+  paintTimeline();
+  syncGameEventRail(video.currentTime || 0);
+});
 video.addEventListener("volumechange", syncVolume);
 video.addEventListener("loadedmetadata", () => {
   $("stage-note").textContent = `${video.videoWidth}x${video.videoHeight} · ${fmtDur(video.duration)}`;
@@ -4610,6 +5001,9 @@ $("seek-back").addEventListener("click", () => seekBy(-5));
 $("seek-forward").addEventListener("click", () => seekBy(5));
 $("prev-marker").addEventListener("click", () => jumpMarker(-1));
 $("next-marker").addEventListener("click", () => jumpMarker(1));
+$("game-event-rail-toggle").addEventListener("click", () => {
+  setGameEventRailCollapsed(!gameEventRailCollapsed);
+});
 $("mute-toggle").addEventListener("click", toggleMute);
 $("rate-select").addEventListener("change", () => {
   video.playbackRate = Number($("rate-select").value);

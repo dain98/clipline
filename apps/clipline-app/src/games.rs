@@ -26,10 +26,7 @@ pub struct DetectedGame {
 }
 
 pub fn game_plugin_catalog() -> Vec<GamePluginInfo> {
-    game_plugins::all()
-        .iter()
-        .map(|plugin| plugin.info())
-        .collect()
+    game_plugins::catalog().to_vec()
 }
 
 pub fn list_game_windows() -> Vec<GameWindowInfo> {
@@ -94,7 +91,7 @@ pub fn built_in_game_still_configured(settings: &GameSettings, id: &str) -> bool
     settings.auto_detect
         && game_plugins::all()
             .iter()
-            .find(|plugin| plugin.id == id)
+            .find(|plugin| plugin.id() == id)
             .is_some_and(|plugin| plugin.settings(settings).enabled)
 }
 
@@ -107,15 +104,15 @@ fn detect_built_in_game_from_windows(
         if !plugin_settings.enabled {
             continue;
         }
-        if let Some(window) = (plugin.match_window)(windows) {
+        if let Some(window) = plugin.match_window(windows) {
             // Opportunistically cache the icon for plugins that ship none —
             // a no-op for League (bundled) and once a cache exists.
             if let Some(path) = window.exe_path.as_deref() {
-                game_plugins::ensure_plugin_icon_cached(plugin.id, path);
+                game_plugins::ensure_plugin_icon_cached(plugin.id(), path);
             }
             return Some(DetectedGame {
-                id: plugin.id.into(),
-                name: plugin.name.into(),
+                id: plugin.id().into(),
+                name: plugin.manifest.name.clone(),
                 hwnd: window.handle,
                 window_title: window.title.clone(),
                 process_id: window.process_id,

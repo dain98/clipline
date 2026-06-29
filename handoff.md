@@ -11,9 +11,9 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-27): a working tray recorder with a first-party review player
+## Current state (2026-06-28): a working tray recorder with a first-party review player
 
-Thirty-two milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
+Thirty-three milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -277,6 +277,29 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      split into a testable `delete_clips_impl` (no `tauri::State`) so the partial-success +
      sidecar/poster cleanup behavior is covered by a unit test; `tests/ui_contract.rs` gains
      `gallery_supports_multi_select_bulk_actions`.
+33. **First-party supported game presentation** — the installable plugin direction was replaced
+     with built-in supported game profiles. League remains the first profile, with declarative
+     presentation data for marker styling, gallery cards, a playback-synced, pull-tab-collapsible
+     right-side event rail, and a bottom metadata strip. Event ingestion stays core-owned behind
+     the built-in `league_live_client` capability; game integration updates ship with normal
+     Clipline releases instead of external plugin zips or Settings-driven package installs.
+     `EventKind`, `GameId`, and `is_timeline_marker()` remain core-owned: profiles style the closed
+     marker vocabulary but cannot add event kinds or change persistence policy. The review player
+     threads presentation into pure `player-core.js` marker helpers and `main.js` renders
+     profile-driven gallery summaries, marker styling, the event rail, and metadata. League's Live
+     Client summary keeps optional participant/team roster data so the event rail can render
+     kill-feed-style actor/victim champion portraits from Data Dragon, actor/objective rows for
+     turret/dragon/baron events, blue/red row treatment, restored first-party timeline marker
+     icons, and a separate event-rail icon map using first-party kill/death silhouettes plus
+     CommunityDragon objective icons. Gallery cards use the profile `gallery.card` policy for title
+     and icon behavior; League keeps full-session cards titled by K/D/A plus CS/min when fresh
+     sidecars have creep-score data, while replacing the generic League logo with the local
+     champion portrait. League's metadata strip resolves the local champion portrait through the
+     Riot Data Dragon champion-square provider, renders summoner spells beside the portrait, shows
+     value-first K/D/A plus ratio, and appends a compact item-build row from fresh Live Client
+     sidecar data; older clips fall back to whatever summary fields they already have. Settings >
+     Games remains backend-driven for supported game rows but no longer exposes check/update/
+     reinstall/reset package actions.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -645,16 +668,21 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
    already carry importance.
-2. **Frame-accurate trim polish** (ddoc §11): re-encode only boundary GOPs, keep the current
+2. **Next supported game investigation:** CS2 is the cleanest candidate because Valve Game State
+   Integration is official and maps naturally to Clipline's event rail. Apex LiveAPI is promising
+   after a local normal-match smoke test. TFT likely needs OCR/synthetic round markers plus Riot
+   postgame data. Valorant/Fortnite should wait until there is a safe official data source worth
+   integrating.
+3. **Frame-accurate trim polish** (ddoc §11): re-encode only boundary GOPs, keep the current
    stream-copy path as the instant/lossless mode.
-3. **In-app HEVC/AV1 playback** (ddoc §11): the encoder matrix (milestone 23) can record HEVC/AV1,
+4. **In-app HEVC/AV1 playback** (ddoc §11): the encoder matrix (milestone 23) can record HEVC/AV1,
    but WebView2 can't decode them without OS extensions — Automatic avoids them and explicit picks
    warn. A native FFmpeg decode path feeding frames to the review player would close that gap.
    Smaller follow-ups from milestone 23: wire the Microsoft software H.264 MFT (the only
    software H.264 under LGPL), bundle the lgpl-shared ffmpeg into the installer, and revisit
    NVENC/QSV arg tuning (only AMF + SVT-AV1 were verified live on this RDNA2 box).
-4. **Dynamic audio-session tracking** (ddoc §10): process audio is split at recorder start; new app sessions that appear mid-recording and multi-process grouping remain next.
-5. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
+5. **Dynamic audio-session tracking** (ddoc §10): process audio is split at recorder start; new app sessions that appear mid-recording and multi-process grouping remain next.
+6. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
    guidance (§8), WebView2-destroyed-when-minimized RAM trick (§4), installer/signing (§4).
 
 Also worth knowing: the default `Videos\Clipline` folder on this machine holds test clips from the milestone

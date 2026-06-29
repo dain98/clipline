@@ -501,6 +501,35 @@ fn marker_navigation_skips_nearby_and_wraps() {
 }
 
 #[test]
+fn game_event_active_index_honors_clicked_event_during_lead_in() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        "const M = [{ t_s: 72 }, { t_s: 140 }, { t_s: 161 }];",
+    ))
+    .expect("define markers");
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 158)"),
+        "1"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 158, 2)"),
+        "2"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 161.2, 2)"),
+        "2"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.gameEventActiveIndex(M, 158, 99)"),
+        "1"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.gameEventActiveIndex([], 158, 2)"),
+        "-1"
+    );
+}
+
+#[test]
 fn marker_count_pluralizes() {
     let mut ctx = player_core_context();
     assert_eq!(eval(&mut ctx, "PlayerCore.markerSummary([])"), "no markers");
@@ -928,6 +957,40 @@ fn marker_styles_map_kinds_to_categories() {
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.markerStyle('SomethingNew')"),
         r#"{"glyph":"•","cls":"info"}"#
+    );
+}
+
+#[test]
+fn marker_styles_accept_injected_plugin_presentation() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"const P = {
+          marker_kinds: {
+            ChampionKill: { category: 'hero', glyph: '!' },
+            DragonKill: { category: 'objective' }
+          },
+          marker_categories: {
+            hero: { singular: 'hero play', plural: 'hero plays', glyph: '!' },
+            objective: { singular: 'map objective', plural: 'map objectives', glyph: '◆' }
+          }
+        };"#,
+    ))
+    .expect("define presentation");
+
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('ChampionKill', P)"),
+        r#"{"glyph":"!","cls":"hero"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('SomethingNew', P)"),
+        r#"{"glyph":"•","cls":"info"}"#
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.markerDigest([{ kind: 'ChampionKill' }, { kind: 'ChampionKill' }, { kind: 'DragonKill' }], P)"
+        ),
+        "2 hero plays · 1 map objective"
     );
 }
 
@@ -1369,6 +1432,434 @@ fn player_summary_label_formats_champion_kda() {
             "PlayerCore.playerSummaryLabel({ champion_name: '   ', kills: 1, deaths: 2, assists: 3 })"
         ),
         ""
+    );
+}
+
+#[test]
+fn player_summary_fields_format_declarative_metadata() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const SUMMARY = { champion_name: 'Nautilus', kills: 3, deaths: 4, assists: 23 };
+        const FIELDS = [
+          {
+            type: 'portrait',
+            source: 'player_summary.champion_name',
+            label: 'Champion',
+            asset_template: 'assets/champions/{assetKey}.png'
+          },
+          { type: 'champion', source: 'player_summary.champion_name', label: 'Champion' },
+          { type: 'kda', label: 'K/D/A' },
+          { type: 'stat', source: 'player_summary.kills', label: 'Kills' },
+          { type: 'stat', source: 'player_summary.creep_score', label: 'CS' }
+        ];
+        "#,
+    ))
+    .expect("define summary fields");
+
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.playerSummaryFields(SUMMARY, FIELDS)"),
+        r#"[{"type":"portrait","label":"Champion","value":"Nautilus","assetKey":"nautilus","asset":"assets/champions/nautilus.png"},{"type":"champion","label":"Champion","value":"Nautilus"},{"type":"kda","label":"K/D/A","value":"3/4/23"},{"type":"stat","label":"Kills","value":"3"}]"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.playerSummaryFields(null, FIELDS)"),
+        "[]"
+    );
+}
+
+#[test]
+fn player_summary_fields_resolve_data_dragon_portraits() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const FIELDS = [{
+          type: 'portrait',
+          source: 'player_summary.champion_name',
+          label: 'Champion',
+          asset_provider: 'riot_data_dragon_champion_square',
+          asset_key_format: 'data_dragon_champion',
+          asset_aliases: { wukong: 'MonkeyKing' }
+        }];
+        const OPTIONS = { data_dragon: { version: '16.13.1' } };
+        "#,
+    ))
+    .expect("define data dragon fields");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.playerSummaryFields({ champion_name: 'Nautilus', kills: 3, deaths: 4, assists: 23 }, FIELDS, OPTIONS)"
+        ),
+        r#"[{"type":"portrait","label":"Champion","value":"Nautilus","assetKey":"Nautilus","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Nautilus.png"}]"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.playerSummaryFields({ champion_name: 'Wukong', kills: 1, deaths: 0, assists: 2 }, FIELDS, OPTIONS)"
+        ),
+        r#"[{"type":"portrait","label":"Champion","value":"Wukong","assetKey":"MonkeyKing","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/MonkeyKing.png"}]"#
+    );
+}
+
+#[test]
+fn player_summary_fields_format_rich_league_metadata() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const SUMMARY = {
+          champion_name: "Vel'Koz",
+          kills: 11,
+          deaths: 19,
+          assists: 34,
+          summoner_spells: [
+            { name: 'Ignite', asset_key: 'SummonerDot' },
+            { name: 'Flash', asset_key: 'SummonerFlash' }
+          ],
+          items: [
+            { id: 1056, name: "Doran's Ring" },
+            { id: 3020, name: "Sorcerer's Shoes" },
+            { id: 6655, name: "Luden's Companion" },
+            { id: 3089, name: "Rabadon's Deathcap" }
+          ]
+        };
+        const FIELDS = [
+          {
+            type: 'summoner_spells',
+            source: 'player_summary.summoner_spells',
+            label: 'Summoner spells',
+            asset_provider: 'riot_data_dragon_summoner_spell'
+          },
+          { type: 'kda', secondary: 'kda_ratio' },
+          {
+            type: 'item_build',
+            source: 'player_summary.items',
+            label: 'Build',
+            asset_provider: 'riot_data_dragon_item'
+          }
+        ];
+        const OPTIONS = { data_dragon: { version: '16.13.1' } };
+        "#,
+    ))
+    .expect("define rich summary fields");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.playerSummaryFields(SUMMARY, FIELDS, OPTIONS)"
+        ),
+        r#"[{"type":"summoner_spells","label":"Summoner spells","items":[{"value":"Ignite","assetKey":"SummonerDot","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/spell/SummonerDot.png"},{"value":"Flash","assetKey":"SummonerFlash","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/spell/SummonerFlash.png"}]},{"type":"kda","label":"","value":"11/19/34","secondary":"2.37 KDA"},{"type":"item_build","label":"Build","items":[{"value":"Doran's Ring","assetKey":"1056","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/item/1056.png"},{"value":"Sorcerer's Shoes","assetKey":"3020","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/item/3020.png"},{"value":"Luden's Companion","assetKey":"6655","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/item/6655.png"},{"value":"Rabadon's Deathcap","assetKey":"3089","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/item/3089.png"}]}]"#
+    );
+}
+
+#[test]
+fn gallery_card_preview_uses_declarative_title_and_icon() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const CARD_CLIP = {
+          markers: {
+            player_summary: {
+              champion_name: "Vel'Koz",
+              kills: 11,
+              deaths: 19,
+              assists: 34,
+              creep_score: 204,
+              game_time_s: 1800
+            }
+          }
+        };
+        const CARD_PRESENTATION = {
+          data_dragon: { version: '16.13.1' },
+          gallery: {
+            summary: 'player_summary_kda',
+            card: {
+              title: 'summary_for_full_session',
+              title_format: {
+                type: 'player_summary_stats',
+                separator: ' | ',
+                stats: [
+                  { type: 'kda' },
+                  { type: 'cs_per_min', label: 'CS/min' }
+                ]
+              },
+              icon: {
+                type: 'portrait',
+                source: 'player_summary.champion_name',
+                label: 'Champion',
+                asset_provider: 'riot_data_dragon_champion_square',
+                asset_key_format: 'data_dragon_champion',
+                asset_aliases: { "vel'koz": 'Velkoz' }
+              }
+            }
+          }
+        };
+        "#,
+    ))
+    .expect("define gallery card preview");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.galleryCardPreview(CARD_CLIP, 'session', 'Jun 28 · 12:15 PM', CARD_PRESENTATION, { data_dragon: CARD_PRESENTATION.data_dragon })"
+        ),
+        r#"{"title":"11/19/34 | 6.8 CS/min","titleSource":"summary","summary":"Vel'Koz | 11/19/34","icon":{"type":"portrait","url":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Velkoz.png","label":"Vel'Koz"}}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.galleryCardPreview(CARD_CLIP, 'replay', 'Jun 28 · 12:15 PM', CARD_PRESENTATION, { data_dragon: CARD_PRESENTATION.data_dragon })"
+        ),
+        r#"{"title":"Jun 28 · 12:15 PM","titleSource":"clip","summary":"Vel'Koz | 11/19/34","icon":{"type":"portrait","url":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Velkoz.png","label":"Vel'Koz"}}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.galleryCardPreview({ markers: { player_summary: { champion_name: \"Vel'Koz\", kills: 11, deaths: 19, assists: 34 } } }, 'session', 'Jun 28 · 12:15 PM', CARD_PRESENTATION, { data_dragon: CARD_PRESENTATION.data_dragon })"
+        ),
+        r#"{"title":"11/19/34","titleSource":"summary","summary":"Vel'Koz | 11/19/34","icon":{"type":"portrait","url":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Velkoz.png","label":"Vel'Koz"}}"#
+    );
+}
+
+#[test]
+fn gallery_card_preview_accepts_plugin_asset_icons() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const ASSET_PRESENTATION = {
+          gallery: {
+            card: {
+              title: 'clip',
+              icon: {
+                type: 'asset',
+                src: 'data:image/png;base64,plugin-logo',
+                label: 'Arena logo'
+              }
+            }
+          }
+        };
+        "#,
+    ))
+    .expect("define gallery card asset icon");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.galleryCardPreview({ name: 'Named clip', markers: {} }, 'trim', 'Custom title', ASSET_PRESENTATION)"
+        ),
+        r#"{"title":"Named clip","titleSource":"clip","summary":"","icon":{"type":"asset","url":"data:image/png;base64,plugin-logo","label":"Arena logo"}}"#
+    );
+}
+
+#[test]
+fn game_event_rail_item_formats_duel_with_data_dragon_portraits() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const RAIL_SUMMARY = {
+          player_name: 'dain',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'dain', champion_name: 'Nautilus', team: 'ORDER' },
+            { player_name: 'Soupmaster', champion_name: 'Ahri', team: 'CHAOS' }
+          ]
+        };
+        const RAIL_PRESENTATION = {
+          marker_kinds: {
+            ChampionKill: {
+              category: 'kill',
+              icon: 'data:image/png;base64,kill-icon',
+              rail: { layout: 'duel', allegiance: 'friendly' }
+            }
+          }
+        };
+        const RAIL_OPTIONS = { data_dragon: { version: '16.13.1' } };
+        "#,
+    ))
+    .expect("define rail inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'ChampionKill', actor: 'dain', victim: 'Soupmaster', t_s: 162 }, RAIL_SUMMARY, RAIL_PRESENTATION, RAIL_OPTIONS)"
+        ),
+        r#"{"layout":"duel","kind":"ChampionKill","category":"kill","allegiance":"friendly","label":"Champion Kill","text":"Champion Kill · dain","icon":"data:image/png;base64,kill-icon","actor":{"name":"dain","champion":"Nautilus","team":"ORDER","assetKey":"Nautilus","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Nautilus.png","initials":"DA","local":true},"victim":{"name":"Soupmaster","champion":"Ahri","team":"CHAOS","assetKey":"Ahri","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Ahri.png","initials":"SO","local":false}}"#
+    );
+}
+
+#[test]
+fn game_event_rail_item_marks_deaths_enemy() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const DEATH_SUMMARY = {
+          player_name: 'dain',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'dain', champion_name: 'Nautilus', team: 'ORDER' },
+            { player_name: 'Kcrystal', champion_name: 'Zed', team: 'CHAOS' }
+          ]
+        };
+        const DEATH_PRESENTATION = {
+          marker_kinds: {
+            ChampionDeath: {
+              category: 'death',
+              icon: 'data:image/png;base64,death-icon',
+              rail: { layout: 'duel', allegiance: 'enemy' }
+            }
+          }
+        };
+        const DEATH_OPTIONS = { data_dragon: { version: '16.13.1' } };
+        "#,
+    ))
+    .expect("define death rail inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'ChampionDeath', actor: 'Kcrystal', victim: 'dain', t_s: 160 }, DEATH_SUMMARY, DEATH_PRESENTATION, DEATH_OPTIONS)"
+        ),
+        r#"{"layout":"duel","kind":"ChampionDeath","category":"death","allegiance":"enemy","label":"Champion Death","text":"Champion Death · Kcrystal","icon":"data:image/png;base64,death-icon","actor":{"name":"Kcrystal","champion":"Zed","team":"CHAOS","assetKey":"Zed","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Zed.png","initials":"KC","local":false},"victim":{"name":"dain","champion":"Nautilus","team":"ORDER","assetKey":"Nautilus","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Nautilus.png","initials":"DA","local":true}}"#
+    );
+}
+
+#[test]
+fn game_event_rail_item_prefers_event_rail_icons_over_timeline_marker_icons() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const RAIL_ICON_SUMMARY = {
+          player_name: 'dain',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'dain', champion_name: 'Nautilus', team: 'ORDER' },
+            { player_name: 'Kcrystal', champion_name: 'Zed', team: 'CHAOS' }
+          ]
+        };
+        const RAIL_ICON_PRESENTATION = {
+          marker_kinds: {
+            ChampionDeath: {
+              category: 'death',
+              icon: 'data:image/png;base64,timeline-death',
+              rail: { layout: 'duel', allegiance: 'enemy' }
+            }
+          },
+          event_rail: {
+            icons: {
+              ChampionDeath: 'data:image/png;base64,rail-death'
+            }
+          }
+        };
+        "#,
+    ))
+    .expect("define event rail icon inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'ChampionDeath', actor: 'Kcrystal', victim: 'dain', t_s: 160 }, RAIL_ICON_SUMMARY, RAIL_ICON_PRESENTATION, {})"
+        ),
+        r#"{"layout":"duel","kind":"ChampionDeath","category":"death","allegiance":"enemy","label":"Champion Death","text":"Champion Death · Kcrystal","icon":"data:image/png;base64,rail-death","actor":{"name":"Kcrystal","champion":"Zed","team":"CHAOS","assetKey":"Zed","initials":"KC","local":false},"victim":{"name":"dain","champion":"Nautilus","team":"ORDER","assetKey":"Nautilus","initials":"DA","local":true}}"#
+    );
+}
+
+#[test]
+fn game_event_rail_item_uses_manifest_rail_layout_and_allegiance() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const CUSTOM_RAIL_SUMMARY = {
+          player_name: 'dain',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'dain', champion_name: 'Nautilus', team: 'ORDER' },
+            { player_name: 'Kcrystal', champion_name: 'Zed', team: 'CHAOS' }
+          ]
+        };
+        const CUSTOM_RAIL_PRESENTATION = {
+          marker_kinds: {
+            CustomElimination: {
+              category: 'kill',
+              icon: 'data:image/png;base64,custom-icon',
+              rail: {
+                layout: 'duel',
+                allegiance: 'actor_team'
+              }
+            }
+          }
+        };
+        "#,
+    ))
+    .expect("define custom rail inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'CustomElimination', actor: 'Kcrystal', victim: 'dain', t_s: 160 }, CUSTOM_RAIL_SUMMARY, CUSTOM_RAIL_PRESENTATION, {})"
+        ),
+        r#"{"layout":"duel","kind":"CustomElimination","category":"kill","allegiance":"enemy","label":"Custom Elimination","text":"Custom Elimination · Kcrystal","icon":"data:image/png;base64,custom-icon","actor":{"name":"Kcrystal","champion":"Zed","team":"CHAOS","assetKey":"Zed","initials":"KC","local":false},"victim":{"name":"dain","champion":"Nautilus","team":"ORDER","assetKey":"Nautilus","initials":"DA","local":true}}"#
+    );
+}
+
+#[test]
+fn game_event_rail_item_formats_actor_objectives_with_portrait_and_icon() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const OBJECTIVE_SUMMARY = {
+          player_name: 'dain',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'dain', champion_name: 'Nautilus', team: 'ORDER' },
+            { player_name: 'Jinmee', champion_name: 'Ezreal', team: 'ORDER' }
+          ]
+        };
+        const OBJECTIVE_PRESENTATION = {
+          marker_kinds: {
+            TurretKilled: {
+              category: 'structure',
+              icon: 'data:image/png;base64,turret-icon',
+              rail: { layout: 'actor_event', allegiance: 'actor_team' }
+            }
+          }
+        };
+        const OBJECTIVE_OPTIONS = { data_dragon: { version: '16.13.1' } };
+        "#,
+    ))
+    .expect("define objective rail inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'TurretKilled', actor: 'Jinmee', t_s: 445 }, OBJECTIVE_SUMMARY, OBJECTIVE_PRESENTATION, OBJECTIVE_OPTIONS)"
+        ),
+        r#"{"layout":"actor_event","kind":"TurretKilled","category":"structure","allegiance":"friendly","label":"Turret Killed","text":"Turret Killed · Jinmee","icon":"data:image/png;base64,turret-icon","actor":{"name":"Jinmee","champion":"Ezreal","team":"ORDER","assetKey":"Ezreal","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Ezreal.png","initials":"JI","local":false}}"#
+    );
+}
+
+#[test]
+fn game_event_rail_item_falls_back_without_participants() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const FALLBACK_PRESENTATION = {
+          marker_kinds: {
+            ChampionKill: {
+              category: 'kill',
+              icon: 'data:image/png;base64,kill-icon',
+              rail: { layout: 'duel', allegiance: 'friendly' }
+            }
+          }
+        };
+        "#,
+    ))
+    .expect("define fallback rail inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'ChampionKill', actor: 'dain', victim: 'Soupmaster', t_s: 162 }, null, FALLBACK_PRESENTATION, {})"
+        ),
+        r#"{"layout":"text","kind":"ChampionKill","category":"kill","allegiance":"friendly","label":"Champion Kill","text":"Champion Kill · dain","icon":"data:image/png;base64,kill-icon"}"#
     );
 }
 
