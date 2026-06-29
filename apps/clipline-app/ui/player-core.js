@@ -657,11 +657,18 @@ const PlayerCore = (() => {
     if (!summary) return "";
     const champion = String(summary.champion_name || "").trim();
     if (!champion) return "";
+    const kda = playerSummaryKda(summary);
+    if (!kda) return "";
+    return `${champion} | ${kda}`;
+  };
+
+  const playerSummaryKda = (summary) => {
+    if (!summary) return "";
     const stat = (value) => {
       const n = Number(value);
       return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
     };
-    return `${champion} | ${stat(summary.kills)}/${stat(summary.deaths)}/${stat(summary.assists)}`;
+    return `${stat(summary.kills)}/${stat(summary.deaths)}/${stat(summary.assists)}`;
   };
 
   const summaryStat = (value) => {
@@ -786,6 +793,40 @@ const PlayerCore = (() => {
     return null;
   };
 
+  const playerSummaryCsPerMin = (summary, label = "CS/min") => {
+    if (!summary) return "";
+    const creepScore = Number(summary.creep_score);
+    const gameTimeS = Number(summary.game_time_s);
+    if (!Number.isFinite(creepScore) || creepScore < 0) return "";
+    if (!Number.isFinite(gameTimeS) || gameTimeS <= 0) return "";
+    const value = creepScore / (gameTimeS / 60);
+    if (!Number.isFinite(value)) return "";
+    const suffix = String(label || "CS/min").trim() || "CS/min";
+    return `${value.toFixed(1)} ${suffix}`;
+  };
+
+  const playerSummaryStatsLabel = (summary, formatConfig) => {
+    if (!summary || !formatConfig || typeof formatConfig !== "object") return "";
+    if (formatConfig.type !== "player_summary_stats") return "";
+    const stats = Array.isArray(formatConfig.stats) ? formatConfig.stats : [];
+    const parts = [];
+    for (const statConfig of stats) {
+      if (!statConfig || typeof statConfig !== "object") continue;
+      const type = String(statConfig.type || "").trim();
+      if (type === "kda") {
+        const kda = playerSummaryKda(summary);
+        if (kda) parts.push(kda);
+      } else if (type === "cs_per_min") {
+        const csPerMin = playerSummaryCsPerMin(summary, statConfig.label);
+        if (csPerMin) parts.push(csPerMin);
+      }
+    }
+    const separator = typeof formatConfig.separator === "string" && formatConfig.separator
+      ? formatConfig.separator
+      : " | ";
+    return parts.join(separator);
+  };
+
   const galleryCardPreview = (clip, kind = "", fallbackTitle = "", presentation = null, options = {}) => {
     const gallery = presentation && presentation.gallery && typeof presentation.gallery === "object"
       ? presentation.gallery
@@ -794,17 +835,18 @@ const PlayerCore = (() => {
     const markers = clip && clip.markers && typeof clip.markers === "object" ? clip.markers : {};
     const summary = markers.player_summary || null;
     const summaryLabel = gallery.summary === "player_summary_kda" ? playerSummaryLabel(summary) : "";
+    const cardSummaryLabel = playerSummaryStatsLabel(summary, card.title_format) || summaryLabel;
     const fallback = String(fallbackTitle || "").trim();
     const clipName = clip && typeof clip.name === "string" ? clip.name.trim() : "";
     const legacyTitlePolicy = gallery.full_session_title === "summary" ? "summary_for_full_session" : "clip";
     const titlePolicy = typeof card.title === "string" && card.title.trim()
       ? card.title.trim()
       : legacyTitlePolicy;
-    const usesSummaryTitle = summaryLabel
+    const usesSummaryTitle = cardSummaryLabel
       && (titlePolicy === "summary" || (titlePolicy === "summary_for_full_session" && kind === "session"));
     const clipTitle = titlePolicy === "clip" && clipName ? clipName : fallback;
     const out = {
-      title: usesSummaryTitle ? summaryLabel : clipTitle,
+      title: usesSummaryTitle ? cardSummaryLabel : clipTitle,
       titleSource: usesSummaryTitle ? "summary" : "clip",
       summary: summaryLabel,
     };

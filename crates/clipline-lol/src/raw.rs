@@ -69,6 +69,8 @@ pub struct PlayerScores {
     pub deaths: u32,
     #[serde(default)]
     pub assists: u32,
+    #[serde(rename = "creepScore", default)]
+    pub creep_score: Option<u32>,
 }
 
 #[cfg(test)]
@@ -130,7 +132,7 @@ mod tests {
             "riotId": "Dain#NA1",
             "championName": "Nautilus",
             "team": "ORDER",
-            "scores": { "kills": 3, "deaths": 4, "assists": 23 }
+            "scores": { "kills": 3, "deaths": 4, "assists": 23, "creepScore": 187 }
           }
         ]"#;
         let players: Vec<PlayerListEntry> = serde_json::from_str(json).unwrap();
@@ -141,5 +143,6 @@ mod tests {
         assert_eq!(players[0].scores.kills, 3);
         assert_eq!(players[0].scores.deaths, 4);
         assert_eq!(players[0].scores.assists, 23);
+        assert_eq!(players[0].scores.creep_score, Some(187));
     }
 }

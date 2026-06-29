@@ -1512,7 +1512,9 @@ fn gallery_card_preview_uses_declarative_title_and_icon() {
               champion_name: "Vel'Koz",
               kills: 11,
               deaths: 19,
-              assists: 34
+              assists: 34,
+              creep_score: 204,
+              game_time_s: 1800
             }
           }
         };
@@ -1522,6 +1524,14 @@ fn gallery_card_preview_uses_declarative_title_and_icon() {
             summary: 'player_summary_kda',
             card: {
               title: 'summary_for_full_session',
+              title_format: {
+                type: 'player_summary_stats',
+                separator: ' | ',
+                stats: [
+                  { type: 'kda' },
+                  { type: 'cs_per_min', label: 'CS/min' }
+                ]
+              },
               icon: {
                 type: 'portrait',
                 source: 'player_summary.champion_name',
@@ -1542,7 +1552,7 @@ fn gallery_card_preview_uses_declarative_title_and_icon() {
             &mut ctx,
             "PlayerCore.galleryCardPreview(CARD_CLIP, 'session', 'Jun 28 · 12:15 PM', CARD_PRESENTATION, { data_dragon: CARD_PRESENTATION.data_dragon })"
         ),
-        r#"{"title":"Vel'Koz | 11/19/34","titleSource":"summary","summary":"Vel'Koz | 11/19/34","icon":{"type":"portrait","url":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Velkoz.png","label":"Vel'Koz"}}"#
+        r#"{"title":"11/19/34 | 6.8 CS/min","titleSource":"summary","summary":"Vel'Koz | 11/19/34","icon":{"type":"portrait","url":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Velkoz.png","label":"Vel'Koz"}}"#
     );
     assert_eq!(
         eval_json(
@@ -1550,6 +1560,13 @@ fn gallery_card_preview_uses_declarative_title_and_icon() {
             "PlayerCore.galleryCardPreview(CARD_CLIP, 'replay', 'Jun 28 · 12:15 PM', CARD_PRESENTATION, { data_dragon: CARD_PRESENTATION.data_dragon })"
         ),
         r#"{"title":"Jun 28 · 12:15 PM","titleSource":"clip","summary":"Vel'Koz | 11/19/34","icon":{"type":"portrait","url":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Velkoz.png","label":"Vel'Koz"}}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.galleryCardPreview({ markers: { player_summary: { champion_name: \"Vel'Koz\", kills: 11, deaths: 19, assists: 34 } } }, 'session', 'Jun 28 · 12:15 PM', CARD_PRESENTATION, { data_dragon: CARD_PRESENTATION.data_dragon })"
+        ),
+        r#"{"title":"11/19/34","titleSource":"summary","summary":"Vel'Koz | 11/19/34","icon":{"type":"portrait","url":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Velkoz.png","label":"Vel'Koz"}}"#
     );
 }
 

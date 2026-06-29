@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "package_version": "1.2.6",
+  "package_version": "1.2.7",
   "id": "league_of_legends",
   "name": "League of Legends",
   "summary": "Auto-records full matches when the in-game window is active.",
@@ -78,6 +78,14 @@
       "full_session_title": "summary",
       "card": {
         "title": "summary_for_full_session",
+        "title_format": {
+          "type": "player_summary_stats",
+          "separator": " | ",
+          "stats": [
+            { "type": "kda" },
+            { "type": "cs_per_min", "label": "CS/min" }
+          ]
+        },
         "icon": {
           "type": "portrait",
           "source": "player_summary.champion_name",

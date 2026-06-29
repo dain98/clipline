@@ -38,6 +38,10 @@ pub struct PlayerSummary {
     pub kills: u32,
     pub deaths: u32,
     pub assists: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creep_score: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_time_s: Option<u32>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub player_name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -186,6 +190,8 @@ mod tests {
             kills: 3,
             deaths: 4,
             assists: 23,
+            creep_score: Some(187),
+            game_time_s: Some(1800),
             player_name: String::new(),
             team: String::new(),
             participants: Vec::new(),
@@ -206,9 +212,11 @@ mod tests {
                 summary.champion_name.as_str(),
                 summary.kills,
                 summary.deaths,
-                summary.assists
+                summary.assists,
+                summary.creep_score,
+                summary.game_time_s
             )),
-            Some(("Nautilus", 3, 4, 23))
+            Some(("Nautilus", 3, 4, 23, Some(187), Some(1800)))
         );
     }
 
@@ -238,6 +246,8 @@ mod tests {
 
         assert_eq!(summary.champion_name, "Nautilus");
         assert_eq!((summary.kills, summary.deaths, summary.assists), (3, 4, 23));
+        assert_eq!(summary.creep_score, None);
+        assert_eq!(summary.game_time_s, None);
         assert!(summary.player_name.is_empty());
         assert!(summary.team.is_empty());
         assert!(summary.participants.is_empty());

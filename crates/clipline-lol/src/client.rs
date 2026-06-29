@@ -74,7 +74,12 @@ impl LiveClient {
 
     pub async fn player_summary(&self, local_player: &str) -> Result<Option<PlayerSummary>, Error> {
         let players = self.player_list().await?;
-        Ok(player_summary_from_list(&players, local_player))
+        let game_time_s = self.game_time_s().await.ok();
+        Ok(player_summary_from_list_with_game_time(
+            &players,
+            local_player,
+            game_time_s,
+        ))
     }
 
     /// Current game clock in seconds, from `gamestats.gameTime` (ddoc §5).
@@ -123,6 +128,22 @@ pub fn player_summary_from_list(
     players: &[PlayerListEntry],
     local_player: &str,
 ) -> Option<PlayerSummary> {
+    player_summary_from_list_with_game_time(players, local_player, None)
+}
+
+fn normalized_game_time_s(game_time_s: Option<f64>) -> Option<u32> {
+    let seconds = game_time_s?;
+    if !seconds.is_finite() || seconds < 0.0 || seconds > u32::MAX as f64 {
+        return None;
+    }
+    Some(seconds.floor() as u32)
+}
+
+pub fn player_summary_from_list_with_game_time(
+    players: &[PlayerListEntry],
+    local_player: &str,
+    game_time_s: Option<f64>,
+) -> Option<PlayerSummary> {
     let local_key = player_name_key(local_player);
     if local_key.is_empty() {
         return None;
@@ -159,6 +180,8 @@ pub fn player_summary_from_list(
         kills: player.scores.kills,
         deaths: player.scores.deaths,
         assists: player.scores.assists,
+        creep_score: player.scores.creep_score,
+        game_time_s: normalized_game_time_s(game_time_s),
         player_name: player.summoner_name.trim().to_string(),
         team: player.team.trim().to_string(),
         participants,
@@ -213,6 +236,7 @@ mod tests {
                 kills,
                 deaths,
                 assists,
+                creep_score: None,
             },
         }
     }
@@ -244,22 +268,25 @@ mod tests {
                 "riotId": "Dain#NA1",
                 "championName": "Nautilus",
                 "team": "ORDER",
-                "scores": { "kills": 3, "deaths": 4, "assists": 23 }
+                "scores": { "kills": 3, "deaths": 4, "assists": 23, "creepScore": 187 }
               },
               {
                 "summonerName": "Soupmaster",
                 "riotId": "Soup#NA1",
                 "championName": "Ahri",
                 "team": "CHAOS",
-                "scores": { "kills": 7, "deaths": 2, "assists": 4 }
+                "scores": { "kills": 7, "deaths": 2, "assists": 4, "creepScore": 120 }
               }
             ]"#,
         )
         .unwrap();
 
-        let summary = player_summary_from_list(&players, "dain#NA1").unwrap();
+        let summary = player_summary_from_list_with_game_time(&players, "dain#NA1", Some(1800.4))
+            .unwrap();
 
         assert_eq!(summary.player_name, "dain");
+        assert_eq!(summary.creep_score, Some(187));
+        assert_eq!(summary.game_time_s, Some(1800));
         assert_eq!(summary.team, "ORDER");
         assert_eq!(summary.participants.len(), 2);
         assert_eq!(summary.participants[0].player_name, "dain");

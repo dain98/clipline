@@ -296,14 +296,15 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      events, blue/red row treatment, restored first-party timeline marker icons, and a separate
      event-rail icon map using first-party kill/death silhouettes plus CommunityDragon objective icons.
      Gallery cards now also have a declarative `gallery.card` policy for plugin-controlled title
-     and icon behavior; League uses this to keep full-session cards titled by champion K/D/A while
-     replacing the generic League logo with the local champion portrait. League's metadata strip
+     and icon behavior; League uses this to keep full-session cards titled by K/D/A plus CS/min
+     when fresh sidecars have creep-score data, while replacing the generic League logo with the
+     local champion portrait. League's metadata strip
      resolves the local champion portrait through the Riot Data
      Dragon champion-square provider plus champion + K/D/A from the sidecar summary; richer stats
      such as CS/min require additive summary data later.
      Settings > Games shows backend-driven first-party package actions (check/update/reinstall/
      reset-to-seed). League now also has the separate public
-     `clipline-plugin-league-of-legends` repository with a v1.3.5 package zip; Clipline pins that
+     `clipline-plugin-league-of-legends` repository with a v1.3.6 package zip; Clipline pins that
      release URL and SHA-256 digest before activating the staged zip installer. Reset remains
      reset-to-seed, while update/reinstall install only this known first-party package. No arbitrary
      URL/package install is exposed.
@@ -676,7 +677,7 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
    already carry importance.
 2. **Signed plugin metadata:** the external
-   `clipline-plugin-league-of-legends` v1.3.5 zip is published and Clipline pins its digest for
+   `clipline-plugin-league-of-legends` v1.3.6 zip is published and Clipline pins its digest for
    Settings > Games update/reinstall. The remaining hardening step is replacing the app-pinned
    single digest with a pinned signing key plus signed package metadata so future first-party plugin
    releases do not require a Clipline binary update; keep arbitrary URLs out of scope unless the

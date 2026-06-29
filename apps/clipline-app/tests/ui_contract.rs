@@ -588,6 +588,8 @@ fn review_player_owns_all_controls() {
             && main_js().contains("data-game-event-index")
             && player_core_js().contains("gallery.summary === \"player_summary_kda\"")
             && player_core_js().contains("titlePolicy === \"summary_for_full_session\"")
+            && player_core_js().contains("playerSummaryStatsLabel")
+            && player_core_js().contains("type === \"cs_per_min\"")
             && main_js().contains("const cardPreview = clipGalleryCardPreview(c, kind, fallbackTitle)")
             && main_js().contains("cardPreview.titleSource === \"summary\"")
             && main_js().contains("cardPreview.icon")

@@ -465,10 +465,10 @@ pub fn known_first_party_package_release(plugin_id: &str) -> Option<KnownFirstPa
     match plugin_id {
         LEAGUE_OF_LEGENDS_ID => Some(KnownFirstPartyPackageRelease {
             plugin_id: LEAGUE_OF_LEGENDS_ID,
-            version: Version::parse("1.3.5").expect("known League package version is valid"),
+            version: Version::parse("1.3.6").expect("known League package version is valid"),
             source_label: "clipline-plugin-league-of-legends",
-            url: "https://github.com/dain98/clipline-plugin-league-of-legends/releases/download/v1.3.5/clipline-plugin-league-of-legends-1.3.5.zip",
-            sha256: "3eaf6e9b806c4bc7e9c733ba6a8c5b50a12697d390e686391d3b344f12a1bc5f",
+            url: "https://github.com/dain98/clipline-plugin-league-of-legends/releases/download/v1.3.6/clipline-plugin-league-of-legends-1.3.6.zip",
+            sha256: "993c12911540def6ff06a854f11a84141bf0a790e507ab6545fa132a01a4186e",
         }),
         _ => None,
     }
@@ -907,7 +907,7 @@ fn install_state(receipt: &InstalledPluginRecord) -> &'static str {
 
 const LEAGUE_SEED_MANIFEST_JSON: &str = r#"{
   "schema_version": 1,
-  "package_version": "1.2.6",
+  "package_version": "1.2.7",
   "id": "league_of_legends",
   "name": "League of Legends",
   "summary": "Auto-records full matches when the in-game window is active.",
@@ -940,6 +940,14 @@ const LEAGUE_SEED_MANIFEST_JSON: &str = r#"{
       "full_session_title": "summary",
       "card": {
         "title": "summary_for_full_session",
+        "title_format": {
+          "type": "player_summary_stats",
+          "separator": " | ",
+          "stats": [
+            { "type": "kda" },
+            { "type": "cs_per_min", "label": "CS/min" }
+          ]
+        },
         "icon": {
           "type": "portrait",
           "source": "player_summary.champion_name",
@@ -1228,6 +1236,18 @@ mod tests {
         );
         assert_eq!(
             presentation
+                .pointer("/gallery/card/title_format/type")
+                .and_then(serde_json::Value::as_str),
+            Some("player_summary_stats")
+        );
+        assert_eq!(
+            presentation
+                .pointer("/gallery/card/title_format/stats/1/type")
+                .and_then(serde_json::Value::as_str),
+            Some("cs_per_min")
+        );
+        assert_eq!(
+            presentation
                 .pointer("/gallery/card/icon/asset_aliases/vel'koz")
                 .and_then(serde_json::Value::as_str),
             Some("Velkoz")
@@ -1346,8 +1366,8 @@ mod tests {
 
         let info = plugin.info();
 
-        assert_eq!(release.version.to_string(), "1.3.5");
-        assert_eq!(info.latest_version.as_deref(), Some("1.3.5"));
+        assert_eq!(release.version.to_string(), "1.3.6");
+        assert_eq!(info.latest_version.as_deref(), Some("1.3.6"));
         assert_eq!(
             info.latest_source_label.as_deref(),
             Some("clipline-plugin-league-of-legends")

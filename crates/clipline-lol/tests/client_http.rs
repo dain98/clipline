@@ -31,7 +31,7 @@ async fn fetches_and_parses_all_three_endpoints() {
                 "summonerName": "Me",
                 "riotId": "Me#NA1",
                 "championName": "Nautilus",
-                "scores": { "kills": 3, "deaths": 4, "assists": 23 }
+                "scores": { "kills": 3, "deaths": 4, "assists": 23, "creepScore": 187 }
             }
         ]));
     });
@@ -44,6 +44,8 @@ async fn fetches_and_parses_all_three_endpoints() {
     let summary = client.player_summary("Me#NA1").await.unwrap().unwrap();
     assert_eq!(summary.champion_name, "Nautilus");
     assert_eq!((summary.kills, summary.deaths, summary.assists), (3, 4, 23));
+    assert_eq!(summary.creep_score, Some(187));
+    assert_eq!(summary.game_time_s, Some(123));
 }
 
 #[tokio::test]
