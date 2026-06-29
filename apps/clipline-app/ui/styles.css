@@ -2075,7 +2075,7 @@ label span { white-space: nowrap; }
   padding: 7px;
 }
 .game-event-rail ol button.game-event-actor-event {
-  grid-template-columns: 38px minmax(46px, 0.85fr) 30px minmax(0, 1fr);
+  grid-template-columns: 38px minmax(46px, 1fr) minmax(46px, 1fr);
   gap: 6px;
   min-height: 72px;
   padding: 7px;
@@ -2113,15 +2113,6 @@ label span { white-space: nowrap; }
   white-space: nowrap;
   font-size: 12px;
 }
-.game-event-objective-label {
-  min-width: 0;
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .game-event-rail .game-event-participant {
   display: grid;
   justify-items: center;
@@ -2152,19 +2143,28 @@ label span { white-space: nowrap; }
   place-items: center;
   width: 30px;
   height: 30px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(8, 10, 14, 0.42);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--text);
   font-size: 13px;
   overflow: hidden;
 }
 .game-event-rail .game-event-kind-icon img {
   display: block;
-  width: 23px;
-  height: 23px;
+  width: 27px;
+  height: 27px;
   margin: auto;
   object-fit: contain;
+}
+.game-event-rail .game-event-objective-icon {
+  justify-self: center;
+  width: 40px;
+  height: 40px;
+}
+.game-event-rail .game-event-objective-icon img {
+  width: 34px;
+  height: 34px;
 }
 .game-event-rail .game-event-name {
   width: 100%;

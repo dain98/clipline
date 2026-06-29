@@ -2539,15 +2539,13 @@ function renderGameEventRail(clip = currentClip) {
         gameEventPortrait(view.victim),
       );
     } else if (view.layout === "actor_event" && view.actor) {
-      const label = document.createElement("span");
-      label.className = "game-event-objective-label";
-      label.textContent = view.label || view.text || markerEventText(marker, presentation);
+      const icon = gameEventIcon(view, marker, presentation);
+      icon.classList.add("game-event-objective-icon");
       button.classList.add("game-event-actor-event");
       button.append(
         time,
         gameEventPortrait(view.actor),
-        gameEventIcon(view, marker, presentation),
-        label,
+        icon,
       );
     } else {
       const label = document.createElement("span");
