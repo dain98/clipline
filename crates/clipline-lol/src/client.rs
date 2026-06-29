@@ -281,8 +281,8 @@ mod tests {
         )
         .unwrap();
 
-        let summary = player_summary_from_list_with_game_time(&players, "dain#NA1", Some(1800.4))
-            .unwrap();
+        let summary =
+            player_summary_from_list_with_game_time(&players, "dain#NA1", Some(1800.4)).unwrap();
 
         assert_eq!(summary.player_name, "dain");
         assert_eq!(summary.creep_score, Some(187));

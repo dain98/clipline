@@ -447,6 +447,10 @@ pub struct ServiceOptions {
     pub active_game: Option<ActiveGame>,
     /// Root folder for saved media.
     pub media_dir: PathBuf,
+    /// Whether this run should recover leftover `.mp4.recording` files.
+    /// Internal recorder restarts disable this to avoid stealing the previous
+    /// recorder thread's active full-session temp file while it is shutting down.
+    pub recover_abandoned_recordings: bool,
     /// Override the League Live Client endpoint (mock servers).
     pub lol_url: Option<String>,
     /// Save Replay trailing window (s).
@@ -479,6 +483,7 @@ impl Default for ServiceOptions {
             active_game_plugin_id: None,
             active_game: None,
             media_dir: default_clips_dir(),
+            recover_abandoned_recordings: true,
             lol_url: None,
             replay_window_s: 60.0,
             // ~2 min at 12 Mbps video + audio headroom.
@@ -770,7 +775,9 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             ),
         );
     }
-    recover_abandoned_recordings(&clips_dir, events);
+    if opts.recover_abandoned_recordings {
+        recover_abandoned_recordings(&clips_dir, events);
+    }
     // Saves land in a session folder: one per recorder run, with a dedicated
     // folder per detected match. Folders are created lazily at save time.
     let mut session = SessionTracker::new(local_session_label(false));

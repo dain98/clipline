@@ -1267,8 +1267,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(plugin_dir.join("assets/markers/kill.png"), b"kill-icon").unwrap();
-        std::fs::write(plugin_dir.join("assets/event-rail/kill.png"), b"rail-kill-icon")
-            .unwrap();
+        std::fs::write(
+            plugin_dir.join("assets/event-rail/kill.png"),
+            b"rail-kill-icon",
+        )
+        .unwrap();
         std::fs::write(plugin_dir.join("assets/games/card-logo.png"), b"card-logo").unwrap();
         std::fs::write(
             plugin_dir.join(PLUGIN_MANIFEST_FILE),
