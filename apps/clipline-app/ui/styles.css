@@ -2146,12 +2146,11 @@ label span { white-space: nowrap; }
 .game-event-rail .game-event-kind-icon {
   display: grid;
   place-items: center;
-  box-sizing: border-box;
   width: 30px;
   height: 30px;
-  border: 1px solid rgba(226, 232, 240, 0.26);
-  border-radius: 7px;
-  background: rgba(15, 23, 42, 0.55);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--text);
   font-size: 13px;
   overflow: hidden;
@@ -2162,6 +2161,12 @@ label span { white-space: nowrap; }
   height: 24px;
   margin: auto;
   object-fit: contain;
+  filter:
+    drop-shadow(1px 0 0 rgba(226, 232, 240, 0.42))
+    drop-shadow(-1px 0 0 rgba(226, 232, 240, 0.42))
+    drop-shadow(0 1px 0 rgba(226, 232, 240, 0.42))
+    drop-shadow(0 -1px 0 rgba(226, 232, 240, 0.42))
+    drop-shadow(0 1px 1px rgba(2, 6, 23, 0.5));
 }
 .game-event-rail ol button.marker-kill .game-event-kind-icon img {
   width: 21px;
