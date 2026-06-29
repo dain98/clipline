@@ -306,6 +306,15 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > shape is a full-size clapper icon on the left, only for videos that are actually user-created
 > clips, likely after finishing a clearer labeling model.
 
+Recent fixes (2026-06-29):
+- Nightly 0.1.19 contains the first-party supported game profile pivot and League presentation
+  upgrade from PR #62. The previous public nightly metadata was 0.1.18, so the app and Tauri
+  package versions were bumped to 0.1.19 for updater eligibility.
+- League clips now have built-in supported-game presentation data for marker styling, gallery
+  cards, a playback-synced right-side event rail, and richer bottom metadata driven by the
+  first-party profile. The old standalone installable plugin package path is intentionally not
+  part of this release; game presentation updates now ship through normal Clipline nightlies.
+
 Recent fixes (2026-06-27):
 - Nightly 0.1.18 contains the default multitrack playback fix and gallery thumbnail hardening
   from PR #63. The previous public nightly metadata was 0.1.17, so the app and Tauri package
