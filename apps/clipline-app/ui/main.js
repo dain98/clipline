@@ -3933,7 +3933,7 @@ const MARKER_ICON_FALLBACK = {
 };
 // Clicking a marker starts playback this many seconds before the event, so its
 // lead-up plays rather than dropping the viewer right on the moment.
-const MARKER_LEAD_S = 3;
+const MARKER_LEAD_S = 1;
 // Game-authentic art for the kinds that actually reach the review timeline
 // (is_timeline_marker). Used as a CSS mask so each silhouette still tints with
 // its category color (--mc); kinds without art fall back to the SVGs above.
