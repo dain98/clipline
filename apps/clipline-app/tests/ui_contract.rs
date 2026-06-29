@@ -1213,6 +1213,13 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     let css = styles_css();
 
     // The whole-clip navigator sits between the ruler and the export row.
+    let trim_toggle = html.find("id=\"trim-mode-toggle\"").expect("trim toggle");
+    let timeline = html.find("id=\"timeline\"").expect("timeline");
+    assert!(
+        trim_toggle < timeline,
+        "the simple scissors trim control must sit above the timeline"
+    );
+
     let ruler = html.find("id=\"ruler\"").expect("ruler");
     let overview = html.find("id=\"overview\"").expect("overview");
     let export_row = html.find("class=\"export-row\"").expect("export row");
@@ -1247,6 +1254,17 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     assert!(
         css.contains("#overview-window") && css.contains(".ov-marker") && css.contains(".snapped"),
         "navigator window, marker ticks, and snap feedback must be styled"
+    );
+    assert!(
+        css.contains("padding-bottom: 25px; /* the band the glyphs ride in, below the track */")
+            && css.contains("flex-direction: column-reverse;")
+            && css.contains("margin-bottom: 2px;"),
+        "timeline markers must ride below the track near the ruler labels"
+    );
+    assert!(
+        css.contains(".timeline-top-tools")
+            && css.contains("#trim-mode-toggle {\n  color: #ffffff;"),
+        "the simple scissors trim control must be top-aligned and high contrast"
     );
     assert!(
         css.contains(".marker-death .glyph.img")

@@ -2417,12 +2417,10 @@ label span { white-space: nowrap; }
 #trim-band:hover { background: rgba(61, 123, 253, 0.22); }
 #trim-band.grabbing { cursor: grabbing; background: rgba(61, 123, 253, 0.26); }
 
-/* Event markers: a small flat glyph rides just above the track, tied to the
-   exact moment by a fading hairline. Restrained, Outplayed-style — the track
-   stays clean and fully clickable (only the glyph itself is a marker target). */
+/* Event markers ride below the track, on the same side as the time ruler. */
 .timeline-stack {
   position: relative;
-  padding-top: 25px; /* the band the glyphs ride in, above the track */
+  padding-bottom: 25px; /* the band the glyphs ride in, below the track */
 }
 #marker-layer {
   position: absolute;
@@ -2436,7 +2434,7 @@ label span { white-space: nowrap; }
   width: 22px;
   margin-left: -11px;
   display: flex;
-  flex-direction: column;
+  flex-direction: column-reverse;
   align-items: center;
   border: 0;
   padding: 0;
@@ -2473,15 +2471,15 @@ label span { white-space: nowrap; }
 .marker .hair {
   flex: 1 1 auto;
   width: 1px;
-  margin-top: 2px;
+  margin-bottom: 2px;
   background: linear-gradient(
-    to bottom,
+    to top,
     var(--hair-top, rgba(174, 182, 196, 0.55)),
     var(--hair-bot, rgba(174, 182, 196, 0.16))
   );
 }
 .marker:hover { z-index: 6; filter: brightness(1.32); }
-.marker:hover .glyph { transform: translateY(-1px); }
+.marker:hover .glyph { transform: translateY(1px); }
 
 /* whisper of category color — light glyph + matching hairline, never loud */
 .marker-kill { --mc: #ff9b9e; --hair-top: rgba(255, 97, 102, 0.6); --hair-bot: rgba(255, 97, 102, 0.12); }
@@ -2519,6 +2517,11 @@ label span { white-space: nowrap; }
 .ruler .lab.first { transform: none; }
 
 /* ---- timeline navigator (whole-clip minimap + zoom/snap controls) ---- */
+.timeline-top-tools {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 28px;
+}
 .nav-row {
   display: flex;
   align-items: center;
@@ -2618,19 +2621,38 @@ label span { white-space: nowrap; }
 }
 .timeline-tools button:hover { background: rgba(255, 255, 255, 0.1); }
 .timeline-tools button svg { display: block; width: 100%; height: 100%; }
+#trim-mode-toggle {
+  color: #ffffff;
+  width: 34px;
+  height: 28px;
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+}
+#trim-mode-toggle:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.46);
+}
+#trim-mode-toggle svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+}
 #snap-toggle.active {
   color: var(--accent);
   border-color: var(--accent);
   background: rgba(61, 123, 253, 0.12);
 }
 #trim-mode-toggle.active {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: rgba(61, 123, 253, 0.12);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.62);
+  background: rgba(61, 123, 253, 0.38);
 }
-.deck.simple-timeline .nav-row {
-  justify-content: flex-end;
-}
+.deck.legacy-timeline .timeline-top-tools { display: none; }
+.deck.simple-timeline .nav-row { display: none; }
 .deck.simple-timeline #overview,
 .deck.simple-timeline #zoom-out,
 .deck.simple-timeline #zoom-fit,
