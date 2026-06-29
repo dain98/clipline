@@ -307,6 +307,13 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-29):
+- Nightly 0.1.20 contains the League replay playback performance fix from PR #65. The previous
+  public nightly metadata was 0.1.19, so the app and Tauri package versions were bumped to
+  0.1.20 for updater eligibility.
+- League review playback now avoids recomputing the event rail, marker metadata, and overlay
+  digest work on every video time tick. The player throttles overlay detail refreshes while the
+  video is running and keeps the event rail's active-row updates on a lighter schedule, reducing
+  the frame stutter observed after the richer League presentation shipped.
 - Nightly 0.1.19 contains the first-party supported game profile pivot and League presentation
   upgrade from PR #62. The previous public nightly metadata was 0.1.18, so the app and Tauri
   package versions were bumped to 0.1.19 for updater eligibility.
