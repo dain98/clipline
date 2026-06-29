@@ -36,11 +36,12 @@ The software AV1 encoder is the Scalable Video Technology for AV1 (SVT-AV1),
 distributed inside the LGPL FFmpeg build under the BSD-3-Clause license with
 the Alliance for Open Media Patent License 1.0.
 
-## League of Legends presentation assets
+## League of Legends event rail assets
 
 The bundled first-party League of Legends presentation seed includes small
-match-history marker icons mirrored by CommunityDragon from League client
-assets. They are used only for League review timeline/event presentation.
+right-side event rail objective icons mirrored by CommunityDragon from League
+client match-history assets. They are used only for League event rail
+presentation; the timeline marker icons are first-party generated assets.
 
 - **Source:** <https://raw.communitydragon.org/latest/plugins/rcp-fe-lol-match-history/global/default/>
 - Riot Games owns the underlying League of Legends artwork and trademarks.

@@ -1572,6 +1572,45 @@ fn game_event_rail_item_marks_deaths_enemy() {
 }
 
 #[test]
+fn game_event_rail_item_prefers_event_rail_icons_over_timeline_marker_icons() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const RAIL_ICON_SUMMARY = {
+          player_name: 'dain',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'dain', champion_name: 'Nautilus', team: 'ORDER' },
+            { player_name: 'Kcrystal', champion_name: 'Zed', team: 'CHAOS' }
+          ]
+        };
+        const RAIL_ICON_PRESENTATION = {
+          marker_kinds: {
+            ChampionDeath: {
+              category: 'death',
+              icon: 'data:image/png;base64,timeline-death'
+            }
+          },
+          event_rail: {
+            icons: {
+              ChampionDeath: 'data:image/png;base64,rail-death'
+            }
+          }
+        };
+        "#,
+    ))
+    .expect("define event rail icon inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'ChampionDeath', actor: 'Kcrystal', victim: 'dain', t_s: 160 }, RAIL_ICON_SUMMARY, RAIL_ICON_PRESENTATION, {})"
+        ),
+        r#"{"layout":"duel","kind":"ChampionDeath","category":"death","allegiance":"enemy","label":"Champion Death","text":"Champion Death · Kcrystal","icon":"data:image/png;base64,rail-death","actor":{"name":"Kcrystal","champion":"Zed","team":"CHAOS","assetKey":"Zed","initials":"KC","local":false},"victim":{"name":"dain","champion":"Nautilus","team":"ORDER","assetKey":"Nautilus","initials":"DA","local":true}}"#
+    );
+}
+
+#[test]
 fn game_event_rail_item_formats_actor_objectives_with_portrait_and_icon() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(

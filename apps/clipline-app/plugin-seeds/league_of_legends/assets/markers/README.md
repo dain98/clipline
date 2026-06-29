@@ -1,12 +1,14 @@
-# League marker icons
+# Timeline marker icons
 
 `kill.png`, `death.png`, `dragon.png`, `baron.png`, and `turret.png` are
-League client match-history assets mirrored by CommunityDragon. They are used
-only by Clipline's first-party League of Legends presentation package.
+**AI-generated** silhouette icons created for Clipline's review-timeline
+markers. They were not extracted, traced, or copied from any game's assets,
+and no third-party copyright is claimed over them.
 
-Riot Games owns the underlying League of Legends artwork and trademarks.
-CommunityDragon provides the public asset mirror at `raw.communitydragon.org`;
-Clipline does not claim third-party rights over these images.
+As first-party project assets they are covered by Clipline's own license
+(**MIT OR Apache-2.0**); they are not third-party material, so they are not
+listed in `THIRD-PARTY-NOTICES.md`.
 
-These package assets are loaded through the plugin manifest and rendered in
-League review timeline/event surfaces.
+They are loaded through the plugin manifest and rendered in League review
+timeline surfaces. Right-side event rail icons live separately in
+`assets/event-rail/`.

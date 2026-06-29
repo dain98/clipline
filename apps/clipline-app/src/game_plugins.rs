@@ -323,26 +323,39 @@ impl GamePlugin {
 
     fn presentation_value(&self) -> Option<serde_json::Value> {
         let mut presentation = self.manifest.presentation.clone()?;
-        let Some(marker_kinds) = presentation
+
+        if let Some(marker_kinds) = presentation
             .get_mut("marker_kinds")
             .and_then(serde_json::Value::as_object_mut)
-        else {
-            return Some(presentation);
-        };
-
-        for config in marker_kinds.values_mut() {
-            let Some(icon_value) = config.get_mut("icon") else {
-                continue;
-            };
-            let Some(icon_path) = icon_value.as_str() else {
-                continue;
-            };
-            let Some(data_url) = self.package_file_data_url(icon_path) else {
-                continue;
-            };
-            *icon_value = serde_json::Value::String(data_url);
+        {
+            for config in marker_kinds.values_mut() {
+                let Some(icon_value) = config.get_mut("icon") else {
+                    continue;
+                };
+                self.resolve_package_icon_value(icon_value);
+            }
         }
+
+        if let Some(event_rail_icons) = presentation
+            .pointer_mut("/event_rail/icons")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for icon_value in event_rail_icons.values_mut() {
+                self.resolve_package_icon_value(icon_value);
+            }
+        }
+
         Some(presentation)
+    }
+
+    fn resolve_package_icon_value(&self, icon_value: &mut serde_json::Value) {
+        let Some(icon_path) = icon_value.as_str() else {
+            return;
+        };
+        let Some(data_url) = self.package_file_data_url(icon_path) else {
+            return;
+        };
+        *icon_value = serde_json::Value::String(data_url);
     }
 
     fn package_file_data_url(&self, path: &str) -> Option<String> {
@@ -448,10 +461,10 @@ pub fn known_first_party_package_release(plugin_id: &str) -> Option<KnownFirstPa
     match plugin_id {
         LEAGUE_OF_LEGENDS_ID => Some(KnownFirstPartyPackageRelease {
             plugin_id: LEAGUE_OF_LEGENDS_ID,
-            version: Version::parse("1.3.3").expect("known League package version is valid"),
+            version: Version::parse("1.3.4").expect("known League package version is valid"),
             source_label: "clipline-plugin-league-of-legends",
-            url: "https://github.com/dain98/clipline-plugin-league-of-legends/releases/download/v1.3.3/clipline-plugin-league-of-legends-1.3.3.zip",
-            sha256: "33e1de7da9b9b9326c1f2f383c0256dc3233a7ffcc021afc5ca752e071709e54",
+            url: "https://github.com/dain98/clipline-plugin-league-of-legends/releases/download/v1.3.4/clipline-plugin-league-of-legends-1.3.4.zip",
+            sha256: "d59d4c393340e3892d5281f9ff92e87847d15c91c67eaf2c40f53ba96e73a396",
         }),
         _ => None,
     }
@@ -890,7 +903,7 @@ fn install_state(receipt: &InstalledPluginRecord) -> &'static str {
 
 const LEAGUE_SEED_MANIFEST_JSON: &str = r#"{
   "schema_version": 1,
-  "package_version": "1.2.4",
+  "package_version": "1.2.5",
   "id": "league_of_legends",
   "name": "League of Legends",
   "summary": "Auto-records full matches when the in-game window is active.",
@@ -925,7 +938,14 @@ const LEAGUE_SEED_MANIFEST_JSON: &str = r#"{
     "event_rail": {
       "enabled": true,
       "title": "Match events",
-      "layout": "kill_feed"
+      "layout": "kill_feed",
+      "icons": {
+        "ChampionKill": "assets/event-rail/kill.png",
+        "ChampionDeath": "assets/event-rail/death.png",
+        "DragonKill": "assets/event-rail/dragon.png",
+        "BaronKill": "assets/event-rail/baron.png",
+        "TurretKilled": "assets/event-rail/turret.png"
+      }
     },
     "metadata_panel": {
       "enabled": true,
@@ -1142,6 +1162,12 @@ mod tests {
             Some("kill_feed")
         );
         assert_eq!(
+            presentation
+                .pointer("/event_rail/icons/ChampionDeath")
+                .and_then(serde_json::Value::as_str),
+            Some("assets/event-rail/death.png")
+        );
+        assert_eq!(
             portrait
                 .get("asset_provider")
                 .and_then(serde_json::Value::as_str),
@@ -1167,12 +1193,15 @@ mod tests {
         let plugin_dir = dir.path().join(LEAGUE_OF_LEGENDS_ID);
         std::fs::create_dir_all(plugin_dir.join("assets/games")).unwrap();
         std::fs::create_dir_all(plugin_dir.join("assets/markers")).unwrap();
+        std::fs::create_dir_all(plugin_dir.join("assets/event-rail")).unwrap();
         std::fs::write(
             plugin_dir.join("assets/games/league-of-legends.png"),
             b"game-icon",
         )
         .unwrap();
         std::fs::write(plugin_dir.join("assets/markers/kill.png"), b"kill-icon").unwrap();
+        std::fs::write(plugin_dir.join("assets/event-rail/kill.png"), b"rail-kill-icon")
+            .unwrap();
         std::fs::write(
             plugin_dir.join(PLUGIN_MANIFEST_FILE),
             r#"{
@@ -1189,6 +1218,11 @@ mod tests {
               "presentation": {
                 "marker_kinds": {
                   "ChampionKill": { "category": "kill", "icon": "assets/markers/kill.png" }
+                },
+                "event_rail": {
+                  "icons": {
+                    "ChampionKill": "assets/event-rail/kill.png"
+                  }
                 }
               }
             }"#,
@@ -1215,6 +1249,18 @@ mod tests {
             marker_icon.starts_with("data:image/png;base64,"),
             "presentation marker icons should be package-relative data URLs, got {marker_icon}"
         );
+        let rail_icon = presentation
+            .pointer("/event_rail/icons/ChampionKill")
+            .and_then(serde_json::Value::as_str)
+            .expect("event rail icon");
+        assert!(
+            rail_icon.starts_with("data:image/png;base64,"),
+            "event rail icons should be package-relative data URLs, got {rail_icon}"
+        );
+        assert_ne!(
+            marker_icon, rail_icon,
+            "event rail icons should resolve independently from timeline marker icons"
+        );
     }
 
     #[test]
@@ -1235,8 +1281,8 @@ mod tests {
 
         let info = plugin.info();
 
-        assert_eq!(release.version.to_string(), "1.3.3");
-        assert_eq!(info.latest_version.as_deref(), Some("1.3.3"));
+        assert_eq!(release.version.to_string(), "1.3.4");
+        assert_eq!(info.latest_version.as_deref(), Some("1.3.4"));
         assert_eq!(
             info.latest_source_label.as_deref(),
             Some("clipline-plugin-league-of-legends")

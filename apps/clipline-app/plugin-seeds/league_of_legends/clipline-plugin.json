@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "package_version": "1.2.4",
+  "package_version": "1.2.5",
   "id": "league_of_legends",
   "name": "League of Legends",
   "summary": "Auto-records full matches when the in-game window is active.",
@@ -80,7 +80,14 @@
     "event_rail": {
       "enabled": true,
       "title": "Match events",
-      "layout": "kill_feed"
+      "layout": "kill_feed",
+      "icons": {
+        "ChampionKill": "assets/event-rail/kill.png",
+        "ChampionDeath": "assets/event-rail/death.png",
+        "DragonKill": "assets/event-rail/dragon.png",
+        "BaronKill": "assets/event-rail/baron.png",
+        "TurretKilled": "assets/event-rail/turret.png"
+      }
     },
     "metadata_panel": {
       "enabled": true,

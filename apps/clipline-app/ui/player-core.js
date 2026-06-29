@@ -772,6 +772,19 @@ const PlayerCore = (() => {
     );
   };
 
+  const eventRailIcon = (kind, presentation) => {
+    const icons = presentation
+      && presentation.event_rail
+      && presentation.event_rail.icons
+      && typeof presentation.event_rail.icons === "object"
+      ? presentation.event_rail.icons
+      : null;
+    const configured = icons && typeof icons[kind] === "string" ? icons[kind] : "";
+    if (configured.trim()) return configured.trim();
+    const markerIcon = markerKindConfig(kind, presentation).icon;
+    return typeof markerIcon === "string" ? markerIcon.trim() : "";
+  };
+
   const markerEventText = (marker, presentation) => {
     const label = markerLabel(marker && marker.kind, presentation);
     const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
@@ -861,8 +874,8 @@ const PlayerCore = (() => {
       label,
       text: markerEventText(marker, presentation),
     };
-    const icon = markerKindConfig(kind, presentation).icon;
-    if (typeof icon === "string" && icon.trim()) item.icon = icon.trim();
+    const icon = eventRailIcon(kind, presentation);
+    if (icon) item.icon = icon;
 
     if (kind === "ChampionKill" || kind === "ChampionDeath") {
       const actor = participantSlot(marker && marker.actor, summary, presentation, options);
