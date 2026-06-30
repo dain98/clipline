@@ -1877,6 +1877,12 @@ fn game_event_rail_item_keeps_objective_icon_when_actor_is_not_a_participant() {
               icon: 'data:image/png;base64,turret-icon',
               rail: { layout: 'actor_event', allegiance: 'actor_team' }
             }
+          },
+          event_rail: {
+            actor_icons: [
+              { prefix: 'Minion_T100', name: 'Minion', asset: 'data:image/png;base64,minion-blue' },
+              { prefix: 'Minion_T200', name: 'Minion', asset: 'data:image/png;base64,minion-red' }
+            ]
           }
         };
         "#,
@@ -1888,7 +1894,7 @@ fn game_event_rail_item_keeps_objective_icon_when_actor_is_not_a_participant() {
             &mut ctx,
             "PlayerCore.gameEventRailItem({ kind: 'TurretKilled', actor: 'Minion_T200LS29N0', t_s: 931 }, MINION_OBJECTIVE_SUMMARY, MINION_OBJECTIVE_PRESENTATION, {})"
         ),
-        r#"{"layout":"actor_event","kind":"TurretKilled","category":"structure","allegiance":"neutral","label":"Turret Killed","text":"Turret Killed · Minion_T200LS29N0","icon":"data:image/png;base64,turret-icon"}"#
+        r#"{"layout":"actor_event","kind":"TurretKilled","category":"structure","allegiance":"neutral","label":"Turret Killed","text":"Turret Killed · Minion_T200LS29N0","icon":"data:image/png;base64,turret-icon","actor":{"name":"Minion","asset":"data:image/png;base64,minion-red","initials":"MI","local":false}}"#
     );
 }
 

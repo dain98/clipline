@@ -2581,6 +2581,11 @@ function renderMetadataIconList(field) {
 function renderGameMetadataPanel(clip = currentClip) {
   const panel = $("game-metadata-panel");
   const fieldsRoot = $("game-metadata-fields");
+  if (!clip) {
+    panel.hidden = true;
+    fieldsRoot.replaceChildren();
+    return;
+  }
   const presentation = pluginPresentationForClip(clip);
   const metadataPanel = metadataPanelPolicy(clip);
   const summary = clip && clip.markers ? clip.markers.player_summary : null;
@@ -3696,6 +3701,7 @@ function applyTimelineEditorPreference() {
   deck.classList.toggle("simple-trim-active", !legacy && simpleTrimMode);
 
   const toggle = $("trim-mode-toggle");
+  $("trim-action-panel").hidden = legacy;
   toggle.disabled = legacy;
   toggle.hidden = legacy;
   toggle.classList.toggle("active", !legacy && simpleTrimMode);

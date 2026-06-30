@@ -101,6 +101,18 @@ fn marker_png_alpha_bounds(asset_dir: &str, name: &str) -> ((u32, u32), (u32, u3
     )
 }
 
+fn png_dimensions(asset_dir: &str, name: &str) -> (u32, u32) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(asset_dir)
+        .join(name);
+    let file = fs::File::open(&path).unwrap_or_else(|err| panic!("open {path:?}: {err}"));
+    let decoder = png::Decoder::new(BufReader::new(file));
+    let reader = decoder
+        .read_info()
+        .unwrap_or_else(|err| panic!("decode {path:?}: {err}"));
+    (reader.info().width, reader.info().height)
+}
+
 fn js_function_body<'a>(source: &'a str, name: &str) -> &'a str {
     let signature = format!("function {name}(");
     let function_start = source
@@ -472,7 +484,7 @@ fn review_player_owns_all_controls() {
             && main_js().contains("function applyTimelineEditorPreference()")
             && main_js().contains("quickTrimRange(")
             && styles_css().contains(".deck.simple-timeline")
-            && styles_css().contains(".deck.simple-trim-active")
+            && styles_css().contains("#trim-mode-toggle.active")
             && styles_css().contains(".deck.legacy-timeline"),
         "review timeline must default to simple trim mode while preserving the legacy editor mode"
     );
@@ -1289,23 +1301,54 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     let css = styles_css();
 
     // The whole-clip navigator sits between the ruler and the export row.
+    let metadata_panel = html
+        .find("id=\"game-metadata-panel\"")
+        .expect("metadata panel");
+    let metadata_fields = html
+        .find("id=\"game-metadata-fields\"")
+        .expect("metadata fields");
     let trim_toggle = html.find("id=\"trim-mode-toggle\"").expect("trim toggle");
+    let trim_action_panel = html
+        .find("id=\"trim-action-panel\"")
+        .expect("trim action panel");
+    let timeline_footer_row = html
+        .find("class=\"timeline-footer-row\"")
+        .expect("timeline footer row");
     let timeline_stack = html
         .find("class=\"timeline-stack\"")
         .expect("timeline stack");
-    let action_row = html
-        .find("class=\"timeline-action-row\"")
-        .expect("timeline action row");
     let timeline_main = html.find("class=\"timeline-main\"").expect("timeline main");
     let timeline = html.find("id=\"timeline\"").expect("timeline");
     let marker_layer = html.find("id=\"marker-layer\"").expect("marker layer");
     let ruler = html.find("id=\"ruler\"").expect("ruler");
+    let audio_track_panel = html
+        .find("id=\"audio-track-panel\"")
+        .expect("audio track panel");
+    let export_row = html.find("class=\"export-row\"").expect("export row");
     assert!(
-        timeline_stack < action_row
-            && action_row < trim_toggle
-            && trim_toggle < timeline_main
-            && timeline_main < timeline,
-        "the simple scissors trim control must sit in its own row above the timeline band"
+        metadata_panel < metadata_fields
+            && metadata_fields < timeline_stack
+            && timeline_stack < timeline_main
+            && timeline_main < timeline
+            && ruler < timeline_footer_row
+            && timeline_footer_row < audio_track_panel
+            && audio_track_panel < trim_action_panel
+            && trim_action_panel < trim_toggle
+            && trim_toggle < export_row,
+        "the simple scissors trim control must sit far right in the below-timeline row beside audio tracks"
+    );
+    assert!(
+        !html.contains("class=\"timeline-action-row\""),
+        "the timeline should not reserve a separate scissors-only row"
+    );
+    let trim_toggle_end = html[trim_toggle..]
+        .find("</button>")
+        .map(|offset| trim_toggle + offset)
+        .expect("trim toggle closes");
+    let trim_toggle_markup = &html[trim_toggle..trim_toggle_end];
+    assert!(
+        !trim_toggle_markup.contains("<span>Clip</span>"),
+        "the below-timeline scissors toggle should stay icon-only so it cannot look like a second export button"
     );
     assert!(
         timeline < marker_layer
@@ -1315,10 +1358,9 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     );
 
     let overview = html.find("id=\"overview\"").expect("overview");
-    let export_row = html.find("class=\"export-row\"").expect("export row");
     assert!(
-        ruler < overview && overview < export_row,
-        "the navigator minimap must sit between the ruler and the export row"
+        ruler < overview && overview < timeline_footer_row && timeline_footer_row < export_row,
+        "the navigator minimap and below-timeline actions must sit above the export row"
     );
 
     // Central view setter + paint/rebuild split keep the navigator in sync, and
@@ -1348,7 +1390,10 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         css.contains("#overview-window") && css.contains(".ov-marker") && css.contains(".snapped"),
         "navigator window, marker ticks, and snap feedback must be styled"
     );
-    let action_row_rule = css_rule_body(&css, ".timeline-action-row");
+    let metadata_panel_rule = css_rule_body(&css, ".game-metadata-panel");
+    let metadata_fields_rule = css_rule_body(&css, ".game-metadata-fields");
+    let timeline_footer_row_rule = css_rule_body(&css, ".timeline-footer-row");
+    let trim_action_panel_rule = css_rule_body(&css, ".trim-action-panel");
     let timeline_main_rule = css_rule_body(&css, ".timeline-main");
     let timeline_rule = css_rule_body(&css, "#timeline");
     let timeline_progress_rule = css_rule_body(&css, "#timeline::before");
@@ -1359,8 +1404,14 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     let marker_glyph_rule = css_rule_body(&css, ".marker .glyph");
     let marker_image_rule = css_rule_body(&css, ".marker .glyph.img");
     assert!(
-        css_decl_value(action_row_rule, "display").is_some()
-            && css_decl_value(action_row_rule, "justify-content").is_some()
+        css_decl_value(metadata_panel_rule, "grid-template-columns").is_none()
+            && css_decl_value(metadata_fields_rule, "display") == Some("flex")
+            && css_decl_value(timeline_footer_row_rule, "display") == Some("flex")
+            && css_decl_value(timeline_footer_row_rule, "border-top").is_some()
+            && css_decl_value(trim_action_panel_rule, "display") == Some("flex")
+            && css_decl_value(trim_action_panel_rule, "justify-content") == Some("flex-end")
+            && css_decl_value(trim_action_panel_rule, "margin-left") == Some("auto")
+            && css_decl_value(trim_action_panel_rule, "border-top").is_none()
             && css_decl_value(timeline_main_rule, "position").is_some()
             && css_decl_value(timeline_main_rule, "border") == Some("0")
             && css_decl_value(timeline_main_rule, "overflow").is_some()
@@ -1383,23 +1434,47 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         "event markers must sit on a borderless timeline band above a dense attached ruler"
     );
     assert!(
-        css_decl_value(action_row_rule, "display").is_some()
-            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "position").is_some()
+        css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "display") == Some("inline-flex")
             && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "color") == Some("#ffffff"),
-        "the simple scissors trim control must be above the track and high contrast"
+        "the simple scissors trim control must read as a compact below-timeline action"
+    );
+    assert!(
+        css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "position").is_some()
+            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "color") == Some("#ffffff"),
+        "the simple scissors trim control must stay high contrast"
     );
     assert!(
         css_decl_value(
             css_rule_body(&css, "#trim-mode-toggle.active"),
             "background"
         )
-        .is_none()
-            && css_decl_value(
-                css_rule_body(&css, ".deck.simple-trim-active #trim-mode-toggle"),
-                "background"
-            )
-            .is_some(),
-        "the simple trim deck state must own the active scissors background"
+        .is_some(),
+        "the moved scissors button must still show active trim state outside the deck"
+    );
+    let render_metadata_panel = js
+        .split("function renderGameMetadataPanel")
+        .nth(1)
+        .and_then(|rest| rest.split("function clipGalleryCardPreview").next())
+        .expect("metadata panel renderer");
+    assert!(
+        render_metadata_panel.contains("if (!clip) {")
+            && render_metadata_panel.contains("panel.hidden = true;")
+            && !render_metadata_panel.contains("panel.hidden = legacyTimelineEnabled();"),
+        "the metadata bar should return to metadata-only visibility"
+    );
+    let timeline_preference = js
+        .split("function applyTimelineEditorPreference")
+        .nth(1)
+        .and_then(|rest| rest.split("function setSimpleTrimMode").next())
+        .expect("timeline preference function");
+    assert!(
+        timeline_preference.contains("$(\"trim-action-panel\").hidden = legacy;"),
+        "legacy timeline mode should hide the below-timeline scissors strip"
+    );
+    assert!(
+        css.contains(".deck.simple-timeline:not(.simple-trim-active) #export-clip")
+            && css.contains(".deck.simple-timeline:not(.simple-trim-active) .trim-readout"),
+        "the export clip action must remain scoped to the deck trim-mode state"
     );
     assert!(
         js.contains("const minorStep = step / 10;")
@@ -1482,6 +1557,17 @@ fn league_event_rail_pngs_have_matching_alpha_height() {
         assert_eq!(
             visible.1, 280,
             "league event rail {name} visible alpha height must match the other match event icons"
+        );
+    }
+}
+
+#[test]
+fn league_event_rail_minion_actor_pngs_are_square_portraits() {
+    for name in ["minion-100.png", "minion-200.png"] {
+        assert_eq!(
+            png_dimensions("plugin-seeds/league_of_legends/assets/event-rail", name),
+            (128, 128),
+            "league event rail {name} must stay a square portrait for non-player actor slots"
         );
     }
 }

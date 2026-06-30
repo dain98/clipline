@@ -232,6 +232,17 @@ impl GamePlugin {
             }
         }
 
+        if let Some(actor_icons) = presentation
+            .pointer_mut("/event_rail/actor_icons")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for actor_icon in actor_icons {
+                if let Some(asset_value) = actor_icon.get_mut("asset") {
+                    resolve_profile_asset_value(asset_value);
+                }
+            }
+        }
+
         if let Some(card_icon_src) = presentation.pointer_mut("/gallery/card/icon/src") {
             resolve_profile_asset_value(card_icon_src);
         }
@@ -417,6 +428,12 @@ fn first_party_asset_data_url(path: &str) -> Option<String> {
         "assets/event-rail/turret.png" => {
             include_bytes!("../plugin-seeds/league_of_legends/assets/event-rail/turret.png")
         }
+        "assets/event-rail/minion-100.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/event-rail/minion-100.png")
+        }
+        "assets/event-rail/minion-200.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/event-rail/minion-200.png")
+        }
         _ => return None,
     };
     Some(crate::game_icon::png_data_url(bytes))
@@ -518,7 +535,11 @@ const LEAGUE_PROFILE_MANIFEST_JSON: &str = r#"{
         "DragonKill": "assets/event-rail/dragon.png",
         "BaronKill": "assets/event-rail/baron.png",
         "TurretKilled": "assets/event-rail/turret.png"
-      }
+      },
+      "actor_icons": [
+        { "prefix": "Minion_T100", "name": "Minion", "asset": "assets/event-rail/minion-100.png" },
+        { "prefix": "Minion_T200", "name": "Minion", "asset": "assets/event-rail/minion-200.png" }
+      ]
     },
     "metadata_panel": {
       "enabled": true,
@@ -686,6 +707,10 @@ mod tests {
             .pointer("/marker_kinds/ChampionKill/icon")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+        assert!(presentation
+            .pointer("/event_rail/actor_icons/1/asset")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
     }
 
     #[test]
@@ -701,6 +726,12 @@ mod tests {
             .presentation
             .as_ref()
             .and_then(|presentation| presentation.pointer("/event_rail/icons/ChampionKill"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+        assert!(first_catalog[0]
+            .presentation
+            .as_ref()
+            .and_then(|presentation| presentation.pointer("/event_rail/actor_icons/0/asset"))
             .and_then(serde_json::Value::as_str)
             .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
     }

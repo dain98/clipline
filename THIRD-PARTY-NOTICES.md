@@ -39,9 +39,10 @@ the Alliance for Open Media Patent License 1.0.
 ## League of Legends event rail assets
 
 The bundled first-party League of Legends presentation seed includes small
-right-side event rail objective icons mirrored by CommunityDragon from League
-client match-history assets. They are used only for League event rail
-presentation; the timeline marker icons are first-party generated assets.
+right-side event rail objective icons and minion actor portraits mirrored by
+CommunityDragon from League client match-history assets. They are used only for
+League event rail presentation; the timeline marker icons are first-party
+generated assets.
 
 - **Source:** <https://raw.communitydragon.org/latest/plugins/rcp-fe-lol-match-history/global/default/>
 - Riot Games owns the underlying League of Legends artwork and trademarks.

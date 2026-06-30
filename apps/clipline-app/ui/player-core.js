@@ -1021,6 +1021,33 @@ const PlayerCore = (() => {
     return slot;
   };
 
+  const eventRailActorIconSlot = (name, presentation) => {
+    const rawName = String(name || "").trim();
+    const actorIcons = presentation
+      && presentation.event_rail
+      && Array.isArray(presentation.event_rail.actor_icons)
+      ? presentation.event_rail.actor_icons
+      : [];
+    if (!rawName || !actorIcons.length) return null;
+    for (const config of actorIcons) {
+      if (!config || typeof config !== "object") continue;
+      const prefix = String(config.prefix || "").trim();
+      const exact = String(config.match || "").trim();
+      const matches = exact ? rawName === exact : prefix && rawName.startsWith(prefix);
+      if (!matches) continue;
+      const asset = String(config.asset || "").trim();
+      const displayName = String(config.name || rawName).trim();
+      if (!asset || !displayName) return null;
+      return {
+        name: displayName,
+        asset,
+        initials: playerInitials(displayName),
+        local: false,
+      };
+    }
+    return null;
+  };
+
   const markerRailConfig = (kind, presentation) => {
     const configured = markerKindConfig(kind, presentation).rail;
     return configured && typeof configured === "object" ? configured : {};
@@ -1064,7 +1091,8 @@ const PlayerCore = (() => {
         item.victim = victim;
       }
     } else if (railLayout === "actor_event" && item.icon) {
-      const actor = participantSlot(marker && marker.actor, summary, presentation, options);
+      const actor = participantSlot(marker && marker.actor, summary, presentation, options)
+        || eventRailActorIconSlot(marker && marker.actor, presentation);
       item.layout = "actor_event";
       if (actor) {
         item.allegiance = eventAllegiance(summary, actor, railConfig);
