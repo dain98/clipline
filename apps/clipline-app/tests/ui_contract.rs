@@ -747,7 +747,9 @@ fn review_player_owns_all_controls() {
             && styles_css().contains(".game-plugin-settings-body")
             && styles_css().contains(".game-review-master-card")
             && styles_css().contains(".game-review-option-group")
-            && styles_css().contains(".game-review-option-list"),
+            && styles_css().contains(".game-review-option-list")
+            && styles_css().contains("align-items: start")
+            && styles_css().contains("align-content: start"),
         "supported games must expose persisted enhanced-review controls in the settings dialog"
     );
     assert!(
