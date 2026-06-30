@@ -309,11 +309,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 
 Recent fixes (2026-06-30):
 - Supported-game rows now persist a nested `review` settings block. Each supported row has a
-  Settings button that opens a tabbed dialog: General controls Replays only vs Full session and the
-  enhanced League review view, Match events filters the right-side rail, and Timeline markers
-  filters local kills/deaths/assists, objectives, and turrets. Fresh recordings keep broader review
-  events (`is_review_event`) in marker sidecars so those filters can show ally/enemy events; older
-  recordings only contain whatever marker data existed when they were captured.
+  Settings button that opens a grouped tabbed dialog: General controls Replays only vs Full session
+  and the enhanced League review view, Match events filters the right-side rail by your events,
+  team fights, and map events, and Timeline markers filters your markers vs map markers. Fresh
+  recordings keep broader review events (`is_review_event`) in marker sidecars so those filters can
+  show ally/enemy events; older recordings only contain whatever marker data existed when they were
+  captured.
 - League local-player assists now normalize as `ChampionAssist`, survive the timeline-marker
   filter, and render with the new assist icon/category; the refreshed sword kill icon is used by
   both timeline markers and the right-side match events rail.

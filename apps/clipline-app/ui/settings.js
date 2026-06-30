@@ -409,10 +409,42 @@ const GAME_REVIEW_GROUPS = [
   },
 ];
 
+const GAME_REVIEW_OPTION_GROUPS = {
+  match_events: [
+    {
+      label: "Your events",
+      keys: ["user_kills", "user_deaths", "user_assists"],
+    },
+    {
+      label: "Team fights",
+      keys: ["team_kills", "team_deaths", "enemy_kills", "enemy_deaths"],
+    },
+    {
+      label: "Map events",
+      keys: ["objectives", "turrets"],
+    },
+  ],
+  timeline_markers: [
+    {
+      label: "Your markers",
+      keys: ["user_kills", "user_deaths", "user_assists"],
+    },
+    {
+      label: "Map markers",
+      keys: ["objectives", "turrets"],
+    },
+  ],
+};
+
 const GAME_PLUGIN_SETTINGS_TABS = ["general", "match_events", "timeline_markers"];
 
 function gamePluginReviewGroupDefinition(groupId) {
   return GAME_REVIEW_GROUPS.find((group) => group.id === groupId) || GAME_REVIEW_GROUPS[0];
+}
+
+function gamePluginReviewOptionLabel(group, key) {
+  const option = group.options.find(([optionKey]) => optionKey === key);
+  return option ? option[1] : key;
 }
 
 function syncGamePluginReviewControls(plugin) {
@@ -462,6 +494,28 @@ function renderReviewCheckbox(plugin, groupId, key, labelText, checked) {
   return label;
 }
 
+function renderGamePluginOptionGroup(plugin, group, groupSettings, optionGroup) {
+  const section = document.createElement("section");
+  section.className = "game-review-option-group";
+  const title = document.createElement("strong");
+  title.textContent = optionGroup.label;
+
+  const list = document.createElement("div");
+  list.className = "game-review-option-list";
+  for (const key of optionGroup.keys) {
+    list.appendChild(renderReviewCheckbox(
+      plugin,
+      group.id,
+      key,
+      gamePluginReviewOptionLabel(group, key),
+      groupSettings[key],
+    ));
+  }
+
+  section.append(title, list);
+  return section;
+}
+
 function renderGamePluginSettingsButton(plugin) {
   const button = document.createElement("button");
   button.type = "button";
@@ -482,7 +536,7 @@ function renderGamePluginReviewGroup(plugin, groupId, review) {
   section.dataset.reviewGroup = group.id;
 
   const head = document.createElement("label");
-  head.className = "check-line game-review-group-head";
+  head.className = "check-line game-review-master-card game-review-group-head";
   const enabled = document.createElement("input");
   enabled.type = "checkbox";
   enabled.checked = groupSettings.enabled;
@@ -494,19 +548,18 @@ function renderGamePluginReviewGroup(plugin, groupId, review) {
   title.textContent = group.label;
   head.append(enabled, title);
 
-  const options = document.createElement("div");
-  options.className = "game-review-options";
-  for (const [key, labelText] of group.options) {
-    options.appendChild(renderReviewCheckbox(
+  const groups = document.createElement("div");
+  groups.className = "game-review-option-groups";
+  for (const optionGroup of GAME_REVIEW_OPTION_GROUPS[group.id] || []) {
+    groups.appendChild(renderGamePluginOptionGroup(
       plugin,
-      group.id,
-      key,
-      labelText,
-      groupSettings[key],
+      group,
+      groupSettings,
+      optionGroup,
     ));
   }
 
-  section.append(head, options);
+  section.append(head, groups);
   return section;
 }
 
@@ -524,7 +577,7 @@ function renderGamePluginSettingsGeneralTab(plugin, settings) {
   const reviewSection = document.createElement("section");
   reviewSection.className = "game-plugin-settings-section";
   const master = document.createElement("label");
-  master.className = "check-line game-review-master";
+  master.className = "check-line game-review-master-card game-review-master";
   const masterInput = document.createElement("input");
   masterInput.type = "checkbox";
   masterInput.checked = review.enabled;
@@ -571,7 +624,7 @@ function renderGamePluginSettingsDialog(plugin = gamePluginSettingsDialogPlugin(
   gamePluginSettings[plugin.id] = settings;
 
   $("game-plugin-settings-title").textContent = `${plugin.name} settings`;
-  $("game-plugin-settings-subtitle").textContent = gamePluginSummary(plugin, settings);
+  $("game-plugin-settings-subtitle").textContent = "";
   document.querySelectorAll("[data-game-plugin-settings-tab]").forEach((button) => {
     const active = button.dataset.gamePluginSettingsTab === tab;
     button.classList.toggle("active", active);

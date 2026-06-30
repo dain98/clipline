@@ -720,6 +720,13 @@ fn review_player_owns_all_controls() {
             && main_js().contains("function renderGamePluginSettingsGeneralTab")
             && main_js().contains("function renderGamePluginSettingsMatchEventsTab")
             && main_js().contains("function renderGamePluginSettingsTimelineMarkersTab")
+            && main_js().contains("const GAME_REVIEW_OPTION_GROUPS")
+            && main_js().contains("function renderGamePluginOptionGroup")
+            && main_js().contains("Your events")
+            && main_js().contains("Team fights")
+            && main_js().contains("Map events")
+            && main_js().contains("Your markers")
+            && main_js().contains("Map markers")
             && main_js().contains("data-game-plugin-review-enabled")
             && main_js().contains("data-game-plugin-review-setting")
             && main_js().contains("match_events")
@@ -738,7 +745,9 @@ fn review_player_owns_all_controls() {
             && styles_css().contains(".game-plugin-settings-dialog")
             && styles_css().contains(".game-plugin-settings-tabs")
             && styles_css().contains(".game-plugin-settings-body")
-            && styles_css().contains(".game-review-options"),
+            && styles_css().contains(".game-review-master-card")
+            && styles_css().contains(".game-review-option-group")
+            && styles_css().contains(".game-review-option-list"),
         "supported games must expose persisted enhanced-review controls in the settings dialog"
     );
     assert!(
