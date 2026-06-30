@@ -1,0 +1,368 @@
+// Shared app foundation (Tauri bridge, state, helpers).
+// Cross-file bindings use `var` so later ui/*.js scripts share one global scope.
+var { invoke, convertFileSrc } = window.__TAURI__.core;
+var { listen } = window.__TAURI__.event;
+var appWindow = window.__TAURI__.window.getCurrentWindow();
+var $ = (id) => document.getElementById(id);
+var afterNextPaint = () => new Promise((resolve) => {
+  requestAnimationFrame(() => requestAnimationFrame(resolve));
+});
+
+var {
+  fmtBytes,
+  fmtLibraryStorageUsage,
+  fmtDur,
+  fmtTenths,
+  fmtAgo,
+  overlayVisible,
+  OVERLAY_HIDE_MS,
+  clampTime,
+  percentFor,
+  percentForView,
+  timelineTimeView,
+  clampView,
+  zoomView,
+  panView,
+  setViewEdge,
+  viewForRange,
+  followView,
+  snapTime,
+  snapCandidates,
+  frameStep,
+  editPoints,
+  MIN_VIEW_SPAN_S,
+  DEFAULT_FOLLOW_MODE,
+  SNAP_THRESHOLD_PX,
+  DEFAULT_FINE_STEP_S,
+  resolveTrim,
+  quickTrimRange,
+  trimDrag,
+  slideTrim,
+  trimSummary,
+  nextMarker,
+  prevMarker,
+  markerSummary,
+  markerStyle,
+  markerDigest,
+  gameEventActiveIndex,
+  gameEventRailItem,
+  playerSummaryFields,
+  galleryCardPreview,
+  rulerMarksRange,
+  sessionGroups,
+  formatClipTitle,
+  clipKind,
+  keyIntent,
+  hotkeyFromKeyEvent,
+  hotkeyFromMouseEvent,
+  displayMapLayout,
+  displayMapHeight,
+  regionForDisplay,
+  clampRegionToDisplay,
+  alignRegion,
+  settingDurationLabel,
+  recordingQualityPreset,
+  qualityIndexForBitrate,
+  smoothnessPreset,
+  smoothnessIndexForFps,
+  outputResolutionOption,
+  captureSourceLabel,
+} = PlayerCore;
+
+var video = $("video");
+var stage = document.querySelector(".stage");
+var stageFrame = $("stage-frame");
+var currentClip = null;
+var clipsCache = [];
+// Gallery (library home) view state.
+var gallerySource = "local";
+var cloudClipsCache = [];
+var cloudClipsLoaded = false;
+var cloudClipsLoading = false;
+var cloudClipsError = "";
+var railProfileAvatarKey = "";
+var railProfileAvatarRequest = 0;
+var galleryFilter = "all";
+var gallerySort = "new";
+var galleryGroup = "smart";
+var gallerySearch = "";
+// Multi-select state for the local gallery. `selectMode` makes tile body
+// clicks toggle selection instead of opening the clip; `selectedClipPaths`
+// survives filter/sort/group/render rebuilds because it is keyed on `clip.path`.
+var selectedClipPaths = new Set();
+var selectMode = false;
+var posterCache = new Map();
+var POSTER_UNAVAILABLE = Symbol("poster unavailable");
+var currentSettings = null;
+var settingsDraft = null;
+var recordingActive = false;
+var fullSessionRecordingActive = false;
+var displays = [];
+var displaysLoaded = false;
+var displaysLoadPromise = null;
+var audioDevices = { outputs: [], inputs: [] };
+var audioDevicesLoaded = false;
+var audioDevicesLoadPromise = null;
+var videoEncoders = [];
+var videoEncodersLoaded = false;
+var videoEncodersLoadPromise = null;
+var gamePlugins = [];
+var gamePluginSettings = {};
+var customGames = [];
+var gameWindows = [];
+var activeDetectedGame = null;
+var captureTargetDirty = false;
+// Codecs WebView2 can decode in the review player (H.264 always; HEVC/AV1
+// probed at startup). Drives the playback caveat and the recorder's
+// Automatic-codec policy via report_decode_support.
+var decodableCodecs = ["h264"];
+var regionState = { display_id: null, x: 0, y: 0, width: 1920, height: 1080 };
+var regionLayout = null;
+var regionDrag = null;
+var regionMenuDisplayId = null;
+var clipContextTarget = null;
+var cloudContextTarget = null;
+var uploadDialogClip = null;
+var selectedAudioTrackIds = new Set();
+var uploadSelectedAudioTrackIds = new Set();
+var audioPreviewSeq = 0;
+var currentReviewAudioKey = null;
+var currentReviewMediaPath = null;
+var renamePending = false;
+var DECK_STATUS_TOAST_MS = 3200;
+var deckStatusToastTimer = 0;
+var NOTICE_TOAST_MS = 2600;
+var noticeToastTimer = 0;
+var micTestRunning = false;
+var micAudioContext = null;
+var micAudioCursor = 0;
+var micAudioSources = [];
+var pendingUpdate = null;
+var updateCheckRunning = false;
+var hotkeyCaptureActive = false;
+var trimStart = 0;
+var trimEnd = 0;
+var simpleTrimMode = false;
+var dragging = null;
+var overlayTimerId = 0;
+// Timeline zoom: the visible window into the clip. zoomSpan === 0 means fully
+// zoomed out (the whole clip is shown); a smaller span shows [zoomStart, +span].
+var zoomStart = 0;
+var zoomSpan = 0;
+// Active navigator drag: { mode:"pan"|"left"|"right", grab?, pointerId } or null.
+var overviewDrag = null;
+// Magnetic snapping for scrub/trim drags (toggle with S, hold Alt to bypass).
+var snapEnabled = true;
+var MIC_MONITOR_START_DELAY_S = 0.02;
+var MIC_MONITOR_MAX_LATENCY_S = 0.25;
+
+function setDeckStatus(message, { transient = false } = {}) {
+  window.clearTimeout(deckStatusToastTimer);
+  deckStatusToastTimer = 0;
+  $("deck-status").textContent = message;
+  if (!transient || !message) return;
+
+  deckStatusToastTimer = window.setTimeout(() => {
+    if ($("deck-status").textContent === message) {
+      $("deck-status").textContent = "";
+    }
+    deckStatusToastTimer = 0;
+  }, DECK_STATUS_TOAST_MS);
+}
+
+function setNotice(message, { transient = false } = {}) {
+  window.clearTimeout(noticeToastTimer);
+  noticeToastTimer = 0;
+  $("notice").textContent = message;
+  if (!transient || !message) return;
+
+  noticeToastTimer = window.setTimeout(() => {
+    if ($("notice").textContent === message) {
+      $("notice").textContent = "";
+    }
+    noticeToastTimer = 0;
+  }, NOTICE_TOAST_MS);
+}
+
+function clipDuration() {
+  if (Number.isFinite(video.duration) && video.duration > 0) return video.duration;
+  if (currentClip && Number.isFinite(currentClip.duration_s)) return currentClip.duration_s;
+  if (currentClip && currentClip.markers && Number.isFinite(currentClip.markers.duration_s)) {
+    return currentClip.markers.duration_s;
+  }
+  return 0;
+}
+
+function clipMarkers() {
+  return currentClip && currentClip.markers ? currentClip.markers.markers : [];
+}
+
+function clipAudioTracks(clip = currentClip) {
+  return clip && clip.markers && Array.isArray(clip.markers.audio_tracks)
+    ? clip.markers.audio_tracks
+    : [];
+}
+
+function defaultAudioTrackIds(clip = currentClip) {
+  return PlayerCore.defaultAudioTrackIds(clipAudioTracks(clip));
+}
+
+function resetSelectedAudioTracks(clip = currentClip) {
+  selectedAudioTrackIds = new Set(defaultAudioTrackIds(clip));
+}
+
+function pruneSelectedAudioTracks(clip = currentClip) {
+  const available = new Set(defaultAudioTrackIds(clip));
+  selectedAudioTrackIds = new Set([...selectedAudioTrackIds].filter((id) => available.has(id)));
+}
+
+function selectedAudioTrackIdsForClip(clip = currentClip, selected = selectedAudioTrackIds) {
+  return PlayerCore.selectedAudioTrackIds(clipAudioTracks(clip), [...selected]);
+}
+
+function audioSelectionKey(clip = currentClip, selected = selectedAudioTrackIdsForClip(clip)) {
+  return `${clip && clip.path ? clip.path : ""}\n${selected.join("\n")}`;
+}
+
+function applyDefaultAudioSelectionIfNeeded({ shouldResume = false } = {}) {
+  const tracks = clipAudioTracks();
+  const selected = selectedAudioTrackIdsForClip();
+  if (!PlayerCore.selectionNeedsPreview(tracks, selected)) {
+    currentReviewAudioKey = audioSelectionKey(currentClip, selected);
+    return false;
+  }
+  applySelectedAudioTracksToPlayback({ forceResume: shouldResume });
+  return true;
+}
+
+function audioTrackLabel(track) {
+  const label = track && track.label ? String(track.label).trim() : "";
+  if (label) return label;
+  const index = Number.isFinite(Number(track && track.track_index)) ? Number(track.track_index) + 1 : 1;
+  return `Audio ${index}`;
+}
+
+function renderAudioTrackRows(container, clip, selected, onChange) {
+  container.replaceChildren();
+  const tracks = clipAudioTracks(clip);
+  const selectedIds = [...selected];
+  for (const track of tracks) {
+    const row = document.createElement("label");
+    row.className = "audio-track-row";
+    const input = document.createElement("input");
+    const state = PlayerCore.audioTrackRowState(track, tracks, selectedIds);
+    input.type = "checkbox";
+    input.checked = state.checked;
+    input.indeterminate = state.indeterminate;
+    input.dataset.trackId = track.id || "";
+    input.addEventListener("change", () => onChange(track, input.checked));
+    const label = document.createElement("span");
+    label.className = "audio-track-label";
+    label.textContent = audioTrackLabel(track);
+    label.title = label.textContent;
+    row.append(input, label);
+    container.appendChild(row);
+  }
+}
+
+function renderAudioTrackPanel() {
+  const panel = $("audio-track-panel");
+  const list = $("audio-track-list");
+  const summary = $("audio-track-summary");
+  const tracks = clipAudioTracks();
+  panel.hidden = tracks.length === 0;
+  if (!tracks.length) {
+    list.replaceChildren();
+    summary.textContent = "";
+    return;
+  }
+  summary.textContent = `${PlayerCore.audioTrackSelectedRowCount(tracks, [...selectedAudioTrackIds])}/${tracks.length} selected`;
+  renderAudioTrackRows(list, currentClip, selectedAudioTrackIds, (track, checked) => {
+    if (!track.id) return;
+    selectedAudioTrackIds = new Set(
+      PlayerCore.applyAudioTrackToggle(tracks, [...selectedAudioTrackIds], track.id, checked),
+    );
+    renderAudioTrackPanel();
+    applySelectedAudioTracksToPlayback();
+  });
+}
+
+function renderUploadAudioTracks(clip = uploadDialogClip) {
+  const section = $("upload-audio-section");
+  const list = $("upload-audio-list");
+  const tracks = clipAudioTracks(clip);
+  section.hidden = tracks.length === 0;
+  if (!tracks.length) {
+    list.replaceChildren();
+    return;
+  }
+  renderAudioTrackRows(list, clip, uploadSelectedAudioTrackIds, (track, checked) => {
+    if (!track.id) return;
+    uploadSelectedAudioTrackIds = new Set(
+      PlayerCore.applyAudioTrackToggle(tracks, [...uploadSelectedAudioTrackIds], track.id, checked),
+    );
+    renderUploadAudioTracks(clip);
+  });
+}
+
+function audioSelectionLabel(clip = currentClip) {
+  const tracks = clipAudioTracks(clip);
+  if (!tracks.length) return "";
+  const selected = PlayerCore.audioTrackSelectedRowCount(tracks, [...selectedAudioTrackIds]);
+  if (selected === tracks.length) return "audio: all tracks";
+  if (selected === 0) return "audio: muted";
+  return `audio: ${selected}/${tracks.length} tracks`;
+}
+
+function videoAspect() {
+  return video.videoWidth > 0 && video.videoHeight > 0
+    ? video.videoWidth / video.videoHeight
+    : 16 / 9;
+}
+
+function updateStageFrame() {
+  const bounds = stage.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) return;
+  const aspect = videoAspect();
+  let width = bounds.width;
+  let height = width / aspect;
+  if (height > bounds.height) {
+    height = bounds.height;
+    width = height * aspect;
+  }
+  stageFrame.style.width = `${Math.max(1, Math.floor(width))}px`;
+  stageFrame.style.height = `${Math.max(1, Math.floor(height))}px`;
+}
+
+/* ---- sidebar: status, settings, library ---- */
+
+async function refresh() {
+  await Promise.all([refreshClips(), refreshStorage()]);
+}
+
+async function refreshStorage() {
+  const s = await invoke("storage_status");
+  const quotaGb = s.quota_bytes == null ? 0 : Number(s.quota_bytes) / (1024 * 1024 * 1024);
+  $("rail-clips-count").textContent = compactCount(s.clip_count);
+  $("rail-library-status").title = `${plural(s.clip_count, "clip")} in library`;
+  $("gallery-storage-used").textContent =
+    `· ${fmtLibraryStorageUsage(s.total_bytes, quotaGb)}`;
+}
+
+function compactCount(count) {
+  return count > 99 ? "99+" : String(count);
+}
+
+function plural(count, singular) {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`;
+}
+
+async function refreshMemoryUsage() {
+  try {
+    const s = await invoke("memory_status");
+    // Compact for the 64px rail; the "RAM" caption is a CSS ::before label.
+    $("memory-usage").textContent = fmtBytes(s.private_working_set_bytes);
+  } catch (_) {
+    $("memory-usage").textContent = "-- MB";
+  }
+}
