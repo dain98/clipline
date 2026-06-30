@@ -713,7 +713,13 @@ fn review_player_owns_all_controls() {
     assert!(
         main_js().contains("function defaultGamePluginReviewSettings")
             && main_js().contains("function normalizeGamePluginReviewSettings")
-            && main_js().contains("function renderGamePluginReviewControls")
+            && main_js().contains("function renderGamePluginSettingsButton")
+            && main_js().contains("function showGamePluginSettingsDialog")
+            && main_js().contains("function hideGamePluginSettingsDialog")
+            && main_js().contains("function renderGamePluginSettingsDialog")
+            && main_js().contains("function renderGamePluginSettingsGeneralTab")
+            && main_js().contains("function renderGamePluginSettingsMatchEventsTab")
+            && main_js().contains("function renderGamePluginSettingsTimelineMarkersTab")
             && main_js().contains("data-game-plugin-review-enabled")
             && main_js().contains("data-game-plugin-review-setting")
             && main_js().contains("match_events")
@@ -722,10 +728,18 @@ fn review_player_owns_all_controls() {
             && main_js().contains("enemy_deaths")
             && main_js().contains("PlayerCore.reviewMatchEventMarkers")
             && main_js().contains("PlayerCore.reviewTimelineMarkers")
-            && styles_css().contains(".game-profile-review")
-            && styles_css().contains(".game-review-group")
+            && index_html().contains("id=\"game-plugin-settings-dialog\"")
+            && index_html().contains("id=\"game-plugin-settings-tabs\"")
+            && index_html().contains("General")
+            && index_html().contains("Match events")
+            && index_html().contains("Timeline markers")
+            && main_js().matches("game-plugin-settings-dialog").count() >= 2
+            && styles_css().contains(".game-profile-settings")
+            && styles_css().contains(".game-plugin-settings-dialog")
+            && styles_css().contains(".game-plugin-settings-tabs")
+            && styles_css().contains(".game-plugin-settings-body")
             && styles_css().contains(".game-review-options"),
-        "supported games must expose persisted enhanced-review, match-events, and timeline-marker controls"
+        "supported games must expose persisted enhanced-review controls in the settings dialog"
     );
     assert!(
         main_js().contains("empty.textContent = \"no supported games available\"")

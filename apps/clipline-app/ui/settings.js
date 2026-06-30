@@ -1,4 +1,7 @@
 // Settings page: form I/O, capture region, devices, games.
+var gamePluginSettingsDialogPluginId = null;
+var gamePluginSettingsDialogTab = "general";
+
 function cloneSettings(settings) {
   return settings ? JSON.parse(JSON.stringify(settings)) : null;
 }
@@ -267,6 +270,15 @@ function gamePluginSetting(plugin) {
   return normalizeGamePluginSettings(gamePluginSettings[plugin.id], plugin);
 }
 
+function syncGamePluginSettingsDraft() {
+  if (currentSettings || settingsDraft) settingsDraft = readSettings();
+}
+
+function gamePluginSettingsDialogPlugin() {
+  if (!gamePluginSettingsDialogPluginId) return null;
+  return gamePlugins.find((plugin) => plugin.id === gamePluginSettingsDialogPluginId) || null;
+}
+
 function gamePluginReviewInputs(plugin) {
   return Array.from(document.querySelectorAll(`[data-game-plugin-review-setting="${plugin.id}"]`));
 }
@@ -351,12 +363,13 @@ function renderGamePluginModeControl(plugin, settings) {
     input.checked = settings.recording_mode === value;
     input.addEventListener("change", () => {
       if (input.checked) {
-        gamePluginSettings[plugin.id] = {
+        gamePluginSettings[plugin.id] = normalizeGamePluginSettings({
           ...gamePluginSetting(plugin),
           recording_mode: value,
-        };
+        }, plugin);
         updateGamePluginSummary(plugin);
         updateGameDetectionStatus();
+        syncGamePluginSettingsDraft();
       }
     });
     const text = document.createElement("span");
@@ -396,9 +409,17 @@ const GAME_REVIEW_GROUPS = [
   },
 ];
 
+const GAME_PLUGIN_SETTINGS_TABS = ["general", "match_events", "timeline_markers"];
+
+function gamePluginReviewGroupDefinition(groupId) {
+  return GAME_REVIEW_GROUPS.find((group) => group.id === groupId) || GAME_REVIEW_GROUPS[0];
+}
+
 function syncGamePluginReviewControls(plugin) {
   const settings = gamePluginSetting(plugin);
   const reviewEnabled = settings.review.enabled;
+  const master = document.querySelector(`[data-game-plugin-review-enabled="${plugin.id}"]`);
+  if (master) master.checked = reviewEnabled;
   const groups = document.querySelectorAll(`[data-game-plugin-review-group="${plugin.id}"]`);
   groups.forEach((group) => {
     const groupName = group.dataset.reviewGroup;
@@ -421,6 +442,7 @@ function updateGamePluginReviewSetting(plugin) {
     review: readGamePluginReviewSettings(plugin, existing.review),
   }, plugin);
   syncGamePluginReviewControls(plugin);
+  syncGamePluginSettingsDraft();
   refreshReviewForSettingsChange();
 }
 
@@ -440,11 +462,67 @@ function renderReviewCheckbox(plugin, groupId, key, labelText, checked) {
   return label;
 }
 
-function renderGamePluginReviewControls(plugin, settings) {
+function renderGamePluginSettingsButton(plugin) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "game-profile-settings";
+  button.dataset.gamePluginSettings = plugin.id;
+  button.textContent = "Settings";
+  button.setAttribute("aria-label", `${plugin.name} settings`);
+  button.addEventListener("click", () => showGamePluginSettingsDialog(plugin));
+  return button;
+}
+
+function renderGamePluginReviewGroup(plugin, groupId, review) {
+  const group = gamePluginReviewGroupDefinition(groupId);
+  const groupSettings = review[group.id];
+  const section = document.createElement("section");
+  section.className = "game-review-group";
+  section.dataset.gamePluginReviewGroup = plugin.id;
+  section.dataset.reviewGroup = group.id;
+
+  const head = document.createElement("label");
+  head.className = "check-line game-review-group-head";
+  const enabled = document.createElement("input");
+  enabled.type = "checkbox";
+  enabled.checked = groupSettings.enabled;
+  enabled.dataset.gamePluginReviewSetting = plugin.id;
+  enabled.dataset.reviewGroup = group.id;
+  enabled.dataset.reviewKey = "enabled";
+  enabled.addEventListener("change", () => updateGamePluginReviewSetting(plugin));
+  const title = document.createElement("strong");
+  title.textContent = group.label;
+  head.append(enabled, title);
+
+  const options = document.createElement("div");
+  options.className = "game-review-options";
+  for (const [key, labelText] of group.options) {
+    options.appendChild(renderReviewCheckbox(
+      plugin,
+      group.id,
+      key,
+      labelText,
+      groupSettings[key],
+    ));
+  }
+
+  section.append(head, options);
+  return section;
+}
+
+function renderGamePluginSettingsGeneralTab(plugin, settings) {
   const review = normalizeGamePluginReviewSettings(settings.review);
   const root = document.createElement("div");
-  root.className = "game-profile-review";
+  root.className = "game-plugin-settings-panel";
 
+  const modeSection = document.createElement("section");
+  modeSection.className = "game-plugin-settings-section";
+  const modeTitle = document.createElement("strong");
+  modeTitle.textContent = "Recording";
+  modeSection.append(modeTitle, renderGamePluginModeControl(plugin, settings));
+
+  const reviewSection = document.createElement("section");
+  reviewSection.className = "game-plugin-settings-section";
   const master = document.createElement("label");
   master.className = "check-line game-review-master";
   const masterInput = document.createElement("input");
@@ -455,49 +533,92 @@ function renderGamePluginReviewControls(plugin, settings) {
   const masterText = document.createElement("span");
   masterText.textContent = "Enhanced review view";
   master.append(masterInput, masterText);
-  root.appendChild(master);
+  reviewSection.append(master);
 
-  for (const group of GAME_REVIEW_GROUPS) {
-    const groupSettings = review[group.id];
-    const section = document.createElement("div");
-    section.className = "game-review-group";
-    section.dataset.gamePluginReviewGroup = plugin.id;
-    section.dataset.reviewGroup = group.id;
-
-    const head = document.createElement("label");
-    head.className = "check-line game-review-group-head";
-    const enabled = document.createElement("input");
-    enabled.type = "checkbox";
-    enabled.checked = groupSettings.enabled;
-    enabled.dataset.gamePluginReviewSetting = plugin.id;
-    enabled.dataset.reviewGroup = group.id;
-    enabled.dataset.reviewKey = "enabled";
-    enabled.addEventListener("change", () => updateGamePluginReviewSetting(plugin));
-    const title = document.createElement("strong");
-    title.textContent = group.label;
-    head.append(enabled, title);
-
-    const options = document.createElement("div");
-    options.className = "game-review-options";
-    for (const [key, labelText] of group.options) {
-      options.appendChild(renderReviewCheckbox(
-        plugin,
-        group.id,
-        key,
-        labelText,
-        groupSettings[key],
-      ));
-    }
-
-    section.append(head, options);
-    root.appendChild(section);
-  }
+  root.append(modeSection, reviewSection);
   return root;
+}
+
+function renderGamePluginSettingsMatchEventsTab(plugin, settings) {
+  const root = document.createElement("div");
+  root.className = "game-plugin-settings-panel";
+  root.appendChild(renderGamePluginReviewGroup(
+    plugin,
+    "match_events",
+    normalizeGamePluginReviewSettings(settings.review),
+  ));
+  return root;
+}
+
+function renderGamePluginSettingsTimelineMarkersTab(plugin, settings) {
+  const root = document.createElement("div");
+  root.className = "game-plugin-settings-panel";
+  root.appendChild(renderGamePluginReviewGroup(
+    plugin,
+    "timeline_markers",
+    normalizeGamePluginReviewSettings(settings.review),
+  ));
+  return root;
+}
+
+function renderGamePluginSettingsDialog(plugin = gamePluginSettingsDialogPlugin()) {
+  if (!plugin) return;
+  const settings = gamePluginSetting(plugin);
+  const tab = GAME_PLUGIN_SETTINGS_TABS.includes(gamePluginSettingsDialogTab)
+    ? gamePluginSettingsDialogTab
+    : "general";
+  gamePluginSettingsDialogTab = tab;
+  gamePluginSettings[plugin.id] = settings;
+
+  $("game-plugin-settings-title").textContent = `${plugin.name} settings`;
+  $("game-plugin-settings-subtitle").textContent = gamePluginSummary(plugin, settings);
+  document.querySelectorAll("[data-game-plugin-settings-tab]").forEach((button) => {
+    const active = button.dataset.gamePluginSettingsTab === tab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+
+  const body = $("game-plugin-settings-body");
+  if (tab === "match_events") {
+    body.replaceChildren(renderGamePluginSettingsMatchEventsTab(plugin, settings));
+  } else if (tab === "timeline_markers") {
+    body.replaceChildren(renderGamePluginSettingsTimelineMarkersTab(plugin, settings));
+  } else {
+    body.replaceChildren(renderGamePluginSettingsGeneralTab(plugin, settings));
+  }
+  syncGamePluginReviewControls(plugin);
+}
+
+function showGamePluginSettingsDialog(plugin, tab = "general") {
+  gamePluginSettingsDialogPluginId = plugin.id;
+  gamePluginSettingsDialogTab = GAME_PLUGIN_SETTINGS_TABS.includes(tab) ? tab : "general";
+  renderGamePluginSettingsDialog(plugin);
+  const dialog = $("game-plugin-settings-dialog");
+  if (!dialog.open) dialog.showModal();
+}
+
+function hideGamePluginSettingsDialog() {
+  const dialog = $("game-plugin-settings-dialog");
+  if (dialog.open) dialog.close();
+  else gamePluginSettingsDialogPluginId = null;
+}
+
+function setGamePluginSettingsTab(tab) {
+  if (!GAME_PLUGIN_SETTINGS_TABS.includes(tab)) return;
+  syncGamePluginSettingsDraft();
+  gamePluginSettingsDialogTab = tab;
+  renderGamePluginSettingsDialog();
 }
 
 function syncGamePluginCatalog(nextPlugins) {
   gamePlugins = Array.isArray(nextPlugins) ? nextPlugins : [];
   renderGamePlugins();
+  if (gamePluginSettingsDialogPluginId && !gamePluginSettingsDialogPlugin()) {
+    hideGamePluginSettingsDialog();
+  } else if (gamePluginSettingsDialogPluginId) {
+    renderGamePluginSettingsDialog();
+  }
   updateGameDetectionStatus();
   if (clipsCache.length) renderClips();
   if (currentClip) {
@@ -538,6 +659,7 @@ function renderGamePlugins() {
       };
       updateGamePluginSummary(plugin);
       updateGameDetectionStatus();
+      syncGamePluginSettingsDraft();
     });
     enabled.appendChild(checkbox);
 
@@ -556,11 +678,9 @@ function renderGamePlugins() {
       enabled,
       icon,
       meta,
-      renderGamePluginModeControl(plugin, settings),
-      renderGamePluginReviewControls(plugin, settings)
+      renderGamePluginSettingsButton(plugin)
     );
     root.appendChild(row);
-    syncGamePluginReviewControls(plugin);
   }
 }
 
