@@ -140,6 +140,7 @@ function pluginForClip(clip) {
 }
 
 function pluginPresentationForClip(clip) {
+  if (!gameReviewEnabledForClip(clip)) return null;
   const plugin = pluginForClip(clip);
   return plugin && plugin.presentation ? plugin.presentation : null;
 }
@@ -267,9 +268,7 @@ function renderGameEventRail(clip = currentClip) {
   const list = $("game-event-list");
   const presentation = pluginPresentationForClip(clip);
   const eventRail = eventRailPolicy(clip);
-  const markers = clip && clip.markers && Array.isArray(clip.markers.markers)
-    ? clip.markers.markers
-    : [];
+  const markers = clipMatchEventMarkers(clip);
   activeGameEventIndex = -1;
   clearGameEventSelection();
   if (!eventRail || !eventRail.enabled || !markers.length) {
@@ -374,7 +373,7 @@ function syncGameEventRail(currentTime = video.currentTime || 0, options = {}) {
   const rail = $("game-event-rail");
   if (!rail || rail.hidden || rail.classList.contains("is-collapsed")) return;
   if (!gameEventRows.length) return;
-  const markers = clipMarkers();
+  const markers = clipMatchEventMarkers();
   const selectedIndex = selectedGameEventIndexForTime(currentTime);
   const next = gameEventActiveIndex(markers, currentTime, selectedIndex);
   if (next === activeGameEventIndex && !options.force) return;
@@ -691,7 +690,7 @@ function clipCard(c) {
 
   const kind = clipKind(c.name);
   const when = new Date(c.modified_unix * 1000);
-  const markers = c.markers ? c.markers.markers : [];
+  const markers = clipMarkers(c);
   const presentation = pluginPresentationForClip(c);
   const duration = Number.isFinite(c.duration_s)
     ? c.duration_s
@@ -920,8 +919,7 @@ function filterGalleryClips(clips) {
     const kind = clipKind(c.name);
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
       && kind !== galleryFilter) return false;
-    if (galleryFilter === "marked"
-      && !(c.markers && c.markers.markers && c.markers.markers.length)) return false;
+    if (galleryFilter === "marked" && !clipMarkers(c).length) return false;
     if (gallerySearch) {
       const champ = c.markers && c.markers.player_summary ? c.markers.player_summary.champion_name : "";
       const hay = `${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""}`.toLowerCase();
@@ -933,7 +931,7 @@ function filterGalleryClips(clips) {
 
 function sortGalleryClips(clips) {
   const out = clips.slice();
-  const markerCount = (c) => (c.markers && c.markers.markers ? c.markers.markers.length : 0);
+  const markerCount = (c) => clipMarkers(c).length;
   if (gallerySort === "old") out.sort((a, b) => a.modified_unix - b.modified_unix);
   else if (gallerySort === "big") out.sort((a, b) => b.size_mb - a.size_mb);
   else if (gallerySort === "marks") out.sort((a, b) => markerCount(b) - markerCount(a));

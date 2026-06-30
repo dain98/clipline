@@ -6,5 +6,5 @@ pub use markers::{
     ClipAudioTrack, ClipMarker, ClipMarkers, MarkerLog, PlayerItem, PlayerParticipant,
     PlayerSummary, PlayerSummonerSpell,
 };
-pub use schema::{is_timeline_marker, EventKind, GameEvent, GameId};
+pub use schema::{is_review_event, is_timeline_marker, EventKind, GameEvent, GameId};
 pub use sync::{recording_offset_s, ClockAnchor};

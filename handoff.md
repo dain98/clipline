@@ -283,8 +283,9 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      right-side event rail, and a bottom metadata strip. Event ingestion stays core-owned behind
      the built-in `league_live_client` capability; game integration updates ship with normal
      Clipline releases instead of external plugin zips or Settings-driven package installs.
-     `EventKind`, `GameId`, and `is_timeline_marker()` remain core-owned: profiles style the closed
-     marker vocabulary but cannot add event kinds or change persistence policy. The review player
+     `EventKind`, `GameId`, `is_review_event()`, and `is_timeline_marker()` remain core-owned:
+     profiles style the closed marker vocabulary but cannot add event kinds or change persistence
+     policy. The review player
      threads presentation into pure `player-core.js` marker helpers and `main.js` renders
      profile-driven gallery summaries, marker styling, the event rail, and metadata. League's Live
      Client summary keeps optional participant/team roster data so the event rail can render
@@ -307,6 +308,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-30):
+- Supported-game rows now persist a nested `review` settings block. Users can turn the enhanced
+  League review view off entirely, or independently filter the match-events rail and timeline
+  markers by local kills/deaths/assists, ally/enemy kills/deaths, objectives, and turrets. Fresh
+  recordings keep broader review events (`is_review_event`) in marker sidecars so those filters can
+  show ally/enemy events; older recordings only contain whatever marker data existed when they were
+  captured.
 - League local-player assists now normalize as `ChampionAssist`, survive the timeline-marker
   filter, and render with the new assist icon/category; the refreshed sword kill icon is used by
   both timeline markers and the right-side match events rail.

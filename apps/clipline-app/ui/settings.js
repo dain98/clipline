@@ -192,7 +192,16 @@ function defaultGamePluginSettings(plugin) {
     recording_mode: normalizeGameRecordingMode(
       plugin && plugin.default_recording_mode ? plugin.default_recording_mode : "full_session"
     ),
+    review: defaultGamePluginReviewSettings(),
   };
+}
+
+function defaultGamePluginReviewSettings() {
+  return PlayerCore.normalizeGameReviewSettings(null);
+}
+
+function normalizeGamePluginReviewSettings(settings) {
+  return PlayerCore.normalizeGameReviewSettings(settings);
 }
 
 function normalizeGameRecordingMode(mode) {
@@ -216,6 +225,7 @@ function normalizeGamePluginSettings(settings, plugin = null) {
     recording_mode: normalizeGameRecordingMode(
       settings && settings.recording_mode ? settings.recording_mode : defaults.recording_mode
     ),
+    review: normalizeGamePluginReviewSettings(settings && settings.review ? settings.review : defaults.review),
   };
 }
 
@@ -257,6 +267,26 @@ function gamePluginSetting(plugin) {
   return normalizeGamePluginSettings(gamePluginSettings[plugin.id], plugin);
 }
 
+function gamePluginReviewInputs(plugin) {
+  return Array.from(document.querySelectorAll(`[data-game-plugin-review-setting="${plugin.id}"]`));
+}
+
+function readGamePluginReviewSettings(plugin, fallback) {
+  const review = normalizeGamePluginReviewSettings(fallback);
+  const master = document.querySelector(`[data-game-plugin-review-enabled="${plugin.id}"]`);
+  const next = normalizeGamePluginReviewSettings({
+    ...review,
+    enabled: master ? master.checked : review.enabled,
+  });
+  for (const input of gamePluginReviewInputs(plugin)) {
+    const group = input.dataset.reviewGroup;
+    const key = input.dataset.reviewKey;
+    if (!next[group] || !Object.prototype.hasOwnProperty.call(next[group], key)) continue;
+    next[group][key] = input.checked;
+  }
+  return next;
+}
+
 function readGamePluginSettings() {
   const source = settingsFormSource();
   const next = {
@@ -273,6 +303,7 @@ function readGamePluginSettings() {
         `game-plugin-mode-${plugin.id}`,
         existing.recording_mode
       ),
+      review: readGamePluginReviewSettings(plugin, existing.review),
     }, plugin);
   }
   gamePluginSettings = next;
@@ -287,6 +318,15 @@ function gamePluginSummary(plugin, settings = gamePluginSetting(plugin)) {
     return "Full-session recording starts when the match window appears. Takes priority over matching custom games.";
   }
   return "Replay capture switches to the match window without saving a full session. Takes priority over matching custom games.";
+}
+
+function refreshReviewForSettingsChange() {
+  if (clipsCache.length) renderClips();
+  if (!currentClip) return;
+  if (typeof renderOverviewMarkers === "function") renderOverviewMarkers();
+  if (typeof renderMarkers === "function") renderMarkers();
+  renderGameEventRail(currentClip);
+  renderGameMetadataPanel(currentClip);
 }
 
 function updateGamePluginSummary(plugin) {
@@ -325,6 +365,134 @@ function renderGamePluginModeControl(plugin, settings) {
     control.appendChild(option);
   });
   return control;
+}
+
+const GAME_REVIEW_GROUPS = [
+  {
+    id: "match_events",
+    label: "Match events",
+    options: [
+      ["user_kills", "User kills"],
+      ["user_deaths", "User deaths"],
+      ["user_assists", "User assists"],
+      ["team_kills", "Ally kills"],
+      ["team_deaths", "Ally deaths"],
+      ["enemy_kills", "Enemy kills"],
+      ["enemy_deaths", "Enemy deaths"],
+      ["objectives", "Objectives"],
+      ["turrets", "Turrets"],
+    ],
+  },
+  {
+    id: "timeline_markers",
+    label: "Timeline markers",
+    options: [
+      ["user_kills", "User kills"],
+      ["user_deaths", "User deaths"],
+      ["user_assists", "User assists"],
+      ["objectives", "Objectives"],
+      ["turrets", "Turrets"],
+    ],
+  },
+];
+
+function syncGamePluginReviewControls(plugin) {
+  const settings = gamePluginSetting(plugin);
+  const reviewEnabled = settings.review.enabled;
+  const groups = document.querySelectorAll(`[data-game-plugin-review-group="${plugin.id}"]`);
+  groups.forEach((group) => {
+    const groupName = group.dataset.reviewGroup;
+    const groupEnabled = Boolean(settings.review[groupName] && settings.review[groupName].enabled);
+    group.classList.toggle("disabled", !reviewEnabled || !groupEnabled);
+    group.querySelectorAll("input").forEach((input) => {
+      if (input.dataset.reviewKey === "enabled") {
+        input.disabled = !reviewEnabled;
+      } else {
+        input.disabled = !reviewEnabled || !groupEnabled;
+      }
+    });
+  });
+}
+
+function updateGamePluginReviewSetting(plugin) {
+  const existing = gamePluginSetting(plugin);
+  gamePluginSettings[plugin.id] = normalizeGamePluginSettings({
+    ...existing,
+    review: readGamePluginReviewSettings(plugin, existing.review),
+  }, plugin);
+  syncGamePluginReviewControls(plugin);
+  refreshReviewForSettingsChange();
+}
+
+function renderReviewCheckbox(plugin, groupId, key, labelText, checked) {
+  const label = document.createElement("label");
+  label.className = "check-line";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = checked;
+  input.dataset.gamePluginReviewSetting = plugin.id;
+  input.dataset.reviewGroup = groupId;
+  input.dataset.reviewKey = key;
+  input.addEventListener("change", () => updateGamePluginReviewSetting(plugin));
+  const text = document.createElement("span");
+  text.textContent = labelText;
+  label.append(input, text);
+  return label;
+}
+
+function renderGamePluginReviewControls(plugin, settings) {
+  const review = normalizeGamePluginReviewSettings(settings.review);
+  const root = document.createElement("div");
+  root.className = "game-profile-review";
+
+  const master = document.createElement("label");
+  master.className = "check-line game-review-master";
+  const masterInput = document.createElement("input");
+  masterInput.type = "checkbox";
+  masterInput.checked = review.enabled;
+  masterInput.dataset.gamePluginReviewEnabled = plugin.id;
+  masterInput.addEventListener("change", () => updateGamePluginReviewSetting(plugin));
+  const masterText = document.createElement("span");
+  masterText.textContent = "Enhanced review view";
+  master.append(masterInput, masterText);
+  root.appendChild(master);
+
+  for (const group of GAME_REVIEW_GROUPS) {
+    const groupSettings = review[group.id];
+    const section = document.createElement("div");
+    section.className = "game-review-group";
+    section.dataset.gamePluginReviewGroup = plugin.id;
+    section.dataset.reviewGroup = group.id;
+
+    const head = document.createElement("label");
+    head.className = "check-line game-review-group-head";
+    const enabled = document.createElement("input");
+    enabled.type = "checkbox";
+    enabled.checked = groupSettings.enabled;
+    enabled.dataset.gamePluginReviewSetting = plugin.id;
+    enabled.dataset.reviewGroup = group.id;
+    enabled.dataset.reviewKey = "enabled";
+    enabled.addEventListener("change", () => updateGamePluginReviewSetting(plugin));
+    const title = document.createElement("strong");
+    title.textContent = group.label;
+    head.append(enabled, title);
+
+    const options = document.createElement("div");
+    options.className = "game-review-options";
+    for (const [key, labelText] of group.options) {
+      options.appendChild(renderReviewCheckbox(
+        plugin,
+        group.id,
+        key,
+        labelText,
+        groupSettings[key],
+      ));
+    }
+
+    section.append(head, options);
+    root.appendChild(section);
+  }
+  return root;
 }
 
 function syncGamePluginCatalog(nextPlugins) {
@@ -388,9 +556,11 @@ function renderGamePlugins() {
       enabled,
       icon,
       meta,
-      renderGamePluginModeControl(plugin, settings)
+      renderGamePluginModeControl(plugin, settings),
+      renderGamePluginReviewControls(plugin, settings)
     );
     root.appendChild(row);
+    syncGamePluginReviewControls(plugin);
   }
 }
 
@@ -1309,4 +1479,3 @@ function positionContextMenu(menu, x, y) {
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
 }
-

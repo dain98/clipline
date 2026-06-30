@@ -244,6 +244,7 @@ mod tests {
             crate::settings::GamePluginSettings {
                 enabled,
                 recording_mode,
+                review: Default::default(),
             },
         );
         settings

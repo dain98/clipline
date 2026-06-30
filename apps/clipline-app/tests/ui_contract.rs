@@ -711,6 +711,23 @@ fn review_player_owns_all_controls() {
         "supported games must render from backend profiles without package install/update actions"
     );
     assert!(
+        main_js().contains("function defaultGamePluginReviewSettings")
+            && main_js().contains("function normalizeGamePluginReviewSettings")
+            && main_js().contains("function renderGamePluginReviewControls")
+            && main_js().contains("data-game-plugin-review-enabled")
+            && main_js().contains("data-game-plugin-review-setting")
+            && main_js().contains("match_events")
+            && main_js().contains("timeline_markers")
+            && main_js().contains("team_kills")
+            && main_js().contains("enemy_deaths")
+            && main_js().contains("PlayerCore.reviewMatchEventMarkers")
+            && main_js().contains("PlayerCore.reviewTimelineMarkers")
+            && styles_css().contains(".game-profile-review")
+            && styles_css().contains(".game-review-group")
+            && styles_css().contains(".game-review-options"),
+        "supported games must expose persisted enhanced-review, match-events, and timeline-marker controls"
+    );
+    assert!(
         main_js().contains("empty.textContent = \"no supported games available\"")
             && !main_js().contains("not installed")
             && !main_js().contains("repair available")
@@ -774,8 +791,6 @@ fn review_player_owns_all_controls() {
             && player_core_js().contains("const clipName = clip && typeof clip.name === \"string\" ? clip.name.trim() : \"\"")
             && player_core_js().contains("titlePolicy === \"clip\" && clipName ? clipName : fallback")
             && player_core_js().contains("const markerRailConfig =")
-            && !player_core_js().contains("kind === \"ChampionKill\"")
-            && !player_core_js().contains("kind === \"ChampionDeath\"")
             && main_js().contains("detail.className = \"game-meta\"")
             && main_js().contains("if (cardPreview.summary && !cardTitleUsesSummary)")
             && main_js().contains("const infoParts = []")

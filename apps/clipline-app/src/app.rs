@@ -2135,6 +2135,7 @@ mod tests {
             crate::settings::GamePluginSettings {
                 enabled: false,
                 recording_mode: GameRecordingMode::FullSession,
+                review: Default::default(),
             },
         );
         assert!(!active_game_still_configured(&settings, Some(&active)));

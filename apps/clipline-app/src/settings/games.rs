@@ -39,6 +39,8 @@ pub struct GamePluginSettings {
     pub enabled: bool,
     #[serde(default = "default_game_recording_mode_full_session")]
     pub recording_mode: GameRecordingMode,
+    #[serde(default)]
+    pub review: GamePluginReviewSettings,
 }
 
 impl Default for GamePluginSettings {
@@ -46,6 +48,97 @@ impl Default for GamePluginSettings {
         Self {
             enabled: true,
             recording_mode: GameRecordingMode::FullSession,
+            review: GamePluginReviewSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GamePluginReviewSettings {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub match_events: MatchEventSettings,
+    #[serde(default)]
+    pub timeline_markers: TimelineMarkerSettings,
+}
+
+impl Default for GamePluginReviewSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            match_events: MatchEventSettings::default(),
+            timeline_markers: TimelineMarkerSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MatchEventSettings {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_enabled")]
+    pub user_kills: bool,
+    #[serde(default = "default_enabled")]
+    pub user_deaths: bool,
+    #[serde(default = "default_enabled")]
+    pub user_assists: bool,
+    #[serde(default = "default_enabled")]
+    pub team_kills: bool,
+    #[serde(default = "default_enabled")]
+    pub team_deaths: bool,
+    #[serde(default = "default_enabled")]
+    pub enemy_kills: bool,
+    #[serde(default = "default_enabled")]
+    pub enemy_deaths: bool,
+    #[serde(default = "default_enabled")]
+    pub objectives: bool,
+    #[serde(default = "default_enabled")]
+    pub turrets: bool,
+}
+
+impl Default for MatchEventSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            user_kills: true,
+            user_deaths: true,
+            user_assists: true,
+            team_kills: true,
+            team_deaths: true,
+            enemy_kills: true,
+            enemy_deaths: true,
+            objectives: true,
+            turrets: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TimelineMarkerSettings {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_enabled")]
+    pub user_kills: bool,
+    #[serde(default = "default_enabled")]
+    pub user_deaths: bool,
+    #[serde(default = "default_enabled")]
+    pub user_assists: bool,
+    #[serde(default = "default_enabled")]
+    pub objectives: bool,
+    #[serde(default = "default_enabled")]
+    pub turrets: bool,
+}
+
+impl Default for TimelineMarkerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            user_kills: true,
+            user_deaths: true,
+            user_assists: true,
+            objectives: true,
+            turrets: true,
         }
     }
 }

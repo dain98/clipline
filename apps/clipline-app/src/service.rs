@@ -28,7 +28,7 @@ use clipline_capture::windows::{
 use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
 };
-use clipline_events::{is_timeline_marker, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
+use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
 use clipline_storage::sessions::{session_label, SessionTracker};
 use clipline_storage::{enforce_quota, recover_recording_files, storage_status, StorageStatus};
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
@@ -824,7 +824,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         player_summary.match_ended();
                         session.match_ended();
                     }
-                    if is_timeline_marker(&event) {
+                    if is_review_event(&event) {
                         marker_log.push(event);
                     }
                 }
@@ -1607,7 +1607,7 @@ fn write_marker_sidecar(
     audio_tracks: &[ClipAudioTrack],
 ) -> usize {
     let mut clip = marker_log.clip_markers(start_s, end_s);
-    clip.markers.retain(|m| is_timeline_marker(&m.event));
+    clip.markers.retain(|m| is_review_event(&m.event));
     clip.player_summary = player_summary.cloned();
     clip.audio_tracks = audio_tracks.to_vec();
     let markers = clip.markers.len();
@@ -2111,6 +2111,27 @@ mod tests {
         }
     }
 
+    fn review_event(
+        kind: EventKind,
+        actor: &str,
+        victim: Option<&str>,
+        offset_s: f64,
+        involves_local_player: bool,
+    ) -> clipline_events::GameEvent {
+        clipline_events::GameEvent {
+            game_id: clipline_events::GameId::LeagueOfLegends,
+            kind,
+            actor: actor.into(),
+            victim: victim.map(String::from),
+            assisters: Vec::new(),
+            subtype: None,
+            game_time_s: offset_s,
+            recording_offset_s: Some(offset_s),
+            importance: 7,
+            involves_local_player,
+        }
+    }
+
     #[test]
     fn player_summary_state_stops_replay_attribution_after_match_end() {
         let mut state = PlayerSummaryState::default();
@@ -2185,6 +2206,64 @@ mod tests {
         let sidecar: clipline_events::ClipMarkers = serde_json::from_str(&json).unwrap();
         assert!(sidecar.markers.is_empty());
         assert_eq!(sidecar.audio_tracks, tracks);
+    }
+
+    #[test]
+    fn write_marker_sidecar_keeps_review_events_for_match_event_filters() {
+        let dir = TestDir::new("clipline-service", "sidecar-review-events");
+        let path = dir.path().join("clip.mp4");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut log = MarkerLog::new();
+        log.push(review_event(
+            EventKind::ChampionKill,
+            "Enemy Mid",
+            Some("Ally Top"),
+            12.0,
+            false,
+        ));
+        log.push(review_event(
+            EventKind::ChampionAssist,
+            "Dain",
+            Some("Enemy Mid"),
+            14.0,
+            true,
+        ));
+        log.push(review_event(
+            EventKind::HeraldKill,
+            "Ally Jungle",
+            None,
+            16.0,
+            false,
+        ));
+        log.push(review_event(
+            EventKind::MinionsSpawning,
+            "",
+            None,
+            18.0,
+            false,
+        ));
+
+        let count = write_marker_sidecar(&tx, &log, &path, 10.0, 20.0, None, &[]);
+
+        assert_eq!(count, 3);
+        let json = std::fs::read_to_string(path.with_extension("markers.json")).unwrap();
+        let sidecar: clipline_events::ClipMarkers = serde_json::from_str(&json).unwrap();
+        let kinds: Vec<_> = sidecar
+            .markers
+            .iter()
+            .map(|marker| marker.event.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                EventKind::ChampionKill,
+                EventKind::ChampionAssist,
+                EventKind::HeraldKill,
+            ]
+        );
+        assert_eq!(sidecar.markers[0].event.actor, "Enemy Mid");
+        assert!(!sidecar.markers[0].event.involves_local_player);
+        assert!((sidecar.markers[0].t_s - 2.0).abs() < 1e-9);
     }
 
     #[test]

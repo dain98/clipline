@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::Mutex;
 
-use clipline_events::{is_timeline_marker, ClipMarker, ClipMarkers};
+use clipline_events::{is_review_event, ClipMarker, ClipMarkers};
 use clipline_mp4::{
     remux_with_mixed_audio_track, remux_with_selected_audio_tracks, trim_keyframe_aligned_file,
 };
@@ -197,7 +197,7 @@ fn push_clips_from(
         let size_mb = meta
             .map(|m| m.len() as f64 / (1024.0 * 1024.0))
             .unwrap_or(0.0);
-        let raw_markers = util::read_markers_raw(&path).map(filter_timeline_markers);
+        let raw_markers = util::read_markers_raw(&path).map(filter_review_markers);
         let duration_s = raw_markers
             .as_ref()
             .map(|markers| markers.duration_s)
@@ -810,7 +810,7 @@ fn export_clip_file(source: PathBuf, start_s: f64, end_s: f64) -> Result<Exporte
     std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
 
     let mut exported_markers = None;
-    if let Some(markers) = util::read_markers_raw(&source).map(filter_timeline_markers) {
+    if let Some(markers) = util::read_markers_raw(&source).map(filter_review_markers) {
         let cropped = crop_markers(&markers, info.aligned_start_s, info.aligned_end_s);
         if has_marker_sidecar_content(&cropped) {
             let json = serde_json::to_string_pretty(&cropped).map_err(|e| e.to_string())?;
@@ -1135,8 +1135,8 @@ impl Drop for ClipboardClose {
     }
 }
 
-fn filter_timeline_markers(mut markers: ClipMarkers) -> ClipMarkers {
-    markers.markers.retain(|m| is_timeline_marker(&m.event));
+fn filter_review_markers(mut markers: ClipMarkers) -> ClipMarkers {
+    markers.markers.retain(|m| is_review_event(&m.event));
     markers
 }
 
@@ -1282,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_timeline_markers_drops_non_user_kills_and_noise() {
+    fn filter_review_markers_keeps_match_event_sources_and_drops_noise() {
         let markers = ClipMarkers {
             recording_start_s: 10.0,
             duration_s: 100.0,
@@ -1307,6 +1307,7 @@ mod tests {
                 marker_with(3.0, EventKind::TurretKilled, false),
                 marker_with(4.0, EventKind::DragonKill, false),
                 marker_with(5.0, EventKind::BaronKill, false),
+                marker_with(5.5, EventKind::HeraldKill, false),
                 marker_with(6.0, EventKind::MinionsSpawning, true),
                 marker_with(7.0, EventKind::FirstBlood, true),
                 marker_with(8.0, EventKind::FirstBrick, true),
@@ -1314,20 +1315,23 @@ mod tests {
             ],
         };
 
-        let filtered = filter_timeline_markers(markers);
+        let filtered = filter_review_markers(markers);
         let kinds: Vec<_> = filtered.markers.iter().map(|m| m.event.kind).collect();
 
         assert_eq!(
             kinds,
             vec![
                 EventKind::ChampionKill,
+                EventKind::ChampionKill,
                 EventKind::ChampionDeath,
                 EventKind::TurretKilled,
                 EventKind::DragonKill,
                 EventKind::BaronKill,
+                EventKind::HeraldKill,
             ]
         );
         assert!(filtered.markers[0].event.involves_local_player);
+        assert!(!filtered.markers[1].event.involves_local_player);
         assert_eq!(
             filtered.player_summary.as_ref().map(|summary| (
                 summary.champion_name.as_str(),

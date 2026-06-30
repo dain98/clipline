@@ -157,6 +157,7 @@ impl GamePlugin {
         GamePluginSettings {
             enabled: self.manifest.default_enabled,
             recording_mode: self.manifest.default_recording_mode,
+            review: Default::default(),
         }
     }
 

@@ -530,6 +530,90 @@ fn game_event_active_index_honors_clicked_event_during_lead_in() {
 }
 
 #[test]
+fn review_marker_filters_apply_per_surface_game_settings() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const REVIEW_SUMMARY = {
+          player_name: 'Dain',
+          champion_name: 'Nautilus',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'Dain', champion_name: 'Nautilus', team: 'ORDER' },
+            { player_name: 'Ally Bot', champion_name: 'Ezreal', team: 'ORDER' },
+            { player_name: 'Enemy Mid', champion_name: 'Ahri', team: 'CHAOS' },
+            { player_name: 'Enemy Jungle', champion_name: 'Zed', team: 'CHAOS' }
+          ]
+        };
+        const REVIEW_MARKERS = [
+          { id: 'local-kill', kind: 'ChampionKill', actor: 'Dain', victim: 'Enemy Mid', involves_local_player: true },
+          { id: 'local-assist', kind: 'ChampionAssist', actor: 'Ally Bot', victim: 'Enemy Mid', assisters: ['Dain'], involves_local_player: true },
+          { id: 'local-death', kind: 'ChampionDeath', actor: 'Enemy Jungle', victim: 'Dain', involves_local_player: true },
+          { id: 'team-kill', kind: 'ChampionKill', actor: 'Ally Bot', victim: 'Enemy Jungle', involves_local_player: false },
+          { id: 'enemy-kill', kind: 'ChampionKill', actor: 'Enemy Mid', victim: 'Ally Bot', involves_local_player: false },
+          { id: 'dragon', kind: 'DragonKill', actor: 'Ally Bot', involves_local_player: false },
+          { id: 'herald', kind: 'HeraldKill', actor: 'Enemy Mid', involves_local_player: false },
+          { id: 'turret', kind: 'TurretKilled', actor: 'Ally Bot', involves_local_player: false },
+          { id: 'noise', kind: 'MinionsSpawning', actor: '', involves_local_player: false }
+        ];
+        const REVIEW_SETTINGS = {
+          enabled: true,
+          match_events: {
+            enabled: true,
+            user_kills: true,
+            user_deaths: true,
+            user_assists: true,
+            team_kills: false,
+            team_deaths: false,
+            enemy_kills: true,
+            enemy_deaths: false,
+            objectives: true,
+            turrets: true
+          },
+          timeline_markers: {
+            enabled: true,
+            user_kills: false,
+            user_deaths: true,
+            user_assists: true,
+            objectives: true,
+            turrets: false
+          }
+        };
+        "#,
+    ))
+    .expect("define review marker filter inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.reviewMatchEventMarkers(REVIEW_MARKERS, REVIEW_SUMMARY, REVIEW_SETTINGS).map(m => m.id)"
+        ),
+        r#"["local-kill","local-assist","local-death","enemy-kill","dragon","herald","turret"]"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.reviewTimelineMarkers(REVIEW_MARKERS, REVIEW_SUMMARY, REVIEW_SETTINGS).map(m => m.id)"
+        ),
+        r#"["local-assist","local-death","dragon","herald"]"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.reviewMatchEventMarkers(REVIEW_MARKERS, REVIEW_SUMMARY, { ...REVIEW_SETTINGS, enabled: false })"
+        ),
+        "[]"
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.reviewTimelineMarkers(REVIEW_MARKERS, REVIEW_SUMMARY, { ...REVIEW_SETTINGS, timeline_markers: { ...REVIEW_SETTINGS.timeline_markers, enabled: false } })"
+        ),
+        "[]"
+    );
+}
+
+#[test]
 fn marker_count_pluralizes() {
     let mut ctx = player_core_context();
     assert_eq!(eval(&mut ctx, "PlayerCore.markerSummary([])"), "no markers");
