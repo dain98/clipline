@@ -155,6 +155,9 @@ var overviewDrag = null;
 var snapEnabled = true;
 var MIC_MONITOR_START_DELAY_S = 0.02;
 var MIC_MONITOR_MAX_LATENCY_S = 0.25;
+// Clicking a marker/event row starts playback this many seconds before the
+// moment so its lead-up plays rather than dropping the viewer right on it.
+var MARKER_LEAD_S = 1;
 
 function setDeckStatus(message, { transient = false } = {}) {
   window.clearTimeout(deckStatusToastTimer);

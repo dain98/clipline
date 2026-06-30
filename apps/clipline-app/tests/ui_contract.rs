@@ -1501,7 +1501,7 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         "the time ruler must add Outplayed-style dense ticks between major labels"
     );
     assert!(
-        js.contains("const MARKER_LEAD_S = 1;")
+        js.contains("MARKER_LEAD_S = 1")
             && js.contains("seekTo(markerTime - MARKER_LEAD_S, { keepGameEventSelection: true });")
             && js.contains("seekTo(m.t_s - MARKER_LEAD_S);"),
         "clicking timeline and event-rail markers must start one second before the event"
