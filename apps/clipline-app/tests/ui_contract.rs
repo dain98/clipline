@@ -727,6 +727,8 @@ fn review_player_owns_all_controls() {
             && main_js().contains("Map events")
             && main_js().contains("Your markers")
             && main_js().contains("Map markers")
+            && main_js().contains("Show League match details")
+            && !main_js().contains("Enhanced review view")
             && main_js().contains("data-game-plugin-review-enabled")
             && main_js().contains("data-game-plugin-review-setting")
             && main_js().contains("match_events")
@@ -750,7 +752,7 @@ fn review_player_owns_all_controls() {
             && styles_css().contains(".game-review-option-list")
             && styles_css().contains("align-items: start")
             && styles_css().contains("align-content: start"),
-        "supported games must expose persisted enhanced-review controls in the settings dialog"
+        "supported games must expose persisted League match detail controls in the settings dialog"
     );
     assert!(
         main_js().contains("empty.textContent = \"no supported games available\"")

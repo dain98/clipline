@@ -584,7 +584,7 @@ function renderGamePluginSettingsGeneralTab(plugin, settings) {
   masterInput.dataset.gamePluginReviewEnabled = plugin.id;
   masterInput.addEventListener("change", () => updateGamePluginReviewSetting(plugin));
   const masterText = document.createElement("span");
-  masterText.textContent = "Enhanced review view";
+  masterText.textContent = "Show League match details";
   master.append(masterInput, masterText);
   reviewSection.append(master);
 
