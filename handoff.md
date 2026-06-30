@@ -307,6 +307,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-29):
+- Nightly 0.1.22 is a hotfix for local review playback of output+mic clips. The previous
+  public nightly metadata was 0.1.21, so the app and Tauri package versions were bumped to
+  0.1.22 for updater eligibility.
+- Local review audio previews now use the native `clipline-mp4` Opus mixer before falling back
+  to FFmpeg, so Clipline-authored multi-track output+mic recordings play back as one audible
+  stream in WebView2 even when external FFmpeg is missing.
 - Nightly 0.1.21 contains the simple timeline editor from PR #66. The previous public nightly
   metadata was 0.1.20, so the app and Tauri package versions were bumped to 0.1.21 for updater
   eligibility.
