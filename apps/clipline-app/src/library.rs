@@ -513,17 +513,35 @@ fn preview_clip_audio_tracks_file_with_mixer(
         return Ok(preview.display().to_string());
     }
 
+    let source_bytes = std::fs::read(&source).map_err(|e| format!("read clip: {e}"))?;
     if selected_indices.len() > 1 {
-        mix_audio_preview(&source, &preview, &selected_indices)?;
-        return Ok(preview.display().to_string());
+        match remux_with_mixed_audio_track(&source_bytes, &selected_indices) {
+            Ok(preview_bytes) => {
+                write_audio_preview(&preview, preview_bytes)?;
+                return Ok(preview.display().to_string());
+            }
+            Err(native_error) => {
+                if let Err(external_error) = mix_audio_preview(&source, &preview, &selected_indices)
+                {
+                    return Err(format!(
+                        "{external_error}; native audio mix failed: {native_error}"
+                    ));
+                }
+                return Ok(preview.display().to_string());
+            }
+        }
     }
 
-    let source_bytes = std::fs::read(&source).map_err(|e| format!("read clip: {e}"))?;
     let preview_bytes = remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
         .map_err(|e| e.to_string())?;
-    let tmp = cached_export_tmp_path(&preview)?;
+    write_audio_preview(&preview, preview_bytes)?;
+    Ok(preview.display().to_string())
+}
+
+fn write_audio_preview(preview: &Path, preview_bytes: Vec<u8>) -> Result<(), String> {
+    let tmp = cached_export_tmp_path(preview)?;
     std::fs::write(&tmp, preview_bytes).map_err(|e| format!("write audio preview: {e}"))?;
-    match std::fs::rename(&tmp, &preview) {
+    match std::fs::rename(&tmp, preview) {
         Ok(()) => {}
         Err(_) if preview.exists() => {
             let _ = std::fs::remove_file(&tmp);
@@ -533,7 +551,7 @@ fn preview_clip_audio_tracks_file_with_mixer(
             return Err(format!("finalize audio preview: {e}"));
         }
     }
-    Ok(preview.display().to_string())
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1187,7 +1205,14 @@ fn unique_export_path(source: &Path, start_s: f64, end_s: f64) -> Result<PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    use audiopus::coder::Encoder;
+    use audiopus::{Application, Channels, SampleRate};
     use clipline_events::{ClipAudioTrack, EventKind, GameEvent, GameId, PlayerSummary};
+    use clipline_mp4::{
+        AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
+    };
     use clipline_test_utils::TestDir;
 
     fn marker(t_s: f64) -> ClipMarker {
@@ -1519,6 +1544,61 @@ mod tests {
     }
 
     #[test]
+    fn multi_track_review_preview_uses_native_mixer_without_ffmpeg() {
+        let dir = TestDir::new("clipline-library", "audio-preview-native-mix");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
+        let markers = ClipMarkers {
+            recording_start_s: 0.0,
+            duration_s: 1.0,
+            player_summary: None,
+            audio_tracks: vec![
+                ClipAudioTrack {
+                    id: "output".into(),
+                    track_index: 0,
+                    label: "Output Audio".into(),
+                    kind: Some("output".into()),
+                },
+                ClipAudioTrack {
+                    id: "microphone".into(),
+                    track_index: 1,
+                    label: "Microphone".into(),
+                    kind: Some("microphone".into()),
+                },
+            ],
+            markers: Vec::new(),
+        };
+        std::fs::write(
+            source.with_extension("markers.json"),
+            serde_json::to_string(&markers).unwrap(),
+        )
+        .unwrap();
+
+        let preview_dir = dir.path().join("previews");
+        let display_path = source.display().to_string();
+        let path = preview_clip_audio_tracks_file_with_mixer(
+            source,
+            display_path,
+            vec!["output".into(), "microphone".into()],
+            preview_dir.clone(),
+            |_, _, _| Err("external mixer should not be required".into()),
+        )
+        .expect("Clipline-authored output+mic preview should use the native mixer");
+        let preview = PathBuf::from(path);
+
+        assert_eq!(preview.parent(), Some(preview_dir.as_path()));
+        let preview_bytes = std::fs::read(preview).unwrap();
+        remux_with_selected_audio_tracks(&preview_bytes, &[0]).expect("mixed audio track exists");
+        let err = remux_with_selected_audio_tracks(&preview_bytes, &[1])
+            .expect_err("mixed preview should have exactly one audio track");
+        assert!(
+            err.to_string()
+                .contains("outside the clip's 1 audio tracks"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn selected_audio_track_indices_follow_sidecar_order_and_reject_unknown_ids() {
         let markers = ClipMarkers {
             recording_start_s: 0.0,
@@ -1732,6 +1812,63 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, b"\0\0\0\0").unwrap();
+    }
+
+    fn two_real_opus_audio_mp4() -> Vec<u8> {
+        let tracks = vec![
+            TrackConfig::Video(VideoTrackConfig::h264(
+                128,
+                72,
+                90_000,
+                vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+                vec![0x68, 0xEE, 0x38, 0x80],
+            )),
+            TrackConfig::Audio(AudioTrackConfig {
+                channels: 2,
+                sample_rate: 48_000,
+                pre_skip: 312,
+            }),
+            TrackConfig::Audio(AudioTrackConfig {
+                channels: 2,
+                sample_rate: 48_000,
+                pre_skip: 312,
+            }),
+        ];
+        let mut writer = HybridMp4Writer::new_multi(Cursor::new(Vec::new()), tracks).unwrap();
+        let video: Vec<_> = (0..10)
+            .map(|i| FragSample {
+                data: format!("V{i:05}").into_bytes(),
+                duration: 9_000,
+                is_sync: i == 0,
+            })
+            .collect();
+        writer
+            .write_fragment_multi(&[&video, &opus_audio_packets(0.20), &opus_audio_packets(0.25)])
+            .unwrap();
+        writer.finalize().unwrap().into_inner()
+    }
+
+    fn opus_audio_packets(amplitude: f32) -> Vec<FragSample> {
+        let encoder =
+            Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio).unwrap();
+        (0..50)
+            .map(|frame_idx| {
+                let mut pcm = Vec::with_capacity(960 * 2);
+                for sample_idx in 0..960 {
+                    let t = (frame_idx * 960 + sample_idx) as f32 / 48_000.0;
+                    let sample = (t * 440.0 * std::f32::consts::TAU).sin() * amplitude;
+                    pcm.extend([sample, sample]);
+                }
+                let mut encoded = vec![0u8; 4000];
+                let len = encoder.encode_float(&pcm, &mut encoded).unwrap();
+                encoded.truncate(len);
+                FragSample {
+                    data: encoded,
+                    duration: 960,
+                    is_sync: true,
+                }
+            })
+            .collect()
     }
 
     #[test]

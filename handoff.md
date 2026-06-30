@@ -542,6 +542,10 @@ Recent fixes (2026-06-19):
   mixing is unavailable, the app falls back to source playback without pinning a persistent error.
   Local gallery poster failures are cached for the app session and stay on the gradient placeholder
   instead of attaching per-card video elements that can hold Windows file locks.
+- Review audio previews now try the native `clipline-mp4` Opus mixer before FFmpeg, so
+  Clipline-authored output+mic clips get a one-stream local preview even when external FFmpeg is
+  missing. The FFmpeg mixer remains a fallback for legacy/non-Opus files the native mixer cannot
+  parse.
 
 Run it: `cargo run -p clipline-app` (settings persist under `%APPDATA%\Clipline\settings.json`;
 options still override startup behavior: `--window <title substring>` to capture one window

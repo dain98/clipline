@@ -916,6 +916,7 @@ dependencies = [
 name = "clipline-app"
 version = "0.1.21"
 dependencies = [
+ "audiopus",
  "base64 0.22.1",
  "boa_engine",
  "chrono",
