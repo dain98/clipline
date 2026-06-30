@@ -11,7 +11,8 @@ pub mod writer;
 pub use fragment::{FragSample, FragSampleRef, TrackRun};
 pub use init::{AudioTrackConfig, TrackConfig, VideoCodecParams, VideoTrackConfig};
 pub use trim::{
-    remux_with_mixed_audio_track, remux_with_selected_audio_tracks, trim_keyframe_aligned,
-    trim_keyframe_aligned_file, trim_keyframe_aligned_to_writer, TrimError, TrimInfo,
+    audio_track_count, remux_with_mixed_audio_track, remux_with_selected_audio_tracks,
+    trim_keyframe_aligned, trim_keyframe_aligned_file, trim_keyframe_aligned_to_writer, TrimError,
+    TrimInfo,
 };
 pub use writer::{HybridMp4Writer, SourceSample};

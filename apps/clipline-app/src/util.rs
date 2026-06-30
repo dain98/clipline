@@ -6,13 +6,57 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clipline_events::ClipMarkers;
+use clipline_events::{ClipAudioTrack, ClipMarkers};
 
 /// Read the `.markers.json` sidecar next to a clip file.
 pub(crate) fn read_markers_raw(path: &Path) -> Option<ClipMarkers> {
     std::fs::read_to_string(path.with_extension("markers.json"))
         .ok()
         .and_then(|json| serde_json::from_str(&json).ok())
+}
+
+pub(crate) fn markers_with_inferred_audio_tracks(
+    path: &Path,
+    markers: Option<ClipMarkers>,
+) -> Option<ClipMarkers> {
+    if markers
+        .as_ref()
+        .is_some_and(|markers| !markers.audio_tracks.is_empty())
+    {
+        return markers;
+    }
+
+    let audio_tracks = infer_audio_tracks_from_file(path).unwrap_or_default();
+    if audio_tracks.is_empty() {
+        return markers;
+    }
+
+    Some(match markers {
+        Some(mut markers) => {
+            markers.audio_tracks = audio_tracks;
+            markers
+        }
+        None => ClipMarkers {
+            recording_start_s: 0.0,
+            duration_s: 0.0,
+            player_summary: None,
+            audio_tracks,
+            markers: Vec::new(),
+        },
+    })
+}
+
+fn infer_audio_tracks_from_file(path: &Path) -> Result<Vec<ClipAudioTrack>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read clip audio metadata: {e}"))?;
+    let count = clipline_mp4::audio_track_count(&bytes).map_err(|e| e.to_string())?;
+    Ok((0..count)
+        .map(|index| ClipAudioTrack {
+            id: format!("audio:{index}"),
+            track_index: index as u32,
+            label: format!("Audio Track {}", index + 1),
+            kind: Some("inferred".into()),
+        })
+        .collect())
 }
 
 /// Encode an OS string as a null-terminated UTF-16 vector for Win32 wide APIs.

@@ -1065,8 +1065,8 @@ const PlayerCore = (() => {
       }
     } else if (railLayout === "actor_event" && item.icon) {
       const actor = participantSlot(marker && marker.actor, summary, presentation, options);
+      item.layout = "actor_event";
       if (actor) {
-        item.layout = "actor_event";
         item.allegiance = eventAllegiance(summary, actor, railConfig);
         item.actor = actor;
       }

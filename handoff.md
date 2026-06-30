@@ -306,6 +306,19 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > shape is a full-size clapper icon on the left, only for videos that are actually user-created
 > clips, likely after finishing a clearer labeling model.
 
+Recent fixes (2026-06-30):
+- Nightly 0.1.23 is a hotfix for legacy/no-sidecar multi-track review playback and minion
+  objective icons. The previous public nightly metadata was 0.1.22, so the app and Tauri package
+  versions were bumped to 0.1.23 for updater eligibility.
+- League event rail rows using `actor_event` layout now keep their objective icon even when the
+  event actor is a non-participant name such as a minion, so minion turret kills render as a
+  compact objective row instead of text-only.
+- Legacy/no-sidecar multi-audio MP4s now infer their audio track list from the finalized MP4 tables
+  and use the same native preview mixer/upload selection paths as fresh split-audio clips. The
+  inferred metadata is playback-only, so clip duration still comes only from real sidecar markers.
+- The review player no longer has a session-wide "audio preview unavailable" latch; failed preview
+  generation falls back for that attempt without blocking later multi-track preview retries.
+
 Recent fixes (2026-06-29):
 - Nightly 0.1.22 is a hotfix for local review playback of output+mic clips. The previous
   public nightly metadata was 0.1.21, so the app and Tauri package versions were bumped to

@@ -1254,7 +1254,11 @@ async fn upload_bytes_for_audio_selection_from_path(
     markers: Option<&ClipMarkers>,
     selected_audio_track_ids: Option<&[String]>,
 ) -> Result<Vec<u8>, String> {
-    match upload_audio_selection_plan(markers, selected_audio_track_ids)? {
+    let markers_with_audio = selected_audio_track_ids.and_then(|_| {
+        crate::util::markers_with_inferred_audio_tracks(source_path, markers.cloned())
+    });
+    let selection_markers = markers_with_audio.as_ref().or(markers);
+    match upload_audio_selection_plan(selection_markers, selected_audio_track_ids)? {
         UploadAudioSelectionPlan::Original => tokio::fs::read(source_path)
             .await
             .map_err(|e| format!("read clip: {e}")),

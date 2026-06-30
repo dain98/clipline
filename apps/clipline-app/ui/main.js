@@ -138,7 +138,6 @@ let selectedAudioTrackIds = new Set();
 let uploadSelectedAudioTrackIds = new Set();
 let audioPreviewSeq = 0;
 let currentReviewAudioKey = null;
-let audioPreviewUnavailable = false;
 let currentReviewMediaPath = null;
 let renamePending = false;
 const DECK_STATUS_TOAST_MS = 3200;
@@ -239,7 +238,6 @@ function audioSelectionKey(clip = currentClip, selected = selectedAudioTrackIdsF
 function applyDefaultAudioSelectionIfNeeded({ shouldResume = false } = {}) {
   const tracks = clipAudioTracks();
   const selected = selectedAudioTrackIdsForClip();
-  if (audioPreviewUnavailable && selected.length > 1) return false;
   if (!PlayerCore.selectionNeedsPreview(tracks, selected)) {
     currentReviewAudioKey = audioSelectionKey(currentClip, selected);
     return false;
@@ -2467,15 +2465,22 @@ function renderGameEventRail(clip = currentClip) {
         gameEventIcon(view, marker, presentation),
         gameEventPortrait(view.victim),
       );
-    } else if (view.layout === "actor_event" && view.actor) {
+    } else if (view.layout === "actor_event") {
       const icon = gameEventIcon(view, marker, presentation);
       icon.classList.add("game-event-objective-icon");
       button.classList.add("game-event-actor-event");
-      button.append(
-        time,
-        gameEventPortrait(view.actor),
-        icon,
-      );
+      if (view.actor) {
+        button.append(
+          time,
+          gameEventPortrait(view.actor),
+          icon,
+        );
+      } else {
+        const label = document.createElement("span");
+        label.className = "game-event-label";
+        label.textContent = view.text || markerEventText(marker, presentation);
+        button.append(time, label, icon);
+      }
     } else {
       const label = document.createElement("span");
       label.className = "game-event-label";
@@ -3434,15 +3439,6 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
     setDeckStatus(audioSelectionLabel(clip), { transient: true });
     return;
   }
-  if (audioPreviewUnavailable && selected.length > 1) {
-    currentReviewAudioKey = null;
-    if (currentReviewMediaPath !== clip.path) {
-      setReviewVideoSource(clip.path, { resumeTime, shouldResume, rate, trimRange });
-    }
-    setDeckStatus("audio mix unavailable; playing source", { transient: true });
-    return;
-  }
-
   const seq = ++audioPreviewSeq;
   setDeckStatus("switching audio tracks...");
   $("error").textContent = "";
@@ -3461,7 +3457,6 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
     if (seq !== audioPreviewSeq) return;
     const message = String(e);
     if (message.includes("ffmpeg is not available for audio track mixing")) {
-      audioPreviewUnavailable = true;
       if (currentClip && currentClip.path === clip.path) {
         if (currentReviewMediaPath !== clip.path) {
           setReviewVideoSource(clip.path, { resumeTime, shouldResume, rate, trimRange });

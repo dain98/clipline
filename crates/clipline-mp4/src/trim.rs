@@ -182,6 +182,15 @@ pub fn remux_with_selected_audio_tracks(
     Ok(out.into_inner())
 }
 
+pub fn audio_track_count(input: &[u8]) -> Result<usize, TrimError> {
+    let movie = parse_movie(input)?;
+    Ok(movie
+        .tracks
+        .iter()
+        .filter(|track| matches!(track.cfg, TrackConfig::Audio(_)))
+        .count())
+}
+
 pub fn remux_with_mixed_audio_track(
     input: &[u8],
     selected_audio_track_indices: &[u32],
@@ -1570,6 +1579,12 @@ mod tests {
                 .contains("outside the clip's 2 audio tracks"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn audio_track_count_reports_finalized_audio_tracks() {
+        assert_eq!(audio_track_count(&clipline_fixture()).unwrap(), 1);
+        assert_eq!(audio_track_count(&clipline_two_audio_fixture()).unwrap(), 2);
     }
 
     #[test]

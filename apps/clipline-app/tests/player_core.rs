@@ -1859,6 +1859,40 @@ fn game_event_rail_item_formats_actor_objectives_with_portrait_and_icon() {
 }
 
 #[test]
+fn game_event_rail_item_keeps_objective_icon_when_actor_is_not_a_participant() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const MINION_OBJECTIVE_SUMMARY = {
+          player_name: 'dain',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'dain', champion_name: 'Nautilus', team: 'ORDER' }
+          ]
+        };
+        const MINION_OBJECTIVE_PRESENTATION = {
+          marker_kinds: {
+            TurretKilled: {
+              category: 'structure',
+              icon: 'data:image/png;base64,turret-icon',
+              rail: { layout: 'actor_event', allegiance: 'actor_team' }
+            }
+          }
+        };
+        "#,
+    ))
+    .expect("define minion objective rail inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'TurretKilled', actor: 'Minion_T200LS29N0', t_s: 931 }, MINION_OBJECTIVE_SUMMARY, MINION_OBJECTIVE_PRESENTATION, {})"
+        ),
+        r#"{"layout":"actor_event","kind":"TurretKilled","category":"structure","allegiance":"neutral","label":"Turret Killed","text":"Turret Killed · Minion_T200LS29N0","icon":"data:image/png;base64,turret-icon"}"#
+    );
+}
+
+#[test]
 fn game_event_rail_item_falls_back_without_participants() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(

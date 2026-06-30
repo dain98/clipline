@@ -197,11 +197,12 @@ fn push_clips_from(
         let size_mb = meta
             .map(|m| m.len() as f64 / (1024.0 * 1024.0))
             .unwrap_or(0.0);
-        let markers = util::read_markers_raw(&path).map(filter_timeline_markers);
-        let duration_s = markers
+        let raw_markers = util::read_markers_raw(&path).map(filter_timeline_markers);
+        let duration_s = raw_markers
             .as_ref()
             .map(|markers| markers.duration_s)
             .filter(|duration| duration.is_finite() && *duration >= 0.0);
+        let markers = util::markers_with_inferred_audio_tracks(&path, raw_markers);
         // Prefer the session sidecar; fall back to the game named in markers
         // so clips recorded before session tagging still show an icon.
         let game = session_game
@@ -496,7 +497,9 @@ fn preview_clip_audio_tracks_file_with_mixer(
     preview_dir: PathBuf,
     mix_audio_preview: impl FnOnce(&Path, &Path, &[u32]) -> Result<(), String>,
 ) -> Result<String, String> {
-    let Some(markers) = util::read_markers_raw(&source) else {
+    let Some(markers) =
+        util::markers_with_inferred_audio_tracks(&source, util::read_markers_raw(&source))
+    else {
         return Ok(display_path);
     };
     let selected_indices = util::selected_audio_track_indices(&markers, &selected_audio_track_ids)?;
@@ -624,7 +627,9 @@ fn clipboard_share_export_mode(
     let Some(selected_audio_track_ids) = selected_audio_track_ids else {
         return Ok(None);
     };
-    let Some(markers) = util::read_markers_raw(source) else {
+    let Some(markers) =
+        util::markers_with_inferred_audio_tracks(source, util::read_markers_raw(source))
+    else {
         return Ok(None);
     };
     let tracks = markers.audio_tracks.as_slice();
@@ -1769,6 +1774,60 @@ mod tests {
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].duration_s, Some(42.5));
         assert_eq!(clips[0].markers.as_ref().unwrap().markers.len(), 1);
+    }
+
+    #[test]
+    fn list_clips_infers_audio_tracks_for_legacy_multitrack_clip() {
+        let dir = TestDir::new("clipline-library", "list-infer-audio-tracks");
+        let clip = dir.path().join("legacy.mp4");
+        std::fs::write(&clip, two_real_opus_audio_mp4()).unwrap();
+
+        let mut clips = Vec::new();
+        push_clips_from(dir.path(), None, &mut clips).unwrap();
+
+        assert_eq!(clips[0].duration_s, None);
+        let tracks = &clips[0]
+            .markers
+            .as_ref()
+            .expect("legacy clip gets inferred audio metadata")
+            .audio_tracks;
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].id, "audio:0");
+        assert_eq!(tracks[0].track_index, 0);
+        assert_eq!(tracks[0].label, "Audio Track 1");
+        assert_eq!(tracks[1].id, "audio:1");
+        assert_eq!(tracks[1].track_index, 1);
+        assert_eq!(tracks[1].label, "Audio Track 2");
+    }
+
+    #[test]
+    fn legacy_multitrack_review_preview_mixes_inferred_audio_tracks() {
+        let dir = TestDir::new("clipline-library", "audio-preview-legacy-inferred");
+        let source = dir.path().join("legacy.mp4");
+        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
+
+        let preview_dir = dir.path().join("previews");
+        let display_path = source.display().to_string();
+        let path = preview_clip_audio_tracks_file_with_mixer(
+            source,
+            display_path,
+            vec!["audio:0".into(), "audio:1".into()],
+            preview_dir.clone(),
+            |_, _, _| Err("external mixer should not be required".into()),
+        )
+        .expect("legacy multi-audio preview should mix inferred tracks");
+        let preview = PathBuf::from(path);
+
+        assert_eq!(preview.parent(), Some(preview_dir.as_path()));
+        let preview_bytes = std::fs::read(preview).unwrap();
+        remux_with_selected_audio_tracks(&preview_bytes, &[0]).expect("mixed audio track exists");
+        let err = remux_with_selected_audio_tracks(&preview_bytes, &[1])
+            .expect_err("mixed preview should have exactly one audio track");
+        assert!(
+            err.to_string()
+                .contains("outside the clip's 1 audio tracks"),
+            "{err}"
+        );
     }
 
     #[test]

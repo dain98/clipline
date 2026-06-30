@@ -1036,10 +1036,10 @@ fn default_audio_preview_is_gated_and_degrades_to_source_on_failure() {
     );
     assert!(
         js.contains("function applyDefaultAudioSelectionIfNeeded({ shouldResume = false } = {})")
-            && js.contains("if (audioPreviewUnavailable && selected.length > 1) return false;")
+            && !js.contains("if (audioPreviewUnavailable && selected.length > 1) return false;")
             && js.contains("PlayerCore.selectionNeedsPreview")
             && js.contains("applySelectedAudioTracksToPlayback({ forceResume: shouldResume });"),
-        "default audio application must be gated by PlayerCore.selectionNeedsPreview"
+        "default audio application must retry preview generation instead of relying on a stale global failure latch"
     );
     assert!(
         js.contains("currentReviewAudioKey === audioSelectionKey(clip, selected)"),
@@ -1053,10 +1053,10 @@ fn default_audio_preview_is_gated_and_degrades_to_source_on_failure() {
     );
     assert!(
         js.contains("setDeckStatus(\"audio mix unavailable; playing source\", { transient: true });")
-            && js.contains("audioPreviewUnavailable = true;")
+            && !js.contains("audioPreviewUnavailable = true;")
             && js.contains("if (currentReviewMediaPath !== clip.path) {")
             && js.contains("setReviewVideoSource(clip.path, { resumeTime, shouldResume, rate, trimRange });"),
-        "preview generation failure should fall back to source playback without a persistent error banner"
+        "preview generation failure should fall back to source playback without disabling future preview attempts"
     );
     assert!(
         js.contains("function cloudUploadRecordForPath(path)")
