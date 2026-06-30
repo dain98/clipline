@@ -1524,6 +1524,7 @@ fn timeline_marker_pngs_have_matching_alpha_height() {
         "plugin-seeds/league_of_legends/assets/markers",
     ];
     let marker_names = [
+        "assist.png",
         "baron.png",
         "death.png",
         "dragon.png",

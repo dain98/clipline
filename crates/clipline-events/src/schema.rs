@@ -20,6 +20,7 @@ pub enum EventKind {
     HeraldKill,
     BaronKill,
     ChampionKill,
+    ChampionAssist,
     ChampionDeath,
     Multikill,
     Ace,
@@ -54,7 +55,7 @@ pub struct GameEvent {
 /// reviewing a match, not every event the game API reports.
 pub fn is_timeline_marker(event: &GameEvent) -> bool {
     match event.kind {
-        EventKind::ChampionKill => event.involves_local_player,
+        EventKind::ChampionKill | EventKind::ChampionAssist => event.involves_local_player,
         EventKind::ChampionDeath => true,
         EventKind::TurretKilled | EventKind::DragonKill | EventKind::BaronKill => true,
         _ => false,
@@ -103,6 +104,7 @@ mod tests {
     fn timeline_policy_keeps_only_review_worthy_markers() {
         assert!(is_timeline_marker(&ev(EventKind::ChampionKill, true)));
         assert!(!is_timeline_marker(&ev(EventKind::ChampionKill, false)));
+        assert!(is_timeline_marker(&ev(EventKind::ChampionAssist, true)));
         assert!(is_timeline_marker(&ev(EventKind::ChampionDeath, false)));
         assert!(is_timeline_marker(&ev(EventKind::TurretKilled, false)));
         assert!(is_timeline_marker(&ev(EventKind::DragonKill, false)));

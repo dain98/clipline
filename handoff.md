@@ -307,6 +307,9 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-30):
+- League local-player assists now normalize as `ChampionAssist`, survive the timeline-marker
+  filter, and render with the new assist icon/category; the refreshed sword kill icon is used by
+  both timeline markers and the right-side match events rail.
 - Nightly 0.1.24 is a hotfix for the review timeline action row and League minion turret-kill
   presentation. The previous public nightly metadata was 0.1.23, so the app and Tauri package
   versions were bumped to 0.1.24 for updater eligibility.

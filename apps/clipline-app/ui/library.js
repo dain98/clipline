@@ -578,6 +578,7 @@ const CARD_KIND_LABELS = { replay: "Replay", session: "Session", trim: "Trim" };
 // Marker categories → tint var, matching the timeline glyph colors.
 const MARKER_CATEGORY_TICK_VARS = {
   kill: "--mc-kill",
+  assist: "--mc-assist",
   death: "--mc-death",
   spree: "--mc-spree",
   objective: "--mc-objective",
@@ -586,6 +587,7 @@ const MARKER_CATEGORY_TICK_VARS = {
 };
 const MARKER_TICK_VARS = {
   ChampionKill: "--mc-kill", FirstBlood: "--mc-kill",
+  ChampionAssist: "--mc-assist",
   ChampionDeath: "--mc-death",
   Multikill: "--mc-spree", Ace: "--mc-spree",
   DragonKill: "--mc-objective", HeraldKill: "--mc-objective", BaronKill: "--mc-objective",

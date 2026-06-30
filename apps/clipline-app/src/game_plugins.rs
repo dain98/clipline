@@ -401,6 +401,9 @@ fn first_party_asset_data_url(path: &str) -> Option<String> {
         "assets/markers/kill.png" => {
             include_bytes!("../plugin-seeds/league_of_legends/assets/markers/kill.png")
         }
+        "assets/markers/assist.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/markers/assist.png")
+        }
         "assets/markers/death.png" => {
             include_bytes!("../plugin-seeds/league_of_legends/assets/markers/death.png")
         }
@@ -459,6 +462,11 @@ const LEAGUE_PROFILE_MANIFEST_JSON: &str = r#"{
         "icon": "assets/markers/kill.png",
         "rail": { "layout": "duel", "allegiance": "friendly" }
       },
+      "ChampionAssist": {
+        "category": "assist",
+        "icon": "assets/markers/assist.png",
+        "rail": { "layout": "duel", "allegiance": "friendly" }
+      },
       "ChampionDeath": {
         "category": "death",
         "icon": "assets/markers/death.png",
@@ -482,6 +490,7 @@ const LEAGUE_PROFILE_MANIFEST_JSON: &str = r#"{
     },
     "marker_categories": {
       "kill": { "singular": "kill", "plural": "kills", "glyph": "✕" },
+      "assist": { "singular": "assist", "plural": "assists", "glyph": "+" },
       "death": { "singular": "death", "plural": "deaths", "glyph": "✕" },
       "spree": { "singular": "spree", "plural": "sprees", "glyph": "★" },
       "objective": { "singular": "objective", "plural": "objectives", "glyph": "◆" },
@@ -531,6 +540,7 @@ const LEAGUE_PROFILE_MANIFEST_JSON: &str = r#"{
       "layout": "kill_feed",
       "icons": {
         "ChampionKill": "assets/event-rail/kill.png",
+        "ChampionAssist": "assets/markers/assist.png",
         "ChampionDeath": "assets/event-rail/death.png",
         "DragonKill": "assets/event-rail/dragon.png",
         "BaronKill": "assets/event-rail/baron.png",
@@ -705,6 +715,14 @@ mod tests {
         );
         assert!(presentation
             .pointer("/marker_kinds/ChampionKill/icon")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+        assert!(presentation
+            .pointer("/marker_kinds/ChampionAssist/icon")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+        assert!(presentation
+            .pointer("/event_rail/icons/ChampionKill")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
         assert!(presentation

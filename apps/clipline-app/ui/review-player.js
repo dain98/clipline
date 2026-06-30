@@ -590,6 +590,7 @@ function renderOverviewMarkers() {
 // untouched. Each draws in currentColor so the category tint (--mc) colors it.
 const MARKER_ICONS = {
   ChampionKill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 4.5 19.5 19.5M19.5 4.5 4.5 19.5"/><path d="M13 16 16 13M8 13 11 16"/><circle cx="19.5" cy="19.5" r="1.15" fill="currentColor" stroke="none"/><circle cx="4.5" cy="19.5" r="1.15" fill="currentColor" stroke="none"/></svg>`,
+  ChampionAssist: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5 12 19M5 12 19 12"/></svg>`,
   ChampionDeath: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 3.5C7.6 3.5 5 6.7 5 10.5C5 12.8 6 14.4 7.2 15.5C7.6 15.9 7.8 16.3 7.8 16.8L7.8 18.5A1 1 0 0 0 8.8 19.5L15.2 19.5A1 1 0 0 0 16.2 18.5L16.2 16.8C16.2 16.3 16.4 15.9 16.8 15.5C18 14.4 19 12.8 19 10.5C19 6.7 16.4 3.5 12 3.5Z"/><circle cx="9.4" cy="11" r="1.4" fill="currentColor" stroke="none"/><circle cx="14.6" cy="11" r="1.4" fill="currentColor" stroke="none"/></svg>`,
   FirstBlood: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 3.5C12 3.5 18.5 11 18.5 15.5A6.5 6.5 0 1 1 5.5 15.5C5.5 11 12 3.5 12 3.5Z"/></svg>`,
   Multikill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M6 11.5A6 6 0 0 1 18 11.5L18 14.5A1.4 1.4 0 0 1 16.6 15.9L16 15.9 16 18.5 8 18.5 8 15.9 7.4 15.9A1.4 1.4 0 0 1 6 14.5Z"/><circle cx="9.6" cy="12.2" r="1.5" fill="currentColor" stroke="none"/><circle cx="14.4" cy="12.2" r="1.5" fill="currentColor" stroke="none"/></svg>`,
@@ -608,6 +609,7 @@ const MARKER_ICONS = {
 // Unknown / future kinds fall back to a representative glyph for their category.
 const MARKER_ICON_FALLBACK = {
   kill: MARKER_ICONS.ChampionKill,
+  assist: MARKER_ICONS.ChampionAssist,
   spree: MARKER_ICONS.Ace,
   objective: MARKER_ICONS.BaronKill,
   structure: MARKER_ICONS.TurretKilled,
@@ -618,6 +620,7 @@ const MARKER_ICON_FALLBACK = {
 // its category color (--mc); kinds without art fall back to the SVGs above.
 const MARKER_IMAGES = {
   ChampionKill: "assets/markers/kill.png",
+  ChampionAssist: "assets/markers/assist.png",
   ChampionDeath: "assets/markers/death.png",
   DragonKill: "assets/markers/dragon.png",
   BaronKill: "assets/markers/baron.png",
