@@ -1,0 +1,1303 @@
+// Review workspace: playback, timeline, trim, export.
+/* ---- review player ---- */
+
+// Sync the review-header upload button to the current clip's cloud state:
+// disabled when no clip is open or cloud is disconnected (and not yet uploaded),
+// a link icon once uploaded. Mirrors the per-row cloud button in clipRow().
+function syncUploadClipButton() {
+  const btn = $("upload-clip");
+  if (!btn) return;
+  const clip = currentClip;
+  btn.hidden = false;
+  if (isCloudOnlyReviewClip(clip)) {
+    btn.title = clip.cloud_remote_url ? "Copy cloud link" : "Cloud page unavailable";
+    btn.classList.toggle("uploaded", !!clip.cloud_remote_url);
+    btn.classList.remove("busy");
+    btn.disabled = !clip.cloud_remote_url;
+    btn.innerHTML =
+      '<svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.5-3.5a3 3 0 1 1 4.2 4.2l-1.5 1.5-1.4-1.4 1.5-1.5a1 1 0 1 0-1.4-1.4L12 13.4a1 1 0 0 1-1.4 0zm2.8-2.8a1 1 0 0 1 0 1.4l-3.5 3.5a3 3 0 1 1-4.2-4.2l1.5-1.5 1.4 1.4-1.5 1.5a1 1 0 1 0 1.4 1.4L12 10.6a1 1 0 0 1 1.4 0z"/></svg>';
+    return;
+  }
+  const record = clip ? clipCloudRecord(clip) : null;
+  const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
+  const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
+  btn.title = uploaded ? "Copy cloud link" : "Upload to Clipline Cloud";
+  btn.classList.toggle("uploaded", !!uploaded);
+  btn.classList.toggle("busy", !!busy);
+  btn.disabled = !clip || busy || (!uploaded && !cloudConnected());
+  btn.innerHTML = uploaded
+    ? '<svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.5-3.5a3 3 0 1 1 4.2 4.2l-1.5 1.5-1.4-1.4 1.5-1.5a1 1 0 1 0-1.4-1.4L12 13.4a1 1 0 0 1-1.4 0zm2.8-2.8a1 1 0 0 1 0 1.4l-3.5 3.5a3 3 0 1 1-4.2-4.2l1.5-1.5 1.4 1.4-1.5 1.5a1 1 0 1 0 1.4 1.4L12 10.6a1 1 0 0 1 1.4 0z"/></svg>'
+    : '<svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>';
+}
+
+function syncReviewLocalActions() {
+  const cloudOnly = isCloudOnlyReviewClip();
+  for (const id of ["rename-clip", "open-folder", "copy-clip", "delete-clip"]) {
+    const el = $(id);
+    if (el) el.hidden = cloudOnly;
+  }
+  if (cloudOnly) setClipTitleEditing(false);
+}
+
+function setClipRenameControlsDisabled(disabled) {
+  $("rename-input").disabled = disabled;
+  $("rename-save").disabled = disabled;
+  $("rename-cancel").disabled = disabled;
+}
+
+function setClipTitleEditing(editing) {
+  $("clip-title-display").hidden = editing;
+  $("clip-title-edit").hidden = !editing;
+  if (!editing) {
+    $("rename-input").value = "";
+    setClipRenameControlsDisabled(false);
+  }
+}
+
+function beginClipRename(clip = currentClip) {
+  if (!clip) return;
+  if (isCloudOnlyReviewClip(clip)) return;
+  if (!currentClip || currentClip.path !== clip.path) openClip(clip);
+  setClipTitleEditing(true);
+  $("rename-input").value = (currentClip && currentClip.path === clip.path ? currentClip.name : clip.name) || "";
+  $("rename-input").focus();
+  $("rename-input").select();
+}
+
+function cancelClipRename() {
+  if (renamePending) return;
+  setClipTitleEditing(false);
+}
+
+function restoreVideoAfterRename(path, time, shouldResume, rate) {
+  const restore = () => {
+    if (Number.isFinite(time)) {
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : time;
+      video.currentTime = Math.min(time, duration);
+    }
+    if (shouldResume) video.play().catch(() => syncPlayState());
+  };
+  video.addEventListener("loadedmetadata", restore, { once: true });
+  currentReviewMediaPath = path;
+  video.src = convertFileSrc(path);
+  video.playbackRate = rate;
+}
+
+function setReviewVideoSource(path, options = {}) {
+  const {
+    resumeTime = 0,
+    shouldResume = false,
+    rate = video.playbackRate,
+    trimRange = null,
+  } = options;
+  const restore = () => {
+    if (trimRange) setTrim(trimRange.start, trimRange.end);
+    if (Number.isFinite(resumeTime)) {
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : resumeTime;
+      video.currentTime = Math.max(0, Math.min(resumeTime, duration));
+    }
+    if (shouldResume) video.play().catch(() => syncPlayState());
+    else syncPlayState();
+  };
+  video.addEventListener("loadedmetadata", restore, { once: true });
+  currentReviewMediaPath = path;
+  video.src = convertFileSrc(path);
+  video.playbackRate = rate;
+}
+
+async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) {
+  const clip = currentClip;
+  const tracks = clipAudioTracks(clip);
+  if (!clip || !tracks.length) return;
+
+  const selected = selectedAudioTrackIdsForClip(clip);
+  const selectionKey = audioSelectionKey(clip, selected);
+  const resumeTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const shouldResume = forceResume || (!video.paused && !video.ended);
+  const rate = video.playbackRate;
+  const trimRange = { start: trimStart, end: trimEnd };
+  if (currentReviewAudioKey === audioSelectionKey(clip, selected)) {
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
+    return;
+  }
+  if (!PlayerCore.selectionNeedsPreview(tracks, selected) && currentReviewMediaPath === clip.path) {
+    currentReviewAudioKey = selectionKey;
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
+    return;
+  }
+  const seq = ++audioPreviewSeq;
+  setDeckStatus("switching audio tracks...");
+  $("error").textContent = "";
+  try {
+    const path = await invoke("preview_clip_audio_tracks", {
+      request: {
+        path: clip.path,
+        audioTrackIds: selected,
+      },
+    });
+    if (seq !== audioPreviewSeq || !currentClip || currentClip.path !== clip.path) return;
+    setReviewVideoSource(path, { resumeTime, shouldResume, rate, trimRange });
+    currentReviewAudioKey = selectionKey;
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
+  } catch (e) {
+    if (seq !== audioPreviewSeq) return;
+    const message = String(e);
+    if (message.includes("ffmpeg is not available for audio track mixing")) {
+      if (currentClip && currentClip.path === clip.path) {
+        if (currentReviewMediaPath !== clip.path) {
+          setReviewVideoSource(clip.path, { resumeTime, shouldResume, rate, trimRange });
+        } else if (forceResume) {
+          video.play().catch(() => syncPlayState());
+        }
+      }
+      setDeckStatus("audio mix unavailable; playing source", { transient: true });
+    } else {
+      setDeckStatus("");
+      $("error").textContent = message;
+      if (forceResume && currentClip && currentClip.path === clip.path) {
+        video.play().catch(() => syncPlayState());
+      }
+    }
+  }
+}
+
+async function releaseVideoFileHandle() {
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  await afterNextPaint();
+}
+
+function suspendReviewPlayback() {
+  setClipTitleEditing(false);
+  audioPreviewSeq += 1;
+  clearOverlayIdleCheck();
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  currentClip = null;
+  currentReviewMediaPath = null;
+  currentReviewAudioKey = null;
+  selectedAudioTrackIds = new Set();
+  resetZoom();
+  syncReviewLocalActions();
+  syncUploadClipButton();
+  updateViews();
+  syncPlayState();
+  setDeckStatus("");
+  $("stage-note").textContent = "";
+  $("marker-layer").replaceChildren();
+  renderAudioTrackPanel();
+  renderClips();
+}
+
+function isRenameFileLockError(error) {
+  const text = String(error).toLowerCase();
+  return text.includes("access is denied")
+    || text.includes("os error 5")
+    || text.includes("used by another process");
+}
+
+async function saveClipRename(ev) {
+  ev.preventDefault();
+  if (!currentClip || renamePending) return;
+  if (isCloudOnlyReviewClip(currentClip)) return;
+  const oldClip = currentClip;
+  const oldPath = oldClip.path;
+  const nextName = $("rename-input").value.trim();
+  if (!nextName) {
+    $("error").textContent = "Clip name cannot be empty.";
+    $("rename-input").focus();
+    return;
+  }
+
+  const resumeTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const shouldResume = !video.paused && !video.ended;
+  const rate = video.playbackRate;
+  renamePending = true;
+  setClipRenameControlsDisabled(true);
+  $("error").textContent = "";
+  setDeckStatus("renaming clip...");
+  await afterNextPaint();
+
+  let mediaReleased = false;
+  try {
+    let result;
+    try {
+      result = await invoke("rename_clip", { path: oldPath, name: nextName });
+    } catch (error) {
+      if (!isRenameFileLockError(error)) throw error;
+      mediaReleased = true;
+      await releaseVideoFileHandle();
+      result = await invoke("rename_clip", { path: oldPath, name: nextName });
+    }
+    const renamed = {
+      ...oldClip,
+      path: result.path || oldPath,
+      name: result.name || nextName,
+    };
+    clipsCache = clipsCache.map((clip) => (clip.path === oldPath ? renamed : clip));
+    replaceCloudRecordPath(result.old_path || oldPath, renamed.path);
+    currentClip = renamed;
+    $("pname").textContent = renamed.name;
+    const shownDuration = clipDuration();
+    $("pmeta").textContent =
+      `${shownDuration > 0 ? `${fmtDur(shownDuration)} · ` : ""}${renamed.size_mb.toFixed(1)} MB · ${renamed.path}`;
+    setClipTitleEditing(false);
+    renderClips();
+    setDeckStatus("clip renamed", { transient: true });
+    setNotice("clip renamed", { transient: true });
+    if (mediaReleased) restoreVideoAfterRename(renamed.path, resumeTime, shouldResume, rate);
+  } catch (e) {
+    $("error").textContent = String(e);
+    if (mediaReleased) restoreVideoAfterRename(oldPath, resumeTime, shouldResume, rate);
+  } finally {
+    renamePending = false;
+    setClipRenameControlsDisabled(false);
+  }
+}
+
+function openClip(clip) {
+  audioPreviewSeq += 1;
+  clearOverlayIdleCheck();
+  pendingSeek = null;
+  currentClip = clip;
+  currentReviewMediaPath = clip.path;
+  currentReviewAudioKey = null;
+  simpleTrimMode = false;
+  resetSelectedAudioTracks(clip);
+  $("error").textContent = "";
+  setDeckStatus("");
+  $("stage-note").textContent = "loading…";
+  setClipTitleEditing(false);
+  $("pname").textContent = clip.name;
+  $("pmeta").textContent = `${clip.size_mb.toFixed(1)} MB · ${clip.path}`;
+  syncReviewLocalActions();
+  syncUploadClipButton();
+  settingsOpen = false;
+  updateViews();
+  updateStageFrame();
+  video.src = convertFileSrc(clip.path);
+  video.playbackRate = Number($("rate-select").value);
+  resetZoom();
+  setTrim(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
+  renderOverviewMarkers();
+  applyView({ start: 0, span: 0 });
+  applyTimelineEditorPreference();
+  renderAudioTrackPanel();
+  renderGameEventRail(clip);
+  renderGameMetadataPanel(clip);
+  renderClips();
+  noteActivity();
+  requestAnimationFrame(updateStageFrame);
+  if (!applyDefaultAudioSelectionIfNeeded({ shouldResume: true })) {
+    video.play().catch(() => syncPlayState());
+  }
+  syncCloudClipStatus(clip);
+}
+
+function closeReview() {
+  setClipTitleEditing(false);
+  audioPreviewSeq += 1;
+  clearOverlayIdleCheck();
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  currentClip = null;
+  simpleTrimMode = false;
+  currentReviewMediaPath = null;
+  currentReviewAudioKey = null;
+  syncReviewLocalActions();
+  syncUploadClipButton();
+  selectedAudioTrackIds = new Set();
+  resetZoom();
+  applyTimelineEditorPreference();
+  updateViews();
+  setDeckStatus("");
+  $("stage-note").textContent = "";
+  $("marker-layer").replaceChildren();
+  renderAudioTrackPanel();
+  renderGameEventRail(null);
+  renderGameMetadataPanel(null);
+  renderClips();
+}
+
+/* ---- main pane views: empty / player / settings ---- */
+
+var settingsOpen = false;
+
+function updateViews() {
+  $("settings-page").hidden = !settingsOpen;
+  $("review-viewer").hidden = settingsOpen || !currentClip;
+  // The gallery is the home whenever neither the editor nor settings is open.
+  $("gallery-view").hidden = settingsOpen || !!currentClip;
+}
+
+function renderVisibleSettingsSection() {
+  const active = document.querySelector("#settings-tabs .tab.active");
+  if (settingsOpen && active && active.dataset.tab === "capture") {
+    requestAnimationFrame(renderRegionEditor);
+  }
+  if (settingsOpen && active && active.dataset.tab === "games") {
+    renderCustomGames();
+    updateGameDetectionStatus();
+  }
+}
+
+function toggleSettings(open = !settingsOpen) {
+  const wasOpen = settingsOpen;
+  settingsOpen = open;
+  // The clip survives the round-trip; just don't play behind the page.
+  if (settingsOpen && !video.paused) video.pause();
+  if (settingsOpen && !wasOpen) {
+    ensureDisplaysLoaded().then(renderVisibleSettingsSection).catch((e) => $("error").textContent = e);
+    ensureAudioDevicesLoaded().catch((e) => $("error").textContent = e);
+    ensureVideoEncodersLoaded().catch((e) => $("error").textContent = e);
+  }
+  // Closing discards unsaved edits by repainting from last-saved settings.
+  if (wasOpen && !settingsOpen && currentSettings) fillSettings(currentSettings);
+  updateViews();
+  renderVisibleSettingsSection();
+}
+
+function setTrim(start, end) {
+  const next = resolveTrim(start, end, clipDuration());
+  trimStart = next.start;
+  trimEnd = next.end;
+  $("trim-summary").textContent = trimSummary(trimStart, trimEnd);
+  paintTimeline();
+}
+
+function legacyTimelineEnabled() {
+  return !!(currentSettings && currentSettings.legacy_timeline_editor);
+}
+
+function applyTimelineEditorPreference() {
+  const deck = document.querySelector(".deck");
+  if (!deck) return;
+  const legacy = legacyTimelineEnabled();
+  if (legacy) simpleTrimMode = false;
+  deck.classList.toggle("legacy-timeline", legacy);
+  deck.classList.toggle("simple-timeline", !legacy);
+  deck.classList.toggle("simple-trim-active", !legacy && simpleTrimMode);
+
+  const toggle = $("trim-mode-toggle");
+  $("trim-action-panel").hidden = legacy;
+  toggle.disabled = legacy;
+  toggle.hidden = legacy;
+  toggle.classList.toggle("active", !legacy && simpleTrimMode);
+  toggle.setAttribute("aria-pressed", String(!legacy && simpleTrimMode));
+  toggle.title = simpleTrimMode ? "Exit trim mode" : "Trim clip";
+
+  const exportLabel = $("export-clip").querySelector("span");
+  if (exportLabel) exportLabel.textContent = !legacy && simpleTrimMode ? "Create Clip" : "Clip";
+  $("timeline").title = legacy
+    ? "Click to seek · drag the selection to slide · drag the edges to trim · scroll to zoom"
+    : simpleTrimMode
+      ? "Drag the handles to trim · drag the selection to slide · click to seek"
+      : "Click to seek · press Trim clip to create a clip";
+  paintTimeline();
+}
+
+function setSimpleTrimMode(active) {
+  if (legacyTimelineEnabled()) {
+    simpleTrimMode = false;
+    applyTimelineEditorPreference();
+    return;
+  }
+  simpleTrimMode = !!active;
+  if (simpleTrimMode && currentClip) {
+    const dur = clipDuration();
+    const range = quickTrimRange(video.currentTime || 0, dur);
+    setTrim(range.start, range.end);
+    if (dur > 0) {
+      noteViewActivity();
+      applyView(viewForRange(range.start, range.end, dur, 0.08));
+    }
+  } else if (currentClip) {
+    zoomFit();
+  }
+  applyTimelineEditorPreference();
+}
+
+// The slice of the clip the timeline currently shows. Normalized every read so
+// a stale zoom from a previous clip (or a shrunk duration) can never escape the
+// bounds — when not zoomed this is just [0, duration].
+function timelineView() {
+  return clampView(zoomStart, zoomSpan, clipDuration());
+}
+
+function resetZoom() {
+  zoomStart = 0;
+  zoomSpan = 0;
+}
+
+// Central view setter: normalize the window, store it (collapsing a full-width
+// span back to the zoomed-out sentinel), then re-render everything the window
+// affects. Every zoom/pan/fit/follow path routes through here so the ruler,
+// markers, track, and navigator can never drift out of sync.
+function applyView(next) {
+  const dur = clipDuration();
+  const v = clampView(next.start, next.span, dur);
+  zoomStart = v.start;
+  zoomSpan = dur > 0 && v.span >= dur ? 0 : v.span;
+  renderRuler();
+  renderMarkers();
+  paintTimeline();
+}
+
+// After a manual view change (wheel zoom/pan, zoom buttons, navigator drag) hold
+// auto-follow off briefly, so playback doesn't immediately yank the view back to
+// the playhead while the user is deliberately looking elsewhere.
+const FOLLOW_SUPPRESS_MS = 1500;
+var suppressFollowUntil = 0;
+function noteViewActivity() {
+  suppressFollowUntil = performance.now() + FOLLOW_SUPPRESS_MS;
+}
+
+// Keep the playhead in view while it moves on its own (playback, keyboard jumps,
+// marker clicks). Gated on no active drag and a quiet period after a manual view
+// change so it never pages out from under the user; only re-renders on a change.
+function maybeFollow(playhead) {
+  if (dragging || overviewDrag) return;
+  if (performance.now() < suppressFollowUntil) return;
+  if (!(zoomSpan > 0)) return; // zoomed out: the whole clip is already in view
+  const v = timelineView();
+  const next = followView(v.start, v.span, clipDuration(), playhead, DEFAULT_FOLLOW_MODE);
+  if (Math.abs(next.start - v.start) > 1e-3 || Math.abs(next.span - v.span) > 1e-3) {
+    applyView(next);
+  }
+}
+
+/* ---- zoom / snap controls ---- */
+
+// Zoom by a factor (<1 in, >1 out) anchored on the playhead so it stays in view.
+function zoomAtPlayhead(factor) {
+  const dur = clipDuration();
+  if (!(dur > 0)) return;
+  noteViewActivity();
+  const v = timelineView();
+  const ph = clampTime(video.currentTime || 0, dur);
+  const frac = v.span > 0 ? Math.max(0, Math.min(1, (ph - v.start) / v.span)) : 0.5;
+  applyView(zoomView(v.start, v.span, dur, frac, factor, MIN_VIEW_SPAN_S));
+}
+
+function zoomFit() {
+  applyView({ start: 0, span: 0 });
+}
+
+// Frame the current trim selection (zoom to selection).
+function zoomToSelection() {
+  const dur = clipDuration();
+  if (!(dur > 0)) return;
+  noteViewActivity();
+  applyView(viewForRange(trimStart, trimEnd, dur));
+}
+
+function setSnap(on) {
+  snapEnabled = on;
+  $("snap-toggle").classList.toggle("active", snapEnabled);
+}
+
+function toggleSnap() {
+  setSnap(!snapEnabled);
+}
+
+// Best-effort clip frame rate: the recorder's configured fps, else a fine
+// fallback. HTML <video> doesn't expose true fps, so frameStep degrades safely.
+function clipFps() {
+  return currentSettings && Number.isFinite(currentSettings.fps) ? currentSettings.fps : 0;
+}
+
+// Arrow keys jump several frames at once — one frame is too fine to navigate
+// with, but the step stays frame-aligned (nice for landing trims on a frame).
+const ARROW_STEP_FRAMES = 10;
+
+function stepFrame(dir) {
+  seekBy(dir * ARROW_STEP_FRAMES * frameStep(clipFps(), DEFAULT_FINE_STEP_S));
+}
+
+// Jump to the previous/next edit point (clip ends, trim edges, markers).
+function jumpEdit(direction) {
+  const points = editPoints(clipMarkers(), trimStart, trimEnd, clipDuration());
+  const current = video.currentTime || 0;
+  const target = direction > 0 ? nextMarker(points, current) : prevMarker(points, current);
+  if (target) seekTo(target.t_s);
+}
+
+function paintTimeline() {
+  const dur = clipDuration();
+  const view = timelineView();
+  const current = dur ? clampTime(video.currentTime || 0, dur) : 0;
+  // Off-window positions fall outside 0–100% and are clipped by the track; the
+  // dimmed trim ends are clamped so they fill the visible side they cover.
+  const pct = (t) => percentForView(t, view.start, view.span);
+  const edge = (t) => Math.max(0, Math.min(100, pct(t)));
+  $("time-readout").textContent = `${fmtTenths(current)} / ${fmtTenths(dur)}`;
+  $("playhead").style.left = `${pct(current)}%`;
+  $("dim-in").style.width = `${edge(trimStart)}%`;
+  $("dim-out").style.width = `${100 - edge(trimEnd)}%`;
+  $("handle-in").style.left = `${pct(trimStart)}%`;
+  $("handle-out").style.left = `${pct(trimEnd)}%`;
+  // The slide strip only appears when there's an actual selection to move (not
+  // the whole clip), so the top of the track still scrubs by default.
+  const band = $("trim-band");
+  const full = !dur || (trimStart <= 0.05 && trimEnd >= dur - 0.05);
+  band.style.display = full ? "none" : "block";
+  if (!full) {
+    band.style.left = `${pct(trimStart)}%`;
+    band.style.width = `${Math.max(0, pct(trimEnd) - pct(trimStart))}%`;
+  }
+  paintOverview();
+}
+
+// Cheap per-frame navigator update, in whole-clip coordinates: the trim band,
+// the playhead, and the visible-window rectangle. The marker ticks are rebuilt
+// separately (renderOverviewMarkers) only when the clip changes.
+function paintOverview() {
+  const win = $("overview-window");
+  if (!win) return;
+  const dur = clipDuration();
+  const view = timelineView();
+  const current = dur ? clampTime(video.currentTime || 0, dur) : 0;
+  const a = percentFor(trimStart, dur);
+  const b = percentFor(trimEnd, dur);
+  $("overview-trim").style.left = `${a}%`;
+  $("overview-trim").style.width = `${Math.max(0, b - a)}%`;
+  $("overview-playhead").style.left = `${percentFor(current, dur)}%`;
+  win.style.left = `${percentFor(view.start, dur)}%`;
+  win.style.width = `${dur ? Math.max(0, Math.min(100, (view.span / dur) * 100)) : 100}%`;
+}
+
+// Rebuild the whole-clip marker ticks in the navigator. View-independent, so it
+// runs on clip/marker change only — never per frame and never on zoom.
+function renderOverviewMarkers() {
+  const layer = $("overview-markers");
+  if (!layer) return;
+  layer.replaceChildren();
+  const dur = clipDuration();
+  const presentation = currentPluginPresentation();
+  for (const m of clipMarkers()) {
+    const tick = document.createElement("i");
+    tick.className = `ov-marker marker-${markerStyle(m.kind, presentation).cls}`;
+    tick.style.left = `${percentFor(m.t_s, dur)}%`;
+    layer.appendChild(tick);
+  }
+}
+
+// Per-event glyphs for the marker pins, keyed by EventKind. Kept here (DOM
+// layer) rather than in player-core.js so its tested {glyph,cls} contract stays
+// untouched. Each draws in currentColor so the category tint (--mc) colors it.
+const MARKER_ICONS = {
+  ChampionKill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 4.5 19.5 19.5M19.5 4.5 4.5 19.5"/><path d="M13 16 16 13M8 13 11 16"/><circle cx="19.5" cy="19.5" r="1.15" fill="currentColor" stroke="none"/><circle cx="4.5" cy="19.5" r="1.15" fill="currentColor" stroke="none"/></svg>`,
+  ChampionAssist: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5 12 19M5 12 19 12"/></svg>`,
+  ChampionDeath: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 3.5C7.6 3.5 5 6.7 5 10.5C5 12.8 6 14.4 7.2 15.5C7.6 15.9 7.8 16.3 7.8 16.8L7.8 18.5A1 1 0 0 0 8.8 19.5L15.2 19.5A1 1 0 0 0 16.2 18.5L16.2 16.8C16.2 16.3 16.4 15.9 16.8 15.5C18 14.4 19 12.8 19 10.5C19 6.7 16.4 3.5 12 3.5Z"/><circle cx="9.4" cy="11" r="1.4" fill="currentColor" stroke="none"/><circle cx="14.6" cy="11" r="1.4" fill="currentColor" stroke="none"/></svg>`,
+  FirstBlood: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 3.5C12 3.5 18.5 11 18.5 15.5A6.5 6.5 0 1 1 5.5 15.5C5.5 11 12 3.5 12 3.5Z"/></svg>`,
+  Multikill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M6 11.5A6 6 0 0 1 18 11.5L18 14.5A1.4 1.4 0 0 1 16.6 15.9L16 15.9 16 18.5 8 18.5 8 15.9 7.4 15.9A1.4 1.4 0 0 1 6 14.5Z"/><circle cx="9.6" cy="12.2" r="1.5" fill="currentColor" stroke="none"/><circle cx="14.4" cy="12.2" r="1.5" fill="currentColor" stroke="none"/></svg>`,
+  Ace: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 3 14.12 9.51 20.97 9.51 15.42 13.54 17.55 20.05 12 16.02 6.45 20.05 8.58 13.54 3.03 9.51 9.88 9.51Z"/></svg>`,
+  DragonKill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13 3C13.5 7 17 9 17 13.5A5 5 0 0 1 7 13.7C7 11.5 8.3 10.3 8.3 10.3C8.6 12 9.8 12.6 9.8 12.6C11 11.2 9.5 7.5 13 3Z"/></svg>`,
+  HeraldKill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M3 12C6 6.5 18 6.5 21 12C18 17.5 6 17.5 3 12Z"/><circle cx="12" cy="12" r="2.7" fill="currentColor" stroke="none"/></svg>`,
+  BaronKill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M4 18.5 4 8 8.5 11.5 12 5.5 15.5 11.5 20 8 20 18.5Z"/></svg>`,
+  TurretKilled: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M6 20.5 6 7 8.5 7 8.5 9 11 9 11 7 13 7 13 9 15.5 9 15.5 7 18 7 18 20.5Z"/></svg>`,
+  InhibKilled: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3 17 9 14 20.5 10 20.5 7 9Z"/><path d="M7 9 17 9M12 3 12 20.5"/></svg>`,
+  FirstBrick: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M5 20.5 5 8.5 7 8.5 7 10 9 10 9 8.5 11 8.5 11 10 13 10 13 8.5 14.5 8.5 14.5 20.5Z"/><path d="M19 3.2 19.7 5.6 22.1 6.3 19.7 7 19 9.4 18.3 7 15.9 6.3 18.3 5.6Z" fill="currentColor" stroke="none"/></svg>`,
+  GameStart: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 21 6.5 3"/><path d="M6.5 4 17 7 6.5 10"/></svg>`,
+  MinionsSpawning: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5 12 12 15 14"/></svg>`,
+  GameEnd: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4 17 4 17 7A5 5 0 0 1 7 7Z"/><path d="M7 5 4.5 5A2 2 0 0 0 7 8.7M17 5 19.5 5A2 2 0 0 1 17 8.7"/><path d="M12 12 12 16M8.5 19.5 15.5 19.5 15 16.5 9 16.5Z"/></svg>`,
+  Other: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="12" cy="12" r="3"/></svg>`,
+};
+// Unknown / future kinds fall back to a representative glyph for their category.
+const MARKER_ICON_FALLBACK = {
+  kill: MARKER_ICONS.ChampionKill,
+  assist: MARKER_ICONS.ChampionAssist,
+  spree: MARKER_ICONS.Ace,
+  objective: MARKER_ICONS.BaronKill,
+  structure: MARKER_ICONS.TurretKilled,
+  info: MARKER_ICONS.Other,
+};
+// Game-authentic art for the kinds that actually reach the review timeline
+// (is_timeline_marker). Used as a CSS mask so each silhouette still tints with
+// its category color (--mc); kinds without art fall back to the SVGs above.
+const MARKER_IMAGES = {
+  ChampionKill: "assets/markers/kill.png",
+  ChampionAssist: "assets/markers/assist.png",
+  ChampionDeath: "assets/markers/death.png",
+  DragonKill: "assets/markers/dragon.png",
+  BaronKill: "assets/markers/baron.png",
+  TurretKilled: "assets/markers/turret.png",
+};
+
+function markerImageForKind(kind, presentation) {
+  const kinds = presentation && presentation.marker_kinds ? presentation.marker_kinds : null;
+  const configured = kinds && kinds[kind] && typeof kinds[kind] === "object"
+    ? kinds[kind].icon
+    : null;
+  return configured || MARKER_IMAGES[kind] || "";
+}
+
+function renderMarkers() {
+  const layer = $("marker-layer");
+  layer.replaceChildren();
+  const view = timelineView();
+  const markers = clipMarkers();
+  const presentation = currentPluginPresentation();
+  for (const m of markers) {
+    const left = percentForView(m.t_s, view.start, view.span);
+    // The marker band isn't clipped like the track, so drop glyphs that would
+    // ride outside the visible window (a small margin keeps edge glyphs whole).
+    if (left < -2 || left > 102) continue;
+    const style = markerStyle(m.kind, presentation);
+    const marker = document.createElement("button");
+    marker.className = `marker marker-${style.cls}`;
+    marker.style.left = `${left}%`;
+    marker.title = `${m.kind}${m.subtype ? ` (${m.subtype})` : ""} — ${m.actor}${m.victim ? " → " + m.victim : ""} @ ${m.t_s.toFixed(1)}s`;
+
+    const glyph = document.createElement("span");
+    glyph.className = "glyph";
+    const img = markerImageForKind(m.kind, presentation);
+    if (img) {
+      glyph.classList.add("img");
+      glyph.style.setProperty("--marker-img", `url("${img}")`);
+    } else {
+      glyph.innerHTML = MARKER_ICONS[m.kind] || MARKER_ICON_FALLBACK[style.cls] || MARKER_ICONS.Other;
+    }
+    const hair = document.createElement("span");
+    hair.className = "hair";
+    marker.append(glyph, hair);
+
+    marker.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+    marker.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      // Start a beat before the event so its lead-up plays, then roll.
+      seekTo(m.t_s - MARKER_LEAD_S);
+      video.play().catch(() => syncPlayState());
+    });
+    layer.appendChild(marker);
+  }
+  $("marker-count").textContent = markerSummary(markers);
+  $("prev-marker").disabled = !markers.length;
+  $("next-marker").disabled = !markers.length;
+}
+
+function renderRuler() {
+  const root = $("ruler");
+  root.replaceChildren();
+  const view = timelineView();
+  if (!(view.span > 0)) return;
+  const viewEnd = view.start + view.span;
+  const pct = (t) => percentForView(t, view.start, view.span);
+  const marks = rulerMarksRange(view.start, view.span, 8);
+  // Dense ticks between the labeled majors mirror clipping tools: quick spatial
+  // reference without turning the timeline into a data graph.
+  if (marks.length >= 2) {
+    const step = marks[1].t - marks[0].t;
+    const minorStep = step / 10;
+    const isMajor = (t) => marks.some((m) => Math.abs(m.t - t) < minorStep / 2);
+    const firstMinor = Math.ceil(view.start / minorStep - 1e-9) * minorStep;
+    for (let t = firstMinor; t <= viewEnd + 1e-6; t += minorStep) {
+      if (t <= 0 || isMajor(t)) continue;
+      const tick = document.createElement("i");
+      const divisionsFromFirst = Math.round((t - marks[0].t) / minorStep);
+      const isHalf = divisionsFromFirst % 5 === 0;
+      tick.className = isHalf ? "tick minor" : "tick micro";
+      tick.style.left = `${pct(t)}%`;
+      root.appendChild(tick);
+    }
+  }
+  marks.forEach((mark) => {
+    const tick = document.createElement("i");
+    tick.className = "tick major";
+    tick.style.left = `${pct(mark.t)}%`;
+    root.appendChild(tick);
+    const lab = document.createElement("span");
+    // The 0:00 label hugs the left edge (no centering) only when it sits there.
+    const atLeftEdge = view.start === 0 && mark.t <= 1e-6;
+    lab.className = atLeftEdge ? "lab first" : "lab";
+    lab.style.left = `${pct(mark.t)}%`;
+    lab.textContent = mark.label;
+    root.appendChild(lab);
+  });
+}
+
+// Rapid seeks (scrubbing) must not pile up: WebView2 stops painting frames
+// when a new seek lands while the previous one is in flight. Issue one seek
+// at a time and chain the latest target from the `seeked` event.
+var pendingSeek = null;
+
+function seekTo(time, options = {}) {
+  if (!currentClip) return;
+  if (!options.keepGameEventSelection) clearGameEventSelection();
+  const t = clampTime(time, clipDuration());
+  if (video.seeking) {
+    pendingSeek = t;
+  } else {
+    pendingSeek = null;
+    video.currentTime = t;
+  }
+  maybeFollow(t);
+  paintTimeline();
+  syncGameEventRail(t);
+}
+
+video.addEventListener("seeked", () => {
+  if (pendingSeek != null) {
+    const t = pendingSeek;
+    pendingSeek = null;
+    video.currentTime = t;
+  }
+  maybeFollow(video.currentTime || 0);
+  paintTimeline();
+  syncGameEventRail(video.currentTime || 0);
+});
+
+function seekBy(delta) {
+  seekTo((video.currentTime || 0) + delta);
+}
+
+function togglePlay() {
+  if (!currentClip) return;
+  if (video.paused) video.play().catch(() => syncPlayState());
+  else video.pause();
+}
+
+function syncPlayState() {
+  $("play-toggle").classList.toggle("playing", !video.paused);
+  $("play-toggle").setAttribute("aria-pressed", String(!video.paused));
+  updateOverlay();
+}
+
+function syncVolume() {
+  $("mute-toggle").classList.toggle("muted", video.muted || video.volume === 0);
+  $("volume-slider").value = String(video.muted ? 0 : video.volume);
+  syncRangeProgress($("volume-slider"));
+}
+
+/* ---- overlay visibility (PlayerCore.overlayVisible policy) ---- */
+
+var lastActivityMs = 0;
+var overlayIdle = null;
+
+function noteActivity() {
+  lastActivityMs = performance.now();
+  scheduleOverlayIdleCheck();
+}
+
+function updateOverlay() {
+  const idleMs = performance.now() - lastActivityMs;
+  const nextIdle = !overlayVisible(video.paused, idleMs);
+  if (overlayIdle === nextIdle) return;
+  stage.classList.toggle("idle", nextIdle);
+  overlayIdle = nextIdle;
+}
+
+function clearOverlayIdleCheck() {
+  clearTimeout(overlayTimerId);
+  overlayTimerId = 0;
+}
+
+function scheduleOverlayIdleCheck() {
+  clearOverlayIdleCheck();
+  updateOverlay();
+  if (video.paused || video.ended) return;
+  const remainingMs = Math.max(0, OVERLAY_HIDE_MS - (performance.now() - lastActivityMs));
+  overlayTimerId = setTimeout(() => {
+    overlayTimerId = 0;
+    updateOverlay();
+  }, remainingMs + 30);
+}
+
+function toggleMute() {
+  if (video.muted || video.volume === 0) {
+    video.muted = false;
+    if (video.volume === 0) video.volume = 1;
+  } else {
+    video.muted = true;
+  }
+  syncVolume();
+}
+
+function jumpMarker(direction) {
+  const markers = clipMarkers();
+  const current = video.currentTime || 0;
+  const target = direction > 0 ? nextMarker(markers, current) : prevMarker(markers, current);
+  if (target) seekTo(target.t_s);
+}
+
+/* ---- timeline pointer interaction ---- */
+
+var resumeAfterDrag = false;
+// Snap targets snapshotted at pointerdown so a drag never snaps to its own
+// moving position (the dragged edge and the playhead are excluded up front).
+var dragCandidates = [];
+// Sliding the whole selection: offset from pointer to selection start, the click
+// time, and whether the pointer moved enough to count as a drag (vs a seek).
+var slideGrab = 0;
+var slideClickT = 0;
+var slideStartX = 0;
+var slideMoved = false;
+const SLIDE_THRESHOLD_PX = 4;
+
+function clearSnapFeedback() {
+  $("playhead").classList.remove("snapped");
+  $("handle-in").classList.remove("snapped");
+  $("handle-out").classList.remove("snapped");
+  $("trim-band").classList.remove("snapped");
+}
+
+function startDrag(kind, ev) {
+  if (!currentClip) return;
+  dragging = kind;
+  // Scrub paused so every pointer position shows its frame, then restore.
+  resumeAfterDrag = !video.paused;
+  if (resumeAfterDrag) video.pause();
+  // Exclude the element(s) being moved so a drag never snaps to itself.
+  const playhead = video.currentTime || 0;
+  let exclude;
+  if (kind === "scrub") {
+    exclude = ["playhead"]; // the playhead rides the pointer
+  } else if (kind === "slide") {
+    exclude = ["in", "out"]; // both edges move together
+  } else {
+    // Trim edge: always drop the dragged edge. The playhead rides that edge once
+    // the drag starts, so drop it too ONLY if it's already within snap range of
+    // the edge (else the handle would stick to its own start) — a playhead parked
+    // elsewhere stays a useful snap target.
+    exclude = [kind];
+    const rect = $("timeline").getBoundingClientRect();
+    const v = timelineView();
+    const pps = rect.width && v.span > 0 ? rect.width / v.span : 0;
+    const tol = pps > 0 ? SNAP_THRESHOLD_PX / pps : 0.05;
+    const edge = kind === "in" ? trimStart : trimEnd;
+    if (Math.abs(playhead - edge) <= tol) exclude.push("playhead");
+  }
+  dragCandidates = snapCandidates(clipDuration(), clipMarkers(), playhead, trimStart, trimEnd, exclude);
+  if (kind === "slide") {
+    const rect = $("timeline").getBoundingClientRect();
+    const v = timelineView();
+    const t = timelineTimeView(ev.clientX, rect.left, rect.width, v.start, v.span, clipDuration());
+    slideGrab = t - trimStart;
+    slideClickT = t;
+    slideStartX = ev.clientX;
+    slideMoved = false;
+    $("trim-band").classList.add("grabbing");
+  }
+  $("timeline").setPointerCapture(ev.pointerId);
+  moveDrag(ev);
+}
+
+function moveDrag(ev) {
+  if (!dragging) return;
+  const rect = $("timeline").getBoundingClientRect();
+  const view = timelineView();
+  const dur = clipDuration();
+  const rawT = timelineTimeView(ev.clientX, rect.left, rect.width, view.start, view.span, dur);
+  const pps = rect.width && view.span > 0 ? rect.width / view.span : 0;
+  const doSnap = snapEnabled && !ev.altKey && pps > 0;
+  clearSnapFeedback();
+
+  if (dragging === "slide") {
+    // Hold still and release to seek; move past the threshold to start sliding.
+    if (!slideMoved && Math.abs(ev.clientX - slideStartX) <= SLIDE_THRESHOLD_PX) return;
+    slideMoved = true;
+    // Move the whole selection, keeping its length. Snap whichever edge lands
+    // closest to a salient time so either end can lock cleanly.
+    const len = trimEnd - trimStart;
+    let newStart = rawT - slideGrab;
+    let snapped = false;
+    if (doSnap) {
+      const a = snapTime(newStart, dragCandidates, pps, SNAP_THRESHOLD_PX);
+      const b = snapTime(newStart + len, dragCandidates, pps, SNAP_THRESHOLD_PX);
+      const da = a.snapped ? Math.abs(a.t - newStart) : Infinity;
+      const db = b.snapped ? Math.abs(b.t - (newStart + len)) : Infinity;
+      if (da <= db && a.snapped) { newStart = a.t; snapped = true; }
+      else if (b.snapped) { newStart = b.t - len; snapped = true; }
+    }
+    const next = slideTrim(trimStart, trimEnd, newStart, dur);
+    setTrim(next.start, next.end);
+    if (snapped) $("trim-band").classList.add("snapped");
+    return;
+  }
+
+  let t = rawT;
+  let snapped = false;
+  if (doSnap) {
+    const res = snapTime(t, dragCandidates, pps, SNAP_THRESHOLD_PX);
+    t = res.t;
+    snapped = res.snapped;
+  }
+  if (dragging === "scrub") {
+    if (snapped) $("playhead").classList.add("snapped");
+    seekTo(t);
+  } else {
+    if (snapped) $(dragging === "in" ? "handle-in" : "handle-out").classList.add("snapped");
+    const next = trimDrag(dragging, t, trimStart, trimEnd, dur);
+    setTrim(next.start, next.end);
+    // The playhead rides the dragged edge — you trim on the frame you see.
+    seekTo(dragging === "in" ? next.start : next.end);
+  }
+}
+
+function endDrag() {
+  if (!dragging) return;
+  // A press-and-release on the selection without dragging just seeks there.
+  const clickSeek = dragging === "slide" && !slideMoved;
+  dragging = null;
+  dragCandidates = [];
+  clearSnapFeedback();
+  $("trim-band").classList.remove("grabbing");
+  if (clickSeek) seekTo(slideClickT);
+  if (resumeAfterDrag) {
+    resumeAfterDrag = false;
+    video.play().catch(() => syncPlayState());
+  }
+}
+
+// Higher = faster zoom per wheel notch. e^(±notch·sensitivity) is the span
+// multiplier, so it zooms by the same ratio whichever way you scroll.
+const ZOOM_SENSITIVITY = 0.0015;
+
+// Scroll over the timeline to zoom, keeping the clip moment under the cursor
+// pinned. Scroll up (deltaY < 0) zooms in, down zooms back out.
+function onTimelineWheel(ev) {
+  const dur = clipDuration();
+  if (!currentClip || !(dur > 0)) return;
+  if (!legacyTimelineEnabled() && !simpleTrimMode) return;
+  ev.preventDefault();
+  noteViewActivity();
+  const rect = $("timeline").getBoundingClientRect();
+  if (!rect.width) return;
+  // Normalize line/page wheels (Firefox-style) to roughly pixel scale.
+  const unit = ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? rect.width : 1;
+  const view = timelineView();
+  // Shift+wheel, or a genuinely horizontal trackpad gesture, pans instead of
+  // zooming. Requiring |deltaX| > |deltaY| keeps trackpad noise during a
+  // vertical scroll from misfiring a pan.
+  if (ev.shiftKey || Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) {
+    const raw = ev.shiftKey ? ev.deltaY || ev.deltaX : ev.deltaX;
+    const seconds = ((raw * unit) / rect.width) * view.span;
+    applyView(panView(view.start, view.span, dur, seconds));
+    return;
+  }
+  const anchorFrac = (ev.clientX - rect.left) / rect.width;
+  const factor = Math.max(0.5, Math.min(2, Math.exp(ev.deltaY * unit * ZOOM_SENSITIVITY)));
+  applyView(zoomView(view.start, view.span, dur, anchorFrac, factor, MIN_VIEW_SPAN_S));
+}
+
+/* ---- navigator (whole-clip minimap) drag: body pans, grips zoom ---- */
+
+// Clip time under the pointer in the whole-clip navigator.
+function overviewTime(ev) {
+  const rect = $("overview").getBoundingClientRect();
+  const dur = clipDuration();
+  if (!rect.width || !dur) return 0;
+  const x = Math.max(0, Math.min(rect.width, ev.clientX - rect.left));
+  return (x / rect.width) * dur;
+}
+
+function onOverviewPointerDown(ev) {
+  if (!currentClip || !(clipDuration() > 0)) return;
+  ev.preventDefault();
+  const dur = clipDuration();
+  const v = timelineView();
+  const t = overviewTime(ev);
+  if (ev.target === $("overview-window-l")) {
+    overviewDrag = { mode: "left", pointerId: ev.pointerId };
+    moveOverviewDrag(ev);
+  } else if (ev.target === $("overview-window-r")) {
+    overviewDrag = { mode: "right", pointerId: ev.pointerId };
+    moveOverviewDrag(ev);
+  } else if (ev.target === $("overview-window")) {
+    // Grab the box where you clicked it and pan, keeping that point under the cursor.
+    overviewDrag = { mode: "pan", grab: t - v.start, pointerId: ev.pointerId };
+  } else {
+    // Clicking the empty track jumps the window to center on the click, then pans.
+    const nv = clampView(t - v.span / 2, v.span, dur);
+    applyView(nv);
+    overviewDrag = { mode: "pan", grab: t - nv.start, pointerId: ev.pointerId };
+  }
+  $("overview").setPointerCapture(ev.pointerId);
+  $("overview-window").classList.add("grabbing");
+}
+
+function moveOverviewDrag(ev) {
+  if (!overviewDrag) return;
+  const dur = clipDuration();
+  const v = timelineView();
+  const t = overviewTime(ev);
+  if (overviewDrag.mode === "pan") {
+    applyView(clampView(t - overviewDrag.grab, v.span, dur));
+  } else {
+    applyView(setViewEdge(v.start, v.span, dur, overviewDrag.mode, t));
+  }
+}
+
+function endOverviewDrag() {
+  if (!overviewDrag) return;
+  overviewDrag = null;
+  $("overview-window").classList.remove("grabbing");
+  noteViewActivity(); // don't snap back to the playhead the instant the drag ends
+}
+
+// Navigator scroll pans the visible window left/right. The strip spans the whole
+// clip, so map pixels scrolled to clip seconds (no-op when fully zoomed out).
+function onOverviewWheel(ev) {
+  const dur = clipDuration();
+  if (!currentClip || !(dur > 0)) return;
+  ev.preventDefault();
+  noteViewActivity();
+  const rect = $("overview").getBoundingClientRect();
+  if (!rect.width) return;
+  const unit = ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? rect.width : 1;
+  const raw = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+  const view = timelineView();
+  applyView(panView(view.start, view.span, dur, ((raw * unit) / rect.width) * dur));
+}
+
+/* ---- clip actions ---- */
+
+async function exportTrim() {
+  const sourceClip = currentClip;
+  if (!sourceClip) return;
+  $("error").textContent = "";
+  $("export-clip").disabled = true;
+  setDeckStatus("exporting…");
+  await afterNextPaint();
+  try {
+    const exported = await invoke("export_clip", {
+      path: sourceClip.path,
+      startS: trimStart,
+      endS: trimEnd,
+    });
+    setDeckStatus(`exported ${exported.name} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true });
+    const exportedClip = {
+      path: exported.path,
+      name: exported.name,
+      session: sourceClip.session || null,
+      size_mb: Number(exported.size_mb) || 0,
+      modified_unix: exported.modified_unix || Math.floor(Date.now() / 1000),
+      duration_s: exported.duration_s,
+      markers: exported.markers || null,
+      game: sourceClip.game || null,
+    };
+    clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
+    renderClips();
+    await refreshStorage();
+  } catch (e) {
+    setDeckStatus("");
+    $("error").textContent = e;
+  } finally {
+    $("export-clip").disabled = false;
+  }
+}
+
+const DEFAULT_DELETE_CONFIRM_TITLE = $("confirm-title").textContent;
+
+// In-app modal — the native browser prompt renders "tauri.localhost says".
+function confirmDelete(name) {
+  return confirmDeleteDialog("Delete this clip?", name);
+}
+
+function confirmBulkDelete(count) {
+  return confirmDeleteDialog(`Delete ${count} clips?`, "This cannot be undone.");
+}
+
+function confirmDeleteDialog(title, detail) {
+  return new Promise((resolve) => {
+    const dlg = $("confirm-dialog");
+    const titleEl = $("confirm-title");
+    titleEl.textContent = title;
+    $("confirm-detail").textContent = detail;
+    const finish = (ok) => {
+      dlg.removeEventListener("close", onClose);
+      if (dlg.open) dlg.close();
+      titleEl.textContent = DEFAULT_DELETE_CONFIRM_TITLE;
+      resolve(ok);
+    };
+    const onClose = () => finish(false); // Esc / backdrop paths
+    dlg.addEventListener("close", onClose);
+    $("confirm-cancel").onclick = () => finish(false);
+    $("confirm-accept").onclick = () => finish(true);
+    dlg.showModal();
+  });
+}
+
+function formatDeletionFailures(failed) {
+  return (failed || []).map(([p, m]) => `${p.split(/[\\/]/).pop()}: ${m}`).join("; ");
+}
+
+function deletionNotice(count) {
+  if (count <= 0) return "";
+  return count === 1 ? "deleted 1 clip" : `deleted ${count} clips`;
+}
+
+async function applyDeletion(removedPaths) {
+  const removed = new Set(removedPaths || []);
+  if (!removed.size) return;
+  const wasCurrent = currentClip && removed.has(currentClip.path);
+  clipsCache = clipsCache.filter((clip) => !removed.has(clip.path));
+  if (wasCurrent) closeReview();
+  else renderClips();
+  await refreshStorage();
+}
+
+function confirmQuit() {
+  return new Promise((resolve) => {
+    const dlg = $("quit-dialog");
+    const finish = (ok) => {
+      dlg.removeEventListener("close", onClose);
+      if (dlg.open) dlg.close();
+      resolve(ok);
+    };
+    const onClose = () => finish(false); // Esc / backdrop paths
+    dlg.addEventListener("close", onClose);
+    $("quit-cancel").onclick = () => finish(false);
+    $("quit-accept").onclick = () => finish(true);
+    dlg.showModal();
+  });
+}
+
+async function requestWindowClose() {
+  if (currentSettings && currentSettings.close_to_tray === false) {
+    if (!(await confirmQuit())) return;
+  }
+  await appWindow.close();
+}
+
+function setUpdateStatus(message) {
+  $("update-status").textContent = message;
+}
+
+function updateUpToDateStatus(update) {
+  const version = update.current_version ? ` ${update.current_version}` : "";
+  return `${update.channel_label}${version} is up to date`;
+}
+
+function updateNotesPreview(notes) {
+  const text = String(notes || "").trim();
+  if (!text) return "";
+  return text.length > 220 ? `${text.slice(0, 217)}...` : text;
+}
+
+function showUpdateDialog(update) {
+  pendingUpdate = update;
+  $("update-install").disabled = false;
+  $("update-cancel").disabled = false;
+  $("update-dialog-title").textContent = `${update.channel_label} update available`;
+  $("update-dialog-body").textContent =
+    `Clipline ${update.version} is available. Current version: ${update.current_version}.`;
+  $("update-dialog-notes").textContent = updateNotesPreview(update.notes);
+  $("update-dialog").showModal();
+}
+
+async function checkForUpdates({ manual = false } = {}) {
+  if (updateCheckRunning) return;
+  updateCheckRunning = true;
+  if (manual) setUpdateStatus("checking...");
+  try {
+    const update = await invoke("check_for_updates");
+    if (update.available) {
+      setUpdateStatus(`${update.channel_label} ${update.version} available`);
+      showUpdateDialog(update);
+    } else if (manual) {
+      setUpdateStatus(update.status || updateUpToDateStatus(update));
+    }
+  } catch (e) {
+    if (manual) {
+      setUpdateStatus(String(e));
+    } else {
+      console.warn("update check failed:", e);
+    }
+  } finally {
+    updateCheckRunning = false;
+  }
+}
+
+async function installPendingUpdate() {
+  $("update-install").disabled = true;
+  $("update-cancel").disabled = true;
+  setUpdateStatus("installing update...");
+  try {
+    await invoke("install_update");
+  } catch (e) {
+    $("update-install").disabled = false;
+    $("update-cancel").disabled = false;
+    setUpdateStatus(String(e));
+  }
+}
+
+async function deleteClip(path = currentClip && currentClip.path) {
+  if (currentClip && currentClip.path === path && isCloudOnlyReviewClip(currentClip)) return;
+  if (!path) return;
+  const name = path.split(/[\\/]/).pop();
+  if (!(await confirmDelete(name))) return;
+  try {
+    await invoke("delete_clip", { path });
+    await applyDeletion([path]);
+    setNotice("clip deleted", { transient: true });
+    $("error").textContent = "";
+  } catch (e) {
+    $("error").textContent = e;
+  }
+}
+
+async function openFolder() {
+  if (!currentClip) return;
+  if (isCloudOnlyReviewClip(currentClip)) return;
+  try {
+    await invoke("reveal_clip", { path: currentClip.path });
+  } catch (e) {
+    $("error").textContent = e;
+  }
+}
+
+async function copyClipToClipboard() {
+  if (!currentClip) return;
+  if (isCloudOnlyReviewClip(currentClip)) return;
+  $("copy-clip").disabled = true;
+  $("error").textContent = "";
+  setDeckStatus("");
+  try {
+    await invoke("copy_clip_to_clipboard", {
+      request: {
+        path: currentClip.path,
+        audioTrackIds: clipAudioTracks(currentClip).length
+          ? selectedAudioTrackIdsForClip(currentClip)
+          : null,
+      },
+    });
+    setDeckStatus("clip copied to clipboard", { transient: true });
+  } catch (e) {
+    setDeckStatus("");
+    $("error").textContent = e;
+  } finally {
+    $("copy-clip").disabled = false;
+  }
+}
+
+async function chooseMediaFolder() {
+  try {
+    const selected = await invoke("choose_media_folder", {
+      current: $("set-media-dir").value,
+    });
+    if (selected) {
+      $("set-media-dir").value = selected;
+      $("settings-status").textContent = "folder selected - save to apply";
+    }
+  } catch (e) {
+    $("error").textContent = e;
+  }
+}
+
+async function chooseReplayCacheFolder() {
+  try {
+    const selected = await invoke("choose_replay_cache_folder", {
+      current: $("set-replay-disk-dir").value,
+    });
+    if (selected) {
+      $("set-replay-disk-dir").value = selected;
+      $("settings-status").textContent = "replay cache folder selected - save to apply";
+    }
+  } catch (e) {
+    $("error").textContent = e;
+  }
+}

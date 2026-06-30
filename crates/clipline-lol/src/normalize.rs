@@ -33,26 +33,30 @@ pub fn normalize(raw: &RawEvent, local_player: &str) -> GameEvent {
 
     let local_player_key = player_name_key(local_player);
     let actor_is_local = player_matches_key(&actor, &local_player_key);
-    let local_player_assisted = raw
+    let local_assister = raw
         .assisters
         .iter()
-        .any(|assister| player_matches_key(assister, &local_player_key));
+        .find(|assister| player_matches_key(assister, &local_player_key))
+        .cloned();
+    let local_player_assisted = local_assister.is_some();
     let local_player_was_victim = raw
         .victim_name
         .as_deref()
         .is_some_and(|victim| player_matches_key(victim, &local_player_key));
 
     // The Live Client API only emits ChampionKill for any champion death. We
-    // split it: the local player's own death becomes ChampionDeath so it
-    // earns its own timeline marker (ddoc §5: "mark *their* kills/deaths
-    // distinctly"). Otherwise the kill classification is unchanged.
+    // split local involvement so the review timeline can distinguish the local
+    // player's kills, assists, and deaths.
     let kind = match kind {
         EventKind::ChampionKill if local_player_was_victim => EventKind::ChampionDeath,
+        EventKind::ChampionKill if local_player_assisted && !actor_is_local => {
+            EventKind::ChampionAssist
+        }
         k => k,
     };
 
     let involves_local_player = match kind {
-        EventKind::ChampionDeath => true,
+        EventKind::ChampionAssist | EventKind::ChampionDeath => true,
         EventKind::ChampionKill => actor_is_local,
         _ => actor_is_local || local_player_assisted || local_player_was_victim,
     };
@@ -74,6 +78,10 @@ pub fn normalize(raw: &RawEvent, local_player: &str) -> GameEvent {
             0
         })
     .min(10);
+    let actor = match kind {
+        EventKind::ChampionAssist => local_assister.unwrap_or_else(|| local_player.trim().into()),
+        _ => actor,
+    };
 
     GameEvent {
         game_id: GameId::LeagueOfLegends,
@@ -108,6 +116,7 @@ fn base_importance(kind: EventKind) -> u8 {
         EventKind::Multikill | EventKind::BaronKill => 7,
         EventKind::DragonKill | EventKind::FirstBlood => 6,
         EventKind::ChampionKill
+        | EventKind::ChampionAssist
         | EventKind::ChampionDeath
         | EventKind::InhibKilled
         | EventKind::HeraldKill => 5,
@@ -167,17 +176,19 @@ mod tests {
     }
 
     #[test]
-    fn local_player_as_assister_does_not_count_as_champion_kill() {
+    fn local_player_as_assister_becomes_champion_assist() {
         let r = raw(
             r#"{ "EventID": 2, "EventName": "ChampionKill", "EventTime": 10.0,
                  "KillerName": "A", "VictimName": "Them", "Assisters": ["B"] }"#,
         );
         let ev = normalize(&r, "B");
+        assert_eq!(ev.kind, EventKind::ChampionAssist);
+        assert_eq!(ev.actor, "B");
         assert!(
-            !ev.involves_local_player,
-            "assists are not timeline-worthy champion kills"
+            ev.involves_local_player,
+            "local assists should get timeline-worthy assist markers"
         );
-        assert_eq!(ev.importance, 5);
+        assert_eq!(ev.importance, 7);
     }
 
     #[test]

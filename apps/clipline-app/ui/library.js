@@ -1,0 +1,1180 @@
+// Local/cloud gallery, clip cards, multi-select.
+// Resolve the icon for the game currently being captured. The detected-game
+// payload carries no plugin id, so match a custom game by exe/window/name, then
+// fall back to a plugin by name; { url: null } means "known game, no icon".
+function activeGameIcon() {
+  const g = activeDetectedGame;
+  if (!g || !g.active) return null;
+  const exe = (g.exe_name || "").toLowerCase();
+  const custom = customGames.find((c) =>
+    (c.exe_name && exe && c.exe_name.toLowerCase() === exe) ||
+    (c.window_title && g.window_title && c.window_title === g.window_title) ||
+    (c.name && g.name && c.name === g.name));
+  if (custom && custom.icon) return { url: custom.icon, label: custom.name || g.name };
+  const plugin = gamePlugins.find((p) => p.name === g.name);
+  if (plugin && plugin.icon) return { url: plugin.icon, label: plugin.name };
+  return { url: null, label: g.name };
+}
+
+function railGamePlaceholder() {
+  const ph = document.createElement("div");
+  ph.className = "placeholder";
+  ph.innerHTML = GENERIC_GAME_ICON; // static markup, safe
+  return ph;
+}
+
+// Show the captured game's icon in the rail; hidden when no game is active
+// (e.g. capturing a display/region).
+function renderRailGame() {
+  const host = $("rail-game");
+  if (!host) return;
+  const icon = activeGameIcon();
+  host.replaceChildren();
+  if (!icon) {
+    host.hidden = true;
+    host.removeAttribute("title");
+    return;
+  }
+  host.hidden = false;
+  host.title = icon.label;
+  if (icon.url) {
+    const img = document.createElement("img");
+    img.src = icon.url;
+    img.alt = "";
+    img.addEventListener("error", () => img.replaceWith(railGamePlaceholder()));
+    host.appendChild(img);
+  } else {
+    host.appendChild(railGamePlaceholder());
+  }
+}
+
+async function refreshClips(preferredCurrentPath = null) {
+  clipsCache = await invoke("list_clips");
+  if (currentClip) {
+    const currentPath = preferredCurrentPath || currentClip.path;
+    const fresh = clipsCache.find((clip) => clip.path === currentPath);
+    if (fresh) {
+      currentClip = fresh;
+      pruneSelectedAudioTracks(fresh);
+      $("pname").textContent = fresh.name;
+      renderAudioTrackPanel();
+    } else {
+      closeReview();
+    }
+  }
+  renderClips();
+}
+// Leading icon per clip kind. Static markup (no clip data) — innerHTML is safe.
+const CLIP_KIND_ICONS = {
+  replay:
+    '<svg viewBox="0 0 24 24"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>',
+  session:
+    '<svg viewBox="0 0 24 24"><path d="M3 5h18v14H3V5zM5 6v2h2v-2zM9 6v2h2v-2zM13 6v2h2v-2zM17 6v2h2v-2zM5 16v2h2v-2zM9 16v2h2v-2zM13 16v2h2v-2zM17 16v2h2v-2z"/></svg>',
+  trim:
+    '<svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm0 12c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3z"/></svg>',
+};
+const CLIP_KIND_LABELS = {
+  replay: "Buffered replay",
+  session: "Full session",
+  trim: "Trimmed export",
+};
+const CLOUD_VISIBILITY_ICONS = {
+  public:
+    '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3z"/></svg>',
+  unlisted:
+    '<svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.1.5l2.4-2.4a5 5 0 0 0-7.1-7.1L11 5.4"/><path d="M14 11a5 5 0 0 0-7.1-.5L4.5 12.9a5 5 0 0 0 7.1 7.1L13 18.6"/></svg>',
+  private:
+    '<svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>',
+};
+const CLOUD_VISIBILITY_LABELS = {
+  public: "Public cloud clip",
+  unlisted: "Unlisted cloud clip",
+  private: "Private cloud clip",
+};
+
+// Neutral fallback when a game has no extractable/bundled icon. Static markup.
+const GENERIC_GAME_ICON =
+  '<svg viewBox="0 0 24 24"><path d="M3 5h18a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-7l1 2h2v2H6v-2h2l1-2H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm1 2v7h16V7H4z"/></svg>';
+
+// A game-icon element: an <img> for a real icon (a plugin's bundled URL or an
+// extracted data URL), falling back to a neutral glyph when absent or broken.
+function gameIconEl(iconUrl, label) {
+  if (iconUrl) {
+    const img = document.createElement("img");
+    img.className = "game-icon";
+    img.src = iconUrl;
+    img.alt = "";
+    if (label) img.title = label;
+    img.addEventListener("error", () => img.replaceWith(gamePlaceholderEl()));
+    return img;
+  }
+  return gamePlaceholderEl();
+}
+function gamePlaceholderEl() {
+  const el = document.createElement("div");
+  el.className = "game-icon placeholder";
+  el.innerHTML = GENERIC_GAME_ICON; // static markup, safe
+  return el;
+}
+
+// Resolve a clip's recorded game to an icon, reusing the icons shown in
+// settings: a plugin's bundled icon, or a custom game's extracted icon.
+// Returns null for clips with no game, or a game no longer configured.
+function clipGameIcon(clip) {
+  const g = clip && clip.game;
+  if (!g || !g.id) return null;
+  const plugin = gamePlugins.find((p) => p.id === g.id);
+  if (plugin && plugin.icon) return { url: plugin.icon, label: plugin.name };
+  const custom = customGames.find((c) => c.id === g.id);
+  if (custom && custom.icon) return { url: custom.icon, label: custom.name };
+  return null;
+}
+
+function pluginForGameId(gameId) {
+  return gamePlugins.find((plugin) => plugin.id === gameId) || null;
+}
+
+function pluginForClip(clip) {
+  const gameId = clip && clip.game && clip.game.id;
+  return gameId ? pluginForGameId(gameId) : null;
+}
+
+function pluginPresentationForClip(clip) {
+  const plugin = pluginForClip(clip);
+  return plugin && plugin.presentation ? plugin.presentation : null;
+}
+
+function currentPluginPresentation() {
+  return pluginPresentationForClip(currentClip);
+}
+
+function pluginGalleryPolicy(clip) {
+  const presentation = pluginPresentationForClip(clip);
+  return presentation && presentation.gallery ? presentation.gallery : null;
+}
+
+function markerDisplayLabel(marker, presentation) {
+  const kind = marker && marker.kind ? marker.kind : "Other";
+  const configured = presentation
+    && presentation.marker_kinds
+    && presentation.marker_kinds[kind]
+    && typeof presentation.marker_kinds[kind] === "object"
+      ? presentation.marker_kinds[kind]
+      : null;
+  const label = configured && configured.label ? configured.label : kind.replace(/([a-z])([A-Z])/g, "$1 $2");
+  const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
+  return `${fmtDur(marker.t_s)} ${label}${actor}`;
+}
+
+function markerEventText(marker, presentation) {
+  const kind = marker && marker.kind ? marker.kind : "Other";
+  const configured = presentation
+    && presentation.marker_kinds
+    && presentation.marker_kinds[kind]
+    && typeof presentation.marker_kinds[kind] === "object"
+      ? presentation.marker_kinds[kind]
+      : null;
+  const label = configured && configured.label ? configured.label : kind.replace(/([a-z])([A-Z])/g, "$1 $2");
+  const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
+  return `${label}${actor}`;
+}
+
+function gameEventPortrait(slot) {
+  const root = document.createElement("span");
+  root.className = "game-event-participant";
+  const portrait = document.createElement("span");
+  portrait.className = "game-event-portrait";
+  portrait.title = slot.champion ? `${slot.champion} · ${slot.name}` : slot.name;
+  if (slot.asset) {
+    const img = document.createElement("img");
+    img.src = slot.asset;
+    img.alt = slot.champion || slot.name;
+    img.addEventListener("error", () => {
+      img.remove();
+      portrait.textContent = slot.initials || "?";
+    }, { once: true });
+    portrait.appendChild(img);
+  } else {
+    portrait.textContent = slot.initials || "?";
+  }
+  const name = document.createElement("span");
+  name.className = "game-event-name";
+  name.textContent = slot.name || slot.champion || "?";
+  root.append(portrait, name);
+  return root;
+}
+
+function gameEventIcon(view, marker, presentation) {
+  const icon = document.createElement("span");
+  icon.className = "game-event-kind-icon";
+  icon.title = view.label || markerDisplayLabel(marker, presentation);
+  if (view.icon) {
+    const img = document.createElement("img");
+    img.src = view.icon;
+    img.alt = "";
+    img.setAttribute("aria-hidden", "true");
+    img.addEventListener("error", () => {
+      img.remove();
+      icon.textContent = markerStyle(marker.kind, presentation).glyph;
+    }, { once: true });
+    icon.appendChild(img);
+  } else {
+    icon.textContent = markerStyle(marker.kind, presentation).glyph;
+  }
+  return icon;
+}
+
+var activeGameEventIndex = -1;
+var selectedGameEventIndex = -1;
+var selectedGameEventTime = null;
+var gameEventRailCollapsed = false;
+var gameEventRows = [];
+
+function eventRailPolicy(clip) {
+  const presentation = pluginPresentationForClip(clip);
+  return presentation && presentation.event_rail ? presentation.event_rail : null;
+}
+
+function metadataPanelPolicy(clip) {
+  const presentation = pluginPresentationForClip(clip);
+  return presentation && presentation.metadata_panel ? presentation.metadata_panel : null;
+}
+
+function clearGameEventSelection() {
+  selectedGameEventIndex = -1;
+  selectedGameEventTime = null;
+}
+
+function selectGameEvent(index, markerTime) {
+  selectedGameEventIndex = index;
+  selectedGameEventTime = Number.isFinite(markerTime) ? markerTime : null;
+}
+
+function selectedGameEventIndexForTime(currentTime) {
+  if (selectedGameEventIndex < 0 || selectedGameEventTime == null) return -1;
+  if (currentTime >= selectedGameEventTime - 0.15) {
+    clearGameEventSelection();
+    return -1;
+  }
+  return selectedGameEventIndex;
+}
+
+function renderGameEventRail(clip = currentClip) {
+  const rail = $("game-event-rail");
+  const reviewBody = rail ? rail.closest(".review-body") : null;
+  const title = $("game-event-rail-title");
+  const summary = $("game-event-rail-summary");
+  const list = $("game-event-list");
+  const presentation = pluginPresentationForClip(clip);
+  const eventRail = eventRailPolicy(clip);
+  const markers = clip && clip.markers && Array.isArray(clip.markers.markers)
+    ? clip.markers.markers
+    : [];
+  activeGameEventIndex = -1;
+  clearGameEventSelection();
+  if (!eventRail || !eventRail.enabled || !markers.length) {
+    rail.hidden = true;
+    rail.classList.remove("is-collapsed");
+    if (reviewBody) reviewBody.classList.remove("has-event-rail", "event-rail-collapsed");
+    title.textContent = "";
+    summary.textContent = "";
+    list.replaceChildren();
+    gameEventRows = [];
+    return;
+  }
+  title.textContent = eventRail.title || (clip && clip.game ? `${clip.game.name} events` : "Game events");
+  summary.textContent = markerSummary(markers);
+  list.replaceChildren();
+  gameEventRows = [];
+  const playerSummary = clip && clip.markers ? clip.markers.player_summary : null;
+  markers.forEach((marker, index) => {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    const view = gameEventRailItem(marker, playerSummary, presentation, {
+      data_dragon: presentation && presentation.data_dragon,
+    });
+    button.type = "button";
+    button.setAttribute("data-game-event-index", String(index));
+    button.setAttribute("data-game-event-time", String(marker.t_s || 0));
+    button.className = `marker-${view.category} game-event-row-${view.allegiance || "neutral"}`;
+    const time = document.createElement("span");
+    time.className = "game-event-time";
+    time.textContent = fmtDur(marker.t_s || 0);
+    button.title = markerDisplayLabel(marker, presentation);
+    if (view.layout === "duel" && view.actor && view.victim) {
+      button.classList.add("game-event-duel");
+      button.append(
+        time,
+        gameEventPortrait(view.actor),
+        gameEventIcon(view, marker, presentation),
+        gameEventPortrait(view.victim),
+      );
+    } else if (view.layout === "actor_event") {
+      const icon = gameEventIcon(view, marker, presentation);
+      icon.classList.add("game-event-objective-icon");
+      button.classList.add("game-event-actor-event");
+      if (view.actor) {
+        button.append(
+          time,
+          gameEventPortrait(view.actor),
+          icon,
+        );
+      } else {
+        const label = document.createElement("span");
+        label.className = "game-event-label";
+        label.textContent = view.text || markerEventText(marker, presentation);
+        button.append(time, label, icon);
+      }
+    } else {
+      const label = document.createElement("span");
+      label.className = "game-event-label";
+      label.textContent = view.text || markerEventText(marker, presentation);
+      button.append(time, label);
+    }
+    button.addEventListener("click", () => {
+      const markerTime = marker.t_s || 0;
+      selectGameEvent(index, markerTime);
+      seekTo(markerTime - MARKER_LEAD_S, { keepGameEventSelection: true });
+      video.play().catch(() => syncPlayState());
+    });
+    gameEventRows.push(button);
+    item.appendChild(button);
+    list.appendChild(item);
+  });
+  rail.hidden = false;
+  if (reviewBody) reviewBody.classList.add("has-event-rail");
+  setGameEventRailCollapsed(gameEventRailCollapsed);
+}
+
+function setGameEventRailCollapsed(collapsed) {
+  gameEventRailCollapsed = Boolean(collapsed);
+  const rail = $("game-event-rail");
+  const reviewBody = rail ? rail.closest(".review-body") : null;
+  const toggle = $("game-event-rail-toggle");
+  if (!rail) return;
+  rail.classList.toggle("is-collapsed", gameEventRailCollapsed);
+  if (reviewBody) {
+    reviewBody.classList.toggle(
+      "event-rail-collapsed",
+      !rail.hidden && gameEventRailCollapsed,
+    );
+  }
+  if (toggle) {
+    const label = gameEventRailCollapsed ? "Expand match events" : "Collapse match events";
+    toggle.title = label;
+    toggle.setAttribute("aria-label", label);
+    toggle.setAttribute("aria-expanded", gameEventRailCollapsed ? "false" : "true");
+  }
+  if (!gameEventRailCollapsed) {
+    syncGameEventRail(video.currentTime || 0, { force: true });
+  }
+}
+
+function syncGameEventRail(currentTime = video.currentTime || 0, options = {}) {
+  const rail = $("game-event-rail");
+  if (!rail || rail.hidden || rail.classList.contains("is-collapsed")) return;
+  if (!gameEventRows.length) return;
+  const markers = clipMarkers();
+  const selectedIndex = selectedGameEventIndexForTime(currentTime);
+  const next = gameEventActiveIndex(markers, currentTime, selectedIndex);
+  if (next === activeGameEventIndex && !options.force) return;
+  activeGameEventIndex = next;
+  gameEventRows.forEach((row) => {
+    const active = Number(row.dataset.gameEventIndex) === next;
+    row.classList.toggle("active", active);
+    row.setAttribute("aria-current", active ? "true" : "false");
+    if (active) row.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
+
+function metadataIconFallbackText(value) {
+  const letters = String(value || "").match(/[A-Za-z0-9]/g) || [];
+  return (letters.slice(0, 2).join("").toUpperCase() || "?").slice(0, 2);
+}
+
+function renderMetadataIcon(entry, className) {
+  const icon = document.createElement("span");
+  icon.className = className;
+  icon.title = entry.value || "";
+  icon.setAttribute("aria-label", entry.value || "Metadata icon");
+  if (entry.asset) {
+    const img = document.createElement("img");
+    img.src = entry.asset;
+    img.alt = entry.value || "";
+    img.addEventListener("error", () => {
+      img.remove();
+      icon.textContent = metadataIconFallbackText(entry.value || entry.assetKey);
+    }, { once: true });
+    icon.appendChild(img);
+  } else {
+    icon.textContent = metadataIconFallbackText(entry.value || entry.assetKey);
+  }
+  return icon;
+}
+
+function renderMetadataIconList(field) {
+  const list = document.createElement("div");
+  list.className = `game-metadata-icons ${field.type}`;
+  list.setAttribute("aria-label", field.label || field.type);
+  for (const entry of field.items || []) {
+    list.appendChild(renderMetadataIcon(entry, "game-metadata-icon"));
+  }
+  return list;
+}
+
+function renderGameMetadataPanel(clip = currentClip) {
+  const panel = $("game-metadata-panel");
+  const fieldsRoot = $("game-metadata-fields");
+  if (!clip) {
+    panel.hidden = true;
+    fieldsRoot.replaceChildren();
+    return;
+  }
+  const presentation = pluginPresentationForClip(clip);
+  const metadataPanel = metadataPanelPolicy(clip);
+  const summary = clip && clip.markers ? clip.markers.player_summary : null;
+  const fields = metadataPanel && metadataPanel.fields
+    ? playerSummaryFields(summary, metadataPanel.fields, {
+      data_dragon: presentation && presentation.data_dragon,
+    })
+    : [];
+  if (!metadataPanel || !metadataPanel.enabled || !fields.length) {
+    panel.hidden = true;
+    fieldsRoot.replaceChildren();
+    return;
+  }
+  fieldsRoot.replaceChildren();
+  for (const field of fields) {
+    if (field.type === "portrait") {
+      const portrait = document.createElement("div");
+      portrait.className = "game-metadata-portrait";
+      portrait.title = field.value;
+      if (field.asset) {
+        const img = document.createElement("img");
+        img.src = field.asset;
+        img.alt = field.value;
+        img.addEventListener("error", () => {
+          img.remove();
+          portrait.textContent = String(field.value || "?").slice(0, 2).toUpperCase();
+        }, { once: true });
+        portrait.appendChild(img);
+      } else {
+        portrait.textContent = String(field.value || "?").slice(0, 2).toUpperCase();
+      }
+      fieldsRoot.appendChild(portrait);
+      continue;
+    }
+    if (field.type === "summoner_spells" || field.type === "item_build") {
+      fieldsRoot.appendChild(renderMetadataIconList(field));
+      continue;
+    }
+    const item = document.createElement("div");
+    item.className = `game-metadata-field ${field.type}`;
+    if (field.label) {
+      const label = document.createElement("strong");
+      label.textContent = field.label;
+      item.appendChild(label);
+    }
+    const value = document.createElement("span");
+    value.textContent = field.value;
+    item.appendChild(value);
+    if (field.secondary) {
+      const secondary = document.createElement("small");
+      secondary.textContent = field.secondary;
+      item.appendChild(secondary);
+    }
+    fieldsRoot.appendChild(item);
+  }
+  panel.hidden = false;
+}
+
+function clipGalleryCardPreview(clip, kind, fallbackTitle) {
+  const presentation = pluginPresentationForClip(clip);
+  return galleryCardPreview(
+    clip,
+    kind,
+    fallbackTitle,
+    presentation,
+    { data_dragon: presentation && presentation.data_dragon },
+  );
+}
+
+function cloudVisibilityEl(record) {
+  const visibility = clipCloudVisibility(record);
+  if (!visibility) return null;
+  const el = document.createElement("span");
+  el.className = `clip-cloud-visibility ${visibility}`;
+  el.title = CLOUD_VISIBILITY_LABELS[visibility];
+  el.setAttribute("aria-label", CLOUD_VISIBILITY_LABELS[visibility]);
+  el.innerHTML = CLOUD_VISIBILITY_ICONS[visibility]; // static markup, safe
+  return el;
+}
+
+const CLOUD_CARD_ICON =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.2 18h10.2a4.1 4.1 0 0 0 .4-8.2A6.2 6.2 0 0 0 5.9 8.1 5 5 0 0 0 7.2 18zm.2-2a3 3 0 0 1-.5-5.9l.8-.1.3-.8A4.2 4.2 0 0 1 16 10.4l.2 1.2 1.2.1A2.1 2.1 0 0 1 17.4 16H7.4z"/></svg>';
+
+function cloudClipCard(entry) {
+  const el = document.createElement("article");
+  el.className = "card cloud-card";
+  el.title = entry.title;
+
+  const thumb = document.createElement("div");
+  thumb.className = "card-thumb";
+  thumb.style.cssText = thumbGradient({ name: entry.title, session: entry.remote_url });
+  const placeholder = document.createElement("span");
+  placeholder.className = "cloud-card-placeholder";
+  placeholder.innerHTML = CLOUD_CARD_ICON; // static markup, safe
+  thumb.appendChild(placeholder);
+  observeCloudThumbnail(entry, thumb);
+
+  const play = document.createElement("div");
+  play.className = "card-play";
+  play.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'; // static markup, safe
+
+  const kindChip = document.createElement("span");
+  kindChip.className = "card-kind session";
+  kindChip.title = "Cloud clip";
+  kindChip.innerHTML =
+    '<svg viewBox="0 0 24 24"><path d="M7.2 18h10.2a4.1 4.1 0 0 0 .4-8.2A6.2 6.2 0 0 0 5.9 8.1 5 5 0 0 0 7.2 18z"/></svg>';
+  const kindLabel = document.createElement("span");
+  kindLabel.textContent = "Cloud";
+  kindChip.appendChild(kindLabel);
+  thumb.appendChild(kindChip);
+
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  const nameRow = document.createElement("div");
+  nameRow.className = "card-name";
+  const name = document.createElement("span");
+  name.className = "t";
+  name.textContent = entry.title;
+  nameRow.appendChild(name);
+  const visibility = cloudVisibilityEl(entry);
+  if (visibility) nameRow.appendChild(visibility);
+
+  const info = document.createElement("div");
+  info.className = "card-sub";
+  const updated = entry.updated_at_unix ? fmtAgo(Date.now() / 1000, entry.updated_at_unix) : "";
+  const parts = [cloudStatusLabel(entry.upload_status)];
+  if (updated) parts.push(updated);
+  parts.push(entry.local_available ? "local copy available" : "cloud only");
+  info.textContent = parts.join(" · ");
+
+  const localState = document.createElement("div");
+  localState.className = "cloud-local-state";
+  localState.textContent = entry.remote_url;
+  localState.title = entry.remote_url;
+
+  meta.append(nameRow, info, localState);
+  thumb.appendChild(play);
+  el.append(thumb, meta);
+  el.addEventListener("click", () => openCloudEntryInApp(entry));
+  el.addEventListener("contextmenu", (ev) => showCloudClipContextMenu(ev, entry));
+  return el;
+}
+
+// Clip names come from disk; build rows with textContent, never innerHTML.
+const CARD_KIND_LABELS = { replay: "Replay", session: "Session", trim: "Trim" };
+// Marker categories → tint var, matching the timeline glyph colors.
+const MARKER_CATEGORY_TICK_VARS = {
+  kill: "--mc-kill",
+  assist: "--mc-assist",
+  death: "--mc-death",
+  spree: "--mc-spree",
+  objective: "--mc-objective",
+  structure: "--mc-structure",
+  info: "--mc-info",
+};
+const MARKER_TICK_VARS = {
+  ChampionKill: "--mc-kill", FirstBlood: "--mc-kill",
+  ChampionAssist: "--mc-assist",
+  ChampionDeath: "--mc-death",
+  Multikill: "--mc-spree", Ace: "--mc-spree",
+  DragonKill: "--mc-objective", HeraldKill: "--mc-objective", BaronKill: "--mc-objective",
+  TurretKilled: "--mc-structure", InhibKilled: "--mc-structure", FirstBrick: "--mc-structure",
+};
+
+// Stable gradient placeholder per clip, shown until the poster loads (and the
+// fallback if poster extraction fails).
+function thumbGradient(c) {
+  const key = (c.name || "") + (c.session || "");
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) % 360;
+  return `--g1:hsl(${h} 30% 18%); --g2:hsl(${(h + 38) % 360} 34% 8%);`;
+}
+
+function insertThumbMedia(thumb, media) {
+  const firstOverlay = thumb.querySelector(".card-play, .card-kind, .card-dur, .card-markers, .card-del");
+  thumb.insertBefore(media, firstOverlay || null);
+}
+
+function makePosterImg(url, onError = null) {
+  const img = document.createElement("img");
+  img.className = "card-thumb-img";
+  img.src = url;
+  img.alt = "";
+  img.addEventListener("error", () => {
+    img.remove();
+    if (onError) onError();
+  });
+  return img;
+}
+
+function markPosterUnavailable(path) {
+  posterCache.set(path, POSTER_UNAVAILABLE);
+}
+
+// Lazily fetch + cache a clip's poster, then drop it into its card thumbnail.
+// The backend caches the JPEG, so repeat calls are cheap after the first.
+function loadCardPoster(path, thumb) {
+  invoke("clip_poster", { path })
+    .then((posterPath) => {
+      if (!posterPath) {
+        markPosterUnavailable(path);
+        return;
+      }
+      const url = convertFileSrc(posterPath);
+      posterCache.set(path, url);
+      if (thumb.isConnected && !thumb.querySelector(".card-thumb-img")) {
+        insertThumbMedia(thumb, makePosterImg(url, () => markPosterUnavailable(path)));
+      }
+    })
+    .catch(() => markPosterUnavailable(path));
+}
+
+// Extracting a poster is an ffmpeg spawn, so we only request one once its card
+// scrolls near the viewport — otherwise a library of hundreds of clips would
+// queue an extraction for every clip on the first render and peg CPU/disk.
+var posterQueue = new WeakMap();
+var cloudThumbnailInflight = new Map();
+var posterObserver =
+  typeof IntersectionObserver === "function"
+    ? new IntersectionObserver(
+        (entries, obs) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            const thumb = entry.target;
+            obs.unobserve(thumb);
+            const request = posterQueue.get(thumb);
+            posterQueue.delete(thumb);
+            if (request && request.type === "local-poster") {
+              loadCardPoster(request.path, thumb);
+            } else if (request && request.type === "cloud-thumbnail") {
+              loadCloudThumbnail(request.entry, thumb);
+            }
+          }
+        },
+        { rootMargin: "400px 0px" },
+      )
+    : null;
+
+// Request a clip's poster when its thumbnail nears the viewport — or right away
+// when IntersectionObserver is unavailable.
+function observePoster(path, thumb) {
+  if (!posterObserver) {
+    loadCardPoster(path, thumb);
+    return;
+  }
+  posterQueue.set(thumb, { type: "local-poster", path });
+  posterObserver.observe(thumb);
+}
+
+function clipCard(c) {
+  const el = document.createElement("article");
+  const selected = selectedClipPaths.has(c.path);
+  el.className = "card"
+    + (currentClip && currentClip.path === c.path ? " active" : "")
+    + (selected ? " selected" : "");
+  el.dataset.clipPath = c.path;
+  el.title = c.name;
+  const cloudRecord = clipCloudRecord(c);
+
+  const kind = clipKind(c.name);
+  const when = new Date(c.modified_unix * 1000);
+  const markers = c.markers ? c.markers.markers : [];
+  const presentation = pluginPresentationForClip(c);
+  const duration = Number.isFinite(c.duration_s)
+    ? c.duration_s
+    : (c.markers ? c.markers.duration_s : NaN);
+  const fallbackTitle = formatClipTitle(
+    when.getMonth(), when.getDate(), when.getHours(), when.getMinutes());
+  const cardPreview = clipGalleryCardPreview(c, kind, fallbackTitle);
+  const cardTitleUsesSummary = cardPreview.titleSource === "summary";
+  const cardTitle = cardPreview.title || fallbackTitle;
+
+  // Thumbnail: gradient placeholder + lazily-loaded poster, with the kind chip,
+  // a hover delete, a play glyph, the duration, and marker ticks layered on.
+  const thumb = document.createElement("div");
+  thumb.className = "card-thumb";
+  thumb.style.cssText = thumbGradient(c);
+  const cachedPoster = posterCache.get(c.path);
+  if (cachedPoster === POSTER_UNAVAILABLE) {
+    // Keep the stable gradient placeholder when extraction or image loading failed.
+  } else if (cachedPoster) {
+    insertThumbMedia(thumb, makePosterImg(cachedPoster, () => markPosterUnavailable(c.path)));
+  } else {
+    observePoster(c.path, thumb);
+  }
+
+  const play = document.createElement("div");
+  play.className = "card-play";
+  play.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'; // static markup, safe
+
+  const kindChip = document.createElement("span");
+  kindChip.className = "card-kind " + kind;
+  kindChip.title = CLIP_KIND_LABELS[kind];
+  kindChip.innerHTML = CLIP_KIND_ICONS[kind]; // static markup, safe
+  const kindLabel = document.createElement("span");
+  kindLabel.textContent = CARD_KIND_LABELS[kind];
+  kindChip.appendChild(kindLabel);
+
+  const del = document.createElement("button");
+  del.className = "card-del";
+  del.title = "Delete clip";
+  // Static markup, no clip data — innerHTML is safe here.
+  del.innerHTML =
+    '<svg viewBox="0 0 24 24"><path d="M9 3v1H4v2h16V4h-5V3H9zM6 8v11a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8H6zm3 2h2v9H9v-9zm4 0h2v9h-2v-9z"/></svg>';
+
+  thumb.append(play, kindChip, del);
+
+  if (Number.isFinite(duration)) {
+    const dur = document.createElement("span");
+    dur.className = "card-dur";
+    dur.textContent = fmtDur(duration);
+    thumb.appendChild(dur);
+  }
+
+  if (Number.isFinite(duration) && duration > 0 && markers.length) {
+    const strip = document.createElement("div");
+    strip.className = "card-markers";
+    for (const m of markers) {
+      const tick = document.createElement("i");
+      tick.style.left = Math.max(0, Math.min(100, (m.t_s / duration) * 100)) + "%";
+      const style = markerStyle(m.kind, presentation);
+      const tint = MARKER_CATEGORY_TICK_VARS[style.cls] || MARKER_TICK_VARS[m.kind];
+      if (tint) tick.style.setProperty("--mc", `var(${tint})`);
+      strip.appendChild(tick);
+    }
+    thumb.appendChild(strip);
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  const nameRow = document.createElement("div");
+  nameRow.className = "card-name";
+  const previewIcon = cardPreview.icon && cardPreview.icon.url ? cardPreview.icon : null;
+  const game = clipGameIcon(c);
+  const cardIcon = previewIcon || (game ? { type: "game", url: game.url, label: game.label } : null);
+  if (cardIcon) {
+    const gi = document.createElement("img");
+    gi.className = "card-game-ico" + (cardIcon.type === "portrait" ? " portrait" : "");
+    gi.src = cardIcon.url;
+    gi.alt = "";
+    gi.title = cardIcon.label || (game ? game.label : "");
+    // Fall back to a neutral glyph if the icon can't load.
+    gi.addEventListener("error", () => {
+      if (previewIcon && game && gi.src !== game.url) {
+        gi.className = "card-game-ico";
+        gi.src = game.url;
+        gi.title = game.label;
+        return;
+      }
+      const ph = document.createElement("div");
+      ph.className = "card-game-ico placeholder";
+      ph.title = cardIcon.label || (game ? game.label : "");
+      ph.innerHTML = GENERIC_GAME_ICON; // static markup, safe
+      gi.replaceWith(ph);
+    });
+    nameRow.appendChild(gi);
+  }
+  const name = document.createElement("span");
+  name.className = "t";
+  name.textContent = cardTitle;
+  nameRow.appendChild(name);
+  const cloudVisibility = cloudVisibilityEl(cloudRecord);
+  if (cloudVisibility) nameRow.appendChild(cloudVisibility);
+
+  const info = document.createElement("div");
+  info.className = "card-sub";
+  const digest = markerDigest(markers, presentation);
+  const infoParts = [];
+  if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s));
+  infoParts.push(`${c.size_mb.toFixed(1)} MB`);
+  infoParts.push(fmtAgo(Date.now() / 1000, c.modified_unix));
+  if (!cardPreview.summary && digest) infoParts.push(digest);
+  info.textContent = infoParts.join(" · ");
+
+  meta.append(nameRow, info);
+  if (cardPreview.summary && !cardTitleUsesSummary) {
+    const detail = document.createElement("div");
+    detail.className = "game-meta";
+    detail.textContent = cardPreview.summary;
+    meta.appendChild(detail);
+  }
+
+  el.append(thumb, meta);
+
+  // Clicking the open clip's card again closes it (back to the gallery).
+  el.addEventListener("click", () => {
+    if (selectMode && gallerySource === "local") {
+      toggleClipSelection(c.path);
+      return;
+    }
+    if (currentClip && currentClip.path === c.path) closeReview();
+    else openClip(c);
+  });
+  el.addEventListener("contextmenu", (ev) => showClipContextMenu(ev, c));
+  del.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    deleteClip(c.path);
+  });
+
+  return el;
+}
+
+/* ---- gallery: multi-select + bulk actions ---- */
+
+// Update a single card's selection UI without a full re-render. Windows
+// backslashes make `[data-clip-path="..."]` fragile as a CSS selector, so
+// iterate the cards and match `dataset.clipPath` in JS instead.
+function applySelectionToCard(card, on) {
+  card.classList.toggle("selected", on);
+}
+
+function findClipCard(path) {
+  for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
+    if (card.dataset.clipPath === path) return card;
+  }
+  return null;
+}
+
+function toggleClipSelection(path) {
+  const on = selectedClipPaths.has(path);
+  if (on) selectedClipPaths.delete(path);
+  else selectedClipPaths.add(path);
+  const card = findClipCard(path);
+  if (card) applySelectionToCard(card, !on);
+  syncBulkBar();
+}
+
+function clearSelection() {
+  selectedClipPaths.clear();
+  for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
+    applySelectionToCard(card, false);
+  }
+  syncBulkBar();
+}
+
+function selectAllVisible() {
+  selectedClipPaths = new Set();
+  for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
+    if (!card.dataset.clipPath) continue;
+    selectedClipPaths.add(card.dataset.clipPath);
+    applySelectionToCard(card, true);
+  }
+  syncBulkBar();
+}
+
+function exitSelectMode() {
+  selectMode = false;
+  clearSelection();
+  syncSelectionControls();
+}
+
+function syncSelectToggleLabel() {
+  const toggle = $("gallery-select-toggle");
+  if (toggle) toggle.textContent = selectMode ? "Done" : "Select multiple";
+}
+
+function syncSelectionControls() {
+  if (gallerySource !== "local" && selectMode) {
+    selectMode = false;
+    clearSelection();
+  }
+  const toggle = $("gallery-select-toggle");
+  if (toggle) {
+    toggle.hidden = gallerySource !== "local";
+    toggle.classList.toggle("active", selectMode);
+    syncSelectToggleLabel();
+  }
+  const grid = $("gallery-grid");
+  if (grid) grid.classList.toggle("select-mode", selectMode && gallerySource === "local");
+  syncBulkBar();
+}
+
+function syncBulkBar() {
+  const bar = $("gallery-bulk-bar");
+  if (!bar) return;
+  const count = selectedClipPaths.size;
+  const visible = (selectMode || count > 0) && gallerySource === "local";
+  bar.hidden = !visible;
+  $("bulk-count").textContent = `${count} selected`;
+  const del = $("bulk-delete");
+  if (del) del.disabled = count === 0;
+}
+
+/* ---- gallery: filter / sort / group ---- */
+
+function filterGalleryClips(clips) {
+  return clips.filter((c) => {
+    const kind = clipKind(c.name);
+    if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
+      && kind !== galleryFilter) return false;
+    if (galleryFilter === "marked"
+      && !(c.markers && c.markers.markers && c.markers.markers.length)) return false;
+    if (gallerySearch) {
+      const champ = c.markers && c.markers.player_summary ? c.markers.player_summary.champion_name : "";
+      const hay = `${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""}`.toLowerCase();
+      if (!hay.includes(gallerySearch)) return false;
+    }
+    return true;
+  });
+}
+
+function sortGalleryClips(clips) {
+  const out = clips.slice();
+  const markerCount = (c) => (c.markers && c.markers.markers ? c.markers.markers.length : 0);
+  if (gallerySort === "old") out.sort((a, b) => a.modified_unix - b.modified_unix);
+  else if (gallerySort === "big") out.sort((a, b) => b.size_mb - a.size_mb);
+  else if (gallerySort === "marks") out.sort((a, b) => markerCount(b) - markerCount(a));
+  else out.sort((a, b) => b.modified_unix - a.modified_unix);
+  return out;
+}
+
+const GALLERY_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const GALLERY_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Bucket clips by an arbitrary key. Clips keep the caller's incoming order
+// (already sorted by the chosen gallery sort), so Largest / Most markers
+// survives inside each group; only the group order is by recency. A
+// null-prototype map keeps game names like "constructor" or "__proto__" from
+// colliding with inherited Object properties and skipping bucket creation.
+function bucketGroups(clips, keyFor, labelFor) {
+  const order = [];
+  const by = Object.create(null);
+  for (const c of clips) {
+    const key = keyFor(c);
+    if (!by[key]) { by[key] = { label: labelFor(c), t: 0, clips: [] }; order.push(key); }
+    by[key].clips.push(c);
+    by[key].t = Math.max(by[key].t, c.modified_unix);
+  }
+  const groups = order.map((k) => by[k]);
+  groups.sort((a, b) => b.t - a.t);
+  return groups;
+}
+
+function galleryDayGroups(clips) {
+  return bucketGroups(
+    clips,
+    (c) => { const d = new Date(c.modified_unix * 1000); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; },
+    (c) => { const d = new Date(c.modified_unix * 1000); return `${GALLERY_DAYS[d.getDay()]}, ${GALLERY_MONTHS[d.getMonth()]} ${d.getDate()}`; },
+  );
+}
+
+function galleryGameGroups(clips) {
+  const label = (c) => (c.game && c.game.name ? c.game.name : "No game detected");
+  return bucketGroups(clips, label, label);
+}
+
+// Relative-date buckets (Photos-style); only non-empty buckets are returned.
+function gallerySmartGroups(clips) {
+  const sod = new Date();
+  sod.setHours(0, 0, 0, 0);
+  const todayStart = sod.getTime() / 1000;
+  const defs = [
+    { label: "Today", test: (t) => t >= todayStart },
+    { label: "Yesterday", test: (t) => t >= todayStart - 86400 && t < todayStart },
+    { label: "Earlier this week", test: (t) => t >= todayStart - 7 * 86400 && t < todayStart - 86400 },
+    { label: "Earlier", test: () => true },
+  ];
+  const out = defs.map((d) => ({ label: d.label, test: d.test, clips: [] }));
+  // Clips keep the incoming gallery-sort order; only the buckets themselves
+  // carry a fixed Today → Earlier reading order.
+  for (const c of clips) out.find((o) => o.test(c.modified_unix)).clips.push(c);
+  return out.filter((g) => g.clips.length).map(({ label, clips }) => ({ label, clips }));
+}
+
+function galleryGroups(clips) {
+  switch (galleryGroup) {
+    case "session": return sessionGroups(clips);
+    case "day": return galleryDayGroups(clips);
+    case "game": return galleryGameGroups(clips);
+    case "none": return [{ label: null, clips: clips.slice() }];
+    default: return gallerySmartGroups(clips);
+  }
+}
+
+function renderClips() {
+  syncUploadClipButton();
+  syncReviewLocalActions();
+  // Keep the home in sync: empty library shows the capture preview, otherwise
+  // the gallery. (Editor/settings arbitration lives in updateViews.)
+  updateViews();
+  const root = $("gallery-grid");
+  const cloudRoot = $("cloud-gallery-grid");
+  if (!root) return;
+  const showingCloud = gallerySource === "cloud";
+  root.hidden = showingCloud;
+  if (cloudRoot) cloudRoot.hidden = !showingCloud;
+  $("gallery-filter").hidden = showingCloud;
+  $("gallery-group").hidden = showingCloud;
+  $("gallery-sort").hidden = showingCloud;
+  syncSelectionControls();
+  document.querySelectorAll("#gallery-source-tabs .source-tab").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.gallerySource === gallerySource);
+  });
+  if (showingCloud) {
+    renderCloudClips();
+    loadCloudClips();
+    return;
+  }
+  // Drop the previous render's pending poster observations before rebuilding;
+  // the detached cards would otherwise linger in the observer.
+  if (posterObserver) posterObserver.disconnect();
+  root.replaceChildren();
+  const filtered = filterGalleryClips(clipsCache);
+  $("gallery-count").textContent = clipsCache.length
+    ? `${filtered.length} of ${clipsCache.length}`
+    : "";
+  if (!clipsCache.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = `No clips yet - press ${saveHotkeyLabel()} while something plays.`;
+    root.appendChild(empty);
+    return;
+  }
+  if (!filtered.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = "No clips match those filters.";
+    root.appendChild(empty);
+    return;
+  }
+  for (const group of galleryGroups(sortGalleryClips(filtered))) {
+    if (group.label !== null) {
+      const head = document.createElement("div");
+      head.className = "gallery-group-head";
+      const label = document.createElement("span");
+      label.textContent = group.label;
+      const count = document.createElement("span");
+      count.className = "gcount";
+      count.textContent = group.clips.length;
+      head.append(label, count);
+      root.appendChild(head);
+    }
+    for (const c of group.clips) root.appendChild(clipCard(c));
+  }
+}
+
+function renderCloudClips() {
+  const root = $("cloud-gallery-grid");
+  if (!root) return;
+  if (posterObserver) posterObserver.disconnect();
+  root.replaceChildren();
+  const entries = cloudLibraryRecords();
+  const filtered = entries.filter(cloudEntryMatchesSearch);
+  $("gallery-count").textContent = entries.length
+    ? `${filtered.length} of ${entries.length}`
+    : "";
+  if (cloudClipsLoading && !entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = "Loading cloud clips...";
+    root.appendChild(empty);
+    return;
+  }
+  if (cloudClipsError) {
+    const error = document.createElement("div");
+    error.className = "gallery-empty cloud-error";
+    error.textContent = cloudClipsError;
+    root.appendChild(error);
+    if (!entries.length) return;
+  }
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = cloudConnected() ? "No cloud clips yet." : "Not connected to Clipline Cloud.";
+    root.appendChild(empty);
+    return;
+  }
+  if (!filtered.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.textContent = "No cloud clips match that search.";
+    root.appendChild(empty);
+    return;
+  }
+  for (const entry of filtered) {
+    const localClip = cloudLocalClipForEntry(entry);
+    root.appendChild(localClip ? clipCard(localClip) : cloudClipCard(entry));
+  }
+}
+
+function showClipContextMenu(ev, clip) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  hideRegionMenu();
+  clipContextTarget = clip;
+  cloudContextTarget = null;
+  const record = clipCloudRecord(clip);
+  const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
+  const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
+  $("clip-menu-play").hidden = true;
+  $("clip-menu-open-cloud-page").hidden = true;
+  $("clip-menu-copy-cloud-link").hidden = true;
+  const upload = $("clip-menu-upload");
+  upload.hidden = false;
+  upload.textContent = uploaded ? "Copy cloud link" : "Upload";
+  upload.disabled = busy || (!uploaded && !cloudConnected());
+  $("clip-menu-rename").hidden = false;
+  $("clip-menu-delete").hidden = false;
+  const menu = $("clip-context-menu");
+  menu.hidden = false;
+  positionContextMenu(menu, ev.clientX, ev.clientY);
+}
+
+function showCloudClipContextMenu(ev, entry) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  hideRegionMenu();
+  clipContextTarget = null;
+  cloudContextTarget = entry;
+  $("clip-menu-play").hidden = false;
+  $("clip-menu-play").disabled = false;
+  $("clip-menu-open-cloud-page").hidden = false;
+  $("clip-menu-open-cloud-page").disabled = !entry.remote_url;
+  $("clip-menu-copy-cloud-link").hidden = false;
+  $("clip-menu-copy-cloud-link").disabled = !entry.remote_url;
+  $("clip-menu-upload").hidden = true;
+  $("clip-menu-rename").hidden = true;
+  $("clip-menu-delete").hidden = true;
+  const menu = $("clip-context-menu");
+  menu.hidden = false;
+  positionContextMenu(menu, ev.clientX, ev.clientY);
+}
+
+function hideClipContextMenu() {
+  const menu = $("clip-context-menu");
+  if (menu) menu.hidden = true;
+  clipContextTarget = null;
+  cloudContextTarget = null;
+}
+
+function clipContextRecord() {
+  return clipContextTarget ? clipCloudRecord(clipContextTarget) : null;
+}
+async function bulkDeleteSelected() {
+  const paths = [...selectedClipPaths];
+  if (!paths.length) return;
+  if (!(await confirmBulkDelete(paths.length))) return;
+  try {
+    const report = await invoke("delete_clips", { paths });
+    await applyDeletion(report.deleted);
+    const notice = deletionNotice(report.deleted.length);
+    if (notice) setNotice(notice, { transient: true });
+    $("error").textContent = formatDeletionFailures(report.failed);
+    clearSelection();
+  } catch (e) {
+    $("error").textContent = String(e);
+  }
+}

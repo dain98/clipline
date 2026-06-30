@@ -934,6 +934,10 @@ fn marker_styles_map_kinds_to_categories() {
         r#"{"glyph":"✕","cls":"death"}"#
     );
     assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.markerStyle('ChampionAssist')"),
+        r#"{"glyph":"+","cls":"assist"}"#
+    );
+    assert_eq!(
         eval_json(&mut ctx, "PlayerCore.markerStyle('FirstBlood')"),
         r#"{"glyph":"✕","cls":"kill"}"#
     );
@@ -988,9 +992,9 @@ fn marker_styles_accept_injected_plugin_presentation() {
     assert_eq!(
         eval(
             &mut ctx,
-            "PlayerCore.markerDigest([{ kind: 'ChampionKill' }, { kind: 'ChampionKill' }, { kind: 'DragonKill' }], P)"
+            "PlayerCore.markerDigest([{ kind: 'ChampionKill' }, { kind: 'ChampionKill' }, { kind: 'DragonKill' }, { kind: 'ChampionAssist' }], P)"
         ),
-        "2 hero plays · 1 map objective"
+        "2 hero plays · 1 map objective · 1 assist"
     );
 }
 

@@ -17,6 +17,7 @@
   --titlebar-h: 32px;
   /* Marker category tints, shared by the timeline glyphs and the gallery ticks. */
   --mc-kill: #ff9b9e;
+  --mc-assist: #7bdff2;
   --mc-death: #b9a7c4;
   --mc-spree: #ffc77d;
   --mc-objective: #cdb2ff;
@@ -2490,6 +2491,7 @@ label span { white-space: nowrap; }
 
 /* whisper of category color — light glyph + matching hairline, never loud */
 .marker-kill { --mc: #ff9b9e; --hair-top: rgba(255, 97, 102, 0.6); --hair-bot: rgba(255, 97, 102, 0.12); }
+.marker-assist { --mc: #7bdff2; --hair-top: rgba(92, 204, 224, 0.58); --hair-bot: rgba(92, 204, 224, 0.12); }
 .marker-death { --mc: #b9a7c4; --hair-top: rgba(157, 138, 178, 0.55); --hair-bot: rgba(157, 138, 178, 0.12); }
 .marker-spree { --mc: #ffc77d; --hair-top: rgba(255, 174, 77, 0.6); --hair-bot: rgba(255, 174, 77, 0.12); }
 .marker-objective { --mc: #cdb2ff; --hair-top: rgba(189, 147, 255, 0.6); --hair-bot: rgba(189, 147, 255, 0.12); }

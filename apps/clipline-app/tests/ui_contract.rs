@@ -10,9 +10,27 @@ fn index_html() -> String {
     fs::read_to_string(path).expect("read ui/index.html")
 }
 
+const APP_UI_JS: &[&str] = &[
+    "app-core.js",
+    "settings.js",
+    "library.js",
+    "cloud.js",
+    "review-player.js",
+    "main.js",
+];
+
+fn read_ui_js(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui").join(name);
+    fs::read_to_string(path).unwrap_or_else(|err| panic!("read ui/{name}: {err}"))
+}
+
+/// Concatenated app UI scripts (everything except player-core.js).
 fn main_js() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/main.js");
-    fs::read_to_string(path).expect("read ui/main.js")
+    APP_UI_JS
+        .iter()
+        .map(|name| read_ui_js(name))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn player_core_js() -> String {
@@ -917,7 +935,7 @@ fn game_event_rail_does_not_run_on_every_animation_frame() {
         "playback should not keep vestigial requestAnimationFrame bookkeeping after rail sync moved to media events"
     );
     assert!(
-        js.contains("let gameEventRows = []")
+        js.contains("gameEventRows = []")
             && js.contains("gameEventRows.push(button)")
             && !js.contains("document.querySelectorAll(\"[data-game-event-index]\")"),
         "event rail active-state updates should use cached row elements instead of querying the DOM each tick"
@@ -1246,7 +1264,7 @@ fn settings_tabs_preserve_unsaved_draft_until_save() {
     let sync_helper = &js[sync_start..fill_start];
 
     assert!(
-        js.contains("let settingsDraft = null;")
+        js.contains("settingsDraft = null")
             && js.contains("function settingsFormSource()")
             && js.contains("function syncSettingsDraftFromForm()"),
         "settings must keep an explicit unsaved draft while the settings page is open"
@@ -1483,7 +1501,7 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         "the time ruler must add Outplayed-style dense ticks between major labels"
     );
     assert!(
-        js.contains("const MARKER_LEAD_S = 1;")
+        js.contains("MARKER_LEAD_S = 1")
             && js.contains("seekTo(markerTime - MARKER_LEAD_S, { keepGameEventSelection: true });")
             && js.contains("seekTo(m.t_s - MARKER_LEAD_S);"),
         "clicking timeline and event-rail markers must start one second before the event"
@@ -1506,6 +1524,7 @@ fn timeline_marker_pngs_have_matching_alpha_height() {
         "plugin-seeds/league_of_legends/assets/markers",
     ];
     let marker_names = [
+        "assist.png",
         "baron.png",
         "death.png",
         "dragon.png",
@@ -1609,7 +1628,7 @@ fn no_native_browser_dialogs() {
 #[test]
 fn controls_have_custom_range_and_scrollbar_skin() {
     let css = styles_css();
-    let js = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/main.js")).unwrap();
+    let js = main_js();
 
     assert!(
         css.contains("::-webkit-slider-thumb") && css.contains("::-moz-range-thumb"),
@@ -1690,16 +1709,16 @@ fn library_has_cloud_source_tab() {
         );
     }
     for required in [
-        "let gallerySource = \"local\"",
+        "gallerySource = \"local\"",
         "function renderCloudClips()",
         "function cloudLocalClipForEntry(entry)",
         "function openCloudEntryInApp(entry)",
         "function showCloudClipContextMenu(ev, entry)",
         "function observeCloudThumbnail(entry, thumb)",
         "function loadCloudThumbnail(entry, thumb)",
-        "const cloudThumbnailInflight = new Map()",
+        "cloudThumbnailInflight = new Map()",
         "posterQueue.set(thumb, { type: \"cloud-thumbnail\", entry })",
-        "let cloudClipsCache = []",
+        "cloudClipsCache = []",
         "function loadCloudClips",
         "if (gallerySource === \"cloud\") renderCloudClips();",
         "if (cloudClipsError && !force) return;",
@@ -1726,7 +1745,7 @@ fn library_has_cloud_source_tab() {
         "cloud-only cards should not render inline Play/Open/Copy buttons"
     );
     for required in [
-        "const POSTER_UNAVAILABLE = Symbol(\"poster unavailable\")",
+        "POSTER_UNAVAILABLE = Symbol(\"poster unavailable\")",
         "function markPosterUnavailable(path)",
         ".card-markers",
         "img.addEventListener(\"error\", () => {",
@@ -1807,8 +1826,8 @@ fn deck_status_success_toasts_auto_clear() {
     let js = main_js();
 
     assert!(
-        js.contains("const DECK_STATUS_TOAST_MS")
-            && js.contains("let deckStatusToastTimer")
+        js.contains("DECK_STATUS_TOAST_MS")
+            && js.contains("deckStatusToastTimer")
             && js.contains("function setDeckStatus(message, { transient = false } = {})"),
         "deck status messages should flow through a helper that can schedule transient toasts"
     );
@@ -1876,8 +1895,8 @@ fn app_notice_toasts_auto_clear() {
     let js = main_js();
 
     assert!(
-        js.contains("const NOTICE_TOAST_MS")
-            && js.contains("let noticeToastTimer")
+        js.contains("NOTICE_TOAST_MS")
+            && js.contains("noticeToastTimer")
             && js.contains("function setNotice(message, { transient = false } = {})"),
         "app-wide notices should flow through a helper that can schedule transient toasts"
     );
@@ -1907,6 +1926,11 @@ fn ui_is_split_into_markup_styles_and_logic() {
     for asset in [
         "href=\"styles.css\"",
         "src=\"player-core.js\"",
+        "src=\"app-core.js\"",
+        "src=\"settings.js\"",
+        "src=\"library.js\"",
+        "src=\"cloud.js\"",
+        "src=\"review-player.js\"",
         "src=\"main.js\"",
     ] {
         assert!(html.contains(asset), "index.html must reference {asset}");
@@ -1921,7 +1945,7 @@ fn ui_is_split_into_markup_styles_and_logic() {
         let tag_end = chunk.find('>').expect("script tag closes");
         assert!(
             chunk[..tag_end].contains("src="),
-            "script tag #{i} must load an external file (logic belongs in player-core.js/main.js)"
+            "script tag #{i} must load an external file (logic belongs in ui/*.js modules)"
         );
         let body_end = chunk.find("</script>").expect("script element closes");
         assert!(
@@ -1983,8 +2007,8 @@ fn gallery_supports_multi_select_bulk_actions() {
     );
 
     for required in [
-        "let selectedClipPaths",
-        "let selectMode",
+        "selectedClipPaths",
+        "selectMode",
         "function toggleClipSelection",
         "function clearSelection",
         "function selectAllVisible",

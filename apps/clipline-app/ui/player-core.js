@@ -586,6 +586,7 @@ const PlayerCore = (() => {
   // EventKind variant name -> visual category. Unknown kinds degrade to info.
   const DEFAULT_MARKER_KINDS = {
     ChampionKill: "kill",
+    ChampionAssist: "assist",
     ChampionDeath: "death",
     FirstBlood: "kill",
     Multikill: "spree",
@@ -599,6 +600,7 @@ const PlayerCore = (() => {
   };
   const DEFAULT_MARKER_CATEGORIES = {
     kill: { singular: "kill", plural: "kills", glyph: "✕" },
+    assist: { singular: "assist", plural: "assists", glyph: "+" },
     death: { singular: "death", plural: "deaths", glyph: "✕" },
     spree: { singular: "spree", plural: "sprees", glyph: "★" },
     objective: { singular: "objective", plural: "objectives", glyph: "◆" },
