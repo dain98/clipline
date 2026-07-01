@@ -326,6 +326,11 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-30):
+- Nightly 0.1.25 contains the osu! play-block release from PR #69. The previous public nightly
+  metadata was 0.1.24, so the app and Tauri package versions were bumped to 0.1.25 for updater
+  eligibility. osu! is now a real supported-game profile with stable/cutting-edge detection,
+  title-change play timing, optional direct API enrichment, Set plays metadata cards, interval
+  blocks, and right-click play export without marker metadata in the exported clip.
 - The osu! profile now detects the stable idle title `osu!`, stable map titles such as
   `osu!  - ginkiha - EOS [Lycoris]`, and cutting-edge build titles such as
   `osu!cuttingedge b20260624`, while explicitly rejecting updater-like titles from `osu!.exe`.
