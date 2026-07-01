@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
@@ -21,6 +21,7 @@ use tauri_plugin_updater::UpdaterExt;
 
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
+use crate::osu_enrichment::OsuTitleEvent;
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     is_global_shortcut_hotkey, parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode,
@@ -31,6 +32,7 @@ use crate::updates::UpdateChannel;
 const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 1_048_576;
 const MAIN_WINDOW_LABEL: &str = "main";
 const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const GAME_DETECTOR_INTERVAL: Duration = Duration::from_millis(500);
 static DIAGNOSTIC_LOG: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_READY_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
@@ -433,6 +435,7 @@ struct RuntimeInner {
     settings: AppSettings,
     lol_url: Option<String>,
     active_game: Option<DetectedGame>,
+    osu_title_events: Vec<OsuTitleEvent>,
     last_save_request: Option<Instant>,
     /// Codecs WebView2 can decode, reported by the frontend. Drives the
     /// recorder's Automatic selection; H.264 is the always-safe default.
@@ -461,6 +464,7 @@ impl RuntimeState {
             settings,
             lol_url,
             active_game: None,
+            osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
         }))
@@ -596,6 +600,21 @@ impl RuntimeState {
         false
     }
 
+    fn osu_title_events_for_window(
+        &self,
+        start: Option<i64>,
+        end: Option<i64>,
+    ) -> Vec<OsuTitleEvent> {
+        let Some(start) = start else {
+            return Vec::new();
+        };
+        let end = end.unwrap_or_else(unix_now);
+        self.0
+            .lock()
+            .map(|inner| filter_osu_title_events(&inner.osu_title_events, start, end))
+            .unwrap_or_default()
+    }
+
     pub(crate) fn settings(&self) -> AppSettings {
         self.0
             .lock()
@@ -616,6 +635,23 @@ impl RuntimeState {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             update(&mut inner.settings.cloud);
             inner.settings.cloud.normalize();
+            inner.settings.clone()
+        };
+        next.save()?;
+        Ok(next)
+    }
+
+    pub(crate) fn update_osu<F>(&self, update: F) -> Result<AppSettings, String>
+    where
+        F: FnOnce(&mut crate::settings::OsuApiSettings),
+    {
+        let _save_guard = CLOUD_SETTINGS_SAVE_LOCK
+            .lock()
+            .map_err(|_| "settings save lock poisoned")?;
+        let next = {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            update(&mut inner.settings.osu);
+            inner.settings.osu.normalize();
             inner.settings.clone()
         };
         next.save()?;
@@ -684,6 +720,7 @@ impl RuntimeState {
         let event = GameDetectionEvent::from_detected(detected.as_ref());
         let (old_tx, next_options, emit_event) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            record_osu_title_event(&mut inner, detected.as_ref(), unix_now());
             if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
                 if game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref()) {
                     inner.active_game = detected;
@@ -718,6 +755,52 @@ impl RuntimeState {
         }
         Ok(())
     }
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn record_osu_title_event(inner: &mut RuntimeInner, detected: Option<&DetectedGame>, unix_s: i64) {
+    const MAX_OSU_TITLE_EVENTS: usize = 512;
+    let Some(game) = detected else {
+        return;
+    };
+    if game.id != crate::game_plugins::OSU_ID {
+        return;
+    }
+    let title = game.window_title.trim();
+    if title.is_empty() {
+        return;
+    }
+    if inner
+        .osu_title_events
+        .last()
+        .is_some_and(|event| event.title == title)
+    {
+        return;
+    }
+    inner.osu_title_events.push(OsuTitleEvent {
+        unix_s,
+        title: title.to_string(),
+    });
+    if inner.osu_title_events.len() > MAX_OSU_TITLE_EVENTS {
+        let overflow = inner.osu_title_events.len() - MAX_OSU_TITLE_EVENTS;
+        inner.osu_title_events.drain(0..overflow);
+    }
+}
+
+fn filter_osu_title_events(events: &[OsuTitleEvent], start: i64, end: i64) -> Vec<OsuTitleEvent> {
+    let start = start - 5;
+    let end = end.max(start) + 5;
+    events
+        .iter()
+        .filter(|event| event.unix_s >= start && event.unix_s <= end)
+        .cloned()
+        .collect()
 }
 
 fn preserve_backend_cloud_fields(settings: &mut AppSettings, backend: &AppSettings) {
@@ -1395,6 +1478,7 @@ pub fn run() {
         .media_dir_path()
         .unwrap_or_else(|_| service::default_clips_dir());
     let scope_dir = media_dir.clone();
+    let media_dir_for_setup = media_dir.clone();
     let audio_preview_scope_dir = crate::settings::audio_preview_cache_dir();
     let global_hotkey = parse_global_hotkey(&settings.hotkey)
         .unwrap_or_else(|_| Some(parse_hotkey("Alt+F10").unwrap()));
@@ -1466,6 +1550,10 @@ pub fn run() {
             crate::cloud::cloud_user_avatar,
             crate::cloud::open_cloud_user_profile,
             crate::cloud::open_cloud_clip_url,
+            crate::osu_api::osu_api_status,
+            crate::osu_api::save_osu_api_settings,
+            crate::osu_api::test_osu_api_connection,
+            crate::osu_api::open_osu_api_setup_guide,
             crate::library::list_clips,
             crate::library::clip_poster,
             crate::library::delete_clip,
@@ -1479,6 +1567,14 @@ pub fn run() {
             crate::library::storage_status
         ])
         .setup(move |app| {
+            let osu_app = app.handle().clone();
+            let osu_media_root = media_dir_for_setup.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::osu_api::retry_pending_enrichment(&osu_app, osu_media_root).await
+                {
+                    eprintln!("retry osu! enrichment on launch: {e}");
+                }
+            });
             if let Some(hotkey) = global_hotkey {
                 if let Err(e) = app.global_shortcut().register(hotkey) {
                     let message =
@@ -1659,7 +1755,7 @@ fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
         .spawn(move || {
             let mut last_error = None::<String>;
             loop {
-                std::thread::sleep(Duration::from_secs(2));
+                std::thread::sleep(GAME_DETECTOR_INTERVAL);
                 let settings = app.state::<RuntimeState>().settings();
                 let detected = crate::games::detect_active_game(&settings.games);
                 match app
@@ -1782,6 +1878,48 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>) {
             } = &event
             {
                 crate::sound::play_replay_saved();
+            }
+            if let Event::Saved {
+                path,
+                seconds,
+                recording_start_unix,
+                recording_end_unix,
+                full_session: true,
+                ..
+            } = &event
+            {
+                let title_events = handle
+                    .state::<RuntimeState>()
+                    .osu_title_events_for_window(*recording_start_unix, *recording_end_unix);
+                let saved = crate::osu_enrichment::OsuSavedClip {
+                    path: std::path::PathBuf::from(path),
+                    seconds: *seconds,
+                    full_session: true,
+                    recording_start_unix: *recording_start_unix,
+                    recording_end_unix: *recording_end_unix,
+                    title_events,
+                };
+                match crate::osu_enrichment::write_pending_for_saved_clip(&saved) {
+                    Ok(Some(_)) => {
+                        let app = handle.clone();
+                        let media_root = saved
+                            .path
+                            .parent()
+                            .map(std::path::Path::to_path_buf)
+                            .unwrap_or_else(|| std::path::PathBuf::from("."));
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) =
+                                crate::osu_api::retry_pending_enrichment(&app, media_root).await
+                            {
+                                eprintln!("retry osu! enrichment after save: {e}");
+                            }
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("queue osu! enrichment: {e}");
+                    }
+                }
             }
         }
     });
@@ -1918,6 +2056,7 @@ mod tests {
             settings: invalid_disk_replay_settings(),
             lol_url: None,
             active_game: None,
+            osu_title_events: Vec::new(),
             last_save_request: Some(Instant::now()),
             decodable_codecs: vec![service::Codec::H264],
         };
@@ -1943,6 +2082,7 @@ mod tests {
             settings: AppSettings::default(),
             lol_url: None,
             active_game: None,
+            osu_title_events: Vec::new(),
             last_save_request: Some(Instant::now()),
             decodable_codecs: vec![service::Codec::H264],
         };
@@ -1971,6 +2111,7 @@ mod tests {
                 exe_name: "game.exe".into(),
                 recording_mode: GameRecordingMode::FullSession,
             }),
+            osu_title_events: Vec::new(),
             last_save_request: Some(Instant::now()),
             decodable_codecs: vec![service::Codec::H264],
         };
@@ -2113,6 +2254,95 @@ mod tests {
             Some(&current),
             Some(&updated_title)
         ));
+    }
+
+    #[test]
+    fn osu_title_events_record_only_changed_osu_titles() {
+        let mut inner = RuntimeInner {
+            tx: None,
+            settings: AppSettings::default(),
+            lol_url: None,
+            active_game: None,
+            osu_title_events: Vec::new(),
+            last_save_request: None,
+            decodable_codecs: vec![service::Codec::H264],
+        };
+        let osu = DetectedGame {
+            id: crate::game_plugins::OSU_ID.into(),
+            name: "osu!".into(),
+            hwnd: 42,
+            window_title: "osu! - xi - Blue Zenith [FOUR DIMENSIONS]".into(),
+            process_id: 7,
+            exe_name: "osu!.exe".into(),
+            recording_mode: GameRecordingMode::FullSession,
+        };
+        let league = DetectedGame {
+            id: crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+            name: "League of Legends".into(),
+            window_title: "League".into(),
+            exe_name: "League of Legends.exe".into(),
+            ..osu.clone()
+        };
+
+        record_osu_title_event(&mut inner, Some(&osu), 100);
+        record_osu_title_event(&mut inner, Some(&osu), 101);
+        record_osu_title_event(&mut inner, Some(&league), 102);
+        record_osu_title_event(
+            &mut inner,
+            Some(&DetectedGame {
+                window_title: "osu!".into(),
+                ..osu.clone()
+            }),
+            103,
+        );
+
+        assert_eq!(
+            inner.osu_title_events,
+            vec![
+                OsuTitleEvent {
+                    unix_s: 100,
+                    title: "osu! - xi - Blue Zenith [FOUR DIMENSIONS]".into(),
+                },
+                OsuTitleEvent {
+                    unix_s: 103,
+                    title: "osu!".into(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn osu_title_events_for_window_filters_to_saved_recording_window() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.osu_title_events = vec![
+                OsuTitleEvent {
+                    unix_s: 90,
+                    title: "too early".into(),
+                },
+                OsuTitleEvent {
+                    unix_s: 96,
+                    title: "start margin".into(),
+                },
+                OsuTitleEvent {
+                    unix_s: 150,
+                    title: "inside".into(),
+                },
+                OsuTitleEvent {
+                    unix_s: 206,
+                    title: "too late".into(),
+                },
+            ];
+        }
+
+        let titles: Vec<_> = state
+            .osu_title_events_for_window(Some(100), Some(200))
+            .into_iter()
+            .map(|event| event.title)
+            .collect();
+
+        assert_eq!(titles, vec!["start margin", "inside"]);
     }
 
     #[test]
@@ -2374,6 +2604,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 exe_name: "game.exe".into(),
                 recording_mode: GameRecordingMode::FullSession,
             }),
+            osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
         };
@@ -2406,6 +2637,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 exe_name: "League of Legends.exe".into(),
                 recording_mode: GameRecordingMode::FullSession,
             }),
+            osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
         };

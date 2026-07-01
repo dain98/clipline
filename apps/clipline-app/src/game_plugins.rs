@@ -20,6 +20,7 @@ use crate::settings::{
 
 pub const LEAGUE_OF_LEGENDS_ID: &str = "league_of_legends";
 pub const LEAGUE_LIVE_CLIENT_EVENT_SOURCE: &str = "league_live_client";
+pub const OSU_ID: &str = "osu";
 pub const GAME_PROFILE_SCHEMA_VERSION: u32 = 1;
 
 pub type EventSourceSpawner = fn(GameEventSourceContext) -> Receiver<PollerMsg>;
@@ -115,12 +116,39 @@ pub struct WindowMatchRule {
     pub exe_name: String,
     #[serde(default = "default_window_selection")]
     pub selection: WindowSelection,
+    #[serde(default)]
+    pub reject_title_exact: Vec<String>,
+    #[serde(default)]
+    pub reject_title_contains: Vec<String>,
+    #[serde(default)]
+    pub require_title_contains: Vec<String>,
 }
 
 impl WindowMatchRule {
     fn validate(&self) -> Result<(), String> {
         if self.exe_name.trim().is_empty() {
             return Err("game profile window matcher exe_name is required".into());
+        }
+        if self
+            .reject_title_exact
+            .iter()
+            .any(|title| title.trim().is_empty())
+        {
+            return Err("game profile rejected window titles cannot be blank".into());
+        }
+        if self
+            .reject_title_contains
+            .iter()
+            .any(|title| title.trim().is_empty())
+        {
+            return Err("game profile rejected window title fragments cannot be blank".into());
+        }
+        if self
+            .require_title_contains
+            .iter()
+            .any(|title| title.trim().is_empty())
+        {
+            return Err("game profile required window title fragments cannot be blank".into());
         }
         Ok(())
     }
@@ -131,8 +159,34 @@ impl WindowMatchRule {
             WindowSelection::LongestTitle => windows
                 .iter()
                 .filter(|window| window.exe_name.eq_ignore_ascii_case(exe_name))
+                .filter(|window| self.allows_title(&window.title))
                 .max_by_key(|window| window.title.len()),
         }
+    }
+
+    fn allows_title(&self, title: &str) -> bool {
+        if self.rejects_title(title) {
+            return false;
+        }
+        if self.require_title_contains.is_empty() {
+            return true;
+        }
+
+        let title_lower = title.to_ascii_lowercase();
+        self.require_title_contains
+            .iter()
+            .any(|required| title_lower.contains(&required.trim().to_ascii_lowercase()))
+    }
+
+    fn rejects_title(&self, title: &str) -> bool {
+        let title_lower = title.to_ascii_lowercase();
+        self.reject_title_exact
+            .iter()
+            .any(|rejected| title.trim().eq_ignore_ascii_case(rejected.trim()))
+            || self
+                .reject_title_contains
+                .iter()
+                .any(|rejected| title_lower.contains(&rejected.trim().to_ascii_lowercase()))
     }
 }
 
@@ -312,9 +366,14 @@ pub fn all() -> &'static [GamePlugin] {
     static PROFILES: OnceLock<Vec<GamePlugin>> = OnceLock::new();
     PROFILES
         .get_or_init(|| {
-            vec![GamePlugin {
-                manifest: league_profile_manifest(),
-            }]
+            vec![
+                GamePlugin {
+                    manifest: league_profile_manifest(),
+                },
+                GamePlugin {
+                    manifest: osu_profile_manifest(),
+                },
+            ]
         })
         .as_slice()
 }
@@ -335,6 +394,7 @@ pub fn plugin_id_for_game_id(game_id: GameId) -> &'static str {
         GameId::LeagueOfLegends => LEAGUE_OF_LEGENDS_ID,
         GameId::Valorant => "valorant",
         GameId::Cs2 => "cs2",
+        GameId::Osu => OSU_ID,
     }
 }
 
@@ -343,6 +403,7 @@ pub fn display_name_for_game_id(game_id: GameId) -> &'static str {
         GameId::LeagueOfLegends => "League of Legends",
         GameId::Valorant => "Valorant",
         GameId::Cs2 => "CS2",
+        GameId::Osu => "osu!",
     }
 }
 
@@ -380,6 +441,11 @@ pub fn league_profile_manifest() -> GameProfileManifest {
         .expect("built-in League profile manifest is valid")
 }
 
+pub fn osu_profile_manifest() -> GameProfileManifest {
+    GameProfileManifest::from_json(OSU_PROFILE_MANIFEST_JSON)
+        .expect("built-in osu! profile manifest is valid")
+}
+
 fn event_source_spawner(name: &str) -> Option<EventSourceSpawner> {
     match name {
         LEAGUE_LIVE_CLIENT_EVENT_SOURCE => Some(league_of_legends::spawn_event_source),
@@ -404,6 +470,7 @@ fn first_party_asset_data_url(path: &str) -> Option<String> {
         "assets/games/league-of-legends.png" => {
             include_bytes!("../plugin-seeds/league_of_legends/assets/games/league-of-legends.png")
         }
+        "assets/games/osu.png" => include_bytes!("../ui/assets/games/osu.png"),
         "assets/markers/kill.png" => {
             include_bytes!("../plugin-seeds/league_of_legends/assets/markers/kill.png")
         }
@@ -601,6 +668,42 @@ const LEAGUE_PROFILE_MANIFEST_JSON: &str = r#"{
   }
 }"#;
 
+const OSU_PROFILE_MANIFEST_JSON: &str = r#"{
+  "schema_version": 1,
+  "id": "osu",
+  "name": "osu!",
+  "summary": "Auto-records osu!standard sessions and enriches saved sessions with submitted plays.",
+  "default_enabled": true,
+  "default_recording_mode": "full_session",
+  "icon": { "type": "file", "path": "assets/games/osu.png" },
+  "window_match": {
+    "exe_name": "osu!.exe",
+    "selection": "longest_title",
+    "reject_title_exact": ["osu! cutting edge"],
+    "reject_title_contains": ["updater", "update available", "updating"]
+  },
+  "presentation": {
+    "play_blocks": {
+      "enabled": true,
+      "source": "plays",
+      "estimated_label": "estimated"
+    },
+    "play_rail": {
+      "enabled": true,
+      "title": "Set plays",
+      "empty": "No osu! plays loaded yet. Add osu! API credentials in osu! settings to fetch submitted plays."
+    },
+    "gallery": {
+      "summary": "osu_set_plays",
+      "full_session_title": "osu_session",
+      "card": {
+        "title": "osu_session_summary",
+        "subtitle": "osu_play_count"
+      }
+    }
+  }
+}"#;
+
 mod league_of_legends {
     use std::sync::mpsc::Receiver;
 
@@ -738,6 +841,163 @@ mod tests {
     }
 
     #[test]
+    fn osu_profile_is_registered_without_live_event_source() {
+        let profile = all()
+            .iter()
+            .find(|profile| profile.id() == "osu")
+            .expect("osu profile");
+        let info = profile.info();
+
+        assert_eq!(plugin_id_for_game_id(GameId::Osu), "osu");
+        assert_eq!(display_name_for_game_id(GameId::Osu), "osu!");
+        assert_eq!(info.name, "osu!");
+        assert_eq!(
+            info.summary,
+            "Auto-records osu!standard sessions and enriches saved sessions with submitted plays."
+        );
+        assert!(info.default_enabled);
+        assert_eq!(info.default_recording_mode, GameRecordingMode::FullSession);
+        assert!(!info.event_markers);
+        assert!(!has_event_source(Some("osu")));
+        assert!(info
+            .icon
+            .as_deref()
+            .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+
+        let presentation = info.presentation.expect("osu presentation");
+        assert_eq!(
+            presentation
+                .pointer("/play_blocks/enabled")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            presentation
+                .pointer("/play_rail/title")
+                .and_then(serde_json::Value::as_str),
+            Some("Set plays")
+        );
+        assert_eq!(
+            presentation
+                .pointer("/play_rail/empty")
+                .and_then(serde_json::Value::as_str),
+            Some("No osu! plays loaded yet. Add osu! API credentials in osu! settings to fetch submitted plays.")
+        );
+        assert_eq!(
+            presentation
+                .pointer("/gallery/summary")
+                .and_then(serde_json::Value::as_str),
+            Some("osu_set_plays")
+        );
+
+        let windows = vec![
+            window(1, "osu!", "osu!.exe", None),
+            window(
+                2,
+                "osu!cuttingedge b20260624",
+                "osu!.exe",
+                Some(r"C:\Users\dain\AppData\Roaming\osu!\osu!.exe"),
+            ),
+            window(
+                3,
+                "osu! - camellia - exit this earth's atomosphere",
+                "osu!.exe",
+                None,
+            ),
+        ];
+        let matched = profile.match_window(&windows).expect("osu window");
+        assert_eq!(matched.handle, 3);
+        assert_eq!(matched.exe_name, "osu!.exe");
+    }
+
+    #[test]
+    fn osu_profile_accepts_cutting_edge_build_title() {
+        let profile = all()
+            .iter()
+            .find(|profile| profile.id() == OSU_ID)
+            .expect("osu profile");
+        let windows = vec![window(
+            1,
+            "osu!cuttingedge b20260624",
+            "osu!.exe",
+            Some(r"C:\Users\dain\AppData\Roaming\osu!\osu!.exe"),
+        )];
+
+        let matched = profile
+            .match_window(&windows)
+            .expect("osu cutting-edge gameplay window");
+
+        assert_eq!(matched.handle, 1);
+    }
+
+    #[test]
+    fn osu_profile_accepts_stable_play_title_with_extra_spacing() {
+        let profile = all()
+            .iter()
+            .find(|profile| profile.id() == OSU_ID)
+            .expect("osu profile");
+        let windows = vec![window(
+            1,
+            "osu!  - ginkiha - EOS [Lycoris]",
+            "osu!.exe",
+            Some(r"C:\Users\dain\AppData\Roaming\osu!\osu!.exe"),
+        )];
+
+        let matched = profile
+            .match_window(&windows)
+            .expect("osu stable gameplay window");
+
+        assert_eq!(matched.handle, 1);
+    }
+
+    #[test]
+    fn osu_profile_accepts_stable_idle_title() {
+        let profile = all()
+            .iter()
+            .find(|profile| profile.id() == OSU_ID)
+            .expect("osu profile");
+        let windows = vec![window(
+            1,
+            "osu!",
+            "osu!.exe",
+            Some(r"C:\Users\dain\AppData\Roaming\osu!\osu!.exe"),
+        )];
+
+        let matched = profile
+            .match_window(&windows)
+            .expect("osu stable idle window");
+
+        assert_eq!(matched.handle, 1);
+    }
+
+    #[test]
+    fn osu_profile_ignores_updater_client_windows() {
+        let profile = all()
+            .iter()
+            .find(|profile| profile.id() == OSU_ID)
+            .expect("osu profile");
+
+        for title in [
+            "osu! updater",
+            "osu! cutting edge",
+            "osu! update available",
+            "osu! updating",
+        ] {
+            let windows = vec![window(
+                1,
+                title,
+                "osu!.exe",
+                Some(r"C:\Users\dain\AppData\Local\osu!\osu!.exe"),
+            )];
+
+            assert!(
+                profile.match_window(&windows).is_none(),
+                "{title:?} should not be treated as an osu! game window"
+            );
+        }
+    }
+
+    #[test]
     fn profile_records_and_resolved_info_are_cached() {
         let first_profiles = all();
         let second_profiles = all();
@@ -793,5 +1053,6 @@ mod tests {
         );
         assert_eq!(plugin_id_for_game_id(GameId::Valorant), "valorant");
         assert_eq!(plugin_id_for_game_id(GameId::Cs2), "cs2");
+        assert_eq!(plugin_id_for_game_id(GameId::Osu), "osu");
     }
 }

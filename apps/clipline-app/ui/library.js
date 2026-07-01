@@ -230,15 +230,38 @@ var selectedGameEventIndex = -1;
 var selectedGameEventTime = null;
 var gameEventRailCollapsed = false;
 var gameEventRows = [];
+var activeGamePlayIndex = -1;
+var gamePlayRows = [];
 
 function eventRailPolicy(clip) {
   const presentation = pluginPresentationForClip(clip);
   return presentation && presentation.event_rail ? presentation.event_rail : null;
 }
 
+function playRailPolicy(clip) {
+  const presentation = pluginPresentationForClip(clip);
+  return presentation && presentation.play_rail ? presentation.play_rail : null;
+}
+
 function metadataPanelPolicy(clip) {
   const presentation = pluginPresentationForClip(clip);
   return presentation && presentation.metadata_panel ? presentation.metadata_panel : null;
+}
+
+function syncReviewSideRailLayout() {
+  const eventRail = $("game-event-rail");
+  const playRail = $("game-play-rail");
+  const reviewBody = eventRail
+    ? eventRail.closest(".review-body")
+    : (playRail ? playRail.closest(".review-body") : null);
+  if (!reviewBody) return;
+  const eventVisible = eventRail && !eventRail.hidden;
+  const playVisible = playRail && !playRail.hidden;
+  reviewBody.classList.toggle("has-event-rail", Boolean(eventVisible || playVisible));
+  reviewBody.classList.toggle(
+    "event-rail-collapsed",
+    Boolean(eventVisible && !playVisible && gameEventRailCollapsed),
+  );
 }
 
 function clearGameEventSelection() {
@@ -262,7 +285,6 @@ function selectedGameEventIndexForTime(currentTime) {
 
 function renderGameEventRail(clip = currentClip) {
   const rail = $("game-event-rail");
-  const reviewBody = rail ? rail.closest(".review-body") : null;
   const title = $("game-event-rail-title");
   const summary = $("game-event-rail-summary");
   const list = $("game-event-list");
@@ -274,7 +296,7 @@ function renderGameEventRail(clip = currentClip) {
   if (!eventRail || !eventRail.enabled || !markers.length) {
     rail.hidden = true;
     rail.classList.remove("is-collapsed");
-    if (reviewBody) reviewBody.classList.remove("has-event-rail", "event-rail-collapsed");
+    syncReviewSideRailLayout();
     title.textContent = "";
     summary.textContent = "";
     list.replaceChildren();
@@ -341,23 +363,17 @@ function renderGameEventRail(clip = currentClip) {
     list.appendChild(item);
   });
   rail.hidden = false;
-  if (reviewBody) reviewBody.classList.add("has-event-rail");
+  syncReviewSideRailLayout();
   setGameEventRailCollapsed(gameEventRailCollapsed);
 }
 
 function setGameEventRailCollapsed(collapsed) {
   gameEventRailCollapsed = Boolean(collapsed);
   const rail = $("game-event-rail");
-  const reviewBody = rail ? rail.closest(".review-body") : null;
   const toggle = $("game-event-rail-toggle");
   if (!rail) return;
   rail.classList.toggle("is-collapsed", gameEventRailCollapsed);
-  if (reviewBody) {
-    reviewBody.classList.toggle(
-      "event-rail-collapsed",
-      !rail.hidden && gameEventRailCollapsed,
-    );
-  }
+  syncReviewSideRailLayout();
   if (toggle) {
     const label = gameEventRailCollapsed ? "Expand match events" : "Collapse match events";
     toggle.title = label;
@@ -383,6 +399,122 @@ function syncGameEventRail(currentTime = video.currentTime || 0, options = {}) {
     row.classList.toggle("active", active);
     row.setAttribute("aria-current", active ? "true" : "false");
     if (active) row.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
+
+function renderGamePlayRail(clip = currentClip) {
+  const rail = $("game-play-rail");
+  const title = $("game-play-rail-title");
+  const summary = $("game-play-rail-summary");
+  const list = $("game-play-list");
+  const playRail = playRailPolicy(clip);
+  const plays = clipPlays(clip);
+  activeGamePlayIndex = -1;
+  if (!rail || !title || !summary || !list) return;
+  if (!playRail || !playRail.enabled || !plays.length) {
+    rail.hidden = true;
+    title.textContent = "Set plays";
+    summary.textContent = "";
+    list.replaceChildren();
+    gamePlayRows = [];
+    syncReviewSideRailLayout();
+    return;
+  }
+
+  const duration = clip && Number.isFinite(clip.duration_s)
+    ? clip.duration_s
+    : (clip && clip.markers && Number.isFinite(clip.markers.duration_s) ? clip.markers.duration_s : 0);
+  title.textContent = playRail.title || "Set plays";
+  summary.textContent = playSummary(plays);
+  list.replaceChildren();
+  gamePlayRows = [];
+  playBlocks(plays, duration).forEach((play, index) => {
+    const view = playRailItem(play.play);
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("data-game-play-index", String(index));
+    button.setAttribute("data-game-play-time", String(play.start || 0));
+    button.title = [view.title, view.meta, view.time].filter(Boolean).join("\n");
+    const thumbnail = document.createElement("span");
+    thumbnail.className = "game-play-thumb";
+    if (view.coverUrl) {
+      const image = document.createElement("img");
+      image.src = view.coverUrl;
+      image.alt = "";
+      image.loading = "lazy";
+      image.decoding = "async";
+      thumbnail.appendChild(image);
+    } else {
+      thumbnail.textContent = "osu!";
+    }
+    const text = document.createElement("span");
+    text.className = "game-play-body";
+    const playTitleEl = document.createElement("span");
+    playTitleEl.className = "game-play-title";
+    const song = document.createElement("span");
+    song.className = "game-play-song";
+    song.textContent = view.artistTitle || view.title;
+    playTitleEl.appendChild(song);
+    if (view.difficulty) {
+      const difficulty = document.createElement("span");
+      difficulty.className = "game-play-difficulty";
+      difficulty.textContent = `[${view.difficulty}]`;
+      playTitleEl.appendChild(difficulty);
+    }
+    if (view.mods) {
+      const mods = document.createElement("span");
+      mods.className = "game-play-mods";
+      mods.textContent = view.mods;
+      playTitleEl.appendChild(mods);
+    }
+    if (view.starRating) {
+      const starRating = document.createElement("span");
+      starRating.className = "game-play-stars";
+      starRating.textContent = view.starRating;
+      playTitleEl.appendChild(starRating);
+    }
+    const meta = document.createElement("span");
+    meta.className = "game-play-meta";
+    meta.textContent = view.meta || view.time;
+    text.append(playTitleEl, meta);
+    button.append(thumbnail, text);
+    button.addEventListener("click", () => {
+      seekTo(play.start);
+      video.play().catch(() => syncPlayState());
+    });
+    button.addEventListener("contextmenu", (ev) => {
+      const exportRange = playExportRange(play.play);
+      showGamePlayContextMenu(ev, {
+        title: view.artistTitle || view.title,
+        range: exportRange ? { start: play.start, end: play.end } : null,
+      });
+    });
+    gamePlayRows.push(button);
+    item.appendChild(button);
+    list.appendChild(item);
+  });
+  rail.hidden = false;
+  syncReviewSideRailLayout();
+  syncGamePlayRail(video.currentTime || 0, { force: true });
+}
+
+function syncGamePlayRail(currentTime = video.currentTime || 0, options = {}) {
+  const rail = $("game-play-rail");
+  if (!rail || rail.hidden) return;
+  const next = playActiveIndex(clipPlays(), currentTime);
+  if (next === activeGamePlayIndex && !options.force) return;
+  activeGamePlayIndex = next;
+  gamePlayRows.forEach((row) => {
+    const active = Number(row.dataset.gamePlayIndex) === next;
+    row.classList.toggle("active", active);
+    row.setAttribute("aria-current", active ? "true" : "false");
+    if (active) row.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+  document.querySelectorAll(".play-block").forEach((block) => {
+    const active = Number(block.dataset.gamePlayIndex) === next;
+    block.classList.toggle("active", active);
+    block.setAttribute("aria-current", active ? "true" : "false");
   });
 }
 
@@ -1114,12 +1246,14 @@ function showClipContextMenu(ev, clip) {
   hideRegionMenu();
   clipContextTarget = clip;
   cloudContextTarget = null;
+  gamePlayContextTarget = null;
   const record = clipCloudRecord(clip);
   const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
   const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
   $("clip-menu-play").hidden = true;
   $("clip-menu-open-cloud-page").hidden = true;
   $("clip-menu-copy-cloud-link").hidden = true;
+  $("clip-menu-export-play").hidden = true;
   const upload = $("clip-menu-upload");
   upload.hidden = false;
   upload.textContent = uploaded ? "Copy cloud link" : "Upload";
@@ -1137,12 +1271,36 @@ function showCloudClipContextMenu(ev, entry) {
   hideRegionMenu();
   clipContextTarget = null;
   cloudContextTarget = entry;
+  gamePlayContextTarget = null;
   $("clip-menu-play").hidden = false;
   $("clip-menu-play").disabled = false;
   $("clip-menu-open-cloud-page").hidden = false;
   $("clip-menu-open-cloud-page").disabled = !entry.remote_url;
   $("clip-menu-copy-cloud-link").hidden = false;
   $("clip-menu-copy-cloud-link").disabled = !entry.remote_url;
+  $("clip-menu-export-play").hidden = true;
+  $("clip-menu-upload").hidden = true;
+  $("clip-menu-rename").hidden = true;
+  $("clip-menu-delete").hidden = true;
+  const menu = $("clip-context-menu");
+  menu.hidden = false;
+  positionContextMenu(menu, ev.clientX, ev.clientY);
+}
+
+function showGamePlayContextMenu(ev, play) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  hideRegionMenu();
+  clipContextTarget = currentClip;
+  cloudContextTarget = null;
+  gamePlayContextTarget = play;
+  $("clip-menu-play").hidden = true;
+  $("clip-menu-open-cloud-page").hidden = true;
+  $("clip-menu-copy-cloud-link").hidden = true;
+  const exportPlay = $("clip-menu-export-play");
+  exportPlay.hidden = false;
+  exportPlay.disabled = !play || !play.range;
+  exportPlay.textContent = "Export play as clip";
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-delete").hidden = true;
@@ -1156,6 +1314,7 @@ function hideClipContextMenu() {
   if (menu) menu.hidden = true;
   clipContextTarget = null;
   cloudContextTarget = null;
+  gamePlayContextTarget = null;
 }
 
 function clipContextRecord() {

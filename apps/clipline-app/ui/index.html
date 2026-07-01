@@ -218,6 +218,13 @@
             </div>
             <ol id="game-event-list"></ol>
           </aside>
+          <aside id="game-play-rail" class="game-event-rail game-play-rail" hidden>
+            <div class="game-event-rail-head">
+              <strong id="game-play-rail-title">Set plays</strong>
+              <span id="game-play-rail-summary"></span>
+            </div>
+            <ol id="game-play-list"></ol>
+          </aside>
         </div>
 
         <aside id="game-metadata-panel" class="game-metadata-panel" hidden>
@@ -235,6 +242,7 @@
                 <div id="handle-in" class="handle" title="Trim in (I at playhead)"></div>
                 <div id="handle-out" class="handle" title="Trim out (O at playhead)"></div>
               </div>
+              <div id="play-block-layer" class="play-block-layer"></div>
               <div id="marker-layer"></div>
             </div>
             <div id="ruler" class="ruler"></div>
@@ -813,6 +821,8 @@
         <button type="button" class="tab active" role="tab" aria-selected="true" data-game-plugin-settings-tab="general">General</button>
         <button type="button" class="tab" role="tab" aria-selected="false" data-game-plugin-settings-tab="match_events" tabindex="-1">Match events</button>
         <button type="button" class="tab" role="tab" aria-selected="false" data-game-plugin-settings-tab="timeline_markers" tabindex="-1">Timeline markers</button>
+        <button type="button" class="tab" role="tab" aria-selected="false" data-game-plugin-settings-tab="osu_account" tabindex="-1">Account</button>
+        <button type="button" class="tab" role="tab" aria-selected="false" data-game-plugin-settings-tab="osu_plays" tabindex="-1">Plays</button>
       </nav>
       <div id="game-plugin-settings-body" class="game-plugin-settings-body"></div>
     </div>
@@ -870,6 +880,7 @@
     <button id="clip-menu-play" type="button">Play</button>
     <button id="clip-menu-open-cloud-page" type="button">Open cloud page</button>
     <button id="clip-menu-copy-cloud-link" type="button">Copy cloud link</button>
+    <button id="clip-menu-export-play" type="button">Export play as clip</button>
     <button id="clip-menu-upload" type="button">Upload</button>
     <button id="clip-menu-rename" type="button">Rename</button>
     <button id="clip-menu-delete" type="button" class="danger-text">Delete</button>

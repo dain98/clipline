@@ -4,6 +4,7 @@
 //! - [`types`]: data model structs/enums + per-type conversions
 //! - [`games`]: game detection settings + legacy migration
 //! - [`cloud`]: Clipline Cloud connection + upload records
+//! - [`osu`]: osu! API connection metadata
 //! - [`hotkey`]: hotkey parsing
 //! - [`validation`]: `validate` impls + path/quota helpers
 //! - [`persistence`]: file I/O, atomic writes, legacy field repair, load/save
@@ -23,6 +24,7 @@ use crate::updates::UpdateChannel;
 pub mod cloud;
 pub mod games;
 pub mod hotkey;
+pub mod osu;
 pub mod persistence;
 pub mod types;
 pub(crate) mod validation;
@@ -34,6 +36,7 @@ pub use games::{
     MatchEventSettings, TimelineMarkerSettings,
 };
 pub use hotkey::{is_global_shortcut_hotkey, normalize_hotkey, parse_hotkey};
+pub use osu::OsuApiSettings;
 pub use persistence::{
     audio_preview_cache_dir, icon_cache_dir, normalize_media_dir, normalize_replay_cache_dir,
     quota_bytes_from_gb, replay_cache_quota_bytes_from_gb, settings_path, share_export_cache_dir,
@@ -90,6 +93,8 @@ pub struct AppSettings {
     pub update_channel: UpdateChannel,
     #[serde(default)]
     pub cloud: CloudSettings,
+    #[serde(default)]
+    pub osu: OsuApiSettings,
 }
 
 fn default_enabled() -> bool {
@@ -126,6 +131,7 @@ impl Default for AppSettings {
             legacy_timeline_editor: false,
             update_channel: UpdateChannel::Nightly,
             cloud: CloudSettings::default(),
+            osu: OsuApiSettings::default(),
         }
     }
 }

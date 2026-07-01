@@ -262,13 +262,21 @@ fn poster_path(path: &Path) -> PathBuf {
     path.with_extension("poster.jpg")
 }
 
+fn osu_pending_path(path: &Path) -> PathBuf {
+    path.with_extension("osu-enrichment.json")
+}
+
 /// The sidecar files present beside a clip (markers JSON + cached poster) and
 /// their combined size. A zero-byte sidecar that exists is still tracked so it
 /// gets cleaned up with the clip.
 fn clip_sidecars(clip: &Path) -> io::Result<(Vec<PathBuf>, u64)> {
     let mut sidecars = Vec::new();
     let mut bytes = 0u64;
-    for candidate in [sidecar_path(clip), poster_path(clip)] {
+    for candidate in [
+        sidecar_path(clip),
+        poster_path(clip),
+        osu_pending_path(clip),
+    ] {
         let len = optional_file_len(&candidate)?;
         if len > 0 || candidate.exists() {
             bytes += len;
@@ -415,6 +423,24 @@ mod tests {
         assert!(!old.exists());
         assert!(!markers.exists());
         assert!(!poster.exists());
+        assert!(keep.exists());
+        assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
+    fn enforce_quota_deletes_osu_pending_sidecar_with_clip() {
+        let dir = TestDir::new("clipline-storage", "osu-pending-delete");
+        let old = dir.write("old.mp4", 10);
+        let pending = dir.write("old.osu-enrichment.json", 6);
+        tick_mtime();
+        let keep = dir.write("keep.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(10), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert_eq!(report.freed_bytes, 16);
+        assert!(!old.exists());
+        assert!(!pending.exists());
         assert!(keep.exists());
         assert_eq!(report.status.total_bytes, 10);
     }

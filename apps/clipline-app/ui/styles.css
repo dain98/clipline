@@ -1184,6 +1184,8 @@ label span { white-space: nowrap; }
   font-size: 12.5px;
 }
 
+.game-plugin-settings-tabs .tab[hidden] { display: none; }
+
 .game-plugin-settings-tabs .tab:hover {
   color: var(--text);
   background: transparent;
@@ -1282,6 +1284,83 @@ label span { white-space: nowrap; }
 
 .game-review-option-list span {
   font-size: 11.5px;
+}
+
+.osu-account-panel {
+  align-content: start;
+}
+
+.osu-api-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.osu-guide-button {
+  width: 26px;
+  height: 26px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.osu-guide-button:hover {
+  border-color: rgba(255, 138, 198, 0.55);
+  background: rgba(255, 138, 198, 0.13);
+}
+
+.osu-api-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.osu-api-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.osu-api-field span {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.osu-account-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+
+.osu-account-actions .hint {
+  min-width: 0;
+}
+
+.osu-play-settings-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.osu-play-settings-list div {
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .games-panel {
@@ -2360,6 +2439,105 @@ label span { white-space: nowrap; }
   white-space: nowrap;
 }
 
+.game-play-rail::before {
+  display: none;
+}
+
+.game-play-rail ol button {
+  grid-template-columns: 52px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-height: 64px;
+  padding: 7px;
+}
+
+.game-play-rail .game-play-thumb {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 6px;
+  background: linear-gradient(135deg, rgba(255, 102, 171, 0.28), rgba(84, 193, 236, 0.16));
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 11px;
+  font-weight: 800;
+  overflow: hidden;
+}
+
+.game-play-rail .game-play-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.game-play-rail .game-play-body {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.game-play-rail ol button.active {
+  border-color: rgba(124, 225, 255, 0.48);
+  background: rgba(84, 193, 236, 0.12);
+}
+
+.game-play-rail .game-play-title,
+.game-play-rail .game-play-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.game-play-rail .game-play-title {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.game-play-rail .game-play-song {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.game-play-rail .game-play-difficulty,
+.game-play-rail .game-play-mods,
+.game-play-rail .game-play-stars {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.game-play-rail .game-play-difficulty {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.game-play-rail .game-play-mods {
+  flex: 0 0 auto;
+  color: #ff8fc4;
+}
+
+.game-play-rail .game-play-stars {
+  flex: 0 0 auto;
+  color: #ffd166;
+}
+
+.game-play-rail .game-play-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .game-metadata-panel {
   min-width: 0;
   padding: 9px 12px;
@@ -2635,6 +2813,46 @@ label span { white-space: nowrap; }
   height: 22px;
   z-index: 7;
   pointer-events: none;
+}
+.play-block-layer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 6px;
+  height: 12px;
+  z-index: 5;
+  pointer-events: none;
+}
+.play-block {
+  position: absolute;
+  top: 0;
+  height: 12px;
+  min-width: 4px;
+  border: 1px solid rgba(124, 225, 255, 0.72);
+  border-radius: 3px;
+  background: rgba(84, 193, 236, 0.34);
+  box-shadow: 0 0 10px rgba(84, 193, 236, 0.16);
+  pointer-events: auto;
+}
+.play-block.failed {
+  border-color: rgba(255, 145, 145, 0.68);
+  background: rgba(232, 94, 116, 0.28);
+}
+.play-block.estimated {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(255, 255, 255, 0.12) 0,
+    rgba(255, 255, 255, 0.12) 4px,
+    transparent 4px,
+    transparent 8px
+  );
+}
+.play-block.active,
+.play-block:hover,
+.play-block:focus-visible {
+  outline: 0;
+  filter: brightness(1.28);
+  box-shadow: 0 0 0 1px rgba(244, 246, 250, 0.55), 0 0 12px rgba(84, 193, 236, 0.34);
 }
 .marker {
   position: absolute;

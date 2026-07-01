@@ -13,7 +13,7 @@ Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
 ## Current state (2026-06-28): a working tray recorder with a first-party review player
 
-Thirty-three milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
+Thirty-four milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -301,6 +301,24 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      sidecar data; older clips fall back to whatever summary fields they already have. Settings >
      Games remains backend-driven for supported game rows but no longer exposes check/update/
      reinstall/reset package actions.
+34. **osu! play-block foundation** — the desktop side now has a first-party `osu!` supported-game
+     profile (`osu!.exe`, full-session focused), an Account/Plays settings dialog that plainly
+     collects a user-provided osu! OAuth app Client ID, Client Secret, and user id/username, plus
+     a question-mark setup guide that opens a local walkthrough. The client secret is stored in
+     Windows Credential Manager, not `settings.json`; the desktop uses the client-credentials
+     grant directly and sends `x-api-version: 20220705` when fetching recent scores so failed plays
+     have real ids and `ended_at`. `ClipMarkers.plays` sidecars support interval play blocks.
+     Full-session saves from osu!-tagged sessions write durable
+     `.osu-enrichment.json` pending records; startup/library refresh retries are idempotent, and
+     storage/delete cleanup tracks those pending sidecars with marker/poster files. The pure
+     mapper accepts normalized osu! scores, keeps fails, requires `ended_at`, prefers
+     `started_at`, derives estimated starts from beatmap length with DT/HT adjustment, clamps
+     derived failed starts against the previous play, dedupes score ids, applies UTC/skew
+     overlap, and reports when the 500-score fetch ceiling may leave plays missing.
+     The review UI can render osu! intervals as timeline blocks, a right-side "Set plays" rail,
+     hover/focus details, seek/highlight behavior, and osu! gallery summaries. A real spike
+     confirmed client credentials with `public` scope can fetch Dain's recent osu!standard scores,
+     including submitted failed plays, so there is no Clipline Cloud broker dependency.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -308,6 +326,16 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-30):
+- The osu! profile now detects the stable idle title `osu!`, stable map titles such as
+  `osu!  - ginkiha - EOS [Lycoris]`, and cutting-edge build titles such as
+  `osu!cuttingedge b20260624`, while explicitly rejecting updater-like titles from `osu!.exe`.
+  osu!-tagged full sessions shorter than ten seconds are discarded as boot/update transients.
+  Its empty Set plays rail copy now points users to the osu! API settings credentials instead of
+  implying enrichment completed with no submitted plays.
+- Added the osu! play-block implementation plan at
+  `docs/superpowers/plans/2026-06-30-osu-play-blocks.md`, plus the desktop schema/UI/enrichment
+  scaffolding and reusable API spike script. The shipped auth path is direct desktop
+  client-credentials with a local setup guide, not the earlier Cloud broker/proxy.
 - Supported-game rows now persist a nested `review` settings block. Each supported row has a
   Settings button that opens a grouped tabbed dialog: General controls Replays only vs Full session
   and whether to show League match details, Match events filters the right-side rail by your events,
@@ -718,6 +746,17 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   (dev-dependency). Keep player math/formatting there, not in `main.js`, or it falls out of
   test coverage. `tests/ui_contract.rs` fails if anyone re-inlines styles/scripts into
   `index.html` or puts `controls` back on the video element.
+- osu! play enrichment samples osu! window-title changes every 500 ms during game detection and
+  stores them in the pending `.osu-enrichment.json` sidecar. When osu! omits `started_at`, the
+  mapper prefers the latest matching title event before `ended_at`; failed plays without a match
+  stay end-only, and passed plays still include 1 s of results-screen padding.
+- osu! full-session saves now write title-only `ClipPlay` blocks immediately from window-title
+  changes even without osu! API credentials; later API enrichment replaces those fallback plays
+  with full score metadata. In Set plays, no `pp` plus rank other than `F` renders as
+  `Incomplete`, and right-clicking an interval play exports that play via the same keyframe-aligned
+  `export_clip` path as trims. Play exports request an `Artist - Title` filename and pass
+  `includeMarkers: false`, so the resulting clip opens without the Set plays sidebar/timeline
+  metadata.
 - WebView2 layout: a CSS grid row only bounds its children if the track is sized — the
   `.app`/`.review-viewer` grids pin rows with `minmax(0, 1fr)` and shrink children carry
   `min-height: 0`. A content-sized row lets the video's intrinsic height push the control

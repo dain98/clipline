@@ -31,6 +31,10 @@ mod markers;
 #[cfg(windows)]
 mod memory;
 #[cfg(windows)]
+mod osu_api;
+#[cfg(windows)]
+mod osu_enrichment;
+#[cfg(windows)]
 mod poster;
 #[cfg(windows)]
 mod service;

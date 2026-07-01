@@ -30,6 +30,10 @@ listen("saved", (e) => {
   refresh();
 });
 
+listen("osu-enrichment-updated", () => {
+  refresh();
+});
+
 listen("error", (e) => { $("error").textContent = e.payload; });
 
 listen("mic-test", (e) => {
@@ -215,6 +219,16 @@ $("clip-menu-copy-cloud-link").addEventListener("click", () => {
   hideClipContextMenu();
   if (entry) copyCloudUrl(entry);
 });
+$("clip-menu-export-play").addEventListener("click", () => {
+  const target = gamePlayContextTarget;
+  hideClipContextMenu();
+  if (target) {
+    gamePlayContextTarget = target;
+    exportPlayClip().finally(() => {
+      if (gamePlayContextTarget === target) gamePlayContextTarget = null;
+    });
+  }
+});
 $("clip-menu-upload").addEventListener("click", () => {
   const clip = clipContextTarget;
   const record = clipContextRecord();
@@ -257,6 +271,7 @@ video.addEventListener("click", togglePlay);
 video.addEventListener("play", () => {
   syncPlayState();
   syncGameEventRail(video.currentTime || 0);
+  syncGamePlayRail(video.currentTime || 0);
   paintTimeline();
   scheduleOverlayIdleCheck();
 });
@@ -270,6 +285,7 @@ video.addEventListener("timeupdate", () => {
   maybeFollow(video.currentTime || 0);
   paintTimeline();
   syncGameEventRail(video.currentTime || 0);
+  syncGamePlayRail(video.currentTime || 0);
 });
 video.addEventListener("volumechange", syncVolume);
 video.addEventListener("loadedmetadata", () => {

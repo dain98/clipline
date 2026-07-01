@@ -89,6 +89,7 @@ impl AppSettings {
         self.validate_replay_storage()?;
         super::hotkey::normalize_hotkey(&self.hotkey)?;
         self.cloud.validate()?;
+        self.osu.validate()?;
         Ok(())
     }
 

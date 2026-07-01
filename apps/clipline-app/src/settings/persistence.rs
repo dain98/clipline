@@ -91,10 +91,12 @@ impl AppSettings {
                 .map(normalize_channel)
                 .unwrap_or(defaults.update_channel),
             cloud: deserialize_field(object, "cloud").unwrap_or_default(),
+            osu: deserialize_field(object, "osu").unwrap_or_default(),
         };
 
         settings.games.normalize();
         settings.cloud.normalize();
+        settings.osu.normalize();
         settings.buffer_seconds = super::replay_buffer_seconds(&settings);
         settings.bitrate_mbps = settings.effective_bitrate_mbps();
         if matches!(settings.capture_mode, CaptureMode::WindowTitle)
@@ -110,6 +112,7 @@ impl AppSettings {
         settings.hotkey = normalize_hotkey(&settings.hotkey)?;
         settings.games.normalize();
         settings.cloud.normalize();
+        settings.osu.normalize();
         settings.media_dir = settings.media_dir_path()?.display().to_string();
         settings.bitrate_mbps = settings.effective_bitrate_mbps();
         if matches!(settings.replay_storage.mode, ReplayStorageMode::Disk) {

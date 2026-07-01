@@ -41,6 +41,7 @@ pub(crate) fn markers_with_inferred_audio_tracks(
             duration_s: 0.0,
             player_summary: None,
             audio_tracks,
+            plays: Vec::new(),
             markers: Vec::new(),
         },
     })

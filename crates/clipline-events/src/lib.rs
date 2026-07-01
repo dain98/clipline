@@ -3,7 +3,7 @@ pub mod schema;
 pub mod sync;
 
 pub use markers::{
-    ClipAudioTrack, ClipMarker, ClipMarkers, MarkerLog, PlayerItem, PlayerParticipant,
+    ClipAudioTrack, ClipMarker, ClipMarkers, ClipPlay, MarkerLog, PlayerItem, PlayerParticipant,
     PlayerSummary, PlayerSummonerSpell,
 };
 pub use schema::{is_review_event, EventKind, GameEvent, GameId};

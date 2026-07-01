@@ -6,6 +6,7 @@ pub enum GameId {
     LeagueOfLegends,
     Valorant,
     Cs2,
+    Osu,
 }
 
 /// Normalized event kind across all game adapters.

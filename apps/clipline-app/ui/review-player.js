@@ -186,8 +186,12 @@ function suspendReviewPlayback() {
   syncPlayState();
   setDeckStatus("");
   $("stage-note").textContent = "";
+  $("play-block-layer").replaceChildren();
   $("marker-layer").replaceChildren();
   renderAudioTrackPanel();
+  renderGameEventRail(null);
+  renderGamePlayRail(null);
+  renderGameMetadataPanel(null);
   renderClips();
 }
 
@@ -286,6 +290,7 @@ function openClip(clip) {
   applyTimelineEditorPreference();
   renderAudioTrackPanel();
   renderGameEventRail(clip);
+  renderGamePlayRail(clip);
   renderGameMetadataPanel(clip);
   renderClips();
   noteActivity();
@@ -315,9 +320,11 @@ function closeReview() {
   updateViews();
   setDeckStatus("");
   $("stage-note").textContent = "";
+  $("play-block-layer").replaceChildren();
   $("marker-layer").replaceChildren();
   renderAudioTrackPanel();
   renderGameEventRail(null);
+  renderGamePlayRail(null);
   renderGameMetadataPanel(null);
   renderClips();
 }
@@ -442,6 +449,7 @@ function applyView(next) {
   zoomStart = v.start;
   zoomSpan = dur > 0 && v.span >= dur ? 0 : v.span;
   renderRuler();
+  renderPlayBlocks();
   renderMarkers();
   paintTimeline();
 }
@@ -635,6 +643,37 @@ function markerImageForKind(kind, presentation) {
   return configured || MARKER_IMAGES[kind] || "";
 }
 
+function renderPlayBlocks() {
+  const layer = $("play-block-layer");
+  if (!layer) return;
+  layer.replaceChildren();
+  const dur = clipDuration();
+  const plays = clipPlays();
+  if (!(dur > 0) || !plays.length) return;
+  const view = timelineView();
+  playBlocks(plays, dur).forEach((play, index) => {
+    const left = percentForView(play.start, view.start, view.span);
+    const right = percentForView(play.end, view.start, view.span);
+    if (right < -2 || left > 102) return;
+    const block = document.createElement("button");
+    block.type = "button";
+    block.className = "play-block"
+      + (play.play && play.play.passed ? "" : " failed")
+      + (play.estimated ? " estimated" : "");
+    block.setAttribute("data-game-play-index", String(index));
+    block.style.left = `${left}%`;
+    block.style.width = `${Math.max(0.4, right - left)}%`;
+    block.title = `${play.title}\n${play.details}\n${fmtTenths(play.start)}-${fmtTenths(play.end)}`;
+    block.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+    block.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      seekTo(play.start);
+      video.play().catch(() => syncPlayState());
+    });
+    layer.appendChild(block);
+  });
+}
+
 function renderMarkers() {
   const layer = $("marker-layer");
   layer.replaceChildren();
@@ -737,6 +776,7 @@ function seekTo(time, options = {}) {
   maybeFollow(t);
   paintTimeline();
   syncGameEventRail(t);
+  syncGamePlayRail(t);
 }
 
 video.addEventListener("seeked", () => {
@@ -748,6 +788,7 @@ video.addEventListener("seeked", () => {
   maybeFollow(video.currentTime || 0);
   paintTimeline();
   syncGameEventRail(video.currentTime || 0);
+  syncGamePlayRail(video.currentTime || 0);
 });
 
 function seekBy(delta) {
@@ -1055,20 +1096,29 @@ function onOverviewWheel(ev) {
 
 /* ---- clip actions ---- */
 
-async function exportTrim() {
+async function exportRangeAsClip(startS, endS, {
+  button = null,
+  label = "",
+  title = "",
+  includeMarkers = true,
+} = {}) {
   const sourceClip = currentClip;
   if (!sourceClip) return;
   $("error").textContent = "";
-  $("export-clip").disabled = true;
+  if (button) button.disabled = true;
   setDeckStatus("exporting…");
   await afterNextPaint();
   try {
-    const exported = await invoke("export_clip", {
+    const request = {
       path: sourceClip.path,
-      startS: trimStart,
-      endS: trimEnd,
-    });
-    setDeckStatus(`exported ${exported.name} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true });
+      startS,
+      endS,
+      includeMarkers,
+    };
+    if (title) request.title = title;
+    const exported = await invoke("export_clip", request);
+    const exportedLabel = label ? `${label} ${exported.name}` : exported.name;
+    setDeckStatus(`exported ${exportedLabel} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true });
     const exportedClip = {
       path: exported.path,
       name: exported.name,
@@ -1086,8 +1136,22 @@ async function exportTrim() {
     setDeckStatus("");
     $("error").textContent = e;
   } finally {
-    $("export-clip").disabled = false;
+    if (button) button.disabled = false;
   }
+}
+
+async function exportTrim() {
+  await exportRangeAsClip(trimStart, trimEnd, { button: $("export-clip") });
+}
+
+async function exportPlayClip() {
+  const target = gamePlayContextTarget;
+  if (!target || !target.range) return;
+  await exportRangeAsClip(target.range.start, target.range.end, {
+    label: "play",
+    title: target.title,
+    includeMarkers: false,
+  });
 }
 
 const DEFAULT_DELETE_CONFIRM_TITLE = $("confirm-title").textContent;

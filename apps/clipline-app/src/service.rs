@@ -414,6 +414,10 @@ pub enum Event {
     Saved {
         path: String,
         seconds: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recording_start_unix: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recording_end_unix: Option<i64>,
         markers: usize,
         #[serde(default)]
         full_session: bool,
@@ -874,7 +878,17 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                                 &audio_track_metadata,
                             );
                             emit_saved_clip(
-                                events, &clips_dir, &path, seconds, markers, false, &opts,
+                                events,
+                                &clips_dir,
+                                &path,
+                                seconds,
+                                SavedClipMeta {
+                                    markers,
+                                    full_session: false,
+                                    recording_start_unix: None,
+                                    recording_end_unix: None,
+                                },
+                                &opts,
                             );
                         }
                         Err(e) => {
@@ -1467,6 +1481,8 @@ fn begin_full_session_recording(
     Some(FullSessionRecording {
         final_path,
         temp_path,
+        wall_start_unix: unix_now(),
+        min_duration_s: minimum_full_session_duration_s(active_game),
     })
 }
 
@@ -1483,6 +1499,21 @@ fn finish_full_session_recording(
             warn_user(
                 ctx.events,
                 "full session ended before any footage was written".into(),
+            );
+            let _ = std::fs::remove_file(&recording.temp_path);
+        }
+        Ok(Some(summary))
+            if should_discard_full_session_for_min_duration(
+                recording.min_duration_s,
+                summary.duration_s,
+            ) =>
+        {
+            warn_user(
+                ctx.events,
+                format!(
+                    "full session discarded because it was only {:.1}s; ignoring a brief startup/update window",
+                    summary.duration_s
+                ),
             );
             let _ = std::fs::remove_file(&recording.temp_path);
         }
@@ -1514,8 +1545,12 @@ fn finish_full_session_recording(
                 ctx.clips_dir,
                 &recording.final_path,
                 seconds,
-                markers,
-                true,
+                SavedClipMeta {
+                    markers,
+                    full_session: true,
+                    recording_start_unix: Some(recording.wall_start_unix),
+                    recording_end_unix: Some(unix_now()),
+                },
                 ctx.opts,
             );
         }
@@ -1572,6 +1607,27 @@ fn discard_full_session_recording(
 struct FullSessionRecording {
     final_path: PathBuf,
     temp_path: PathBuf,
+    wall_start_unix: i64,
+    min_duration_s: f64,
+}
+
+fn minimum_full_session_duration_s(active_game: Option<&ActiveGame>) -> f64 {
+    match active_game {
+        Some(game) if game.id == crate::game_plugins::OSU_ID => 10.0,
+        _ => 0.0,
+    }
+}
+
+#[cfg(test)]
+fn should_discard_full_session_duration(active_game: Option<&ActiveGame>, duration_s: f64) -> bool {
+    should_discard_full_session_for_min_duration(
+        minimum_full_session_duration_s(active_game),
+        duration_s,
+    )
+}
+
+fn should_discard_full_session_for_min_duration(min_duration_s: f64, duration_s: f64) -> bool {
+    min_duration_s > 0.0 && duration_s.is_finite() && duration_s < min_duration_s
 }
 
 fn unique_media_path(session_dir: &Path, prefix: &str) -> PathBuf {
@@ -1611,7 +1667,11 @@ fn write_marker_sidecar(
     clip.player_summary = player_summary.cloned();
     clip.audio_tracks = audio_tracks.to_vec();
     let markers = clip.markers.len();
-    if markers == 0 && clip.player_summary.is_none() && clip.audio_tracks.is_empty() {
+    if markers == 0
+        && clip.player_summary.is_none()
+        && clip.audio_tracks.is_empty()
+        && clip.plays.is_empty()
+    {
         return 0;
     }
     match serde_json::to_string_pretty(&clip) {
@@ -1628,13 +1688,19 @@ fn write_marker_sidecar(
     markers
 }
 
+struct SavedClipMeta {
+    markers: usize,
+    full_session: bool,
+    recording_start_unix: Option<i64>,
+    recording_end_unix: Option<i64>,
+}
+
 fn emit_saved_clip(
     events: &Sender<Event>,
     clips_dir: &Path,
     path: &Path,
     seconds: f64,
-    markers: usize,
-    full_session: bool,
+    meta: SavedClipMeta,
     opts: &ServiceOptions,
 ) {
     let report = match enforce_quota(clips_dir, opts.disk_quota_bytes, Some(path)) {
@@ -1660,8 +1726,10 @@ fn emit_saved_clip(
     let _ = events.send(Event::Saved {
         path: path.display().to_string(),
         seconds,
-        markers,
-        full_session,
+        recording_start_unix: meta.recording_start_unix,
+        recording_end_unix: meta.recording_end_unix,
+        markers: meta.markers,
+        full_session: meta.full_session,
         gc_deleted: report.deleted_clips,
         gc_freed_bytes: report.freed_bytes,
         storage_total_bytes: report.status.total_bytes,
@@ -1820,6 +1888,13 @@ fn local_session_label(league_match: bool) -> String {
         now.minute(),
         league_match,
     )
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 pub(crate) fn default_clips_dir() -> PathBuf {
@@ -2369,6 +2444,8 @@ mod tests {
         let recording = FullSessionRecording {
             final_path,
             temp_path: dir.path().join("session.mp4.recording"),
+            wall_start_unix: 0,
+            min_duration_s: 0.0,
         };
         let (tx, rx) = mpsc::channel();
 
@@ -2382,6 +2459,8 @@ mod tests {
         let recording = FullSessionRecording {
             final_path: dir.path().join("session.mp4"),
             temp_path: dir.path().join("session.mp4.recording"),
+            wall_start_unix: 0,
+            min_duration_s: 0.0,
         };
         let (tx, rx) = mpsc::channel();
 
@@ -2390,5 +2469,24 @@ mod tests {
             panic!("expected warning");
         };
         assert!(message.contains("finalize full session"));
+    }
+
+    #[test]
+    fn osu_full_session_duration_policy_discards_boot_transients_only() {
+        let osu = ActiveGame {
+            id: crate::game_plugins::OSU_ID.into(),
+            name: "osu!".into(),
+        };
+        let league = ActiveGame {
+            id: crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+            name: "League of Legends".into(),
+        };
+
+        assert_eq!(minimum_full_session_duration_s(Some(&osu)), 10.0);
+        assert!(should_discard_full_session_duration(Some(&osu), 9.9));
+        assert!(!should_discard_full_session_duration(Some(&osu), 10.0));
+        assert_eq!(minimum_full_session_duration_s(Some(&league)), 0.0);
+        assert!(!should_discard_full_session_duration(Some(&league), 3.0));
+        assert!(!should_discard_full_session_duration(None, 3.0));
     }
 }

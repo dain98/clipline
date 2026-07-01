@@ -1540,6 +1540,7 @@ fn delete_uploaded_local_files(target: &Path) {
     }
     // Sidecars may not exist — ignore missing-file errors.
     let _ = std::fs::remove_file(target.with_extension("markers.json"));
+    let _ = std::fs::remove_file(crate::osu_enrichment::pending_path(target));
     let _ = std::fs::remove_file(crate::poster::poster_path(target));
 }
 
@@ -2067,15 +2068,18 @@ mod tests {
         let dir = test_dir("cloud-delete");
         let clip = dir.join("clip.mp4");
         let markers = clip.with_extension("markers.json");
+        let pending_osu = clip.with_extension("osu-enrichment.json");
         let poster = crate::poster::poster_path(&clip);
         std::fs::write(&clip, b"mp4").unwrap();
         std::fs::write(&markers, b"{}").unwrap();
+        std::fs::write(&pending_osu, b"{}").unwrap();
         std::fs::write(&poster, b"jpg").unwrap();
 
         delete_uploaded_local_files(&clip);
 
         assert!(!clip.exists());
         assert!(!markers.exists());
+        assert!(!pending_osu.exists());
         assert!(!poster.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2099,6 +2103,7 @@ mod tests {
                     kind: Some("microphone".into()),
                 },
             ],
+            plays: Vec::new(),
             markers: Vec::new(),
         }
     }
