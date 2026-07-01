@@ -225,6 +225,55 @@ fn windows_installer_repairs_webview2_with_bootstrapper() {
 }
 
 #[test]
+fn tauri_config_enforces_a_real_csp() {
+    let config: serde_json::Value =
+        serde_json::from_str(&tauri_config()).expect("tauri.conf.json should parse");
+    let csp = config
+        .pointer("/app/security/csp")
+        .and_then(serde_json::Value::as_object)
+        .expect("tauri config should define a directive-map CSP");
+
+    for directive in [
+        "default-src",
+        "script-src",
+        "style-src",
+        "img-src",
+        "media-src",
+        "connect-src",
+        "object-src",
+    ] {
+        assert!(
+            csp.contains_key(directive),
+            "CSP should define `{directive}`"
+        );
+    }
+
+    let img_src = csp
+        .get("img-src")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert!(img_src.contains("asset:"), "local posters need asset:");
+    assert!(img_src.contains("data:"), "embedded game icons need data:");
+    assert!(
+        img_src.contains("https://assets.ppy.sh"),
+        "osu! beatmap covers need assets.ppy.sh"
+    );
+    assert!(
+        img_src.contains("https://ddragon.leagueoflegends.com"),
+        "League champion icons need ddragon"
+    );
+
+    let connect_src = csp
+        .get("connect-src")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        connect_src.contains("ipc:") && connect_src.contains("http://ipc.localhost"),
+        "Tauri IPC must stay allowed under CSP"
+    );
+}
+
+#[test]
 fn frontend_reports_webview_readiness_to_native_shell() {
     let app = app_rs();
     let js = main_js();
@@ -999,6 +1048,68 @@ fn review_player_owns_all_controls() {
             "{id} must render an SVG icon, not a text label"
         );
     }
+}
+
+#[test]
+fn osu_play_blocks_are_centered_and_taller_in_timeline() {
+    let css = styles_css();
+    let timeline_rule = css_rule_body(&css, ".timeline-main");
+    let layer_rule = css_rule_body(&css, ".play-block-layer");
+    let block_rule = css_rule_body(&css, ".play-block {");
+    let incomplete_rule = css_rule_body(&css, ".play-block.incomplete");
+    let active_rule = css_rule_body(&css, ".play-block.active,");
+
+    assert_eq!(
+        css_decl_value(timeline_rule, "height"),
+        Some("56px"),
+        "timeline band height anchors the centered osu! play block placement"
+    );
+    assert_eq!(
+        css_decl_value(layer_rule, "top"),
+        Some("18px"),
+        "osu! play blocks should sit vertically centered in the timeline band"
+    );
+    assert_eq!(
+        css_decl_value(layer_rule, "height"),
+        Some("20px"),
+        "osu! play block hit area should stay taller than the old compact rail"
+    );
+    assert_eq!(
+        css_decl_value(block_rule, "height"),
+        Some("20px"),
+        "osu! play block visuals should fill the taller hit area"
+    );
+    assert!(
+        main_js().contains("+ (play.incomplete ? \" incomplete\" : \"\")")
+            && css_decl_value(incomplete_rule, "border-color").is_some()
+            && css_decl_value(incomplete_rule, "background").is_some(),
+        "incomplete osu! play blocks should receive their own purple timeline styling"
+    );
+    assert_eq!(
+        css_decl_value(active_rule, "z-index"),
+        Some("8"),
+        "active osu! play blocks should paint above overlapping neighbors"
+    );
+}
+
+#[test]
+fn osu_play_rail_click_holds_selected_play_during_seek() {
+    let js = main_js();
+
+    assert!(
+        js.contains("var selectedGamePlayIndex = -1")
+            && js.contains("var selectedGamePlayPending = false")
+            && js.contains("function selectGamePlay(index, playStart, playEnd)")
+            && js.contains("selectedGamePlayPending = true;")
+            && js.contains("if (options.keepGamePlaySelection || selectedGamePlayPending)")
+            && js.contains("if (inSelectedPlay) selectedGamePlayPending = false;")
+            && js.contains("selectGamePlay(index, play.start, play.end);")
+            && js.contains("seekTo(play.start, { keepGamePlaySelection: true });")
+            && js.contains("if (!options.keepGamePlaySelection) clearGamePlaySelection();")
+            && js.contains("syncGamePlayRail(t, { keepGamePlaySelection: options.keepGamePlaySelection });")
+            && js.contains("playActiveIndex(clipPlays(), currentTime, selectedIndex)"),
+        "Set plays clicks should highlight the clicked play immediately instead of waiting for the video seek to settle"
+    );
 }
 
 #[test]

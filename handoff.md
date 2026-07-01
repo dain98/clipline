@@ -468,7 +468,9 @@ Recent fixes (2026-06-25):
   Display-region capture also recovers from a missing saved display id or stale region geometry by
   warning the user and falling back to the full current primary display when the saved display is
   gone. If the saved display still exists but the region only partially fits, the crop clamps to
-  the visible part instead of silently recording the whole display.
+  the visible part instead of silently recording the whole display. Full-display region selections
+  are recognized by display size and re-based to the current monitor origin so Windows virtual
+  desktop coordinate churn across reboot does not require opening Settings and saving again.
 - Share/export audio compatibility follow-up: the 0.1.12/0.1.14 remux-only upload behavior could
   hand cloud/Discord a multi-audio-track MP4 where only the first stream was played, producing
   silent uploads or missing mic audio. Cloud uploads now replace two-or-more selected audio tracks

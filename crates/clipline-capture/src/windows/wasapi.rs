@@ -15,7 +15,8 @@ use windows::Win32::Media::Audio::{
     IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
     IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
     IAudioSessionControl2, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
-    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
+    AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
     AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
     AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
@@ -103,6 +104,14 @@ pub enum WasapiChannelMode {
 enum EndpointMode {
     OutputLoopback,
     InputCapture(WasapiChannelMode),
+}
+
+fn wasapi_timestamp_valid(flags: u32) -> bool {
+    flags & (AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32) == 0
+}
+
+fn wasapi_data_discontinuous(flags: u32) -> bool {
+    flags & (AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32) != 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -421,7 +430,9 @@ impl WasapiPcmCapture {
                         Some(&mut qpc_100ns),
                     )
                     .map_err(lost)?;
-                let pts_s = self.clock.pts_s(qpc_100ns as i64);
+                let timestamp_valid = wasapi_timestamp_valid(flags);
+                let data_discontinuous = wasapi_data_discontinuous(flags);
+                let pts_s = timestamp_valid.then(|| self.clock.pts_s(qpc_100ns as i64));
                 let n = frames as usize * self.channels as usize;
                 let samples: Vec<f32> = if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
                     vec![0.0; n]
@@ -430,7 +441,14 @@ impl WasapiPcmCapture {
                 };
                 self.capture.ReleaseBuffer(frames).map_err(lost)?;
                 let stereo = self.stereo_samples(&samples);
-                self.assembler.push_chunk(pts_s, &stereo);
+                if let Some(pts_s) = pts_s {
+                    self.assembler.push_chunk(pts_s, &stereo);
+                } else {
+                    self.assembler.push_contiguous_chunk(&stereo);
+                }
+                if data_discontinuous {
+                    eprintln!("WASAPI data discontinuity; audio gap fill capped");
+                }
             }
         }
         Ok(())
@@ -1302,6 +1320,20 @@ mod tests {
             Some("Discord")
         );
         assert_eq!(process_name_from_path("").as_deref(), None);
+    }
+
+    #[test]
+    fn wasapi_timestamp_error_flag_marks_timestamp_invalid() {
+        assert!(wasapi_timestamp_valid(0));
+        assert!(wasapi_timestamp_valid(
+            AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32
+        ));
+        assert!(!wasapi_timestamp_valid(
+            AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32
+        ));
+        assert!(wasapi_data_discontinuous(
+            AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32
+        ));
     }
 
     #[test]

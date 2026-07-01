@@ -659,6 +659,7 @@ function renderPlayBlocks() {
     block.type = "button";
     block.className = "play-block"
       + (play.play && play.play.passed ? "" : " failed")
+      + (play.incomplete ? " incomplete" : "")
       + (play.estimated ? " estimated" : "");
     block.setAttribute("data-game-play-index", String(index));
     block.style.left = `${left}%`;
@@ -667,7 +668,8 @@ function renderPlayBlocks() {
     block.addEventListener("pointerdown", (ev) => ev.stopPropagation());
     block.addEventListener("click", (ev) => {
       ev.stopPropagation();
-      seekTo(play.start);
+      selectGamePlay(index, play.start, play.end);
+      seekTo(play.start, { keepGamePlaySelection: true });
       video.play().catch(() => syncPlayState());
     });
     layer.appendChild(block);
@@ -766,6 +768,7 @@ var pendingSeek = null;
 function seekTo(time, options = {}) {
   if (!currentClip) return;
   if (!options.keepGameEventSelection) clearGameEventSelection();
+  if (!options.keepGamePlaySelection) clearGamePlaySelection();
   const t = clampTime(time, clipDuration());
   if (video.seeking) {
     pendingSeek = t;
@@ -776,7 +779,7 @@ function seekTo(time, options = {}) {
   maybeFollow(t);
   paintTimeline();
   syncGameEventRail(t);
-  syncGamePlayRail(t);
+  syncGamePlayRail(t, { keepGamePlaySelection: options.keepGamePlaySelection });
 }
 
 video.addEventListener("seeked", () => {

@@ -5,17 +5,18 @@
 //! to AVCC for clipline-mp4.
 
 use std::mem::ManuallyDrop;
+use std::time::{Duration, Instant};
 
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
-    ICodecAPI, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFSample, IMFTransform,
+    ICodecAPI, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFSample, IMFTransform, MEError,
     METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
     MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample,
     MFMediaType_Video, MFNominalRange_16_235, MFSampleExtension_CleanPoint, MFVideoFormat_H264,
     MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoTransFunc_709,
-    MFVideoTransferMatrix_BT709, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFT_ENUM_FLAG_HARDWARE,
-    MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFVideoTransferMatrix_BT709, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+    MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
     MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MF_EVENT_FLAG_NO_WAIT,
     MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE,
@@ -35,6 +36,8 @@ use crate::windows::nv12::{CropRect, VideoConverter};
 /// eAVEncH264VProfile_High (codecapi.h) — windows-rs feature placement of
 /// the enum varies; the wire value is stable.
 const H264_PROFILE_HIGH: u32 = 100;
+const MFT_EVENT_TIMEOUT: Duration = Duration::from_secs(10);
+const MFT_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 #[derive(Debug, Clone, Copy)]
 pub struct MftConfig {
@@ -64,6 +67,48 @@ pub struct MftH264Encoder {
 
 fn backend(e: windows::core::Error) -> EncodeError {
     EncodeError::Backend(e.to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MftEventKind {
+    NeedInput,
+    HaveOutput,
+    DrainComplete,
+    Error,
+    Other(u32),
+}
+
+fn classify_mft_event_type(ty: u32) -> MftEventKind {
+    if ty == METransformNeedInput.0 as u32 {
+        MftEventKind::NeedInput
+    } else if ty == METransformHaveOutput.0 as u32 {
+        MftEventKind::HaveOutput
+    } else if ty == METransformDrainComplete.0 as u32 {
+        MftEventKind::DrainComplete
+    } else if ty == MEError.0 as u32 {
+        MftEventKind::Error
+    } else {
+        MftEventKind::Other(ty)
+    }
+}
+
+fn mft_event_error(event: &windows::Win32::Media::MediaFoundation::IMFMediaEvent) -> EncodeError {
+    match unsafe { event.GetStatus() } {
+        Ok(status) if status.is_err() => EncodeError::Backend(format!(
+            "MFT encoder event error: {}",
+            windows::core::Error::from(status)
+        )),
+        Ok(_) => EncodeError::Backend("MFT encoder reported MEError".into()),
+        Err(e) => backend(e),
+    }
+}
+
+fn mft_unexpected_event_error(ty: u32) -> EncodeError {
+    EncodeError::Backend(format!("MFT encoder unexpected event type {ty}"))
+}
+
+fn mft_event_timeout_error(waiting_for: &str) -> EncodeError {
+    EncodeError::Backend(format!("MFT encoder timed out waiting for {waiting_for}"))
 }
 
 fn h264_activate(
@@ -354,27 +399,36 @@ impl MftH264Encoder {
     /// Pump pending events; feed `sample` when a NeedInput credit exists.
     /// `block` waits for the first event when no credit is banked.
     fn pump(&mut self, packets: &mut Vec<EncodedPacket>, block: bool) -> Result<(), EncodeError> {
-        let flags = if block {
-            MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0)
-        } else {
-            MF_EVENT_FLAG_NO_WAIT
-        };
+        let wait_started = Instant::now();
         loop {
             // SAFETY: GetEvent on a valid generator; NO_WAIT yields
             // MF_E_NO_EVENTS_AVAILABLE when drained.
-            match unsafe { self.events.GetEvent(flags) } {
+            match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
                 Ok(event) => {
                     let ty = unsafe { event.GetType() }.map_err(backend)?;
-                    if ty == METransformNeedInput.0 as u32 {
-                        self.need_input_credits += 1;
-                        if block {
-                            return Ok(());
+                    match classify_mft_event_type(ty) {
+                        MftEventKind::NeedInput => {
+                            self.need_input_credits += 1;
+                            if block {
+                                return Ok(());
+                            }
                         }
-                    } else if ty == METransformHaveOutput.0 as u32 {
-                        packets.push(self.drain_one()?);
+                        MftEventKind::HaveOutput => packets.push(self.drain_one()?),
+                        MftEventKind::Error => return Err(mft_event_error(&event)),
+                        MftEventKind::DrainComplete => return Err(mft_unexpected_event_error(ty)),
+                        MftEventKind::Other(ty) => return Err(mft_unexpected_event_error(ty)),
                     }
                 }
                 Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE && !block => return Ok(()),
+                Err(e)
+                    if e.code() == MF_E_NO_EVENTS_AVAILABLE
+                        && wait_started.elapsed() >= MFT_EVENT_TIMEOUT =>
+                {
+                    return Err(mft_event_timeout_error("an encoder event"));
+                }
+                Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => {
+                    std::thread::sleep(MFT_EVENT_POLL_INTERVAL);
+                }
                 Err(e) => return Err(backend(e)),
             }
             if block && self.need_input_credits > 0 {
@@ -454,19 +508,32 @@ impl Encoder for MftH264Encoder {
                 .map_err(backend)?;
         }
         let mut packets = Vec::new();
+        let mut wait_started = Instant::now();
         loop {
-            // SAFETY: blocking GetEvent; drain always terminates with
-            // DrainComplete per the async-MFT contract.
-            let event = unsafe {
-                self.events
-                    .GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0))
-            }
-            .map_err(backend)?;
-            let ty = unsafe { event.GetType() }.map_err(backend)?;
-            if ty == METransformHaveOutput.0 as u32 {
-                packets.push(self.drain_one()?);
-            } else if ty == METransformDrainComplete.0 as u32 {
-                break;
+            // SAFETY: GetEvent on a valid generator; poll with a bounded wait
+            // so a wedged hardware MFT can surface as an encoder error.
+            match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
+                Ok(event) => {
+                    wait_started = Instant::now();
+                    let ty = unsafe { event.GetType() }.map_err(backend)?;
+                    match classify_mft_event_type(ty) {
+                        MftEventKind::HaveOutput => packets.push(self.drain_one()?),
+                        MftEventKind::DrainComplete => break,
+                        MftEventKind::NeedInput => {}
+                        MftEventKind::Error => return Err(mft_event_error(&event)),
+                        MftEventKind::Other(ty) => return Err(mft_unexpected_event_error(ty)),
+                    }
+                }
+                Err(e)
+                    if e.code() == MF_E_NO_EVENTS_AVAILABLE
+                        && wait_started.elapsed() >= MFT_EVENT_TIMEOUT =>
+                {
+                    return Err(mft_event_timeout_error("drain completion"));
+                }
+                Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => {
+                    std::thread::sleep(MFT_EVENT_POLL_INTERVAL);
+                }
+                Err(e) => return Err(backend(e)),
             }
         }
         Ok(packets)
@@ -532,6 +599,30 @@ fn sequence_header_sps_pps(
 mod tests {
     use super::*;
     use crate::traits::{Encoder, Frame, FrameData};
+
+    #[test]
+    fn classifies_mft_error_event_as_error() {
+        assert_eq!(
+            classify_mft_event_type(MEError.0 as u32),
+            MftEventKind::Error
+        );
+        assert_eq!(
+            classify_mft_event_type(METransformNeedInput.0 as u32),
+            MftEventKind::NeedInput
+        );
+        assert_eq!(
+            classify_mft_event_type(METransformHaveOutput.0 as u32),
+            MftEventKind::HaveOutput
+        );
+        assert_eq!(
+            classify_mft_event_type(METransformDrainComplete.0 as u32),
+            MftEventKind::DrainComplete
+        );
+        assert_eq!(
+            classify_mft_event_type(0xFFFF_FFFE),
+            MftEventKind::Other(0xFFFF_FFFE)
+        );
+    }
 
     /// Real hardware encode (AMF on the dev machine). CI-skipped: runners
     /// have no hardware encoder and MF behaves erratically there.

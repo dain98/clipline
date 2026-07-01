@@ -675,9 +675,9 @@ fn osu_play_blocks_format_intervals_and_details() {
     assert_eq!(
         eval_json(
             &mut ctx,
-            "PlayerCore.playBlocks(OSU_PLAYS, 200).map(p => ({ id: p.externalId, left: p.leftPct, width: p.widthPct, title: p.title, details: p.details, estimated: p.estimated }))"
+            "PlayerCore.playBlocks(OSU_PLAYS, 200).map(p => ({ id: p.externalId, left: p.leftPct, width: p.widthPct, title: p.title, details: p.details, estimated: p.estimated, incomplete: p.incomplete }))"
         ),
-        r#"[{"id":"score-2","left":5,"width":20,"title":"Camellia - Exit This Earth's Atomosphere [Extra]","details":"Failed · A · 98.76% · +HDDT","estimated":true},{"id":"score-3","left":30,"width":30,"title":"xi - Blue Zenith [FOUR DIMENSIONS]","details":"Passed · S · 99.12% · 321pp","estimated":false}]"#
+        r#"[{"id":"score-2","left":5,"width":20,"title":"Camellia - Exit This Earth's Atomosphere [Extra]","details":"Incomplete · A · 98.76% · +HDDT","estimated":true,"incomplete":true},{"id":"score-3","left":30,"width":30,"title":"xi - Blue Zenith [FOUR DIMENSIONS]","details":"Passed · S · 99.12% · 321pp","estimated":false,"incomplete":false}]"#
     );
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.playRailItem(OSU_PLAYS[0])"),
@@ -697,6 +697,14 @@ fn osu_play_blocks_format_intervals_and_details() {
     assert_eq!(
         eval(&mut ctx, "PlayerCore.playRailItem({ artist: 'ZUN', title: 'Necro-Fantasia', difficulty: 'Hard', rank: 'B', accuracy: 0.95, t_start_s: 1, t_end_s: 30 }).meta"),
         "B ▸ Incomplete ▸ 95.00%"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.playRailItem({ artist: 'ZUN', title: 'Necro-Fantasia', difficulty: 'Hard', passed: true, rank: 'S', accuracy: 0.99, t_start_s: 1, t_end_s: 30 }).meta"),
+        "S ▸ 99.00%"
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.playBlocks([{ passed: true, rank: 'S', accuracy: 0.99, t_start_s: 1, t_end_s: 30 }], 60).map(p => ({ details: p.details, incomplete: p.incomplete }))"),
+        r#"[{"details":"Passed · S · 99.00%","incomplete":false}]"#
     );
     assert_eq!(
         eval(&mut ctx, "PlayerCore.playRailItem({ artist: 'ZUN', title: 'Necro-Fantasia', difficulty: 'Hard', rank: 'F', accuracy: 0.95, t_start_s: 1, t_end_s: 30 }).meta"),
@@ -722,7 +730,25 @@ fn osu_play_blocks_format_intervals_and_details() {
         "2 submitted plays"
     );
     assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.playResultSummary([{ passed: true, rank: 'S' }, { passed: false, rank: 'A' }, { passed: false, rank: 'B' }, { passed: false, rank: 'F' }])"
+        ),
+        "1 pass · 2 incomplete · 1 fail"
+    );
+    assert_eq!(
         eval(&mut ctx, "PlayerCore.playActiveIndex(OSU_PLAYS, 75)"),
+        "1"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.playActiveIndex([{ t_start_s: 10, t_end_s: 70 }, { t_start_s: 45, t_end_s: 90 }], 50)"
+        ),
+        "1"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.playActiveIndex(OSU_PLAYS, 45, 1)"),
         "1"
     );
 }
@@ -736,7 +762,7 @@ fn osu_gallery_card_preview_summarizes_play_sidecar() {
           markers: {
             plays: [
               { external_id: 'score-1', passed: true, t_start_s: 3, t_end_s: 40 },
-              { external_id: 'score-2', passed: false, t_start_s: 50, t_end_s: 80 }
+              { external_id: 'score-2', passed: false, rank: 'F', t_start_s: 50, t_end_s: 80 }
             ]
           }
         };
