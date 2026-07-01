@@ -1078,6 +1078,18 @@ fn osu_play_rail_uses_thumbnail_metadata_rows() {
 }
 
 #[test]
+fn library_refresh_starts_osu_enrichment_retry() {
+    let library = library_rs();
+
+    assert!(
+        library.contains("pub async fn list_clips<R: Runtime>")
+            && library.contains("app: AppHandle<R>")
+            && library.contains("crate::osu_api::retry_pending_enrichment(&app, retry_root).await"),
+        "list_clips should kick off the async osu! retry path during library refresh"
+    );
+}
+
+#[test]
 fn game_event_rail_does_not_run_on_every_animation_frame() {
     let js = main_js();
     let schedule_overlay = js_function_body(&js, "scheduleOverlayIdleCheck");

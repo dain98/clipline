@@ -146,17 +146,23 @@ pub struct CopyClipToClipboardRequest {
 }
 
 #[tauri::command]
-pub async fn list_clips(
+pub async fn list_clips<R: Runtime>(
+    app: AppHandle<R>,
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<Vec<ClipInfo>, String> {
     let dir = settings.clips_dir()?;
+    let retry_root = dir.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::osu_api::retry_pending_enrichment(&app, retry_root).await {
+            eprintln!("retry osu! enrichment on library refresh: {e}");
+        }
+    });
     tauri::async_runtime::spawn_blocking(move || list_clips_from_dir(dir))
         .await
         .map_err(|e| format!("list clips task: {e}"))?
 }
 
 fn list_clips_from_dir(dir: PathBuf) -> Result<Vec<ClipInfo>, String> {
-    crate::osu_enrichment::retry_pending_on_refresh(&dir);
     let mut clips = Vec::new();
     push_clips_from(&dir, None, &mut clips)?;
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {

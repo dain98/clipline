@@ -9,13 +9,9 @@ use serde::{Deserialize, Serialize};
 const PENDING_SCHEMA_VERSION: u32 = 1;
 const SESSION_META_FILE: &str = "clipline-session.json";
 const PENDING_EXTENSION: &str = "osu-enrichment.json";
-#[allow(dead_code)]
-const UTC_SKEW_TOLERANCE_S: f64 = 5.0;
-#[allow(dead_code)]
+const UTC_SKEW_TOLERANCE_S: f64 = 15.0;
 const PASSED_RESULTS_SCREEN_PADDING_S: f64 = 1.0;
-#[allow(dead_code)]
 const TITLE_EVENT_FALLBACK_LOOKBACK_S: i64 = 15 * 60;
-#[allow(dead_code)]
 const TITLE_EVENT_LENGTH_SLACK_S: i64 = 60;
 
 #[derive(Debug, Clone)]
@@ -59,7 +55,6 @@ pub struct OsuPendingEnrichment {
     pub message: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OsuProxyScore {
     pub id: String,
@@ -98,7 +93,6 @@ pub struct OsuProxyScore {
     pub beatmap_total_length_s: Option<f64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct OsuMappedPlays {
     pub plays: Vec<ClipPlay>,
@@ -162,24 +156,6 @@ pub fn discover_pending(media_root: &Path) -> Result<Vec<OsuPendingEnrichment>, 
     Ok(out)
 }
 
-pub fn retry_pending_on_refresh(media_root: &Path) -> usize {
-    match discover_pending(media_root) {
-        Ok(pending) => {
-            if !pending.is_empty() {
-                eprintln!(
-                    "osu! enrichment pending: {} clip(s) awaiting osu! API credentials",
-                    pending.len()
-                );
-            }
-            pending.len()
-        }
-        Err(e) => {
-            eprintln!("scan osu! enrichment pending records: {e}");
-            0
-        }
-    }
-}
-
 pub fn apply_scores_to_pending(
     pending: &OsuPendingEnrichment,
     scores: &[OsuProxyScore],
@@ -187,6 +163,13 @@ pub fn apply_scores_to_pending(
 ) -> Result<OsuMappedPlays, String> {
     let mapped = map_proxy_scores_to_clip_plays(pending, scores, pagination_ceiling_reached);
     let clip_path = PathBuf::from(&pending.clip_path);
+    if mapped.plays.is_empty() {
+        mark_pending_retry(
+            pending,
+            "No osu! API plays matched this recording yet; keeping fallback plays and retrying later.",
+        )?;
+        return Ok(mapped);
+    }
     write_plays_sidecar(&clip_path, pending, mapped.plays.clone())?;
     let pending_path = pending_path(&clip_path);
     if let Err(e) = std::fs::remove_file(&pending_path) {
@@ -197,6 +180,19 @@ pub fn apply_scores_to_pending(
         }
     }
     Ok(mapped)
+}
+
+fn mark_pending_retry(pending: &OsuPendingEnrichment, message: &str) -> Result<(), String> {
+    let mut next = pending.clone();
+    next.status = OsuEnrichmentStatus::Pending;
+    next.attempts = next.attempts.saturating_add(1);
+    next.message = Some(message.to_string());
+    let clip_path = PathBuf::from(&pending.clip_path);
+    let path = pending_path(&clip_path);
+    let json = serde_json::to_string_pretty(&next)
+        .map_err(|e| format!("serialize retryable osu! enrichment sidecar: {e}"))?;
+    std::fs::write(&path, json)
+        .map_err(|e| format!("write retryable osu! enrichment sidecar {path:?}: {e}"))
 }
 
 pub fn mark_pending_failed(pending: &OsuPendingEnrichment, message: &str) -> Result<(), String> {
@@ -240,7 +236,6 @@ fn write_plays_sidecar(
     std::fs::write(&path, json).map_err(|e| format!("write marker sidecar {path:?}: {e}"))
 }
 
-#[allow(dead_code)]
 pub fn map_proxy_scores_to_clip_plays(
     pending: &OsuPendingEnrichment,
     scores: &[OsuProxyScore],
@@ -472,7 +467,6 @@ fn session_game_id(session_dir: &Path) -> Option<String> {
     value.get("id")?.as_str().map(str::to_string)
 }
 
-#[allow(dead_code)]
 fn score_start_unix(
     score: &OsuProxyScore,
     pending: &OsuPendingEnrichment,
@@ -542,7 +536,6 @@ fn normalized_title_match_text(value: &str) -> String {
     out.trim().to_string()
 }
 
-#[allow(dead_code)]
 fn adjusted_total_length_s(score: &OsuProxyScore) -> Option<f64> {
     let mut length = score.beatmap_total_length_s?;
     if !length.is_finite() || length < 0.0 {
@@ -567,7 +560,6 @@ fn adjusted_total_length_s(score: &OsuProxyScore) -> Option<f64> {
     Some(length)
 }
 
-#[allow(dead_code)]
 fn clamp_clip_time(value: f64, pending: &OsuPendingEnrichment) -> f64 {
     if !pending.clip_duration_s.is_finite() || pending.clip_duration_s <= 0.0 {
         return value.max(0.0);
@@ -575,7 +567,6 @@ fn clamp_clip_time(value: f64, pending: &OsuPendingEnrichment) -> f64 {
     value.max(0.0).min(pending.clip_duration_s)
 }
 
-#[allow(dead_code)]
 fn unix_to_rfc3339(value: i64) -> String {
     let timestamp = UNIX_EPOCH + Duration::from_secs(value.max(0) as u64);
     DateTime::<Utc>::from(timestamp).to_rfc3339()
@@ -765,6 +756,58 @@ mod tests {
     }
 
     #[test]
+    fn empty_api_enrichment_preserves_title_fallback_and_pending_retry() {
+        let dir = TestDir::new("clipline-osu", "empty-api-keeps-fallback");
+        let session = dir.path().join("2026-07-01");
+        write_session_game(&session, crate::game_plugins::OSU_ID, "osu!");
+        let clip = session.join("session_123.mp4");
+        std::fs::write(&clip, b"mp4").unwrap();
+
+        let pending_path = write_pending_for_saved_clip(&OsuSavedClip {
+            path: clip.clone(),
+            seconds: 60.0,
+            full_session: true,
+            recording_start_unix: Some(1_820_000_000),
+            recording_end_unix: Some(1_820_000_060),
+            title_events: vec![
+                OsuTitleEvent {
+                    unix_s: 1_820_000_005,
+                    title: "osu! - xi - Blue Zenith [FOUR DIMENSIONS]".into(),
+                },
+                OsuTitleEvent {
+                    unix_s: 1_820_000_045,
+                    title: "osu!".into(),
+                },
+            ],
+        })
+        .unwrap()
+        .expect("pending file");
+        let pending: OsuPendingEnrichment =
+            serde_json::from_str(&std::fs::read_to_string(&pending_path).unwrap()).unwrap();
+
+        let mapped = apply_scores_to_pending(&pending, &[], false).unwrap();
+
+        assert!(mapped.plays.is_empty());
+        let markers: ClipMarkers = serde_json::from_str(
+            &std::fs::read_to_string(clip.with_extension("markers.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(markers.plays.len(), 1);
+        assert_eq!(markers.plays[0].source, "osu_title");
+        assert_eq!(markers.plays[0].title, "Blue Zenith");
+        assert!(pending_path.exists());
+        let retried: OsuPendingEnrichment =
+            serde_json::from_str(&std::fs::read_to_string(&pending_path).unwrap()).unwrap();
+        assert_eq!(retried.status, OsuEnrichmentStatus::Pending);
+        assert_eq!(retried.attempts, 1);
+        assert!(retried
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("No osu! API plays matched"));
+    }
+
+    #[test]
     fn maps_proxy_scores_to_clip_plays_with_derived_start_clamp() {
         let pending = OsuPendingEnrichment {
             schema_version: 1,
@@ -819,17 +862,22 @@ mod tests {
         };
         let scores = vec![
             proxy_score("near-end", None, 1_103, None, false, &[]),
+            proxy_score("clock-skew-end", None, 1_112, None, false, &[]),
             proxy_score("too-late", None, 1_120, None, false, &[]),
         ];
 
         let mapped = map_proxy_scores_to_clip_plays(&pending, &scores, true);
 
         assert!(mapped.pagination_ceiling_reached);
-        assert_eq!(mapped.plays.len(), 1);
+        assert_eq!(mapped.plays.len(), 2);
         assert_eq!(mapped.plays[0].external_id, "near-end");
         assert_eq!(mapped.plays[0].t_start_s, 100.0);
         assert_eq!(mapped.plays[0].t_end_s, None);
         assert!(mapped.plays[0].derived_start);
+        assert_eq!(mapped.plays[1].external_id, "clock-skew-end");
+        assert_eq!(mapped.plays[1].t_start_s, 100.0);
+        assert_eq!(mapped.plays[1].t_end_s, None);
+        assert!(mapped.plays[1].derived_start);
     }
 
     #[test]
