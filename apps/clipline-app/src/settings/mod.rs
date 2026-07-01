@@ -28,7 +28,11 @@ pub mod types;
 pub(crate) mod validation;
 
 pub use cloud::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
-pub use games::{GamePluginSettings, GameRecordingMode, GameSettings};
+#[allow(unused_imports)]
+pub use games::{
+    GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings,
+    MatchEventSettings, TimelineMarkerSettings,
+};
 pub use hotkey::{is_global_shortcut_hotkey, normalize_hotkey, parse_hotkey};
 pub use persistence::{
     audio_preview_cache_dir, icon_cache_dir, normalize_media_dir, normalize_replay_cache_dir,

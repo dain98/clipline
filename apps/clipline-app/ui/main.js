@@ -340,6 +340,17 @@ $("upload-dialog").addEventListener("click", (ev) => {
   if (ev.target === $("upload-dialog")) closeUploadDialog();
 });
 
+$("game-plugin-settings-close").addEventListener("click", hideGamePluginSettingsDialog);
+$("game-plugin-settings-dialog").addEventListener("click", (ev) => {
+  if (ev.target === $("game-plugin-settings-dialog")) hideGamePluginSettingsDialog();
+});
+$("game-plugin-settings-dialog").addEventListener("close", () => {
+  gamePluginSettingsDialogPluginId = null;
+});
+document.querySelectorAll("[data-game-plugin-settings-tab]").forEach((tab) => {
+  tab.addEventListener("click", () => setGamePluginSettingsTab(tab.dataset.gamePluginSettingsTab));
+});
+
 $("trim-mode-toggle").addEventListener("click", () => setSimpleTrimMode(!simpleTrimMode));
 $("zoom-in").addEventListener("click", () => zoomAtPlayhead(0.5));
 $("zoom-out").addEventListener("click", () => zoomAtPlayhead(2));
@@ -427,6 +438,7 @@ document.addEventListener("keydown", (ev) => {
     $("quit-dialog").open ||
     $("update-dialog").open ||
     $("upload-dialog").open ||
+    $("game-plugin-settings-dialog").open ||
     $("keys-dialog").open
   ) return; // a dialog owns the keyboard
   if (ev.code === "Escape" && settingsOpen) {

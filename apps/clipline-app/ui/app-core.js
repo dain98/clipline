@@ -44,6 +44,7 @@ var {
   markerSummary,
   markerStyle,
   markerDigest,
+  normalizeGameReviewSettings,
   gameEventActiveIndex,
   gameEventRailItem,
   playerSummaryFields,
@@ -196,8 +197,40 @@ function clipDuration() {
   return 0;
 }
 
-function clipMarkers() {
-  return currentClip && currentClip.markers ? currentClip.markers.markers : [];
+function rawClipMarkers(clip = currentClip) {
+  return clip && clip.markers && Array.isArray(clip.markers.markers)
+    ? clip.markers.markers
+    : [];
+}
+
+function clipPlayerSummary(clip = currentClip) {
+  return clip && clip.markers ? clip.markers.player_summary : null;
+}
+
+function gameReviewSettingsForClip(clip = currentClip) {
+  const gameId = clip && clip.game && clip.game.id;
+  const settings = gameId && gamePluginSettings[gameId] ? gamePluginSettings[gameId] : null;
+  return normalizeGameReviewSettings(settings && settings.review);
+}
+
+function gameReviewEnabledForClip(clip = currentClip) {
+  return gameReviewSettingsForClip(clip).enabled;
+}
+
+function clipMarkers(clip = currentClip) {
+  return PlayerCore.reviewTimelineMarkers(
+    rawClipMarkers(clip),
+    clipPlayerSummary(clip),
+    gameReviewSettingsForClip(clip),
+  );
+}
+
+function clipMatchEventMarkers(clip = currentClip) {
+  return PlayerCore.reviewMatchEventMarkers(
+    rawClipMarkers(clip),
+    clipPlayerSummary(clip),
+    gameReviewSettingsForClip(clip),
+  );
 }
 
 function clipAudioTracks(clip = currentClip) {

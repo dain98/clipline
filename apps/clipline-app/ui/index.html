@@ -798,6 +798,26 @@
     </div>
   </dialog>
 
+  <dialog id="game-plugin-settings-dialog" class="game-plugin-settings-dialog">
+    <div class="game-plugin-settings-shell">
+      <header class="game-plugin-settings-head">
+        <div>
+          <strong id="game-plugin-settings-title">Game settings</strong>
+          <span id="game-plugin-settings-subtitle" class="hint"></span>
+        </div>
+        <button id="game-plugin-settings-close" class="icon-button" type="button" title="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6 18 18M18 6 6 18"/></svg>
+        </button>
+      </header>
+      <nav id="game-plugin-settings-tabs" class="game-plugin-settings-tabs" role="tablist" aria-label="Game settings">
+        <button type="button" class="tab active" role="tab" aria-selected="true" data-game-plugin-settings-tab="general">General</button>
+        <button type="button" class="tab" role="tab" aria-selected="false" data-game-plugin-settings-tab="match_events" tabindex="-1">Match events</button>
+        <button type="button" class="tab" role="tab" aria-selected="false" data-game-plugin-settings-tab="timeline_markers" tabindex="-1">Timeline markers</button>
+      </nav>
+      <div id="game-plugin-settings-body" class="game-plugin-settings-body"></div>
+    </div>
+  </dialog>
+
   <dialog id="keys-dialog" class="keys-dialog">
     <header class="keys-head">
       <strong>Keyboard shortcuts</strong>

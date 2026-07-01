@@ -1066,6 +1066,133 @@ const PlayerCore = (() => {
     return actorTeam === ownTeam ? "friendly" : "enemy";
   };
 
+  const matchEventDefaults = () => ({
+    enabled: true,
+    user_kills: true,
+    user_deaths: true,
+    user_assists: true,
+    team_kills: true,
+    team_deaths: true,
+    enemy_kills: true,
+    enemy_deaths: true,
+    objectives: true,
+    turrets: true,
+  });
+
+  const timelineMarkerDefaults = () => ({
+    enabled: true,
+    user_kills: true,
+    user_deaths: true,
+    user_assists: true,
+    objectives: true,
+    turrets: true,
+  });
+
+  const normalizeBooleanGroup = (settings, defaults) => {
+    const source = settings && typeof settings === "object" ? settings : {};
+    const out = {};
+    for (const [key, fallback] of Object.entries(defaults)) {
+      out[key] = Object.prototype.hasOwnProperty.call(source, key)
+        ? source[key] !== false
+        : fallback;
+    }
+    return out;
+  };
+
+  const normalizeGameReviewSettings = (settings) => {
+    const source = settings && typeof settings === "object" ? settings : {};
+    return {
+      enabled: Object.prototype.hasOwnProperty.call(source, "enabled")
+        ? source.enabled !== false
+        : true,
+      match_events: normalizeBooleanGroup(source.match_events, matchEventDefaults()),
+      timeline_markers: normalizeBooleanGroup(source.timeline_markers, timelineMarkerDefaults()),
+    };
+  };
+
+  const markerRelation = (summary, name) => {
+    const key = playerIdentityKey(name);
+    if (!key || !summary) return "";
+    if (key === localPlayerKey(summary)) return "user";
+    const participant = participantForName(summary, name);
+    if (!participant) return "";
+    const participantTeam = String(participant.team || "").trim();
+    const ownTeam = localTeam(summary);
+    if (!participantTeam || !ownTeam) return "";
+    return participantTeam === ownTeam ? "team" : "enemy";
+  };
+
+  const markerHasLocalAssist = (marker, summary) => {
+    const localKey = localPlayerKey(summary);
+    if (!localKey) return marker && marker.involves_local_player === true;
+    return Array.isArray(marker && marker.assisters)
+      && marker.assisters.some((name) => playerIdentityKey(name) === localKey);
+  };
+
+  const isObjectiveMarker = (marker) =>
+    marker && (marker.kind === "DragonKill" || marker.kind === "HeraldKill" || marker.kind === "BaronKill");
+
+  const isTurretMarker = (marker) => marker && marker.kind === "TurretKilled";
+
+  const isLocalKill = (marker, summary) =>
+    marker && marker.kind === "ChampionKill"
+      && (markerRelation(summary, marker.actor) === "user"
+        || (marker.involves_local_player === true && markerRelation(summary, marker.victim) !== "user"));
+
+  const isLocalDeath = (marker, summary) =>
+    marker
+      && (marker.kind === "ChampionDeath"
+        || (marker.kind === "ChampionKill" && markerRelation(summary, marker.victim) === "user"))
+      && (markerRelation(summary, marker.victim) === "user" || marker.involves_local_player === true);
+
+  const isLocalAssist = (marker, summary) =>
+    marker && marker.kind === "ChampionAssist"
+      && (markerRelation(summary, marker.actor) === "user"
+        || markerHasLocalAssist(marker, summary)
+        || marker.involves_local_player === true);
+
+  const matchEventEnabled = (marker, summary, settings) => {
+    if (isLocalKill(marker, summary)) return settings.user_kills;
+    if (isLocalDeath(marker, summary)) return settings.user_deaths;
+    if (isLocalAssist(marker, summary)) return settings.user_assists;
+    if (marker && marker.kind === "ChampionKill") {
+      const actorRelation = markerRelation(summary, marker.actor);
+      const victimRelation = markerRelation(summary, marker.victim);
+      return (actorRelation === "team" && settings.team_kills)
+        || (victimRelation === "team" && settings.team_deaths)
+        || (actorRelation === "enemy" && settings.enemy_kills)
+        || (victimRelation === "enemy" && settings.enemy_deaths);
+    }
+    if (isObjectiveMarker(marker)) return settings.objectives;
+    if (isTurretMarker(marker)) return settings.turrets;
+    return false;
+  };
+
+  const timelineMarkerEnabled = (marker, summary, settings) => {
+    if (isLocalKill(marker, summary)) return settings.user_kills;
+    if (isLocalDeath(marker, summary)) return settings.user_deaths;
+    if (isLocalAssist(marker, summary)) return settings.user_assists;
+    if (isObjectiveMarker(marker)) return settings.objectives;
+    if (isTurretMarker(marker)) return settings.turrets;
+    return false;
+  };
+
+  const reviewMatchEventMarkers = (markers, summary = null, settings = null) => {
+    const normalized = normalizeGameReviewSettings(settings);
+    if (!normalized.enabled || !normalized.match_events.enabled) return [];
+    return (markers || []).filter((marker) =>
+      matchEventEnabled(marker, summary, normalized.match_events)
+    );
+  };
+
+  const reviewTimelineMarkers = (markers, summary = null, settings = null) => {
+    const normalized = normalizeGameReviewSettings(settings);
+    if (!normalized.enabled || !normalized.timeline_markers.enabled) return [];
+    return (markers || []).filter((marker) =>
+      timelineMarkerEnabled(marker, summary, normalized.timeline_markers)
+    );
+  };
+
   const gameEventRailItem = (marker, summary = null, presentation = null, options = {}) => {
     const kind = marker && marker.kind ? marker.kind : "Other";
     const category = markerCategory(kind, presentation);
@@ -1511,6 +1638,9 @@ const PlayerCore = (() => {
     audioTrackSelectedRowCount,
     markerStyle,
     markerDigest,
+    normalizeGameReviewSettings,
+    reviewMatchEventMarkers,
+    reviewTimelineMarkers,
     playerSummaryLabel,
     playerSummaryFields,
     galleryCardPreview,

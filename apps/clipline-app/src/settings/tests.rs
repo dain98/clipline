@@ -82,7 +82,12 @@ fn legacy_settings_default_capture_region() {
             "disk_quota_gb": 10.0,
             "hotkey": "Alt+F10"
         }"#;
-    let settings: AppSettings = serde_json::from_str(json).unwrap();
+    let settings = AppSettings::load_from_object(
+        serde_json::from_str::<Value>(json)
+            .unwrap()
+            .as_object()
+            .unwrap(),
+    );
 
     assert_eq!(settings.capture_region.width, 1920);
     assert_eq!(settings.capture_region.height, 1080);
@@ -168,7 +173,12 @@ fn legacy_custom_games_default_to_replays_only() {
                 }]
             }
         }"#;
-    let settings: AppSettings = serde_json::from_str(json).unwrap();
+    let settings = AppSettings::load_from_object(
+        serde_json::from_str::<Value>(json)
+            .unwrap()
+            .as_object()
+            .unwrap(),
+    );
 
     assert_eq!(
         settings.games.custom_games[0].recording_mode,
@@ -209,6 +219,100 @@ fn legacy_global_game_recording_mode_migrates_to_custom_games() {
     );
     let saved = serde_json::to_value(&settings).unwrap();
     assert!(saved["games"].get("recording_mode").is_none());
+}
+
+#[test]
+fn supported_game_review_settings_round_trip_json() {
+    let json = r#"{
+            "games": {
+                "auto_detect": true,
+                "plugins": {
+                    "league_of_legends": {
+                        "enabled": true,
+                        "recording_mode": "full_session",
+                        "review": {
+                            "enabled": false,
+                            "match_events": {
+                                "enabled": true,
+                                "user_kills": true,
+                                "user_deaths": false,
+                                "user_assists": true,
+                                "team_kills": false,
+                                "team_deaths": true,
+                                "enemy_kills": false,
+                                "enemy_deaths": true,
+                                "objectives": false,
+                                "turrets": true
+                            },
+                            "timeline_markers": {
+                                "enabled": true,
+                                "user_kills": false,
+                                "user_deaths": true,
+                                "user_assists": false,
+                                "objectives": true,
+                                "turrets": false
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+    let settings = AppSettings::load_from_object(
+        serde_json::from_str::<Value>(json)
+            .unwrap()
+            .as_object()
+            .unwrap(),
+    );
+    let saved = serde_json::to_value(&settings).unwrap();
+    let review = &saved["games"]["plugins"]["league_of_legends"]["review"];
+
+    assert_eq!(review["enabled"], false);
+    assert_eq!(review["match_events"]["user_deaths"], false);
+    assert_eq!(review["match_events"]["team_kills"], false);
+    assert_eq!(review["match_events"]["enemy_deaths"], true);
+    assert_eq!(review["match_events"]["objectives"], false);
+    assert_eq!(review["timeline_markers"]["user_kills"], false);
+    assert_eq!(review["timeline_markers"]["user_assists"], false);
+    assert_eq!(review["timeline_markers"]["turrets"], false);
+}
+
+#[test]
+fn supported_game_review_settings_default_to_current_enhanced_view() {
+    let settings = AppSettings {
+        games: GameSettings {
+            auto_detect: true,
+            plugins: BTreeMap::from([(
+                "league_of_legends".into(),
+                GamePluginSettings {
+                    enabled: true,
+                    recording_mode: GameRecordingMode::FullSession,
+                    review: Default::default(),
+                },
+            )]),
+            custom_games: Vec::new(),
+        },
+        ..AppSettings::default()
+    };
+
+    let saved = serde_json::to_value(&settings).unwrap();
+    let review = &saved["games"]["plugins"]["league_of_legends"]["review"];
+    assert_eq!(review["enabled"], true);
+    assert_eq!(review["match_events"]["enabled"], true);
+    assert_eq!(review["match_events"]["user_kills"], true);
+    assert_eq!(review["match_events"]["user_deaths"], true);
+    assert_eq!(review["match_events"]["user_assists"], true);
+    assert_eq!(review["match_events"]["team_kills"], true);
+    assert_eq!(review["match_events"]["team_deaths"], true);
+    assert_eq!(review["match_events"]["enemy_kills"], true);
+    assert_eq!(review["match_events"]["enemy_deaths"], true);
+    assert_eq!(review["match_events"]["objectives"], true);
+    assert_eq!(review["match_events"]["turrets"], true);
+    assert_eq!(review["timeline_markers"]["enabled"], true);
+    assert_eq!(review["timeline_markers"]["user_kills"], true);
+    assert_eq!(review["timeline_markers"]["user_deaths"], true);
+    assert_eq!(review["timeline_markers"]["user_assists"], true);
+    assert_eq!(review["timeline_markers"]["objectives"], true);
+    assert_eq!(review["timeline_markers"]["turrets"], true);
 }
 
 #[test]
@@ -662,6 +766,7 @@ fn settings_round_trip_json() {
                 GamePluginSettings {
                     enabled: true,
                     recording_mode: GameRecordingMode::FullSession,
+                    review: Default::default(),
                 },
             )]),
             custom_games: vec![CustomGameSettings {
