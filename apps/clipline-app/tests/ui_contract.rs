@@ -2309,3 +2309,50 @@ fn gallery_supports_multi_select_bulk_actions() {
         "bulk delete should call the shared file-removal helper"
     );
 }
+
+#[test]
+fn gallery_card_hover_keeps_hit_target_stable() {
+    let css = styles_css();
+    let card_rule = css_rule_body(&css, ".card");
+    let hover_rule = css_rule_body(&css, ".card:hover");
+    let play_rule = css_rule_body(&css, ".card-play");
+    let play_hover_rule = css_rule_body(&css, ".card:hover .card-play");
+    let delete_rule = css_rule_body(&css, ".card-del");
+    let delete_hover_rule = css_rule_body(&css, ".card:hover .card-del");
+
+    assert_eq!(
+        css_decl_value(hover_rule, "transform"),
+        None,
+        "gallery card hover must not move the card hit target; moving it can make hover/click oscillate at card edges"
+    );
+    assert!(
+        !css_decl_value(card_rule, "transition")
+            .unwrap_or_default()
+            .split(',')
+            .any(|part| part.trim_start().starts_with("transform")),
+        "gallery cards should not transition their own transform because hover feedback must keep the hit target stable"
+    );
+    assert_eq!(
+        css_decl_value(play_rule, "pointer-events"),
+        Some("none"),
+        "the decorative play overlay must not take hover/click hit testing from the card"
+    );
+    assert!(
+        !css_decl_value(play_rule, "transition")
+            .unwrap_or_default()
+            .split(',')
+            .any(|part| part.trim_start().starts_with("transform"))
+            && css_decl_value(play_hover_rule, "transform").is_none(),
+        "the full-size play overlay should not transform on hover because it participates in thumbnail hit testing"
+    );
+    assert_eq!(
+        css_decl_value(delete_rule, "pointer-events"),
+        Some("none"),
+        "the invisible delete button should not be hit-testable before the card hover makes it visible"
+    );
+    assert_eq!(
+        css_decl_value(delete_hover_rule, "pointer-events"),
+        Some("auto"),
+        "the delete button should become clickable only while visible on card hover"
+    );
+}
