@@ -183,15 +183,16 @@ pub async fn retry_pending_enrichment<R: Runtime>(
     media_root: PathBuf,
 ) -> Result<(), String> {
     let settings = app.state::<RuntimeState>().settings().osu;
-    retry_pending_enrichment_with_settings(&settings, media_root).await?;
-    let _ = app.emit("osu-enrichment-updated", ());
+    if retry_pending_enrichment_with_settings(&settings, media_root).await? {
+        let _ = app.emit("osu-enrichment-updated", ());
+    }
     Ok(())
 }
 
 async fn retry_pending_enrichment_with_settings(
     settings: &OsuApiSettings,
     media_root: PathBuf,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let config = match config_from_settings(settings) {
         Ok(config) => config,
         Err(e) => {
@@ -199,36 +200,42 @@ async fn retry_pending_enrichment_with_settings(
             if !pending.is_empty() {
                 eprintln!("osu! enrichment pending: {e}");
             }
-            return Ok(());
+            return Ok(false);
         }
     };
     let pending = crate::osu_enrichment::discover_pending(&media_root)?;
     if pending.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let earliest = pending
         .iter()
         .map(|record| record.recording_start_unix)
         .min();
     let fetch = fetch_recent_scores(&config, earliest).await?;
+    let mut updated = false;
     for record in pending {
         match crate::osu_enrichment::apply_scores_to_pending(
             &record,
             &fetch.scores,
             fetch.pagination_ceiling_reached,
         ) {
-            Ok(mapped) => eprintln!(
-                "osu! enrichment complete for {}: {} play(s)",
-                record.clip_path,
-                mapped.plays.len()
-            ),
+            Ok(mapped) => {
+                if !mapped.plays.is_empty() {
+                    updated = true;
+                }
+                eprintln!(
+                    "osu! enrichment complete for {}: {} play(s)",
+                    record.clip_path,
+                    mapped.plays.len()
+                );
+            }
             Err(e) => {
                 eprintln!("osu! enrichment failed for {}: {e}", record.clip_path);
                 let _ = crate::osu_enrichment::mark_pending_failed(&record, &e);
             }
         }
     }
-    Ok(())
+    Ok(updated)
 }
 
 async fn fetch_recent_scores(
@@ -854,6 +861,8 @@ fn osu_setup_guide_html() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::osu_enrichment::{pending_path, OsuEnrichmentStatus, OsuPendingEnrichment};
+    use clipline_test_utils::TestDir;
 
     #[test]
     fn non_numeric_usernames_are_resolved_before_recent_score_requests() {
@@ -937,5 +946,39 @@ mod tests {
         .expect_err("missing stored secret should be actionable");
 
         assert!(error.contains("client secret"));
+    }
+
+    #[tokio::test]
+    async fn pending_retry_without_api_credentials_reports_no_visible_update() {
+        let dir = TestDir::new("clipline-osu-api", "retry-no-credentials");
+        let clip = dir.path().join("session.mp4");
+        std::fs::write(&clip, b"").unwrap();
+        let pending = OsuPendingEnrichment {
+            schema_version: 1,
+            clip_path: clip.display().to_string(),
+            recording_start_unix: 1_820_000_000,
+            recording_end_unix: 1_820_000_120,
+            clip_duration_s: 120.0,
+            status: OsuEnrichmentStatus::Pending,
+            attempts: 0,
+            pagination_ceiling_reached: false,
+            title_events: Vec::new(),
+            message: None,
+        };
+        std::fs::write(
+            pending_path(&clip),
+            serde_json::to_string_pretty(&pending).unwrap(),
+        )
+        .unwrap();
+
+        let changed =
+            retry_pending_enrichment_with_settings(&OsuApiSettings::default(), dir.path().into())
+                .await
+                .unwrap();
+
+        assert!(
+            !changed,
+            "missing osu! API credentials should not trigger an osu-enrichment-updated refresh loop"
+        );
     }
 }
