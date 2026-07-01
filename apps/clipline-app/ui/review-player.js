@@ -615,9 +615,9 @@ const MARKER_ICON_FALLBACK = {
   structure: MARKER_ICONS.TurretKilled,
   info: MARKER_ICONS.Other,
 };
-// Game-authentic art for the kinds that actually reach the review timeline
-// (is_timeline_marker). Used as a CSS mask so each silhouette still tints with
-// its category color (--mc); kinds without art fall back to the SVGs above.
+// Game-authentic art for marker kinds shown by the review timeline filter. Used
+// as a CSS mask so each silhouette still tints with its category color (--mc);
+// kinds without art fall back to the SVGs above.
 const MARKER_IMAGES = {
   ChampionKill: "assets/markers/kill.png",
   ChampionAssist: "assets/markers/assist.png",

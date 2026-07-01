@@ -14,7 +14,9 @@ use clipline_events::GameId;
 use serde::{Deserialize, Serialize};
 
 use crate::markers::PollerMsg;
-use crate::settings::{GamePluginSettings, GameRecordingMode, GameSettings};
+use crate::settings::{
+    GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings,
+};
 
 pub const LEAGUE_OF_LEGENDS_ID: &str = "league_of_legends";
 pub const LEAGUE_LIVE_CLIENT_EVENT_SOURCE: &str = "league_live_client";
@@ -35,6 +37,7 @@ pub struct GamePluginInfo {
     pub summary: String,
     pub default_enabled: bool,
     pub default_recording_mode: GameRecordingMode,
+    pub default_review: GamePluginReviewSettings,
     pub event_markers: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presentation: Option<serde_json::Value>,
@@ -170,12 +173,14 @@ impl GamePlugin {
     }
 
     pub fn info(&self) -> GamePluginInfo {
+        let default_settings = self.default_settings();
         GamePluginInfo {
             id: self.id().into(),
             name: self.manifest.name.clone(),
             summary: self.manifest.summary.clone(),
-            default_enabled: self.manifest.default_enabled,
-            default_recording_mode: self.manifest.default_recording_mode,
+            default_enabled: default_settings.enabled,
+            default_recording_mode: default_settings.recording_mode,
+            default_review: default_settings.review,
             event_markers: self
                 .manifest
                 .event_source

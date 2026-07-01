@@ -258,15 +258,20 @@ pub async fn clip_poster(
     .map_err(|e| format!("clip poster task: {e}"))?
 }
 
-/// The frame to grab a poster from: the first timeline marker (the action
-/// moment that makes the best thumbnail), else a little into the clip to skip
-/// the black opening frame.
+/// The frame to grab a poster from: prefer a local-player review event, then
+/// the first review event, else a little into the clip to skip black opening.
 fn poster_seek_seconds(clip: &Path) -> f64 {
     let Some(markers) = util::read_markers_raw(clip) else {
         return 1.0;
     };
+    let markers = filter_review_markers(markers);
     let duration_ok = markers.duration_s.is_finite() && markers.duration_s > 0.0;
-    if let Some(first) = markers.markers.first() {
+    if let Some(first) = markers
+        .markers
+        .iter()
+        .find(|marker| marker.event.involves_local_player)
+        .or_else(|| markers.markers.first())
+    {
         let t = first.t_s.max(0.0);
         return if duration_ok {
             t.min((markers.duration_s - 0.2).max(0.0))
@@ -1778,6 +1783,30 @@ mod tests {
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].duration_s, Some(42.5));
         assert_eq!(clips[0].markers.as_ref().unwrap().markers.len(), 1);
+    }
+
+    #[test]
+    fn poster_seek_seconds_prefers_local_player_marker_for_thumbnail() {
+        let dir = TestDir::new("clipline-library", "poster-local-marker");
+        let clip = dir.path().join("clip.mp4");
+        touch_mp4(&clip);
+        let markers = ClipMarkers {
+            recording_start_s: 0.0,
+            duration_s: 20.0,
+            player_summary: None,
+            audio_tracks: Vec::new(),
+            markers: vec![
+                marker_with(1.0, EventKind::DragonKill, false),
+                marker_with(8.0, EventKind::ChampionAssist, true),
+            ],
+        };
+        std::fs::write(
+            clip.with_extension("markers.json"),
+            serde_json::to_string(&markers).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(poster_seek_seconds(&clip), 8.0);
     }
 
     #[test]

@@ -479,6 +479,7 @@ mod tests {
                 && plugin.name == "League of Legends"
                 && plugin.default_enabled
                 && plugin.default_recording_mode == GameRecordingMode::FullSession
+                && plugin.default_review == crate::settings::GamePluginReviewSettings::default()
                 && plugin.event_markers
         }));
     }

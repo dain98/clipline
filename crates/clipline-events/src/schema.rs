@@ -51,20 +51,6 @@ pub struct GameEvent {
     pub involves_local_player: bool,
 }
 
-/// Product-level timeline policy: keep only markers that are useful while
-/// reviewing a match, not every event the game API reports.
-pub fn is_timeline_marker(event: &GameEvent) -> bool {
-    match event.kind {
-        EventKind::ChampionKill | EventKind::ChampionAssist => event.involves_local_player,
-        EventKind::ChampionDeath => true,
-        EventKind::TurretKilled
-        | EventKind::DragonKill
-        | EventKind::HeraldKill
-        | EventKind::BaronKill => true,
-        _ => false,
-    }
-}
-
 /// Storage/review policy: keep events that a review surface may show after
 /// user filtering. This is intentionally broader than the default timeline.
 pub fn is_review_event(event: &GameEvent) -> bool {
@@ -116,35 +102,6 @@ mod tests {
         let json = serde_json::to_string(&ev).unwrap();
         let back: GameEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(ev, back);
-    }
-
-    #[test]
-    fn timeline_policy_keeps_only_review_worthy_markers() {
-        assert!(is_timeline_marker(&ev(EventKind::ChampionKill, true)));
-        assert!(!is_timeline_marker(&ev(EventKind::ChampionKill, false)));
-        assert!(is_timeline_marker(&ev(EventKind::ChampionAssist, true)));
-        assert!(is_timeline_marker(&ev(EventKind::ChampionDeath, false)));
-        assert!(is_timeline_marker(&ev(EventKind::TurretKilled, false)));
-        assert!(is_timeline_marker(&ev(EventKind::DragonKill, false)));
-        assert!(is_timeline_marker(&ev(EventKind::HeraldKill, false)));
-        assert!(is_timeline_marker(&ev(EventKind::BaronKill, false)));
-
-        for kind in [
-            EventKind::GameStart,
-            EventKind::MinionsSpawning,
-            EventKind::FirstBrick,
-            EventKind::InhibKilled,
-            EventKind::Multikill,
-            EventKind::Ace,
-            EventKind::FirstBlood,
-            EventKind::GameEnd,
-            EventKind::Other,
-        ] {
-            assert!(
-                !is_timeline_marker(&ev(kind, true)),
-                "{kind:?} should not be shown on the review timeline"
-            );
-        }
     }
 
     #[test]

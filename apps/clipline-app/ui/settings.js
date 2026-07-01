@@ -195,12 +195,14 @@ function defaultGamePluginSettings(plugin) {
     recording_mode: normalizeGameRecordingMode(
       plugin && plugin.default_recording_mode ? plugin.default_recording_mode : "full_session"
     ),
-    review: defaultGamePluginReviewSettings(),
+    review: defaultGamePluginReviewSettings(plugin),
   };
 }
 
-function defaultGamePluginReviewSettings() {
-  return PlayerCore.normalizeGameReviewSettings(null);
+function defaultGamePluginReviewSettings(plugin = null) {
+  return normalizeGamePluginReviewSettings(
+    plugin && plugin.default_review ? plugin.default_review : null
+  );
 }
 
 function normalizeGamePluginReviewSettings(settings) {

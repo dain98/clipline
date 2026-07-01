@@ -713,6 +713,7 @@ fn review_player_owns_all_controls() {
     assert!(
         main_js().contains("function defaultGamePluginReviewSettings")
             && main_js().contains("function normalizeGamePluginReviewSettings")
+            && main_js().contains("plugin.default_review")
             && main_js().contains("function renderGamePluginSettingsButton")
             && main_js().contains("function showGamePluginSettingsDialog")
             && main_js().contains("function hideGamePluginSettingsDialog")
@@ -751,7 +752,8 @@ fn review_player_owns_all_controls() {
             && styles_css().contains(".game-review-option-group")
             && styles_css().contains(".game-review-option-list")
             && styles_css().contains("align-items: start")
-            && styles_css().contains("align-content: start"),
+            && styles_css().contains("align-content: start")
+            && !main_js().contains("is_timeline_marker"),
         "supported games must expose persisted League match detail controls in the settings dialog"
     );
     assert!(
