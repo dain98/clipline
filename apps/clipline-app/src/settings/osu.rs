@@ -1,0 +1,42 @@
+//! osu! API settings persisted in `settings.json`.
+//!
+//! The OAuth client secret is intentionally not part of this struct. It is
+//! stored in Windows Credential Manager under `credential_target`.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OsuApiSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_connected_username: Option<String>,
+}
+
+impl OsuApiSettings {
+    pub fn normalize(&mut self) {
+        self.client_id = clean_optional(self.client_id.take());
+        self.user = clean_optional(self.user.take());
+        self.credential_target = clean_optional(self.credential_target.take());
+        self.last_connected_username = clean_optional(self.last_connected_username.take());
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(client_id) = self.client_id.as_deref() {
+            if client_id.parse::<u64>().is_err() {
+                return Err("osu! client id must be a number".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn clean_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}

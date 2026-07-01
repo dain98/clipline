@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::GameEvent;
+use crate::schema::{GameEvent, GameId};
 
 /// All anchored events of the current recording session, in arrival order.
 #[derive(Debug, Default)]
@@ -84,6 +84,49 @@ pub struct ClipAudioTrack {
     pub kind: Option<String>,
 }
 
+/// One score/play interval inside a saved clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipPlay {
+    pub game_id: GameId,
+    pub source: String,
+    pub external_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beatmap_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beatmapset_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_url: Option<String>,
+    pub title: String,
+    pub artist: String,
+    pub difficulty: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mapper: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub star_rating: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mods: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<String>,
+    pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accuracy: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_combo: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_score: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pp: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    pub ended_at: String,
+    pub derived_start: bool,
+    pub t_start_s: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t_end_s: Option<f64>,
+}
+
 /// The `<clip>.markers.json` sidecar document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipMarkers {
@@ -94,6 +137,8 @@ pub struct ClipMarkers {
     pub player_summary: Option<PlayerSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audio_tracks: Vec<ClipAudioTrack>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plays: Vec<ClipPlay>,
     pub markers: Vec<ClipMarker>,
 }
 
@@ -136,6 +181,7 @@ impl MarkerLog {
             duration_s: end_s - start_s,
             player_summary: None,
             audio_tracks: Vec::new(),
+            plays: Vec::new(),
             markers,
         }
     }
@@ -144,7 +190,7 @@ impl MarkerLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{EventKind, GameEvent, GameId};
+    use crate::schema::EventKind;
 
     fn ev(kind: EventKind, offset_s: f64) -> GameEvent {
         GameEvent {
@@ -254,6 +300,49 @@ mod tests {
         assert!(back.player_summary.is_none());
         assert!(back.audio_tracks.is_empty());
         assert!(back.markers.is_empty());
+        assert!(back.plays.is_empty());
+    }
+
+    #[test]
+    fn sidecar_serializes_osu_play_round_trip() {
+        let clip = ClipMarkers {
+            recording_start_s: 120.0,
+            duration_s: 180.0,
+            player_summary: None,
+            audio_tracks: Vec::new(),
+            markers: Vec::new(),
+            plays: vec![ClipPlay {
+                game_id: GameId::Osu,
+                source: "osu_api".into(),
+                external_id: "solo-score:42".into(),
+                url: Some("https://osu.ppy.sh/scores/42".into()),
+                beatmap_id: Some(123),
+                beatmapset_id: Some(456),
+                cover_url: Some("https://assets.ppy.sh/beatmaps/456/covers/list.jpg".into()),
+                title: "Everything will freeze".into(),
+                artist: "UNDEAD CORPORATION".into(),
+                difficulty: "Time Freeze".into(),
+                mapper: Some("Ekoro".into()),
+                star_rating: Some(6.42),
+                mods: vec!["DT".into(), "HD".into()],
+                rank: Some("A".into()),
+                passed: false,
+                accuracy: Some(0.9345),
+                max_combo: Some(789),
+                total_score: Some(1234567),
+                pp: None,
+                started_at: None,
+                ended_at: "2026-06-30T23:55:00+00:00".into(),
+                derived_start: true,
+                t_start_s: 5.0,
+                t_end_s: Some(95.0),
+            }],
+        };
+
+        let json = serde_json::to_string_pretty(&clip).unwrap();
+        let back: ClipMarkers = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.plays, clip.plays);
     }
 
     #[test]

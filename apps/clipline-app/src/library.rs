@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::Mutex;
 
-use clipline_events::{is_review_event, ClipMarker, ClipMarkers};
+use clipline_events::{is_review_event, ClipMarker, ClipMarkers, ClipPlay};
 use clipline_mp4::{
     remux_with_mixed_audio_track, remux_with_selected_audio_tracks, trim_keyframe_aligned_file,
 };
@@ -156,6 +156,7 @@ pub async fn list_clips(
 }
 
 fn list_clips_from_dir(dir: PathBuf) -> Result<Vec<ClipInfo>, String> {
+    crate::osu_enrichment::retry_pending_on_refresh(&dir);
     let mut clips = Vec::new();
     push_clips_from(&dir, None, &mut clips)?;
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
@@ -295,6 +296,7 @@ pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Res
 fn remove_clip_files(target: &Path) -> Result<(), String> {
     std::fs::remove_file(target).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(target.with_extension("markers.json"));
+    let _ = std::fs::remove_file(crate::osu_enrichment::pending_path(target));
     let _ = std::fs::remove_file(crate::poster::poster_path(target));
     Ok(())
 }
@@ -429,12 +431,17 @@ pub async fn export_clip(
     path: String,
     start_s: f64,
     end_s: f64,
+    title: Option<String>,
+    include_markers: Option<bool>,
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<ExportedClipInfo, String> {
     let source = validate_clip_path(&settings, &path)?;
-    tauri::async_runtime::spawn_blocking(move || export_clip_file(source, start_s, end_s))
-        .await
-        .map_err(|e| format!("export clip task: {e}"))?
+    let include_markers = include_markers.unwrap_or(true);
+    tauri::async_runtime::spawn_blocking(move || {
+        export_clip_file(source, start_s, end_s, title, include_markers)
+    })
+    .await
+    .map_err(|e| format!("export clip task: {e}"))?
 }
 
 #[tauri::command]
@@ -802,7 +809,13 @@ fn ffmpeg_audio_mix_filter(selected_audio_track_indices: &[u32]) -> Result<Strin
 
 pub(crate) use clipline_capture::ffmpeg::suppress_console;
 
-fn export_clip_file(source: PathBuf, start_s: f64, end_s: f64) -> Result<ExportedClipInfo, String> {
+fn export_clip_file(
+    source: PathBuf,
+    start_s: f64,
+    end_s: f64,
+    title: Option<String>,
+    include_markers: bool,
+) -> Result<ExportedClipInfo, String> {
     let tmp = unique_temp_export_path(&source)?;
     let info = match trim_keyframe_aligned_file(&source, &tmp, start_s, end_s) {
         Ok(info) => info,
@@ -811,18 +824,18 @@ fn export_clip_file(source: PathBuf, start_s: f64, end_s: f64) -> Result<Exporte
             return Err(e.to_string());
         }
     };
-    let target = unique_export_path(&source, info.aligned_start_s, info.aligned_end_s)?;
+    let target = unique_export_path(&source, info.aligned_start_s, info.aligned_end_s, title)?;
     std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
 
-    let mut exported_markers = None;
-    if let Some(markers) = util::read_markers_raw(&source).map(filter_review_markers) {
-        let cropped = crop_markers(&markers, info.aligned_start_s, info.aligned_end_s);
-        if has_marker_sidecar_content(&cropped) {
-            let json = serde_json::to_string_pretty(&cropped).map_err(|e| e.to_string())?;
-            std::fs::write(target.with_extension("markers.json"), json)
-                .map_err(|e| e.to_string())?;
-            exported_markers = Some(cropped);
-        }
+    let exported_markers = export_markers_for_range(
+        &source,
+        info.aligned_start_s,
+        info.aligned_end_s,
+        include_markers,
+    )?;
+    if let Some(markers) = &exported_markers {
+        let json = serde_json::to_string_pretty(markers).map_err(|e| e.to_string())?;
+        std::fs::write(target.with_extension("markers.json"), json).map_err(|e| e.to_string())?;
     }
     let meta =
         std::fs::metadata(&target).map_err(|e| format!("read exported clip metadata: {e}"))?;
@@ -1149,6 +1162,7 @@ fn has_marker_sidecar_content(markers: &ClipMarkers) -> bool {
     !markers.markers.is_empty()
         || markers.player_summary.is_some()
         || !markers.audio_tracks.is_empty()
+        || !markers.plays.is_empty()
 }
 
 fn crop_markers(markers: &ClipMarkers, start_s: f64, end_s: f64) -> ClipMarkers {
@@ -1161,13 +1175,53 @@ fn crop_markers(markers: &ClipMarkers, start_s: f64, end_s: f64) -> ClipMarkers 
             event: m.event.clone(),
         })
         .collect();
+    let plays = markers
+        .plays
+        .iter()
+        .filter_map(|play| crop_play(play, start_s, end_s))
+        .collect();
     ClipMarkers {
         recording_start_s: markers.recording_start_s + start_s,
         duration_s: end_s - start_s,
         player_summary: markers.player_summary.clone(),
         audio_tracks: markers.audio_tracks.clone(),
+        plays,
         markers: cropped,
     }
+}
+
+fn crop_play(play: &ClipPlay, start_s: f64, end_s: f64) -> Option<ClipPlay> {
+    if let Some(play_end_s) = play.t_end_s {
+        if play_end_s <= start_s || play.t_start_s >= end_s {
+            return None;
+        }
+        let mut cropped = play.clone();
+        cropped.t_start_s = play.t_start_s.max(start_s) - start_s;
+        cropped.t_end_s = Some(play_end_s.min(end_s) - start_s);
+        Some(cropped)
+    } else if play.t_start_s >= start_s && play.t_start_s < end_s {
+        let mut cropped = play.clone();
+        cropped.t_start_s -= start_s;
+        Some(cropped)
+    } else {
+        None
+    }
+}
+
+fn export_markers_for_range(
+    source: &Path,
+    start_s: f64,
+    end_s: f64,
+    include_markers: bool,
+) -> Result<Option<ClipMarkers>, String> {
+    if !include_markers {
+        return Ok(None);
+    }
+    let Some(markers) = util::read_markers_raw(source).map(filter_review_markers) else {
+        return Ok(None);
+    };
+    let cropped = crop_markers(&markers, start_s, end_s);
+    Ok(has_marker_sidecar_content(&cropped).then_some(cropped))
 }
 
 fn unique_temp_export_path(source: &Path) -> Result<PathBuf, String> {
@@ -1188,7 +1242,12 @@ fn unique_temp_export_path(source: &Path) -> Result<PathBuf, String> {
     Err("could not choose an unused temporary export filename".into())
 }
 
-fn unique_export_path(source: &Path, start_s: f64, end_s: f64) -> Result<PathBuf, String> {
+fn unique_export_path(
+    source: &Path,
+    start_s: f64,
+    end_s: f64,
+    title: Option<String>,
+) -> Result<PathBuf, String> {
     let parent = source
         .parent()
         .ok_or_else(|| "source clip has no parent directory".to_string())?;
@@ -1198,8 +1257,15 @@ fn unique_export_path(source: &Path, start_s: f64, end_s: f64) -> Result<PathBuf
         .ok_or_else(|| "source clip has no file stem".to_string())?;
     let start_ms = (start_s * 1000.0).round().max(0.0) as u64;
     let end_ms = (end_s * 1000.0).round().max(0.0) as u64;
+    let titled_stem = title.as_deref().and_then(export_title_stem);
     for suffix in 0..1000u32 {
-        let name = if suffix == 0 {
+        let name = if let Some(titled_stem) = titled_stem.as_deref() {
+            if suffix == 0 {
+                format!("{titled_stem}.mp4")
+            } else {
+                format!("{titled_stem}_{suffix}.mp4")
+            }
+        } else if suffix == 0 {
             format!("{stem}_trim_{start_ms:06}_{end_ms:06}.mp4")
         } else {
             format!("{stem}_trim_{start_ms:06}_{end_ms:06}_{suffix}.mp4")
@@ -1212,6 +1278,28 @@ fn unique_export_path(source: &Path, start_s: f64, end_s: f64) -> Result<PathBuf
     Err("could not choose an unused export filename".into())
 }
 
+fn export_title_stem(title: &str) -> Option<String> {
+    let sanitized: String = title
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_control()
+                || matches!(ch, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '/' | '\\')
+            {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect();
+    let collapsed = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    let stem = collapsed.trim().trim_end_matches(['.', ' ']);
+    if stem.is_empty() || stem == "." || stem == ".." || is_reserved_windows_file_name(stem) {
+        None
+    } else {
+        Some(stem.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1219,7 +1307,7 @@ mod tests {
 
     use audiopus::coder::Encoder;
     use audiopus::{Application, Channels, SampleRate};
-    use clipline_events::{ClipAudioTrack, EventKind, GameEvent, GameId, PlayerSummary};
+    use clipline_events::{ClipAudioTrack, ClipPlay, EventKind, GameEvent, GameId, PlayerSummary};
     use clipline_mp4::{
         AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
     };
@@ -1247,6 +1335,35 @@ mod tests {
         }
     }
 
+    fn osu_play(t_start_s: f64, t_end_s: Option<f64>, external_id: &str) -> ClipPlay {
+        ClipPlay {
+            game_id: GameId::Osu,
+            source: "osu_api".into(),
+            external_id: external_id.into(),
+            url: None,
+            beatmap_id: Some(123),
+            beatmapset_id: Some(456),
+            cover_url: None,
+            title: "Everything will freeze".into(),
+            artist: "UNDEAD CORPORATION".into(),
+            difficulty: "Time Freeze".into(),
+            mapper: Some("Ekoro".into()),
+            star_rating: None,
+            mods: vec!["HD".into()],
+            rank: Some("A".into()),
+            passed: true,
+            accuracy: Some(0.9876),
+            max_combo: Some(1234),
+            total_score: Some(987654),
+            pp: Some(123.4),
+            started_at: Some("2026-06-30T23:54:00+00:00".into()),
+            ended_at: "2026-06-30T23:56:00+00:00".into(),
+            derived_start: false,
+            t_start_s,
+            t_end_s,
+        }
+    }
+
     #[test]
     fn crop_markers_rebases_times_and_recording_start() {
         let markers = ClipMarkers {
@@ -1266,6 +1383,7 @@ mod tests {
                 items: Vec::new(),
             }),
             audio_tracks: Vec::new(),
+            plays: Vec::new(),
             markers: vec![marker(0.5), marker(1.5), marker(2.5)],
         };
 
@@ -1305,6 +1423,7 @@ mod tests {
                 items: Vec::new(),
             }),
             audio_tracks: Vec::new(),
+            plays: Vec::new(),
             markers: vec![
                 marker_with(1.0, EventKind::ChampionKill, true),
                 marker_with(2.0, EventKind::ChampionKill, false),
@@ -1367,6 +1486,7 @@ mod tests {
                 items: Vec::new(),
             }),
             audio_tracks: Vec::new(),
+            plays: Vec::new(),
             markers: Vec::new(),
         };
 
@@ -1380,10 +1500,79 @@ mod tests {
             duration_s: 20.0,
             player_summary: None,
             audio_tracks: Vec::new(),
+            plays: Vec::new(),
             markers: Vec::new(),
         };
 
         assert!(!has_marker_sidecar_content(&markers));
+    }
+
+    #[test]
+    fn play_only_markers_are_export_sidecar_content() {
+        let markers = ClipMarkers {
+            recording_start_s: 10.0,
+            duration_s: 20.0,
+            player_summary: None,
+            audio_tracks: Vec::new(),
+            plays: vec![osu_play(2.0, Some(8.0), "score-1")],
+            markers: Vec::new(),
+        };
+
+        assert!(has_marker_sidecar_content(&markers));
+    }
+
+    #[test]
+    fn export_markers_can_be_suppressed_for_play_exports() {
+        let dir = TestDir::new("clipline-library", "export-no-markers");
+        let source = dir.path().join("session.mp4");
+        std::fs::write(&source, b"mp4").unwrap();
+        let markers = ClipMarkers {
+            recording_start_s: 10.0,
+            duration_s: 20.0,
+            player_summary: None,
+            audio_tracks: Vec::new(),
+            plays: vec![osu_play(2.0, Some(8.0), "score-1")],
+            markers: Vec::new(),
+        };
+        std::fs::write(
+            source.with_extension("markers.json"),
+            serde_json::to_string(&markers).unwrap(),
+        )
+        .unwrap();
+
+        assert!(export_markers_for_range(&source, 2.0, 8.0, false)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn crop_markers_keeps_and_clamps_overlapping_plays() {
+        let markers = ClipMarkers {
+            recording_start_s: 10.0,
+            duration_s: 20.0,
+            player_summary: None,
+            audio_tracks: Vec::new(),
+            plays: vec![
+                osu_play(0.0, Some(2.0), "before"),
+                osu_play(2.0, Some(8.0), "overlap"),
+                osu_play(5.0, None, "point"),
+                osu_play(8.0, Some(12.0), "after"),
+            ],
+            markers: Vec::new(),
+        };
+
+        let cropped = crop_markers(&markers, 4.0, 6.0);
+
+        let ids: Vec<_> = cropped
+            .plays
+            .iter()
+            .map(|play| play.external_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["overlap", "point"]);
+        assert_eq!(cropped.plays[0].t_start_s, 0.0);
+        assert_eq!(cropped.plays[0].t_end_s, Some(2.0));
+        assert_eq!(cropped.plays[1].t_start_s, 1.0);
+        assert_eq!(cropped.plays[1].t_end_s, None);
     }
 
     #[test]
@@ -1399,6 +1588,7 @@ mod tests {
             duration_s: 20.0,
             player_summary: None,
             audio_tracks: tracks.clone(),
+            plays: Vec::new(),
             markers: Vec::new(),
         };
 
@@ -1471,6 +1661,7 @@ mod tests {
                     kind: Some("microphone".into()),
                 },
             ],
+            plays: Vec::new(),
             markers: Vec::new(),
         };
         std::fs::write(
@@ -1537,6 +1728,7 @@ mod tests {
                     kind: Some("microphone".into()),
                 },
             ],
+            plays: Vec::new(),
             markers: Vec::new(),
         };
         std::fs::write(
@@ -1580,6 +1772,7 @@ mod tests {
                     kind: Some("microphone".into()),
                 },
             ],
+            plays: Vec::new(),
             markers: Vec::new(),
         };
         std::fs::write(
@@ -1632,6 +1825,7 @@ mod tests {
                     kind: Some("microphone".into()),
                 },
             ],
+            plays: Vec::new(),
             markers: Vec::new(),
         };
 
@@ -1672,6 +1866,7 @@ mod tests {
                     kind: Some("microphone".into()),
                 },
             ],
+            plays: Vec::new(),
             markers: Vec::new(),
         };
         std::fs::write(
@@ -1751,11 +1946,31 @@ mod tests {
         std::fs::write(&source, b"source").unwrap();
         std::fs::write(&first, b"existing").unwrap();
 
-        let path = unique_export_path(&source, 1.0, 2.0).unwrap();
+        let path = unique_export_path(&source, 1.0, 2.0, None).unwrap();
 
         assert_eq!(
             path.file_name().unwrap().to_string_lossy(),
             "clip_1_trim_001000_002000_1.mp4"
+        );
+    }
+
+    #[test]
+    fn unique_export_path_uses_requested_clip_title_when_present() {
+        let dir = TestDir::new("clipline-library", "export-title");
+        let source = dir.path().join("session_123.mp4");
+        std::fs::write(&source, b"source").unwrap();
+
+        let path = unique_export_path(
+            &source,
+            145.783,
+            188.167,
+            Some("I MY ME MINE - Trouble".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            "I MY ME MINE - Trouble.mp4"
         );
     }
 
@@ -1770,6 +1985,7 @@ mod tests {
             duration_s: 42.5,
             player_summary: None,
             audio_tracks: Vec::new(),
+            plays: Vec::new(),
             markers: vec![marker(1.0)],
         };
         std::fs::write(
@@ -1795,6 +2011,7 @@ mod tests {
             duration_s: 20.0,
             player_summary: None,
             audio_tracks: Vec::new(),
+            plays: Vec::new(),
             markers: vec![
                 marker_with(1.0, EventKind::DragonKill, false),
                 marker_with(8.0, EventKind::ChampionAssist, true),
@@ -2007,13 +2224,15 @@ mod tests {
         let root = dir.path().join("media");
         std::fs::create_dir_all(&root).unwrap();
 
-        // Two real clips, each with a markers sidecar and a cached poster.
+        // Two real clips, each with markers, pending osu! enrichment, and poster sidecars.
         let a = root.join("a.mp4");
         let b = root.join("b.mp4");
         touch_mp4(&a);
         touch_mp4(&b);
         std::fs::write(a.with_extension("markers.json"), b"{}").unwrap();
         std::fs::write(b.with_extension("markers.json"), b"{}").unwrap();
+        std::fs::write(a.with_extension("osu-enrichment.json"), b"{}").unwrap();
+        std::fs::write(b.with_extension("osu-enrichment.json"), b"{}").unwrap();
         std::fs::write(crate::poster::poster_path(&a), b"poster").unwrap();
         std::fs::write(crate::poster::poster_path(&b), b"poster").unwrap();
 
@@ -2021,6 +2240,7 @@ mod tests {
         let c = root.join("c.mp4");
         touch_mp4(&c);
         std::fs::write(c.with_extension("markers.json"), b"{}").unwrap();
+        std::fs::write(c.with_extension("osu-enrichment.json"), b"{}").unwrap();
 
         let validated = vec![
             (a.to_str().unwrap().to_string(), a.clone()),
@@ -2044,10 +2264,22 @@ mod tests {
             !crate::poster::poster_path(&b).exists(),
             "b.mp4 poster should be removed"
         );
+        assert!(
+            !a.with_extension("osu-enrichment.json").exists(),
+            "a.mp4 pending osu! sidecar should be removed"
+        );
+        assert!(
+            !b.with_extension("osu-enrichment.json").exists(),
+            "b.mp4 pending osu! sidecar should be removed"
+        );
         assert!(c.exists(), "c.mp4 must be left untouched");
         assert!(
             c.with_extension("markers.json").exists(),
             "c.mp4 markers sidecar must be left untouched"
+        );
+        assert!(
+            c.with_extension("osu-enrichment.json").exists(),
+            "c.mp4 pending osu! sidecar must be left untouched"
         );
     }
 

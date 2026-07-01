@@ -1010,6 +1010,37 @@ fn cloud_settings_normalize_connected_display_name() {
 }
 
 #[test]
+fn osu_api_settings_round_trip_without_secret() {
+    let settings = AppSettings {
+        osu: OsuApiSettings {
+            client_id: Some("61835".into()),
+            user: Some("3426414".into()),
+            credential_target: Some("Clipline osu!:61835:3426414".into()),
+            last_connected_username: Some("Dain".into()),
+        },
+        ..AppSettings::default()
+    };
+
+    let json = serde_json::to_string(&settings).unwrap();
+    assert!(
+        !json.contains("client_secret"),
+        "osu! client secret must not be serialized into settings.json"
+    );
+    let round_trip: AppSettings = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(round_trip.osu.client_id.as_deref(), Some("61835"));
+    assert_eq!(round_trip.osu.user.as_deref(), Some("3426414"));
+    assert_eq!(
+        round_trip.osu.credential_target.as_deref(),
+        Some("Clipline osu!:61835:3426414")
+    );
+    assert_eq!(
+        round_trip.osu.last_connected_username.as_deref(),
+        Some("Dain")
+    );
+}
+
+#[test]
 fn disk_replay_requires_acknowledgement_and_folder() {
     let mut settings = AppSettings {
         replay_storage: ReplayStorageSettings {

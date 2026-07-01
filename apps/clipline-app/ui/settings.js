@@ -20,6 +20,7 @@ function fillSettings(s) {
   const replayStorage = { ...defaultReplayStorageSettings(), ...(s.replay_storage || {}) };
   const games = { ...defaultGameSettings(), ...(s.games || {}) };
   const cloud = { ...defaultCloudSettings(), ...(s.cloud || {}) };
+  const osu = { ...defaultOsuApiSettings(), ...(s.osu || {}) };
   cloud.uploads = { ...(cloud.uploads || {}) };
   gamePluginSettings = normalizeGamePluginSettingsMap(games.plugins || {});
   customGames = (games.custom_games || []).map(normalizeCustomGame);
@@ -28,6 +29,7 @@ function fillSettings(s) {
     audio,
     replay_storage: replayStorage,
     cloud,
+    osu,
     games: {
       ...games,
       plugins: { ...gamePluginSettings },
@@ -141,6 +143,7 @@ function readSettings() {
     legacy_timeline_editor: $("set-legacy-timeline-editor").checked,
     update_channel: $("set-update-channel").value,
     cloud: readCloudSettings(),
+    osu: readOsuApiSettings(),
   };
 }
 
@@ -186,6 +189,27 @@ function defaultCloudSettings() {
     delete_local_after_upload: false,
     auto_upload_rules: false,
     uploads: {},
+  };
+}
+
+function defaultOsuApiSettings() {
+  return {
+    client_id: null,
+    user: null,
+    credential_target: null,
+    last_connected_username: null,
+  };
+}
+
+function osuApiSettings() {
+  return currentSettings && currentSettings.osu ? currentSettings.osu : defaultOsuApiSettings();
+}
+
+function readOsuApiSettings() {
+  const source = settingsFormSource();
+  return {
+    ...defaultOsuApiSettings(),
+    ...(source.osu || {}),
   };
 }
 
@@ -340,6 +364,7 @@ function refreshReviewForSettingsChange() {
   if (typeof renderOverviewMarkers === "function") renderOverviewMarkers();
   if (typeof renderMarkers === "function") renderMarkers();
   renderGameEventRail(currentClip);
+  renderGamePlayRail(currentClip);
   renderGameMetadataPanel(currentClip);
 }
 
@@ -438,7 +463,23 @@ const GAME_REVIEW_OPTION_GROUPS = {
   ],
 };
 
-const GAME_PLUGIN_SETTINGS_TABS = ["general", "match_events", "timeline_markers"];
+const GAME_PLUGIN_SETTINGS_TAB_DEFINITIONS = {
+  general: { label: "General" },
+  match_events: { label: "Match events", pluginIds: ["league_of_legends"] },
+  timeline_markers: { label: "Timeline markers", pluginIds: ["league_of_legends"] },
+  osu_account: { label: "Account", pluginIds: ["osu"] },
+  osu_plays: { label: "Plays", pluginIds: ["osu"] },
+};
+
+const GAME_PLUGIN_SETTINGS_TABS = Object.keys(GAME_PLUGIN_SETTINGS_TAB_DEFINITIONS);
+
+function gamePluginSettingsTabs(plugin) {
+  if (!plugin) return ["general"];
+  return GAME_PLUGIN_SETTINGS_TABS.filter((tab) => {
+    const definition = GAME_PLUGIN_SETTINGS_TAB_DEFINITIONS[tab];
+    return !definition.pluginIds || definition.pluginIds.includes(plugin.id);
+  });
+}
 
 function gamePluginReviewGroupDefinition(groupId) {
   return GAME_REVIEW_GROUPS.find((group) => group.id === groupId) || GAME_REVIEW_GROUPS[0];
@@ -576,6 +617,21 @@ function renderGamePluginSettingsGeneralTab(plugin, settings) {
   modeTitle.textContent = "Recording";
   modeSection.append(modeTitle, renderGamePluginModeControl(plugin, settings));
 
+  root.append(modeSection);
+
+  if (plugin.id === "osu") {
+    const playsSection = document.createElement("section");
+    playsSection.className = "game-plugin-settings-section";
+    const playsTitle = document.createElement("strong");
+    playsTitle.textContent = "Play blocks";
+    const playsHint = document.createElement("span");
+    playsHint.className = "hint";
+    playsHint.textContent = "Recent submitted plays are fetched after a full-session recording is saved.";
+    playsSection.append(playsTitle, playsHint);
+    root.append(playsSection);
+    return root;
+  }
+
   const reviewSection = document.createElement("section");
   reviewSection.className = "game-plugin-settings-section";
   const master = document.createElement("label");
@@ -590,7 +646,206 @@ function renderGamePluginSettingsGeneralTab(plugin, settings) {
   master.append(masterInput, masterText);
   reviewSection.append(master);
 
-  root.append(modeSection, reviewSection);
+  root.append(reviewSection);
+  return root;
+}
+
+function osuApiConnectionLabel(status = osuApiSettings()) {
+  const name = status.username || status.last_connected_username;
+  if (status.configured) return name ? `Connected as ${name}` : "Connected";
+  if (status.secret_present) return "Saved; test the connection";
+  if (status.client_id || status.user || status.credential_target) return "Client secret needed";
+  return "Not configured";
+}
+
+function updateOsuApiSettingsFromStatus(status) {
+  const next = {
+    ...osuApiSettings(),
+    client_id: status.client_id || null,
+    user: status.user || null,
+    credential_target: status.credential_target || null,
+    last_connected_username: status.username || null,
+  };
+  if (currentSettings) currentSettings.osu = next;
+  if (settingsDraft) settingsDraft.osu = { ...next };
+}
+
+function renderOsuApiField(labelText, input) {
+  const label = document.createElement("label");
+  label.className = "osu-api-field";
+  const labelSpan = document.createElement("span");
+  labelSpan.textContent = labelText;
+  label.append(labelSpan, input);
+  return label;
+}
+
+function osuApiRequestFromInputs(clientIdInput, clientSecretInput, userInput) {
+  return {
+    client_id: clientIdInput.value.trim(),
+    client_secret: clientSecretInput.value.trim() || null,
+    user: userInput.value.trim(),
+  };
+}
+
+function syncOsuApiInputsFromStatus(clientIdInput, clientSecretInput, userInput, status) {
+  if (status.client_id) clientIdInput.value = status.client_id;
+  if (status.user) userInput.value = status.user;
+  clientSecretInput.value = "";
+  clientSecretInput.placeholder = status.secret_present
+    ? "Leave blank to keep saved secret"
+    : "Paste client secret";
+}
+
+async function saveOsuApiSettingsFromInputs(clientIdInput, clientSecretInput, userInput, status) {
+  status.textContent = "Saving...";
+  const result = await invoke("save_osu_api_settings", {
+    request: osuApiRequestFromInputs(clientIdInput, clientSecretInput, userInput),
+  });
+  updateOsuApiSettingsFromStatus(result);
+  syncOsuApiInputsFromStatus(clientIdInput, clientSecretInput, userInput, result);
+  status.textContent = osuApiConnectionLabel(result);
+  syncSettingsDraftFromForm();
+  return result;
+}
+
+async function refreshOsuApiStatus(status) {
+  try {
+    const result = await invoke("osu_api_status");
+    updateOsuApiSettingsFromStatus(result);
+    status.textContent = osuApiConnectionLabel(result);
+  } catch (e) {
+    status.textContent = String(e);
+  }
+}
+
+function renderOsuAccountSettingsTab() {
+  const root = document.createElement("div");
+  root.className = "game-plugin-settings-panel osu-account-panel";
+
+  const accountSection = document.createElement("section");
+  accountSection.className = "game-plugin-settings-section";
+  const heading = document.createElement("div");
+  heading.className = "osu-api-heading";
+  const title = document.createElement("strong");
+  title.textContent = "Account";
+  const guide = document.createElement("button");
+  guide.type = "button";
+  guide.className = "osu-guide-button";
+  guide.title = "Open osu! API setup guide";
+  guide.setAttribute("aria-label", "Open osu! API setup guide");
+  guide.textContent = "?";
+  guide.addEventListener("click", async () => {
+    try {
+      await invoke("open_osu_api_setup_guide");
+    } catch (e) {
+      $("error").textContent = String(e);
+    }
+  });
+  heading.append(title, guide);
+
+  const osu = osuApiSettings();
+  const hint = document.createElement("span");
+  hint.className = "hint";
+  hint.textContent = "Use your own osu! OAuth app. The client secret stays in Windows Credential Manager.";
+
+  const fields = document.createElement("div");
+  fields.className = "osu-api-fields";
+  const clientId = document.createElement("input");
+  clientId.type = "text";
+  clientId.inputMode = "numeric";
+  clientId.autocomplete = "off";
+  clientId.placeholder = "Client ID";
+  clientId.value = osu.client_id || "";
+  const secret = document.createElement("input");
+  secret.type = "password";
+  secret.autocomplete = "off";
+  secret.placeholder = osu.credential_target ? "Leave blank to keep saved secret" : "Paste client secret";
+  const user = document.createElement("input");
+  user.type = "text";
+  user.autocomplete = "username";
+  user.placeholder = "osu! User ID or Username";
+  user.value = osu.user || "";
+  fields.append(
+    renderOsuApiField("Client ID", clientId),
+    renderOsuApiField("Client Secret", secret),
+    renderOsuApiField("osu! User ID or Username", user)
+  );
+
+  const actions = document.createElement("div");
+  actions.className = "osu-account-actions";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.textContent = "Save";
+  const test = document.createElement("button");
+  test.type = "button";
+  test.className = "primary";
+  test.textContent = "Test osu! API connection";
+  const status = document.createElement("span");
+  status.className = "hint";
+  status.textContent = osuApiConnectionLabel(osu);
+  save.addEventListener("click", async () => {
+    $("error").textContent = "";
+    save.disabled = true;
+    test.disabled = true;
+    try {
+      await saveOsuApiSettingsFromInputs(clientId, secret, user, status);
+    } catch (e) {
+      status.textContent = String(e);
+    } finally {
+      save.disabled = false;
+      test.disabled = false;
+    }
+  });
+  test.addEventListener("click", async () => {
+    $("error").textContent = "";
+    save.disabled = true;
+    test.disabled = true;
+    try {
+      await saveOsuApiSettingsFromInputs(clientId, secret, user, status);
+      status.textContent = "Testing...";
+      const result = await invoke("test_osu_api_connection");
+      updateOsuApiSettingsFromStatus(result.status);
+      syncOsuApiInputsFromStatus(clientId, secret, user, result.status);
+      const missing = result.pagination_ceiling_reached ? "; some plays may be missing" : "";
+      status.textContent = `Connected. Recent scores: ${result.score_count}, failed: ${result.failed_count}${missing}`;
+      await refresh();
+    } catch (e) {
+      status.textContent = String(e);
+    } finally {
+      save.disabled = false;
+      test.disabled = false;
+    }
+  });
+  actions.append(save, test, status);
+  refreshOsuApiStatus(status);
+
+  accountSection.append(heading, hint, fields, actions);
+  root.append(accountSection);
+  return root;
+}
+
+function renderOsuPlaysSettingsTab() {
+  const root = document.createElement("div");
+  root.className = "game-plugin-settings-panel";
+
+  const playsSection = document.createElement("section");
+  playsSection.className = "game-plugin-settings-section";
+  const title = document.createElement("strong");
+  title.textContent = "Plays";
+  const list = document.createElement("div");
+  list.className = "osu-play-settings-list";
+  [
+    "Recent submitted plays are fetched after a full-session recording is saved.",
+    "Failed plays stay visible when osu! returns them; retries only appear if they were submitted.",
+    "Some plays may be missing if osu!'s recent-score list reaches the 500 score ceiling.",
+    "v1 tracks osu!standard only.",
+  ].forEach((text) => {
+    const item = document.createElement("div");
+    item.textContent = text;
+    list.appendChild(item);
+  });
+  playsSection.append(title, list);
+  root.append(playsSection);
   return root;
 }
 
@@ -619,7 +874,8 @@ function renderGamePluginSettingsTimelineMarkersTab(plugin, settings) {
 function renderGamePluginSettingsDialog(plugin = gamePluginSettingsDialogPlugin()) {
   if (!plugin) return;
   const settings = gamePluginSetting(plugin);
-  const tab = GAME_PLUGIN_SETTINGS_TABS.includes(gamePluginSettingsDialogTab)
+  const availableTabs = gamePluginSettingsTabs(plugin);
+  const tab = availableTabs.includes(gamePluginSettingsDialogTab)
     ? gamePluginSettingsDialogTab
     : "general";
   gamePluginSettingsDialogTab = tab;
@@ -628,6 +884,7 @@ function renderGamePluginSettingsDialog(plugin = gamePluginSettingsDialogPlugin(
   $("game-plugin-settings-title").textContent = `${plugin.name} settings`;
   $("game-plugin-settings-subtitle").textContent = "";
   document.querySelectorAll("[data-game-plugin-settings-tab]").forEach((button) => {
+    button.hidden = !availableTabs.includes(button.dataset.gamePluginSettingsTab);
     const active = button.dataset.gamePluginSettingsTab === tab;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
@@ -639,6 +896,10 @@ function renderGamePluginSettingsDialog(plugin = gamePluginSettingsDialogPlugin(
     body.replaceChildren(renderGamePluginSettingsMatchEventsTab(plugin, settings));
   } else if (tab === "timeline_markers") {
     body.replaceChildren(renderGamePluginSettingsTimelineMarkersTab(plugin, settings));
+  } else if (tab === "osu_account") {
+    body.replaceChildren(renderOsuAccountSettingsTab(plugin, settings));
+  } else if (tab === "osu_plays") {
+    body.replaceChildren(renderOsuPlaysSettingsTab(plugin, settings));
   } else {
     body.replaceChildren(renderGamePluginSettingsGeneralTab(plugin, settings));
   }
@@ -647,7 +908,8 @@ function renderGamePluginSettingsDialog(plugin = gamePluginSettingsDialogPlugin(
 
 function showGamePluginSettingsDialog(plugin, tab = "general") {
   gamePluginSettingsDialogPluginId = plugin.id;
-  gamePluginSettingsDialogTab = GAME_PLUGIN_SETTINGS_TABS.includes(tab) ? tab : "general";
+  const availableTabs = gamePluginSettingsTabs(plugin);
+  gamePluginSettingsDialogTab = availableTabs.includes(tab) ? tab : "general";
   renderGamePluginSettingsDialog(plugin);
   const dialog = $("game-plugin-settings-dialog");
   if (!dialog.open) dialog.showModal();
@@ -660,7 +922,8 @@ function hideGamePluginSettingsDialog() {
 }
 
 function setGamePluginSettingsTab(tab) {
-  if (!GAME_PLUGIN_SETTINGS_TABS.includes(tab)) return;
+  const plugin = gamePluginSettingsDialogPlugin();
+  if (!gamePluginSettingsTabs(plugin).includes(tab)) return;
   syncGamePluginSettingsDraft();
   gamePluginSettingsDialogTab = tab;
   renderGamePluginSettingsDialog();

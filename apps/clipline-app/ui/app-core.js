@@ -42,6 +42,11 @@ var {
   nextMarker,
   prevMarker,
   markerSummary,
+  playBlocks,
+  playRailItem,
+  playExportRange,
+  playSummary,
+  playActiveIndex,
   markerStyle,
   markerDigest,
   normalizeGameReviewSettings,
@@ -123,6 +128,7 @@ var regionDrag = null;
 var regionMenuDisplayId = null;
 var clipContextTarget = null;
 var cloudContextTarget = null;
+var gamePlayContextTarget = null;
 var uploadDialogClip = null;
 var selectedAudioTrackIds = new Set();
 var uploadSelectedAudioTrackIds = new Set();
@@ -223,6 +229,13 @@ function clipMarkers(clip = currentClip) {
     clipPlayerSummary(clip),
     gameReviewSettingsForClip(clip),
   );
+}
+
+function clipPlays(clip = currentClip) {
+  if (!gameReviewEnabledForClip(clip)) return [];
+  return clip && clip.markers && Array.isArray(clip.markers.plays)
+    ? clip.markers.plays
+    : [];
 }
 
 function clipMatchEventMarkers(clip = currentClip) {

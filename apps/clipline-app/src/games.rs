@@ -250,6 +250,21 @@ mod tests {
         settings
     }
 
+    fn settings_with_all_plugins_disabled() -> GameSettings {
+        let mut settings = GameSettings::default();
+        for plugin in crate::game_plugins::all() {
+            settings.plugins.insert(
+                plugin.id().into(),
+                crate::settings::GamePluginSettings {
+                    enabled: false,
+                    recording_mode: plugin.manifest.default_recording_mode,
+                    review: Default::default(),
+                },
+            );
+        }
+        settings
+    }
+
     #[test]
     fn detects_first_enabled_custom_game_by_process_path() {
         let settings = GameSettings {
@@ -383,12 +398,12 @@ mod tests {
     fn no_enabled_games_can_skip_window_enumeration() {
         assert!(!has_enabled_games(&GameSettings {
             auto_detect: true,
-            plugins: settings_with_league(false, GameRecordingMode::FullSession).plugins,
+            plugins: settings_with_all_plugins_disabled().plugins,
             custom_games: Vec::new(),
         }));
         assert!(!has_enabled_games(&GameSettings {
             auto_detect: true,
-            plugins: settings_with_league(false, GameRecordingMode::FullSession).plugins,
+            plugins: settings_with_all_plugins_disabled().plugins,
             custom_games: vec![CustomGameSettings {
                 enabled: false,
                 ..game()
@@ -426,6 +441,121 @@ mod tests {
         assert_eq!(detected.name, "League of Legends");
         assert_eq!(detected.hwnd, 2);
         assert_eq!(detected.recording_mode, GameRecordingMode::FullSession);
+    }
+
+    #[test]
+    fn detects_osu_window_as_built_in_full_session() {
+        let detected = detect_active_game_from_windows(
+            &GameSettings::default(),
+            vec![
+                window(1, "osu!", "osu!.exe", None),
+                window(
+                    2,
+                    "osu! - camellia - exit this earth's atomosphere",
+                    "osu!.exe",
+                    Some(r"C:\Users\dain\AppData\Local\osu!\osu!.exe"),
+                ),
+            ],
+        )
+        .expect("osu! game window should match");
+
+        assert_eq!(
+            detected.id,
+            crate::game_plugins::plugin_id_for_game_id(clipline_events::GameId::Osu)
+        );
+        assert_eq!(detected.name, "osu!");
+        assert_eq!(detected.hwnd, 2);
+        assert_eq!(detected.recording_mode, GameRecordingMode::FullSession);
+    }
+
+    #[test]
+    fn detects_osu_cutting_edge_build_title_as_built_in_full_session() {
+        let detected = detect_active_game_from_windows(
+            &GameSettings::default(),
+            vec![window(
+                1,
+                "osu!cuttingedge b20260624",
+                "osu!.exe",
+                Some(r"C:\Users\dain\AppData\Roaming\osu!\osu!.exe"),
+            )],
+        )
+        .expect("osu! cutting-edge gameplay window should match");
+
+        assert_eq!(
+            detected.id,
+            crate::game_plugins::plugin_id_for_game_id(clipline_events::GameId::Osu)
+        );
+        assert_eq!(detected.name, "osu!");
+        assert_eq!(detected.hwnd, 1);
+        assert_eq!(detected.recording_mode, GameRecordingMode::FullSession);
+    }
+
+    #[test]
+    fn detects_osu_stable_play_title_with_extra_spacing_as_built_in_full_session() {
+        let detected = detect_active_game_from_windows(
+            &GameSettings::default(),
+            vec![window(
+                1,
+                "osu!  - ginkiha - EOS [Lycoris]",
+                "osu!.exe",
+                Some(r"C:\Users\dain\AppData\Roaming\osu!\osu!.exe"),
+            )],
+        )
+        .expect("osu! stable gameplay window should match");
+
+        assert_eq!(
+            detected.id,
+            crate::game_plugins::plugin_id_for_game_id(clipline_events::GameId::Osu)
+        );
+        assert_eq!(detected.name, "osu!");
+        assert_eq!(detected.hwnd, 1);
+        assert_eq!(detected.recording_mode, GameRecordingMode::FullSession);
+    }
+
+    #[test]
+    fn detects_osu_stable_idle_title_as_built_in_full_session() {
+        let detected = detect_active_game_from_windows(
+            &GameSettings::default(),
+            vec![window(
+                1,
+                "osu!",
+                "osu!.exe",
+                Some(r"C:\Users\dain\AppData\Roaming\osu!\osu!.exe"),
+            )],
+        )
+        .expect("osu! stable idle window should match");
+
+        assert_eq!(
+            detected.id,
+            crate::game_plugins::plugin_id_for_game_id(clipline_events::GameId::Osu)
+        );
+        assert_eq!(detected.name, "osu!");
+        assert_eq!(detected.hwnd, 1);
+        assert_eq!(detected.recording_mode, GameRecordingMode::FullSession);
+    }
+
+    #[test]
+    fn ignores_osu_updater_windows_as_built_in_sessions() {
+        for title in [
+            "osu! updater",
+            "osu! cutting edge",
+            "osu! update available",
+            "osu! updating",
+        ] {
+            assert!(
+                detect_active_game_from_windows(
+                    &GameSettings::default(),
+                    vec![window(
+                        1,
+                        title,
+                        "osu!.exe",
+                        Some(r"C:\Users\dain\AppData\Local\osu!\osu!.exe"),
+                    )],
+                )
+                .is_none(),
+                "{title:?} should not start an osu! full-session recording"
+            );
+        }
     }
 
     #[test]

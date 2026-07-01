@@ -721,7 +721,10 @@ fn review_player_owns_all_controls() {
             && main_js().contains("function renderGamePluginSettingsGeneralTab")
             && main_js().contains("function renderGamePluginSettingsMatchEventsTab")
             && main_js().contains("function renderGamePluginSettingsTimelineMarkersTab")
+            && main_js().contains("function renderOsuAccountSettingsTab")
+            && main_js().contains("function renderOsuPlaysSettingsTab")
             && main_js().contains("const GAME_REVIEW_OPTION_GROUPS")
+            && main_js().contains("const GAME_PLUGIN_SETTINGS_TAB_DEFINITIONS")
             && main_js().contains("function renderGamePluginOptionGroup")
             && main_js().contains("Your events")
             && main_js().contains("Team fights")
@@ -729,11 +732,19 @@ fn review_player_owns_all_controls() {
             && main_js().contains("Your markers")
             && main_js().contains("Map markers")
             && main_js().contains("Show League match details")
+            && main_js().contains("Use your own osu! OAuth app")
+            && main_js().contains("Test osu! API connection")
+            && main_js().contains(
+                "Recent submitted plays are fetched after a full-session recording is saved."
+            )
+            && main_js().contains("Some plays may be missing")
             && !main_js().contains("Enhanced review view")
             && main_js().contains("data-game-plugin-review-enabled")
             && main_js().contains("data-game-plugin-review-setting")
             && main_js().contains("match_events")
             && main_js().contains("timeline_markers")
+            && main_js().contains("osu_account")
+            && main_js().contains("osu_plays")
             && main_js().contains("team_kills")
             && main_js().contains("enemy_deaths")
             && main_js().contains("PlayerCore.reviewMatchEventMarkers")
@@ -743,14 +754,19 @@ fn review_player_owns_all_controls() {
             && index_html().contains("General")
             && index_html().contains("Match events")
             && index_html().contains("Timeline markers")
+            && index_html().contains("Account")
+            && index_html().contains("Plays")
             && main_js().matches("game-plugin-settings-dialog").count() >= 2
             && styles_css().contains(".game-profile-settings")
             && styles_css().contains(".game-plugin-settings-dialog")
             && styles_css().contains(".game-plugin-settings-tabs")
+            && styles_css().contains(".game-plugin-settings-tabs .tab[hidden]")
             && styles_css().contains(".game-plugin-settings-body")
             && styles_css().contains(".game-review-master-card")
             && styles_css().contains(".game-review-option-group")
             && styles_css().contains(".game-review-option-list")
+            && styles_css().contains(".osu-account-panel")
+            && styles_css().contains(".osu-play-settings-list")
             && styles_css().contains("align-items: start")
             && styles_css().contains("align-content: start")
             && !main_js().contains("is_timeline_marker"),
@@ -795,14 +811,25 @@ fn review_player_owns_all_controls() {
             && main_js().contains("setGameEventRailCollapsed(!gameEventRailCollapsed)")
             && main_js().contains("syncGameEventRail(video.currentTime || 0, { force: true })")
             && main_js().contains("function renderGameMetadataPanel")
+            && main_js().contains("function clipPlays(clip = currentClip)")
+            && main_js().contains("function renderPlayBlocks")
+            && main_js().contains("function renderGamePlayRail")
+            && main_js().contains("function syncGamePlayRail")
             && main_js().contains("function renderMetadataIconList(field)")
             && main_js().contains("field.type === \"summoner_spells\" || field.type === \"item_build\"")
             && main_js().contains("presentation.event_rail")
             && main_js().contains("presentation.metadata_panel")
             && main_js().contains("playerSummaryFields")
             && main_js().contains("galleryCardPreview")
+            && main_js().contains("playBlocks(")
+            && main_js().contains("playRailItem(")
+            && main_js().contains("playActiveIndex")
+            && main_js().contains("data-game-play-index")
+            && main_js().contains("Set plays")
             && main_js().contains("data_dragon: presentation && presentation.data_dragon")
             && main_js().contains("data-game-event-index")
+            && player_core_js().contains("gallery.summary === \"osu_set_plays\"")
+            && player_core_js().contains("titlePolicy === \"osu_session_summary\"")
             && player_core_js().contains("gallery.summary === \"player_summary_kda\"")
             && player_core_js().contains("titlePolicy === \"summary_for_full_session\"")
             && player_core_js().contains("playerSummaryStatsLabel")
@@ -818,7 +845,9 @@ fn review_player_owns_all_controls() {
             && !player_core_js().contains("dataDragonSummonerSpellAsset")
             && !player_core_js().contains("dataDragonItemAsset")
             && player_core_js().contains("const clipName = clip && typeof clip.name === \"string\" ? clip.name.trim() : \"\"")
-            && player_core_js().contains("titlePolicy === \"clip\" && clipName ? clipName : fallback")
+            && player_core_js().contains("const clipDisplayTitle = clipName.replace")
+            && player_core_js().contains("titlePolicy === \"clip\" || (titlePolicy === \"osu_session_summary\" && kind !== \"session\")")
+            && player_core_js().contains("const clipTitle = usesClipTitle && clipName ? clipDisplayTitle : fallback")
             && player_core_js().contains("const markerRailConfig =")
             && main_js().contains("detail.className = \"game-meta\"")
             && main_js().contains("if (cardPreview.summary && !cardTitleUsesSummary)")
@@ -831,6 +860,12 @@ fn review_player_owns_all_controls() {
             && !main_js().contains("isLeagueClip")
             && !main_js().contains("function renderGamePanel")
             && index_html().contains("aria-controls=\"game-event-list\"")
+            && index_html().contains("id=\"game-play-rail\"")
+            && index_html().contains("id=\"game-play-list\"")
+            && index_html().contains("id=\"play-block-layer\"")
+            && styles_css().contains(".play-block-layer")
+            && styles_css().contains(".play-block")
+            && styles_css().contains(".game-play-rail")
             && styles_css().contains(".review-body.has-event-rail.event-rail-collapsed")
             && styles_css().contains(".game-event-rail-tab")
             && styles_css().contains(".game-event-row-friendly")
@@ -964,6 +999,82 @@ fn review_player_owns_all_controls() {
             "{id} must render an SVG icon, not a text label"
         );
     }
+}
+
+#[test]
+fn osu_account_settings_use_direct_api_credentials_and_guide() {
+    let js = main_js();
+    let app = app_rs();
+
+    assert!(
+        js.contains("invoke(\"save_osu_api_settings\"")
+            && js.contains("invoke(\"test_osu_api_connection\"")
+            && js.contains("invoke(\"open_osu_api_setup_guide\"")
+            && app.contains("crate::osu_api::save_osu_api_settings")
+            && app.contains("crate::osu_api::test_osu_api_connection")
+            && app.contains("crate::osu_api::open_osu_api_setup_guide"),
+        "osu! account settings must call direct osu! API commands instead of Cloud proxy commands"
+    );
+    assert!(
+        js.contains("Client ID")
+            && js.contains("Client Secret")
+            && js.contains("osu! User ID or Username")
+            && js.contains("Test osu! API connection")
+            && js.contains("setAttribute(\"aria-label\", \"Open osu! API setup guide\")"),
+        "osu! account settings should collect direct API credentials and expose a setup guide button"
+    );
+    assert!(
+        !js.contains("Connect Clipline Cloud to enable osu! login.")
+            && !js.contains("Login with osu!")
+            && !js.contains("cloud_osu_login")
+            && !js.contains("cloud_osu_connection")
+            && !app.contains("crate::cloud::cloud_osu_login")
+            && !app.contains("crate::cloud::cloud_osu_connection"),
+        "the old Cloud osu! login path should not stay user-visible once direct API credentials are used"
+    );
+}
+
+#[test]
+fn osu_play_rail_uses_thumbnail_metadata_rows() {
+    let js = main_js();
+    let core = player_core_js();
+    let html = index_html();
+    let css = styles_css();
+
+    for required in [
+        "game-play-thumb",
+        "game-play-body",
+        "game-play-song",
+        "game-play-difficulty",
+        "game-play-mods",
+        "game-play-stars",
+    ] {
+        assert!(
+            js.contains(required) && css.contains(required),
+            "osu! play rail must render and style `{required}`"
+        );
+    }
+
+    assert!(
+        core.contains("coverUrl")
+            && core.contains("starRating")
+            && core.contains("\"CL\"")
+            && core.contains("\"NOMOD\"")
+            && core.contains("Incomplete")
+            && core.contains("playExportRange")
+            && !core.contains("\"estimated start\""),
+        "osu! play rail formatting should expose thumbnails/stars, hide CL/nomod, mark incomplete plays, and avoid estimated-start copy"
+    );
+    assert!(
+        html.contains("id=\"clip-menu-export-play\"")
+            && js.contains("function showGamePlayContextMenu")
+            && js.contains("function exportPlayClip")
+            && js.contains("gamePlayContextTarget")
+            && js.contains("clip-menu-export-play")
+            && js.contains("includeMarkers: false")
+            && js.contains("title: target.title"),
+        "Set plays rows must use the app-owned context menu to export a play as a clean titled clip"
+    );
 }
 
 #[test]
@@ -1884,7 +1995,7 @@ fn deck_status_success_toasts_auto_clear() {
     for required in [
         "setDeckStatus(audioSelectionLabel(clip), { transient: true })",
         "setDeckStatus(\"clip renamed\", { transient: true })",
-        "setDeckStatus(`exported ${exported.name} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true })",
+        "setDeckStatus(`exported ${exportedLabel} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true })",
         "setDeckStatus(\"clip copied to clipboard\", { transient: true })",
         "setDeckStatus(\"cloud link copied\", { transient: true })",
         "setDeckStatus(\"cloud upload ready\", { transient: true })",

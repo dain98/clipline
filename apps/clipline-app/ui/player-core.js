@@ -480,6 +480,170 @@ const PlayerCore = (() => {
     return markers.length === 1 ? "1 marker" : `${markers.length} markers`;
   };
 
+  const rawPlays = (plays) => Array.isArray(plays) ? plays : [];
+
+  const playTitle = (play) => {
+    const artist = String(play && play.artist || "").trim();
+    const title = String(play && play.title || "").trim();
+    const difficulty = String(play && play.difficulty || "").trim();
+    const song = artist && title ? `${artist} - ${title}` : (title || artist || "osu! play");
+    return difficulty ? `${song} [${difficulty}]` : song;
+  };
+
+  const playArtistTitle = (play) => {
+    const artist = String(play && play.artist || "").trim();
+    const title = String(play && play.title || "").trim();
+    return artist && title ? `${artist} - ${title}` : (title || artist || "osu! play");
+  };
+
+  const playDifficulty = (play) => String(play && play.difficulty || "").trim();
+
+  const displayableMods = (play) => {
+    const ignored = new Set(["CL", "NM", "NOMOD"]);
+    return Array.isArray(play && play.mods)
+      ? play.mods
+        .map((mod) => String(mod || "").trim().toUpperCase())
+        .filter((mod) => mod && !ignored.has(mod))
+      : [];
+  };
+
+  const playMods = (play) => {
+    const mods = displayableMods(play);
+    return mods.length ? `+${mods.join("")}` : "";
+  };
+
+  const playStarRating = (play) => {
+    const raw = Number(play && (play.star_rating || play.starRating));
+    return Number.isFinite(raw) && raw > 0 ? `${raw.toFixed(2)}★` : "";
+  };
+
+  const playCoverUrl = (play) => {
+    const explicit = String(play && (play.cover_url || play.coverUrl) || "").trim();
+    if (explicit) return explicit;
+    const beatmapsetId = Number(play && (play.beatmapset_id || play.beatmapsetId));
+    return Number.isFinite(beatmapsetId) && beatmapsetId > 0
+      ? `https://assets.ppy.sh/beatmaps/${Math.trunc(beatmapsetId)}/covers/list.jpg`
+      : "";
+  };
+
+  const playAccuracy = (play) => {
+    const raw = Number(play && play.accuracy);
+    if (!Number.isFinite(raw) || raw < 0) return "";
+    const percent = raw <= 1 ? raw * 100 : raw;
+    return `${percent.toFixed(2)}%`;
+  };
+
+  const playPp = (play) => {
+    const pp = Number(play && play.pp);
+    return Number.isFinite(pp) && pp > 0 ? `${Math.round(pp)}pp` : "";
+  };
+
+  const playRank = (play) => String(play && play.rank || "").trim();
+
+  const playIncomplete = (play) => {
+    if (playPp(play)) return "";
+    return playRank(play).toUpperCase() === "F" ? "" : "Incomplete";
+  };
+
+  const playDetails = (play) => {
+    const parts = [
+      play && play.passed ? "Passed" : "Failed",
+      playRank(play),
+      playAccuracy(play),
+      playPp(play),
+      playMods(play),
+    ].filter(Boolean);
+    return parts.join(" · ");
+  };
+
+  const normalizedPlay = (play, index, duration = 0) => {
+    const startRaw = Number(play && play.t_start_s);
+    if (!Number.isFinite(startRaw)) return null;
+    const endRaw = Number(play && play.t_end_s);
+    const hasEnd = Number.isFinite(endRaw);
+    const start = clampTime(startRaw, duration);
+    const end = hasEnd ? Math.max(start, clampTime(endRaw, duration)) : start;
+    const externalId = String(play && play.external_id || play && play.id || `play-${index}`);
+    return {
+      externalId,
+      play,
+      start,
+      end,
+      hasEnd,
+      title: playTitle(play),
+      details: playDetails(play),
+      estimated: Boolean(play && play.derived_start),
+    };
+  };
+
+  const normalizedPlays = (plays, duration = 0) => rawPlays(plays)
+    .map((play, index) => normalizedPlay(play, index, duration))
+    .filter(Boolean)
+    .sort((a, b) => a.start - b.start || a.end - b.end || a.externalId.localeCompare(b.externalId));
+
+  const playBlocks = (plays, duration = 0) => normalizedPlays(plays, duration).map((play) => ({
+    ...play,
+    leftPct: percentFor(play.start, duration),
+    widthPct: play.hasEnd ? Math.max(0, percentFor(play.end, duration) - percentFor(play.start, duration)) : 0,
+  }));
+
+  const playRailItem = (play) => {
+    const normalized = normalizedPlay(play, 0, 0);
+    if (!normalized) return { title: "osu! play", meta: "", time: "" };
+    const time = normalized.hasEnd
+      ? `${fmtTenths(normalized.start)}-${fmtTenths(normalized.end)}`
+      : fmtTenths(normalized.start);
+    return {
+      title: normalized.title,
+      artistTitle: playArtistTitle(play),
+      difficulty: playDifficulty(play),
+      mods: playMods(play),
+      starRating: playStarRating(play),
+      coverUrl: playCoverUrl(play),
+      rank: playRank(play),
+      pp: playPp(play),
+      accuracy: playAccuracy(play),
+      meta: [
+        playRank(play),
+        playIncomplete(play),
+        playPp(play),
+        playAccuracy(play),
+      ].filter(Boolean).join(" ▸ "),
+      time,
+    };
+  };
+
+  const playExportRange = (play) => {
+    const normalized = normalizedPlay(play, 0, 0);
+    if (!normalized || !normalized.hasEnd || !(normalized.end > normalized.start)) return null;
+    return { start: normalized.start, end: normalized.end };
+  };
+
+  const playSummary = (plays) => {
+    const count = rawPlays(plays).length;
+    if (!count) return "no submitted plays";
+    return count === 1 ? "1 submitted play" : `${count} submitted plays`;
+  };
+
+  const playResultSummary = (plays) => {
+    const list = rawPlays(plays);
+    const passed = list.filter((play) => play && play.passed).length;
+    const failed = list.length - passed;
+    const parts = [];
+    if (passed) parts.push(`${passed} ${passed === 1 ? "pass" : "passes"}`);
+    if (failed) parts.push(`${failed} ${failed === 1 ? "fail" : "fails"}`);
+    return parts.join(" · ");
+  };
+
+  const playActiveIndex = (plays, currentTime) => {
+    const list = normalizedPlays(plays, 0);
+    const current = Number(currentTime);
+    if (!Number.isFinite(current)) return -1;
+    return list.findIndex((play) =>
+      play.hasEnd ? current >= play.start && current <= play.end : Math.abs(current - play.start) <= MARKER_EPSILON_S
+    );
+  };
+
   const gameEventActiveIndex = (markers, currentTime, selectedIndex = -1) => {
     const list = Array.isArray(markers) ? markers : [];
     if (!list.length) return -1;
@@ -914,7 +1078,11 @@ const PlayerCore = (() => {
     const card = gallery.card && typeof gallery.card === "object" ? gallery.card : {};
     const markers = clip && clip.markers && typeof clip.markers === "object" ? clip.markers : {};
     const summary = markers.player_summary || null;
-    const summaryLabel = gallery.summary === "player_summary_kda" ? playerSummaryLabel(summary) : "";
+    const plays = Array.isArray(markers.plays) ? markers.plays : [];
+    const summaryLabel = gallery.summary === "player_summary_kda"
+      ? playerSummaryLabel(summary)
+      : (gallery.summary === "osu_set_plays" ? playSummary(plays) : "");
+    const detailSummaryLabel = gallery.summary === "osu_set_plays" ? playResultSummary(plays) : summaryLabel;
     const cardSummaryLabel = playerSummaryStatsLabel(summary, card.title_format) || summaryLabel;
     const fallback = String(fallbackTitle || "").trim();
     const clipName = clip && typeof clip.name === "string" ? clip.name.trim() : "";
@@ -922,13 +1090,19 @@ const PlayerCore = (() => {
     const titlePolicy = typeof card.title === "string" && card.title.trim()
       ? card.title.trim()
       : legacyTitlePolicy;
+    const clipDisplayTitle = clipName.replace(/\.(mp4|mov|mkv|webm)$/i, "").trim() || clipName;
+    const usesClipTitle = titlePolicy === "clip" || (titlePolicy === "osu_session_summary" && kind !== "session");
     const usesSummaryTitle = cardSummaryLabel
-      && (titlePolicy === "summary" || (titlePolicy === "summary_for_full_session" && kind === "session"));
-    const clipTitle = titlePolicy === "clip" && clipName ? clipName : fallback;
+      && (
+        titlePolicy === "summary"
+        || (titlePolicy === "summary_for_full_session" && kind === "session")
+        || (titlePolicy === "osu_session_summary" && kind === "session")
+      );
+    const clipTitle = usesClipTitle && clipName ? clipDisplayTitle : fallback;
     const out = {
       title: usesSummaryTitle ? cardSummaryLabel : clipTitle,
       titleSource: usesSummaryTitle ? "summary" : "clip",
-      summary: summaryLabel,
+      summary: detailSummaryLabel,
     };
     const icon = galleryCardIcon(summary, card.icon, options);
     if (icon) out.icon = icon;
@@ -1629,6 +1803,11 @@ const PlayerCore = (() => {
     nextMarker,
     prevMarker,
     markerSummary,
+    playBlocks,
+    playRailItem,
+    playExportRange,
+    playSummary,
+    playActiveIndex,
     gameEventActiveIndex,
     defaultAudioTrackIds,
     selectedAudioTrackIds,

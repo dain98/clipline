@@ -631,6 +631,159 @@ fn marker_count_pluralizes() {
 }
 
 #[test]
+fn osu_play_blocks_format_intervals_and_details() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const OSU_PLAYS = [
+          {
+            external_id: 'score-2',
+            artist: 'Camellia',
+            title: "Exit This Earth's Atomosphere",
+            difficulty: 'Extra',
+            cover_url: 'https://assets.ppy.sh/beatmaps/1/covers/list.jpg',
+            star_rating: 6.54,
+            mods: ['HD', 'DT'],
+            rank: 'A',
+            passed: false,
+            accuracy: 0.9876,
+            derived_start: true,
+            t_start_s: 10,
+            t_end_s: 50
+          },
+          {
+            external_id: 'score-3',
+            artist: 'xi',
+            title: 'Blue Zenith',
+            difficulty: 'FOUR DIMENSIONS',
+            cover_url: 'https://assets.ppy.sh/beatmaps/2/covers/list.jpg',
+            star_rating: 5.43,
+            mods: ['CL'],
+            rank: 'S',
+            passed: true,
+            accuracy: 0.9912,
+            pp: 321.4,
+            derived_start: false,
+            t_start_s: 60,
+            t_end_s: 120
+          }
+        ];
+        "#,
+    ))
+    .expect("define osu plays");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.playBlocks(OSU_PLAYS, 200).map(p => ({ id: p.externalId, left: p.leftPct, width: p.widthPct, title: p.title, details: p.details, estimated: p.estimated }))"
+        ),
+        r#"[{"id":"score-2","left":5,"width":20,"title":"Camellia - Exit This Earth's Atomosphere [Extra]","details":"Failed · A · 98.76% · +HDDT","estimated":true},{"id":"score-3","left":30,"width":30,"title":"xi - Blue Zenith [FOUR DIMENSIONS]","details":"Passed · S · 99.12% · 321pp","estimated":false}]"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.playRailItem(OSU_PLAYS[0])"),
+        r#"{"title":"Camellia - Exit This Earth's Atomosphere [Extra]","artistTitle":"Camellia - Exit This Earth's Atomosphere","difficulty":"Extra","mods":"+HDDT","starRating":"6.54★","coverUrl":"https://assets.ppy.sh/beatmaps/1/covers/list.jpg","rank":"A","pp":"","accuracy":"98.76%","meta":"A ▸ Incomplete ▸ 98.76%","time":"0:10.0-0:50.0"}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.playRailItem(OSU_PLAYS[1])"),
+        r#"{"title":"xi - Blue Zenith [FOUR DIMENSIONS]","artistTitle":"xi - Blue Zenith","difficulty":"FOUR DIMENSIONS","mods":"","starRating":"5.43★","coverUrl":"https://assets.ppy.sh/beatmaps/2/covers/list.jpg","rank":"S","pp":"321pp","accuracy":"99.12%","meta":"S ▸ 321pp ▸ 99.12%","time":"1:00.0-2:00.0"}"#
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.playRailItem({ artist: 'ZUN', title: 'Necro-Fantasia', difficulty: 'Hard', beatmapset_id: 456, rank: 'B', accuracy: 0.95, t_start_s: 1 }).coverUrl"
+        ),
+        "https://assets.ppy.sh/beatmaps/456/covers/list.jpg"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.playRailItem({ artist: 'ZUN', title: 'Necro-Fantasia', difficulty: 'Hard', rank: 'B', accuracy: 0.95, t_start_s: 1, t_end_s: 30 }).meta"),
+        "B ▸ Incomplete ▸ 95.00%"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.playRailItem({ artist: 'ZUN', title: 'Necro-Fantasia', difficulty: 'Hard', rank: 'F', accuracy: 0.95, t_start_s: 1, t_end_s: 30 }).meta"),
+        "F ▸ 95.00%"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.playRailItem({ artist: 'ZUN', title: 'Necro-Fantasia', difficulty: 'Hard', t_start_s: 1, t_end_s: 30 }).meta"),
+        "Incomplete"
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.playExportRange(OSU_PLAYS[0])"),
+        r#"{"start":10,"end":50}"#
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.playExportRange({ t_start_s: 4 }) === null"
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.playSummary(OSU_PLAYS)"),
+        "2 submitted plays"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.playActiveIndex(OSU_PLAYS, 75)"),
+        "1"
+    );
+}
+
+#[test]
+fn osu_gallery_card_preview_summarizes_play_sidecar() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const OSU_CARD_CLIP = {
+          markers: {
+            plays: [
+              { external_id: 'score-1', passed: true, t_start_s: 3, t_end_s: 40 },
+              { external_id: 'score-2', passed: false, t_start_s: 50, t_end_s: 80 }
+            ]
+          }
+        };
+        const OSU_PRESENTATION = {
+          gallery: {
+            summary: 'osu_set_plays',
+            card: { title: 'osu_session_summary' }
+          }
+        };
+        "#,
+    ))
+    .expect("define osu gallery preview");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.galleryCardPreview(OSU_CARD_CLIP, 'session', 'Jun 30 · 8:20 PM', OSU_PRESENTATION)"
+        ),
+        r#"{"title":"2 submitted plays","titleSource":"summary","summary":"1 pass · 1 fail"}"#
+    );
+}
+
+#[test]
+fn osu_gallery_card_preview_uses_clip_name_for_non_session_exports() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const OSU_EXPORT_PRESENTATION = {
+          gallery: {
+            summary: 'osu_set_plays',
+            card: { title: 'osu_session_summary' }
+          }
+        };
+        "#,
+    ))
+    .expect("define osu export gallery preview");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.galleryCardPreview({ name: 'I MY ME MINE - Trouble.mp4', markers: {} }, 'replay', 'Jul 1 · 1:20 AM', OSU_EXPORT_PRESENTATION)"
+        ),
+        r#"{"title":"I MY ME MINE - Trouble","titleSource":"clip","summary":""}"#
+    );
+}
+
+#[test]
 fn split_output_master_toggles_process_tracks_without_selecting_fallback() {
     let mut ctx = player_core_context();
     let model = eval_json(
