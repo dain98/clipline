@@ -1582,6 +1582,50 @@ function customGameId(name) {
   return `custom-${slug}-${Date.now()}`;
 }
 
+function detectedGameKey(candidate) {
+  return String(candidate.id_hint || candidate.process_path || candidate.exe_name || candidate.name || "");
+}
+
+function detectedGameSourceLabel(candidate) {
+  switch (candidate.source) {
+    case "steam_and_running_window":
+      return "Steam + running window";
+    case "steam":
+      return "Steam";
+    case "running_window":
+      return "Running window";
+    default:
+      return "Detected";
+  }
+}
+
+function detectedGameMeta(candidate) {
+  const parts = [detectedGameSourceLabel(candidate)];
+  if (candidate.exe_name) parts.push(candidate.exe_name);
+  if (candidate.window_title) parts.push(candidate.window_title);
+  if (!candidate.window_title && candidate.install_dir) parts.push(candidate.install_dir);
+  if (!candidate.window_title && !candidate.install_dir && candidate.steam_app_id) {
+    parts.push(`Steam app ${candidate.steam_app_id}`);
+  }
+  return parts.join(" · ");
+}
+
+function customGameMatchesCandidate(game, candidate) {
+  const gamePath = String(game.process_path || "").toLowerCase();
+  const candidatePath = String(candidate.process_path || "").toLowerCase();
+  if (gamePath && candidatePath) return gamePath === candidatePath;
+  if (
+    game.exe_name &&
+    candidate.exe_name &&
+    String(game.exe_name).toLowerCase() === String(candidate.exe_name).toLowerCase()
+  ) {
+    return true;
+  }
+  const gameName = String(game.name || "").toLowerCase();
+  const candidateName = String(candidate.name || "").toLowerCase();
+  return !!gameName && !!candidateName && gameName === candidateName;
+}
+
 function gameRecordingModeControl(game, index) {
   const control = document.createElement("div");
   control.className = "segmented-control custom-game-mode";
@@ -1609,6 +1653,55 @@ function gameRecordingModeControl(game, index) {
     control.appendChild(option);
   });
   return control;
+}
+
+function renderDetectedGames() {
+  const root = $("detected-games-list");
+  root.replaceChildren();
+  const addable = detectedGameCandidates.filter(
+    (candidate) => !customGames.some((game) => customGameMatchesCandidate(game, candidate)),
+  );
+  const addableKeys = new Set(addable.map(detectedGameKey));
+  selectedDetectedGameIds = new Set([...selectedDetectedGameIds].filter((key) => addableKeys.has(key)));
+  $("add-detected-games").disabled = selectedDetectedGameIds.size === 0;
+  if (!addable.length) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "no new games found";
+    root.appendChild(empty);
+    return;
+  }
+  for (const candidate of addable) {
+    const key = detectedGameKey(candidate);
+    const row = document.createElement("label");
+    row.className = "detected-game";
+
+    const check = document.createElement("span");
+    check.className = "check-line";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = selectedDetectedGameIds.has(key);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        selectedDetectedGameIds.add(key);
+      } else {
+        selectedDetectedGameIds.delete(key);
+      }
+      $("add-detected-games").disabled = selectedDetectedGameIds.size === 0;
+    });
+    check.appendChild(checkbox);
+
+    const icon = gameIconEl(candidate.icon, candidate.name);
+    const meta = document.createElement("div");
+    meta.className = "detected-game-meta";
+    const name = document.createElement("strong");
+    name.textContent = candidate.name || "Detected game";
+    const info = document.createElement("span");
+    info.textContent = detectedGameMeta(candidate);
+    meta.append(name, info);
+    row.append(check, icon, meta);
+    root.appendChild(row);
+  }
 }
 
 function renderCustomGames() {
@@ -1702,6 +1795,72 @@ async function refreshGameWindows() {
     gameWindows = [];
     renderGameWindows();
   }
+}
+
+async function showDetectedGamesPanel() {
+  $("error").textContent = "";
+  $("detected-games-panel").hidden = false;
+  const scanId = ++detectedGamesScanId;
+  selectedDetectedGameIds = new Set();
+  detectedGameCandidates = [];
+  $("add-detected-games").disabled = true;
+  $("detected-games-list").replaceChildren();
+  const loading = document.createElement("div");
+  loading.className = "hint";
+  loading.textContent = "scanning installed and running games...";
+  $("detected-games-list").appendChild(loading);
+  try {
+    const candidates = await invoke("detect_installed_games", { existingCustomGames: customGames });
+    if (scanId !== detectedGamesScanId || $("detected-games-panel").hidden) return;
+    detectedGameCandidates = candidates;
+    renderDetectedGames();
+  } catch (e) {
+    if (scanId !== detectedGamesScanId || $("detected-games-panel").hidden) return;
+    $("error").textContent = e;
+    detectedGameCandidates = [];
+    renderDetectedGames();
+  }
+}
+
+function hideDetectedGamesPanel() {
+  detectedGamesScanId += 1;
+  $("detected-games-panel").hidden = true;
+  detectedGameCandidates = [];
+  selectedDetectedGameIds = new Set();
+}
+
+function customGameFromDetectedCandidate(candidate) {
+  return normalizeCustomGame({
+    id: customGameId(candidate.name),
+    name: candidate.name || "Detected game",
+    enabled: true,
+    exe_name: candidate.exe_name || "",
+    process_path: candidate.process_path || null,
+    window_title: candidate.window_title || "",
+    recording_mode: "replays_only",
+    icon: candidate.icon || null,
+  });
+}
+
+function addSelectedDetectedGames() {
+  const selected = detectedGameCandidates.filter((candidate) =>
+    selectedDetectedGameIds.has(detectedGameKey(candidate)),
+  );
+  const additions = selected
+    .filter((candidate) => !customGames.some((game) => customGameMatchesCandidate(game, candidate)))
+    .map(customGameFromDetectedCandidate);
+  if (!additions.length) {
+    renderDetectedGames();
+    return;
+  }
+  customGames.push(...additions);
+  hideDetectedGamesPanel();
+  renderCustomGames();
+  updateGameDetectionStatus();
+  $("settings-status").textContent =
+    additions.length === 1
+      ? "custom game added - save to apply"
+      : `${additions.length} custom games added - save to apply`;
 }
 
 async function showGameWindowPicker() {

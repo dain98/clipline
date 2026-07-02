@@ -141,6 +141,9 @@ for (const id of ["set-output-volume", "set-mic-volume"]) {
 }
 $("test-mic").addEventListener("click", testMic);
 $("add-custom-game").addEventListener("click", showGameWindowPicker);
+$("detect-games").addEventListener("click", showDetectedGamesPanel);
+$("add-detected-games").addEventListener("click", addSelectedDetectedGames);
+$("cancel-detected-games").addEventListener("click", hideDetectedGamesPanel);
 $("refresh-game-windows").addEventListener("click", refreshGameWindows);
 $("cancel-game-picker").addEventListener("click", hideGameWindowPicker);
 $("choose-media-folder").addEventListener("click", chooseMediaFolder);

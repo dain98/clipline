@@ -2090,16 +2090,31 @@ fn games_ui_wires_detection_commands() {
         "await invoke(\"list_game_plugins\")",
         "await invoke(\"list_game_windows\")",
         "listen(\"game-detection\"",
+        "var detectedGameCandidates = []",
+        "var selectedDetectedGameIds = new Set()",
+        "var detectedGamesScanId = 0",
+        "await invoke(\"detect_installed_games\", { existingCustomGames: customGames })",
+        "const scanId = ++detectedGamesScanId",
+        "if (scanId !== detectedGamesScanId || $(\"detected-games-panel\").hidden) return",
+        "detectedGamesScanId += 1",
+        "const addableKeys = new Set(addable.map(detectedGameKey))",
+        "selectedDetectedGameIds = new Set([...selectedDetectedGameIds].filter((key) => addableKeys.has(key)))",
         "renderGamePlugins",
         "renderCustomGames",
         "refreshGameWindows",
+        "renderDetectedGames",
+        "showDetectedGamesPanel",
+        "addSelectedDetectedGames",
         "$(\"add-custom-game\").addEventListener(\"click\", showGameWindowPicker)",
+        "$(\"detect-games\").addEventListener(\"click\", showDetectedGamesPanel)",
+        "$(\"add-detected-games\").addEventListener(\"click\", addSelectedDetectedGames)",
+        "$(\"cancel-detected-games\").addEventListener(\"click\", hideDetectedGamesPanel)",
         "$(\"refresh-game-windows\").addEventListener(\"click\", refreshGameWindows)",
         "$(\"cancel-game-picker\").addEventListener(\"click\", hideGameWindowPicker)",
     ] {
         assert!(
             js.contains(required),
-            "main.js must wire the custom game workflow through {required}"
+            "main/settings JS must wire detected games workflow through {required}"
         );
     }
 
@@ -2113,7 +2128,7 @@ fn games_ui_wires_detection_commands() {
         );
     }
 
-    for required in [".detected-game", ".detected-games-panel[hidden]"] {
+    for required in [".detected-game,", ".detected-games-panel[hidden]"] {
         assert!(
             styles_css().contains(required),
             "styles.css must style detected games workflow through {required}"
