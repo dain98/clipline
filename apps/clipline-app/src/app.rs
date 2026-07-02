@@ -19,13 +19,14 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_updater::UpdaterExt;
 
+use crate::game_discovery::DetectedGameCandidate;
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
 use crate::osu_enrichment::OsuTitleEvent;
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     is_global_shortcut_hotkey, parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode,
-    GameRecordingMode,
+    CustomGameSettings, GameRecordingMode,
 };
 use crate::updates::UpdateChannel;
 
@@ -1245,6 +1246,13 @@ fn list_game_windows() -> Vec<GameWindowInfo> {
     crate::games::list_game_windows()
 }
 
+#[tauri::command(async)]
+fn detect_installed_games(
+    existing_custom_games: Vec<CustomGameSettings>,
+) -> Vec<DetectedGameCandidate> {
+    crate::game_discovery::detect_installed_games(&existing_custom_games)
+}
+
 /// Extract an executable's icon as a PNG `data:` URL for the custom-games UI.
 /// Returns `None` when the path has no usable icon.
 #[tauri::command]
@@ -1550,6 +1558,7 @@ pub fn run() {
             report_decode_support,
             list_game_plugins,
             list_game_windows,
+            detect_installed_games,
             extract_window_icon,
             memory_status,
             frontend_ready,

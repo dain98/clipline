@@ -1006,14 +1006,22 @@ label span { white-space: nowrap; }
 
 .supported-games,
 .custom-games,
+.detected-games-panel,
 .game-window-picker {
   display: grid;
   gap: 8px;
   min-width: 0;
 }
 
+.custom-games {
+  max-height: clamp(180px, calc(100vh - 360px), 460px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
 .game-profile,
 .custom-game,
+.detected-game,
 .game-window {
   display: grid;
   gap: 2px;
@@ -1026,6 +1034,7 @@ label span { white-space: nowrap; }
 
 .game-profile strong,
 .custom-game strong,
+.detected-game strong,
 .game-window strong {
   min-width: 0;
   overflow: hidden;
@@ -1037,6 +1046,7 @@ label span { white-space: nowrap; }
 
 .game-profile span,
 .custom-game span,
+.detected-game span,
 .game-window span {
   min-width: 0;
   overflow: hidden;
@@ -1377,16 +1387,18 @@ label span { white-space: nowrap; }
   gap: 14px;
 }
 
+.games-panel-actions,
 .game-window-picker-head div {
   display: flex;
   gap: 8px;
 }
 
 .custom-game {
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) minmax(220px, 320px) auto;
   align-items: center;
   column-gap: 10px;
-  row-gap: 8px;
+  row-gap: 4px;
+  padding-block: 8px;
 }
 
 .custom-game .check-line {
@@ -1400,8 +1412,8 @@ label span { white-space: nowrap; }
 }
 
 .custom-game-mode {
-  grid-column: 3 / 5;
-  width: min(100%, 320px);
+  grid-column: auto;
+  width: 100%;
 }
 
 .custom-game-mode span {
@@ -1414,19 +1426,43 @@ label span { white-space: nowrap; }
   padding: 0;
 }
 
-.game-window-picker {
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel-2);
+.detected-games-panel {
+  padding: 14px;
 }
 
-.game-window-picker[hidden] { display: none; }
+.detected-games-list {
+  display: grid;
+  gap: 6px;
+  max-height: min(420px, calc(72vh - 96px));
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.detected-game {
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 2px;
+}
+
+.detected-game .check-line {
+  justify-content: center;
+}
+
+.detected-game-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.game-window-picker {
+  padding: 14px;
+}
 
 .game-window-list {
   display: grid;
   gap: 6px;
-  max-height: 260px;
+  max-height: min(420px, calc(72vh - 96px));
   min-height: 0;
   overflow-y: auto;
 }
@@ -2130,6 +2166,23 @@ label span { white-space: nowrap; }
 #update-dialog::backdrop,
 #upload-dialog::backdrop,
 #rename-file-dialog::backdrop { background: rgba(5, 7, 10, 0.62); }
+
+#detected-games-dialog,
+#game-window-picker-dialog {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(74vh, 640px);
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+
+#detected-games-dialog::backdrop,
+#game-window-picker-dialog::backdrop {
+  background: rgba(5, 7, 10, 0.62);
+}
 
 .confirm-body {
   display: grid;

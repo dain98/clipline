@@ -500,8 +500,13 @@ fn review_player_owns_all_controls() {
         "id=\"set-games-auto-detect\"",
         "id=\"supported-games\"",
         "id=\"custom-games\"",
+        "id=\"detect-games\"",
         "id=\"add-custom-game\"",
-        "id=\"game-window-picker\"",
+        "id=\"detected-games-dialog\"",
+        "id=\"detected-games-list\"",
+        "id=\"add-detected-games\"",
+        "id=\"cancel-detected-games\"",
+        "id=\"game-window-picker-dialog\"",
         "id=\"refresh-game-windows\"",
         "id=\"game-window-list\"",
         "id=\"game-detection-status\"",
@@ -737,6 +742,18 @@ fn review_player_owns_all_controls() {
             && main_js().contains("full_session")
             && styles_css().contains(".custom-game-mode"),
         "custom games must expose and persist per-game recording mode choices"
+    );
+    assert!(
+        styles_css().contains("max-height: clamp(180px, calc(100vh - 360px), 460px);")
+            && styles_css().contains("overflow-y: auto;")
+            && styles_css().contains(
+                "grid-template-columns: auto auto minmax(0, 1fr) minmax(220px, 320px) auto;"
+            )
+            && styles_css().contains(".custom-game-mode {\n  grid-column: auto;")
+            && main_js().contains(
+                "row.append(enabled, icon, meta, gameRecordingModeControl(game, index), remove);"
+            ),
+        "custom games list must scroll independently and keep recording mode on the right side"
     );
     assert!(
         main_js().contains("await invoke(\"list_game_plugins\")")
@@ -2096,16 +2113,53 @@ fn games_ui_wires_detection_commands() {
         "await invoke(\"list_game_plugins\")",
         "await invoke(\"list_game_windows\")",
         "listen(\"game-detection\"",
+        "var detectedGameCandidates = []",
+        "var selectedDetectedGameIds = new Set()",
+        "var detectedGamesScanId = 0",
+        "await invoke(\"detect_installed_games\", { existingCustomGames: customGames })",
+        "const scanId = ++detectedGamesScanId",
+        "$(\"detected-games-dialog\").showModal()",
+        "if (scanId !== detectedGamesScanId || !$(\"detected-games-dialog\").open) return",
+        "detectedGamesScanId += 1",
+        "const addableKeys = new Set(addable.map(detectedGameKey))",
+        "selectedDetectedGameIds = new Set([...selectedDetectedGameIds].filter((key) => addableKeys.has(key)))",
+        "function uniqueCustomGameId",
+        "const usedIds = new Set(customGames.map((game) => game.id))",
+        ".map((candidate) => customGameFromDetectedCandidate(candidate, usedIds))",
         "renderGamePlugins",
         "renderCustomGames",
         "refreshGameWindows",
+        "renderDetectedGames",
+        "showDetectedGamesDialog",
+        "addSelectedDetectedGames",
         "$(\"add-custom-game\").addEventListener(\"click\", showGameWindowPicker)",
+        "$(\"detect-games\").addEventListener(\"click\", showDetectedGamesDialog)",
+        "$(\"add-detected-games\").addEventListener(\"click\", addSelectedDetectedGames)",
+        "$(\"cancel-detected-games\").addEventListener(\"click\", hideDetectedGamesDialog)",
         "$(\"refresh-game-windows\").addEventListener(\"click\", refreshGameWindows)",
         "$(\"cancel-game-picker\").addEventListener(\"click\", hideGameWindowPicker)",
     ] {
         assert!(
             js.contains(required),
-            "main.js must wire the custom game workflow through {required}"
+            "main/settings JS must wire detected games workflow through {required}"
+        );
+    }
+
+    for required in ["fn detect_installed_games", "detect_installed_games,"] {
+        assert!(
+            app_rs().contains(required),
+            "native command registry must expose detected game scan through {required}"
+        );
+    }
+
+    for required in [
+        ".detected-game,",
+        "#detected-games-dialog,",
+        "#game-window-picker-dialog",
+    ] {
+        assert!(
+            styles_css().contains(required),
+            "styles.css must style detected games workflow through {required}"
         );
     }
 }

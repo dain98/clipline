@@ -116,6 +116,9 @@ var gamePlugins = [];
 var gamePluginSettings = {};
 var customGames = [];
 var gameWindows = [];
+var detectedGameCandidates = [];
+var selectedDetectedGameIds = new Set();
+var detectedGamesScanId = 0;
 var activeDetectedGame = null;
 var captureTargetDirty = false;
 // Codecs WebView2 can decode in the review player (H.264 always; HEVC/AV1
