@@ -8,6 +8,8 @@ Lightweight, local-first game recording for Windows.
 [Download nightly](https://github.com/dain98/clipline/releases) ·
 [Report an issue](https://github.com/dain98/clipline/issues/new/choose)
 
+![Clipline banner](clipline-social-preview.jpg)
+
 </div>
 
 Clipline is an open-source desktop recorder for saving gameplay replays, full-session recordings, and reviewable clips without ads, accounts, telemetry, watermarks, or game injection.
