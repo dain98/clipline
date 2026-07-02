@@ -20,6 +20,8 @@ pub type PcmFrame = (f64, Vec<f32>);
 pub struct LoopbackAssembler {
     /// pts of the first sample ever pushed; frame N pops at base + N*0.02.
     base_pts_s: Option<f64>,
+    /// Expected WASAPI timestamp for the next finite chunk.
+    next_chunk_pts_s: Option<f64>,
     buffered: Vec<f32>, // interleaved stereo
     frames_popped: u64,
 }
@@ -35,10 +37,8 @@ impl LoopbackAssembler {
             self.push_contiguous_chunk(interleaved);
             return;
         }
-        let base = *self.base_pts_s.get_or_insert(pts_s);
-        let expected = base
-            + self.frames_popped as f64 * FRAME_DURATION_S
-            + (self.buffered.len() / 2) as f64 / SAMPLE_RATE;
+        self.base_pts_s.get_or_insert(pts_s);
+        let expected = self.next_chunk_pts_s.unwrap_or(pts_s);
         let gap = pts_s - expected;
         if gap > GAP_TOLERANCE_S {
             let missing_pairs = (gap.min(MAX_GAP_FILL_S) * SAMPLE_RATE).round() as usize;
@@ -46,12 +46,21 @@ impl LoopbackAssembler {
                 .extend(std::iter::repeat_n(0.0, missing_pairs * 2));
         }
         self.buffered.extend_from_slice(interleaved);
+        let chunk_duration_s = (interleaved.len() / 2) as f64 / SAMPLE_RATE;
+        self.next_chunk_pts_s = Some(if gap > GAP_TOLERANCE_S {
+            pts_s + chunk_duration_s
+        } else {
+            expected + chunk_duration_s
+        });
     }
 
     /// Append a chunk when the device explicitly marked its timestamp invalid.
     pub fn push_contiguous_chunk(&mut self, interleaved: &[f32]) {
         self.base_pts_s.get_or_insert(0.0);
         self.buffered.extend_from_slice(interleaved);
+        if let Some(next_chunk_pts_s) = &mut self.next_chunk_pts_s {
+            *next_chunk_pts_s += (interleaved.len() / 2) as f64 / SAMPLE_RATE;
+        }
     }
 
     /// One 20 ms frame once enough samples are buffered.
@@ -333,6 +342,20 @@ mod tests {
 
         let max_missing_pairs = (MAX_GAP_FILL_S * SAMPLE_RATE).round() as usize;
         assert_eq!(asm.buffered.len(), (960 + max_missing_pairs + 960) * 2);
+    }
+
+    #[test]
+    fn capped_timestamp_gap_does_not_repeat_for_following_chunks() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &pairs(960, 1.0));
+        asm.push_chunk(3600.0, &pairs(960, 0.5));
+        asm.push_chunk(3600.02, &pairs(960, 0.25));
+
+        let max_missing_pairs = (MAX_GAP_FILL_S * SAMPLE_RATE).round() as usize;
+        assert_eq!(
+            asm.buffered.len(),
+            (960 + max_missing_pairs + 960 + 960) * 2
+        );
     }
 
     #[test]
