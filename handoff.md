@@ -176,6 +176,10 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     was removed from Settings > Capture while backend/CLI compatibility remains. The fallback
     Capture target dropdown lists available displays first and keeps the editable `SET REGION`
     option at the bottom; display selections persist as full-monitor display-region captures.
+    - Settings > Games now has a manual Detect Games workflow beside Add Custom Game. It scans
+      Steam manifests and visible running windows, shows unchecked candidates, dedupes existing
+      custom games, and appends selected rows as normal Custom games using the existing
+      save-to-apply flow.
 25. **Full-session game recording** — Each saved custom game persists its own recording-mode
     preference (`replays_only` default, `full_session` selectable). Games set to full session start
     a shared-encoder Hybrid MP4 sink when the detected window becomes the active capture target,
