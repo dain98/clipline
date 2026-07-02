@@ -750,8 +750,9 @@ fn review_player_owns_all_controls() {
                 "grid-template-columns: auto auto minmax(0, 1fr) minmax(220px, 320px) auto;"
             )
             && styles_css().contains(".custom-game-mode {\n  grid-column: auto;")
-            && main_js()
-                .contains("row.append(enabled, icon, meta, gameRecordingModeControl(game, index), remove);"),
+            && main_js().contains(
+                "row.append(enabled, icon, meta, gameRecordingModeControl(game, index), remove);"
+            ),
         "custom games list must scroll independently and keep recording mode on the right side"
     );
     assert!(
@@ -910,9 +911,10 @@ fn review_player_owns_all_controls() {
             && !player_core_js().contains("dataDragonSummonerSpellAsset")
             && !player_core_js().contains("dataDragonItemAsset")
             && player_core_js().contains("const clipName = clip && typeof clip.name === \"string\" ? clip.name.trim() : \"\"")
-            && player_core_js().contains("const clipDisplayTitle = clipName.replace")
+            && player_core_js().contains("const customTitle = clip && typeof clip.title === \"string\" ? clip.title.trim() : \"\"")
+            && player_core_js().contains("const clipDisplayTitle = customTitle || clipName.replace")
             && player_core_js().contains("titlePolicy === \"clip\" || (titlePolicy === \"osu_session_summary\" && kind !== \"session\")")
-            && player_core_js().contains("const clipTitle = usesClipTitle && clipName ? clipDisplayTitle : fallback")
+            && player_core_js().contains("const clipTitle = usesClipTitle && clipDisplayTitle ? clipDisplayTitle : fallback")
             && player_core_js().contains("const markerRailConfig =")
             && main_js().contains("detail.className = \"game-meta\"")
             && main_js().contains("if (cardPreview.summary && !cardTitleUsesSummary)")
@@ -1908,12 +1910,22 @@ fn no_native_browser_dialogs() {
             && js.contains("$(\"clip-menu-copy-cloud-link\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-upload\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-rename\").addEventListener(\"click\"")
+            && js.contains("$(\"clip-menu-rename-file\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-delete\").addEventListener(\"click\"")
             && js.contains("function beginClipRename")
+            && js.contains("function openRenameFileDialog")
             && js.contains("await invoke(\"rename_clip\"")
+            && js.contains("await invoke(\"rename_clip_file\"")
             && app_rs().contains("crate::library::rename_clip")
+            && app_rs().contains("crate::library::rename_clip_file")
+            && index_html().contains("id=\"clip-menu-rename-file\"")
+            && index_html().contains("id=\"rename-file-dialog\"")
+            && index_html().contains("id=\"rename-file-input\"")
+            && js.contains("clipKind(c)")
+            && !js.contains("clipKind(c.name)")
             && css.contains(".clip-title-edit")
             && css.contains(".context-menu button[hidden]")
+            && css.contains("#rename-file-dialog")
             && css.contains(".context-menu button.danger-text"),
         "native context menus must be suppressed and library rows must expose an app-owned clip menu"
     );
@@ -2133,10 +2145,7 @@ fn games_ui_wires_detection_commands() {
         );
     }
 
-    for required in [
-        "fn detect_installed_games",
-        "detect_installed_games,",
-    ] {
+    for required in ["fn detect_installed_games", "detect_installed_games,"] {
         assert!(
             app_rs().contains(required),
             "native command registry must expose detected game scan through {required}"
@@ -2221,6 +2230,16 @@ fn clipboard_copy_sends_selected_audio_tracks() {
             && js.contains("audioTrackIds: clipAudioTracks(currentClip).length")
             && js.contains("selectedAudioTrackIdsForClip(currentClip)"),
         "copy should send the current selected audio tracks to the native clipboard exporter"
+    );
+}
+
+#[test]
+fn file_rename_reapplies_selected_audio_preview() {
+    let js = main_js();
+
+    assert!(
+        js.contains("await applySelectedAudioTracksToPlayback({ forceResume: shouldResume });"),
+        "renaming the open source file should restore the selected audio-track preview"
     );
 }
 

@@ -1602,6 +1602,10 @@ function detectedGameSourceLabel(candidate) {
   switch (candidate.source) {
     case "steam":
       return "Steam";
+    case "running_window":
+      return "Running";
+    case "steam_and_running_window":
+      return "Steam · Running";
     default:
       return "Installed";
   }

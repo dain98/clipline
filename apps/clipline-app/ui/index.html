@@ -825,6 +825,19 @@
     </div>
   </dialog>
 
+  <dialog id="rename-file-dialog">
+    <div class="confirm-body upload-body">
+      <strong>Rename file</strong>
+      <label for="rename-file-input">File name</label>
+      <input id="rename-file-input" type="text" maxlength="180" autocomplete="off" spellcheck="false" />
+      <span id="rename-file-status" class="hint"></span>
+    </div>
+    <div class="confirm-actions">
+      <button id="rename-file-save" class="primary" type="button">Rename</button>
+      <button id="rename-file-cancel" type="button">Cancel</button>
+    </div>
+  </dialog>
+
   <dialog id="game-plugin-settings-dialog" class="game-plugin-settings-dialog">
     <div class="game-plugin-settings-shell">
       <header class="game-plugin-settings-head">
@@ -902,6 +915,7 @@
     <button id="clip-menu-export-play" type="button">Export play as clip</button>
     <button id="clip-menu-upload" type="button">Upload</button>
     <button id="clip-menu-rename" type="button">Rename</button>
+    <button id="clip-menu-rename-file" type="button">Rename file</button>
     <button id="clip-menu-delete" type="button" class="danger-text">Delete</button>
   </div>
 

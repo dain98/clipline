@@ -1,6 +1,9 @@
 // Review workspace: playback, timeline, trim, export.
 /* ---- review player ---- */
 
+var renameFileDialogClip = null;
+var renameFilePending = false;
+
 // Sync the review-header upload button to the current clip's cloud state:
 // disabled when no clip is open or cloud is disconnected (and not yet uploaded),
 // a link icon once uploaded. Mirrors the per-row cloud button in clipRow().
@@ -59,7 +62,8 @@ function beginClipRename(clip = currentClip) {
   if (isCloudOnlyReviewClip(clip)) return;
   if (!currentClip || currentClip.path !== clip.path) openClip(clip);
   setClipTitleEditing(true);
-  $("rename-input").value = (currentClip && currentClip.path === clip.path ? currentClip.name : clip.name) || "";
+  const activeClip = currentClip && currentClip.path === clip.path ? currentClip : clip;
+  $("rename-input").value = clipDisplayTitle(activeClip) || activeClip.name || "";
   $("rename-input").focus();
   $("rename-input").select();
 }
@@ -67,6 +71,31 @@ function beginClipRename(clip = currentClip) {
 function cancelClipRename() {
   if (renamePending) return;
   setClipTitleEditing(false);
+}
+
+function renamedClipFromResult(oldClip, result) {
+  const hasTitle = result && Object.prototype.hasOwnProperty.call(result, "title");
+  return {
+    ...oldClip,
+    path: result && result.path || oldClip.path,
+    name: result && result.name || oldClip.name,
+    title: hasTitle ? result.title : oldClip.title,
+    kind: result && result.kind || oldClip.kind,
+  };
+}
+
+function applyRenamedClip(oldClip, result) {
+  const renamed = renamedClipFromResult(oldClip, result);
+  replaceClipInCache(oldClip.path, renamed);
+  replaceCloudRecordPath(result && result.old_path || oldClip.path, renamed.path);
+  if (currentClip && currentClip.path === oldClip.path) {
+    currentClip = renamed;
+    $("pname").textContent = clipDisplayTitle(renamed) || renamed.name;
+    const shownDuration = clipDuration();
+    $("pmeta").textContent =
+      `${shownDuration > 0 ? `${fmtDur(shownDuration)} · ` : ""}${renamed.size_mb.toFixed(1)} MB · ${renamed.path}`;
+  }
+  return renamed;
 }
 
 function restoreVideoAfterRename(path, time, shouldResume, rate) {
@@ -235,18 +264,7 @@ async function saveClipRename(ev) {
       await releaseVideoFileHandle();
       result = await invoke("rename_clip", { path: oldPath, name: nextName });
     }
-    const renamed = {
-      ...oldClip,
-      path: result.path || oldPath,
-      name: result.name || nextName,
-    };
-    clipsCache = clipsCache.map((clip) => (clip.path === oldPath ? renamed : clip));
-    replaceCloudRecordPath(result.old_path || oldPath, renamed.path);
-    currentClip = renamed;
-    $("pname").textContent = renamed.name;
-    const shownDuration = clipDuration();
-    $("pmeta").textContent =
-      `${shownDuration > 0 ? `${fmtDur(shownDuration)} · ` : ""}${renamed.size_mb.toFixed(1)} MB · ${renamed.path}`;
+    const renamed = applyRenamedClip(oldClip, result);
     setClipTitleEditing(false);
     renderClips();
     setDeckStatus("clip renamed", { transient: true });
@@ -258,6 +276,86 @@ async function saveClipRename(ev) {
   } finally {
     renamePending = false;
     setClipRenameControlsDisabled(false);
+  }
+}
+
+function setRenameFileControlsDisabled(disabled) {
+  $("rename-file-input").disabled = disabled;
+  $("rename-file-save").disabled = disabled;
+  $("rename-file-cancel").disabled = disabled;
+}
+
+function openRenameFileDialog(clip) {
+  if (!clip || isCloudOnlyReviewClip(clip)) return;
+  renameFileDialogClip = clip;
+  $("rename-file-input").value = clip.name || "";
+  $("rename-file-status").textContent = "";
+  setRenameFileControlsDisabled(false);
+  const dialog = $("rename-file-dialog");
+  if (!dialog.open) dialog.showModal();
+  $("rename-file-input").focus();
+  $("rename-file-input").select();
+}
+
+function closeRenameFileDialog(force = false) {
+  if (renameFilePending && !force) return;
+  renameFileDialogClip = null;
+  $("rename-file-status").textContent = "";
+  setRenameFileControlsDisabled(false);
+  const dialog = $("rename-file-dialog");
+  if (dialog.open) dialog.close();
+}
+
+async function submitRenameFileDialog() {
+  const oldClip = renameFileDialogClip;
+  if (!oldClip || renameFilePending) return;
+  const nextName = $("rename-file-input").value.trim();
+  if (!nextName) {
+    $("rename-file-status").textContent = "File name is required.";
+    $("rename-file-input").focus();
+    return;
+  }
+
+  const oldPath = oldClip.path;
+  const isCurrent = currentClip && currentClip.path === oldPath;
+  const resumeTime = isCurrent && Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const shouldResume = isCurrent && !video.paused && !video.ended;
+  const rate = video.playbackRate;
+  const trimRange = isCurrent ? { start: trimStart, end: trimEnd } : null;
+  renameFilePending = true;
+  setRenameFileControlsDisabled(true);
+  $("rename-file-status").textContent = "Renaming...";
+  await afterNextPaint();
+
+  let mediaReleased = false;
+  try {
+    let result;
+    try {
+      result = await invoke("rename_clip_file", { path: oldPath, name: nextName });
+    } catch (error) {
+      if (!isCurrent || !isRenameFileLockError(error)) throw error;
+      mediaReleased = true;
+      await releaseVideoFileHandle();
+      result = await invoke("rename_clip_file", { path: oldPath, name: nextName });
+    }
+    const renamed = applyRenamedClip(oldClip, result);
+    closeRenameFileDialog(true);
+    renderClips();
+    setDeckStatus("file renamed", { transient: true });
+    setNotice("file renamed", { transient: true });
+    if (isCurrent && renamed.path !== oldPath) {
+      setReviewVideoSource(renamed.path, { resumeTime, shouldResume, rate, trimRange });
+      currentReviewAudioKey = null;
+      await applySelectedAudioTracksToPlayback({ forceResume: shouldResume });
+    } else if (mediaReleased) {
+      restoreVideoAfterRename(renamed.path, resumeTime, shouldResume, rate);
+    }
+  } catch (e) {
+    $("rename-file-status").textContent = String(e);
+    if (mediaReleased) restoreVideoAfterRename(oldPath, resumeTime, shouldResume, rate);
+  } finally {
+    renameFilePending = false;
+    setRenameFileControlsDisabled(false);
   }
 }
 
@@ -274,7 +372,7 @@ function openClip(clip) {
   setDeckStatus("");
   $("stage-note").textContent = "loading…";
   setClipTitleEditing(false);
-  $("pname").textContent = clip.name;
+  $("pname").textContent = clipDisplayTitle(clip) || clip.name;
   $("pmeta").textContent = `${clip.size_mb.toFixed(1)} MB · ${clip.path}`;
   syncReviewLocalActions();
   syncUploadClipButton();

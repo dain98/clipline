@@ -582,10 +582,11 @@ Recent fixes (2026-06-19):
   title-only custom rules ignore browser processes, so YouTube tabs with a game title do not start
   game recording or trigger save-on-return behavior.
 - The native WebView/Chromium context menu is suppressed. Library rows own a small right-click
-  menu with Upload and Delete actions.
-- Library rows and the review header can rename clips. The backend validates Windows-safe MP4
-  names, renames marker sidecars with the source file, and keeps matching cloud upload records
-  pointed at the new local path.
+  menu with Upload, Rename, Rename file, and Delete actions.
+- Library rows and the review header rename clips by saving a metadata-backed display title without
+  moving the MP4. The secondary Rename file action still validates Windows-safe MP4 names, moves
+  marker/poster/metadata sidecars with the source file, preserves the clip kind, and keeps matching
+  cloud upload records pointed at the new local path.
 - Upload buttons now open an in-app dialog for title, description, and visibility before upload.
   Nonblank descriptions are trimmed and sent on `POST /api/v1/uploads`; blank descriptions are
   omitted. New cloud uploads no longer include deprecated marker payloads in the create request.
