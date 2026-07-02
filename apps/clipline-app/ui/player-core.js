@@ -541,13 +541,14 @@ const PlayerCore = (() => {
   const playRank = (play) => String(play && play.rank || "").trim();
 
   const playIncomplete = (play) => {
+    if (play && play.passed) return "";
     if (playPp(play)) return "";
     return playRank(play).toUpperCase() === "F" ? "" : "Incomplete";
   };
 
   const playDetails = (play) => {
     const parts = [
-      play && play.passed ? "Passed" : "Failed",
+      playIncomplete(play) || (play && play.passed ? "Passed" : "Failed"),
       playRank(play),
       playAccuracy(play),
       playPp(play),
@@ -573,6 +574,7 @@ const PlayerCore = (() => {
       title: playTitle(play),
       details: playDetails(play),
       estimated: Boolean(play && play.derived_start),
+      incomplete: Boolean(playIncomplete(play)),
     };
   };
 
@@ -628,20 +630,30 @@ const PlayerCore = (() => {
   const playResultSummary = (plays) => {
     const list = rawPlays(plays);
     const passed = list.filter((play) => play && play.passed).length;
-    const failed = list.length - passed;
+    const incomplete = list.filter((play) => playIncomplete(play)).length;
+    const failed = Math.max(0, list.length - passed - incomplete);
     const parts = [];
     if (passed) parts.push(`${passed} ${passed === 1 ? "pass" : "passes"}`);
+    if (incomplete) parts.push(`${incomplete} incomplete`);
     if (failed) parts.push(`${failed} ${failed === 1 ? "fail" : "fails"}`);
     return parts.join(" · ");
   };
 
-  const playActiveIndex = (plays, currentTime) => {
+  const playActiveIndex = (plays, currentTime, selectedIndex = -1) => {
     const list = normalizedPlays(plays, 0);
     const current = Number(currentTime);
     if (!Number.isFinite(current)) return -1;
-    return list.findIndex((play) =>
-      play.hasEnd ? current >= play.start && current <= play.end : Math.abs(current - play.start) <= MARKER_EPSILON_S
-    );
+    const selected = Number(selectedIndex);
+    if (Number.isInteger(selected) && selected >= 0 && selected < list.length) return selected;
+    let active = -1;
+    for (let index = 0; index < list.length; index += 1) {
+      const play = list[index];
+      const contains = play.hasEnd
+        ? current >= play.start && current <= play.end
+        : Math.abs(current - play.start) <= MARKER_EPSILON_S;
+      if (contains && (active < 0 || play.start >= list[active].start)) active = index;
+    }
+    return active;
   };
 
   const gameEventActiveIndex = (markers, currentTime, selectedIndex = -1) => {
@@ -1807,6 +1819,7 @@ const PlayerCore = (() => {
     playRailItem,
     playExportRange,
     playSummary,
+    playResultSummary,
     playActiveIndex,
     gameEventActiveIndex,
     defaultAudioTrackIds,

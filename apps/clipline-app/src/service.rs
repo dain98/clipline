@@ -1785,7 +1785,13 @@ fn crop_for_region_or_full_display(
     display: &clipline_capture::windows::display::DisplayInfo,
     recovered_display: bool,
 ) -> Result<(CropRect, bool), String> {
+    if region.width < 2 || region.height < 2 {
+        return Err("capture region must be at least 2x2 pixels".into());
+    }
     if !recovered_display {
+        if let Some(crop) = rebased_full_display_crop(region, display) {
+            return Ok((crop, false));
+        }
         if let Ok(crop) = crop_for_region(region, display) {
             return Ok((crop, false));
         }
@@ -1802,6 +1808,22 @@ fn crop_for_region_or_full_display(
         },
         true,
     ))
+}
+
+fn rebased_full_display_crop(
+    region: &CaptureRegion,
+    display: &clipline_capture::windows::display::DisplayInfo,
+) -> Option<CropRect> {
+    if region.width == display.width && region.height == display.height {
+        Some(CropRect {
+            x: 0,
+            y: 0,
+            width: display.width,
+            height: display.height,
+        })
+    } else {
+        None
+    }
 }
 
 fn clamped_region_crop(
@@ -2109,6 +2131,42 @@ mod tests {
                 y: 500,
                 width: 920,
                 height: 580
+            }
+        );
+    }
+
+    #[test]
+    fn full_display_region_survives_virtual_origin_change() {
+        let region = CaptureRegion {
+            display_id: Some(r"\\.\DISPLAY1".into()),
+            x: 1280,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+        let display = clipline_capture::windows::display::DisplayInfo {
+            id: r"\\.\DISPLAY1".into(),
+            name: "DISPLAY1".into(),
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+            is_primary: true,
+        };
+
+        let (crop, recovered) = crop_for_region_or_full_display(&region, &display, false).unwrap();
+
+        assert!(
+            !recovered,
+            "a full-display selection should rebase without a settings warning"
+        );
+        assert_eq!(
+            crop,
+            CropRect {
+                x: 0,
+                y: 0,
+                width: 2560,
+                height: 1440
             }
         );
     }

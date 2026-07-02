@@ -9,6 +9,8 @@ use std::collections::VecDeque;
 const SAMPLE_RATE: f64 = 48_000.0;
 /// Gaps shorter than half a frame are treated as device jitter.
 const GAP_TOLERANCE_S: f64 = FRAME_DURATION_S / 2.0;
+/// A bogus device timestamp must not allocate unbounded silence.
+const MAX_GAP_FILL_S: f64 = 5.0;
 const MIX_FRAME_EPSILON_S: f64 = FRAME_DURATION_S / 2.0;
 const MISSING_SOURCE_GRACE_S: f64 = FRAME_DURATION_S * 3.0;
 
@@ -18,6 +20,8 @@ pub type PcmFrame = (f64, Vec<f32>);
 pub struct LoopbackAssembler {
     /// pts of the first sample ever pushed; frame N pops at base + N*0.02.
     base_pts_s: Option<f64>,
+    /// Expected WASAPI timestamp for the next finite chunk.
+    next_chunk_pts_s: Option<f64>,
     buffered: Vec<f32>, // interleaved stereo
     frames_popped: u64,
 }
@@ -29,17 +33,34 @@ impl LoopbackAssembler {
 
     /// `pts_s` stamps the first sample of `interleaved` (stereo pairs).
     pub fn push_chunk(&mut self, pts_s: f64, interleaved: &[f32]) {
-        let base = *self.base_pts_s.get_or_insert(pts_s);
-        let expected = base
-            + self.frames_popped as f64 * FRAME_DURATION_S
-            + (self.buffered.len() / 2) as f64 / SAMPLE_RATE;
+        if !pts_s.is_finite() {
+            self.push_contiguous_chunk(interleaved);
+            return;
+        }
+        self.base_pts_s.get_or_insert(pts_s);
+        let expected = self.next_chunk_pts_s.unwrap_or(pts_s);
         let gap = pts_s - expected;
         if gap > GAP_TOLERANCE_S {
-            let missing_pairs = (gap * SAMPLE_RATE).round() as usize;
+            let missing_pairs = (gap.min(MAX_GAP_FILL_S) * SAMPLE_RATE).round() as usize;
             self.buffered
                 .extend(std::iter::repeat_n(0.0, missing_pairs * 2));
         }
         self.buffered.extend_from_slice(interleaved);
+        let chunk_duration_s = (interleaved.len() / 2) as f64 / SAMPLE_RATE;
+        self.next_chunk_pts_s = Some(if gap > GAP_TOLERANCE_S {
+            pts_s + chunk_duration_s
+        } else {
+            expected + chunk_duration_s
+        });
+    }
+
+    /// Append a chunk when the device explicitly marked its timestamp invalid.
+    pub fn push_contiguous_chunk(&mut self, interleaved: &[f32]) {
+        self.base_pts_s.get_or_insert(0.0);
+        self.buffered.extend_from_slice(interleaved);
+        if let Some(next_chunk_pts_s) = &mut self.next_chunk_pts_s {
+            *next_chunk_pts_s += (interleaved.len() / 2) as f64 / SAMPLE_RATE;
+        }
     }
 
     /// One 20 ms frame once enough samples are buffered.
@@ -311,6 +332,43 @@ mod tests {
         assert!(frames[3].1.iter().all(|&s| s == 1.0), "audio resumes");
         // pts stays continuous despite the gap: the resumed audio lands at 0.06.
         assert!((frames[3].0 - 0.06).abs() < 1e-9);
+    }
+
+    #[test]
+    fn caps_huge_timestamp_gaps() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &pairs(960, 1.0));
+        asm.push_chunk(3600.0, &pairs(960, 1.0));
+
+        let max_missing_pairs = (MAX_GAP_FILL_S * SAMPLE_RATE).round() as usize;
+        assert_eq!(asm.buffered.len(), (960 + max_missing_pairs + 960) * 2);
+    }
+
+    #[test]
+    fn capped_timestamp_gap_does_not_repeat_for_following_chunks() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &pairs(960, 1.0));
+        asm.push_chunk(3600.0, &pairs(960, 0.5));
+        asm.push_chunk(3600.02, &pairs(960, 0.25));
+
+        let max_missing_pairs = (MAX_GAP_FILL_S * SAMPLE_RATE).round() as usize;
+        assert_eq!(
+            asm.buffered.len(),
+            (960 + max_missing_pairs + 960 + 960) * 2
+        );
+    }
+
+    #[test]
+    fn invalid_timestamp_chunks_append_contiguously() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &pairs(960, 1.0));
+        asm.push_chunk(f64::NAN, &pairs(960, 0.5));
+
+        let first = asm.pop_frame().expect("first frame");
+        let second = asm.pop_frame().expect("second frame");
+        assert!(first.1.iter().all(|&s| s == 1.0));
+        assert!(second.1.iter().all(|&s| s == 0.5));
+        assert!(asm.pop_frame().is_none());
     }
 
     #[test]

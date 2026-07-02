@@ -231,6 +231,10 @@ var selectedGameEventTime = null;
 var gameEventRailCollapsed = false;
 var gameEventRows = [];
 var activeGamePlayIndex = -1;
+var selectedGamePlayIndex = -1;
+var selectedGamePlayPending = false;
+var selectedGamePlayStart = null;
+var selectedGamePlayEnd = null;
 var gamePlayRows = [];
 
 function eventRailPolicy(clip) {
@@ -281,6 +285,40 @@ function selectedGameEventIndexForTime(currentTime) {
     return -1;
   }
   return selectedGameEventIndex;
+}
+
+function clearGamePlaySelection() {
+  selectedGamePlayIndex = -1;
+  selectedGamePlayPending = false;
+  selectedGamePlayStart = null;
+  selectedGamePlayEnd = null;
+}
+
+function selectGamePlay(index, playStart, playEnd) {
+  selectedGamePlayIndex = index;
+  selectedGamePlayPending = true;
+  selectedGamePlayStart = Number.isFinite(playStart) ? playStart : null;
+  selectedGamePlayEnd = Number.isFinite(playEnd) ? playEnd : selectedGamePlayStart;
+}
+
+function selectedGamePlayIndexForTime(currentTime, options = {}) {
+  if (selectedGamePlayIndex < 0 || selectedGamePlayStart == null) return -1;
+  const t = Number(currentTime);
+  const start = Number(selectedGamePlayStart);
+  const end = Number.isFinite(selectedGamePlayEnd) ? Number(selectedGamePlayEnd) : start;
+  const inSelectedPlay = Number.isFinite(t)
+    && Number.isFinite(start)
+    && t >= start - 0.15
+    && t <= Math.max(start, end) + 0.15;
+  if (options.keepGamePlaySelection || selectedGamePlayPending) {
+    if (!options.keepGamePlaySelection) {
+      if (inSelectedPlay) selectedGamePlayPending = false;
+    }
+    return selectedGamePlayIndex;
+  }
+  if (inSelectedPlay) return selectedGamePlayIndex;
+  clearGamePlaySelection();
+  return -1;
 }
 
 function renderGameEventRail(clip = currentClip) {
@@ -410,6 +448,7 @@ function renderGamePlayRail(clip = currentClip) {
   const playRail = playRailPolicy(clip);
   const plays = clipPlays(clip);
   activeGamePlayIndex = -1;
+  clearGamePlaySelection();
   if (!rail || !title || !summary || !list) return;
   if (!playRail || !playRail.enabled || !plays.length) {
     rail.hidden = true;
@@ -480,7 +519,8 @@ function renderGamePlayRail(clip = currentClip) {
     text.append(playTitleEl, meta);
     button.append(thumbnail, text);
     button.addEventListener("click", () => {
-      seekTo(play.start);
+      selectGamePlay(index, play.start, play.end);
+      seekTo(play.start, { keepGamePlaySelection: true });
       video.play().catch(() => syncPlayState());
     });
     button.addEventListener("contextmenu", (ev) => {
@@ -502,7 +542,8 @@ function renderGamePlayRail(clip = currentClip) {
 function syncGamePlayRail(currentTime = video.currentTime || 0, options = {}) {
   const rail = $("game-play-rail");
   if (!rail || rail.hidden) return;
-  const next = playActiveIndex(clipPlays(), currentTime);
+  const selectedIndex = selectedGamePlayIndexForTime(currentTime, options);
+  const next = playActiveIndex(clipPlays(), currentTime, selectedIndex);
   if (next === activeGamePlayIndex && !options.force) return;
   activeGamePlayIndex = next;
   gamePlayRows.forEach((row) => {

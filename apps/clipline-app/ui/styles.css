@@ -2818,15 +2818,15 @@ label span { white-space: nowrap; }
   position: absolute;
   left: 0;
   right: 0;
-  top: 6px;
-  height: 12px;
+  top: 18px;
+  height: 20px;
   z-index: 5;
   pointer-events: none;
 }
 .play-block {
   position: absolute;
   top: 0;
-  height: 12px;
+  height: 20px;
   min-width: 4px;
   border: 1px solid rgba(124, 225, 255, 0.72);
   border-radius: 3px;
@@ -2837,6 +2837,11 @@ label span { white-space: nowrap; }
 .play-block.failed {
   border-color: rgba(255, 145, 145, 0.68);
   background: rgba(232, 94, 116, 0.28);
+}
+.play-block.incomplete {
+  border-color: rgba(202, 166, 255, 0.76);
+  background: rgba(139, 92, 246, 0.34);
+  box-shadow: 0 0 10px rgba(139, 92, 246, 0.18);
 }
 .play-block.estimated {
   background-image: repeating-linear-gradient(
@@ -2851,6 +2856,7 @@ label span { white-space: nowrap; }
 .play-block:hover,
 .play-block:focus-visible {
   outline: 0;
+  z-index: 8;
   filter: brightness(1.28);
   box-shadow: 0 0 0 1px rgba(244, 246, 250, 0.55), 0 0 12px rgba(84, 193, 236, 0.34);
 }

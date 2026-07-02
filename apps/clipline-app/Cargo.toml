@@ -57,3 +57,4 @@ boa_engine = "0.21.1"
 clipline-test-utils = { path = "../../crates/clipline-test-utils" }
 httpmock = { workspace = true }
 png = "0.17"
+serde_json = { workspace = true }

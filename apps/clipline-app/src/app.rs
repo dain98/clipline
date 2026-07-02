@@ -432,6 +432,7 @@ impl<R: Runtime> TrayItems<R> {
 
 struct RuntimeInner {
     tx: Option<Sender<Cmd>>,
+    recording_generation: u64,
     settings: AppSettings,
     lol_url: Option<String>,
     active_game: Option<DetectedGame>,
@@ -459,15 +460,39 @@ impl RuntimeState {
     }
 
     fn from_parts(tx: Option<Sender<Cmd>>, settings: AppSettings, lol_url: Option<String>) -> Self {
-        Self(Mutex::new(RuntimeInner {
-            tx,
+        let mut inner = RuntimeInner {
+            tx: None,
+            recording_generation: 0,
             settings,
             lol_url,
             active_game: None,
             osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
-        }))
+        };
+        if let Some(tx) = tx {
+            Self::install_recording_sender(&mut inner, tx);
+        }
+        Self(Mutex::new(inner))
+    }
+
+    fn install_recording_sender(inner: &mut RuntimeInner, tx: Sender<Cmd>) -> u64 {
+        inner.recording_generation = inner.recording_generation.wrapping_add(1);
+        inner.tx = Some(tx);
+        inner.last_save_request = None;
+        inner.recording_generation
+    }
+
+    fn clear_recording_sender_for_generation(&self, generation: u64) -> bool {
+        let Ok(mut inner) = self.0.lock() else {
+            return false;
+        };
+        if inner.recording_generation != generation || inner.tx.is_none() {
+            return false;
+        }
+        inner.tx = None;
+        inner.last_save_request = None;
+        true
     }
 
     /// Replace the decodable-codec set from the frontend's canPlayType probe.
@@ -555,12 +580,11 @@ impl RuntimeState {
         }
         if let Some(options) = prepared.next_options {
             let (tx, rx) = service::spawn(options);
-            {
+            let generation = {
                 let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-                inner.tx = Some(tx);
-                inner.last_save_request = None;
-            }
-            pump_events(app.clone(), rx);
+                Self::install_recording_sender(&mut inner, tx)
+            };
+            pump_events(app.clone(), rx, generation);
         }
         if prepared.cleared_active_game {
             let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
@@ -685,17 +709,16 @@ impl RuntimeState {
     }
 
     fn start_recording<R: Runtime>(&self, app: AppHandle<R>) -> Result<bool, String> {
-        let rx = {
+        let (rx, generation) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             if inner.tx.is_some() {
                 return Ok(true);
             }
             let (tx, rx) = service::spawn(Self::options(&inner)?);
-            inner.tx = Some(tx);
-            inner.last_save_request = None;
-            rx
+            let generation = Self::install_recording_sender(&mut inner, tx);
+            (rx, generation)
         };
-        pump_events(app, rx);
+        pump_events(app, rx, generation);
         Ok(true)
     }
 
@@ -743,12 +766,11 @@ impl RuntimeState {
         }
         if let Some(options) = next_options {
             let (tx, rx) = service::spawn(options);
-            {
+            let generation = {
                 let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-                inner.tx = Some(tx);
-                inner.last_save_request = None;
-            }
-            pump_events(app.clone(), rx);
+                Self::install_recording_sender(&mut inner, tx)
+            };
+            pump_events(app.clone(), rx, generation);
         }
         if emit_event {
             let _ = app.emit("game-detection", event);
@@ -803,7 +825,7 @@ fn filter_osu_title_events(events: &[OsuTitleEvent], start: i64, end: i64) -> Ve
         .collect()
 }
 
-fn preserve_backend_cloud_fields(settings: &mut AppSettings, backend: &AppSettings) {
+fn preserve_backend_owned_settings_fields(settings: &mut AppSettings, backend: &AppSettings) {
     settings.cloud.host_url = backend.cloud.host_url.clone();
     settings.cloud.public_url = backend.cloud.public_url.clone();
     settings.cloud.connected_user_id = backend.cloud.connected_user_id.clone();
@@ -811,6 +833,7 @@ fn preserve_backend_cloud_fields(settings: &mut AppSettings, backend: &AppSettin
     settings.cloud.connected_display_name = backend.cloud.connected_display_name.clone();
     settings.cloud.credential_target = backend.cloud.credential_target.clone();
     settings.cloud.uploads = backend.cloud.uploads.clone();
+    settings.osu = backend.osu.clone();
 }
 
 fn same_game_window(current: Option<&DetectedGame>, next: Option<&DetectedGame>) -> bool {
@@ -1400,14 +1423,12 @@ fn save_settings<R: Runtime>(
     }
 
     let cloud_save_guard = RuntimeState::lock_cloud_settings_save()?;
-    // Cloud connection + upload state is backend-owned (mutated by cloud_connect
-    // and upload_clip_to_cloud via update_cloud). A settings Save carries the
-    // frontend's snapshot of these fields, which can be stale — e.g. a Save
-    // fired during an in-flight upload would clobber freshly written records or
-    // the connection identity. Keep the authoritative backend values; only the
-    // user-editable cloud preferences below come from the payload.
-    preserve_backend_cloud_fields(&mut settings, &state.settings());
-    // (default_visibility, delete_local_after_upload, auto_upload_rules stay as sent.)
+    // Cloud connection/upload state and osu credential metadata are backend-owned
+    // (mutated through dedicated commands). A settings Save carries the frontend's
+    // snapshot of these fields, which can be stale; keep the authoritative backend
+    // values while allowing user-editable Cloud preferences from the payload.
+    preserve_backend_owned_settings_fields(&mut settings, &state.settings());
+    // (Cloud default_visibility, delete_local_after_upload, auto_upload_rules stay as sent.)
 
     if let Err(e) = settings.save() {
         if settings.hotkey != old.hotkey {
@@ -1864,9 +1885,17 @@ where
     focus().map_err(|e| e.to_string())
 }
 
-fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>) {
+fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, generation: u64) {
     std::thread::spawn(move || {
         for event in event_rx {
+            if let Event::Status {
+                recording: false, ..
+            } = &event
+            {
+                handle
+                    .state::<RuntimeState>()
+                    .clear_recording_sender_for_generation(generation);
+            }
             let _ = match &event {
                 Event::Status { .. } => handle.emit("status", &event),
                 Event::Saved { .. } => handle.emit("saved", &event),
@@ -2049,10 +2078,45 @@ mod tests {
     }
 
     #[test]
+    fn stopped_status_clears_matching_recording_sender() {
+        let (tx, rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+        let generation = {
+            let mut inner = state.0.lock().unwrap();
+            inner.last_save_request = Some(Instant::now());
+            inner.recording_generation
+        };
+
+        assert!(state.clear_recording_sender_for_generation(generation));
+
+        let inner = state.0.lock().unwrap();
+        assert!(inner.tx.is_none());
+        assert!(inner.last_save_request.is_none());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn stale_stopped_status_does_not_clear_newer_recording_sender() {
+        let (old_tx, _old_rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(old_tx, AppSettings::default(), None);
+        let stale_generation = state.0.lock().unwrap().recording_generation;
+        let (new_tx, new_rx) = mpsc::channel();
+        {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::install_recording_sender(&mut inner, new_tx);
+        }
+
+        assert!(!state.clear_recording_sender_for_generation(stale_generation));
+        assert!(state.send(Cmd::Save));
+        assert!(matches!(new_rx.try_recv(), Ok(Cmd::Save)));
+    }
+
+    #[test]
     fn recording_sender_survives_restart_option_error() {
         let (tx, _rx) = mpsc::channel();
         let mut inner = RuntimeInner {
             tx: Some(tx),
+            recording_generation: 1,
             settings: invalid_disk_replay_settings(),
             lol_url: None,
             active_game: None,
@@ -2079,6 +2143,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let mut inner = RuntimeInner {
             tx: Some(tx),
+            recording_generation: 1,
             settings: AppSettings::default(),
             lol_url: None,
             active_game: None,
@@ -2100,6 +2165,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let mut inner = RuntimeInner {
             tx: Some(tx),
+            recording_generation: 1,
             settings: invalid_disk_replay_settings(),
             lol_url: None,
             active_game: Some(DetectedGame {
@@ -2130,7 +2196,7 @@ mod tests {
     }
 
     #[test]
-    fn preserve_backend_cloud_fields_keeps_upload_state_but_allows_preferences() {
+    fn preserve_backend_owned_settings_fields_keeps_upload_state_but_allows_preferences() {
         let mut frontend = AppSettings::default();
         frontend.cloud.host_url = "https://stale.example.com".into();
         frontend.cloud.public_url = Some("https://stale-public.example.com".into());
@@ -2163,7 +2229,7 @@ mod tests {
             },
         );
 
-        preserve_backend_cloud_fields(&mut frontend, &backend);
+        preserve_backend_owned_settings_fields(&mut frontend, &backend);
 
         assert_eq!(frontend.cloud.host_url, backend.cloud.host_url);
         assert_eq!(frontend.cloud.public_url, backend.cloud.public_url);
@@ -2187,6 +2253,25 @@ mod tests {
         assert_eq!(frontend.cloud.default_visibility, "public");
         assert!(frontend.cloud.delete_local_after_upload);
         assert!(frontend.cloud.auto_upload_rules);
+    }
+
+    #[test]
+    fn preserve_backend_owned_settings_fields_keeps_osu_credentials_from_backend() {
+        let mut frontend = AppSettings::default();
+        frontend.osu.client_id = None;
+        frontend.osu.user = None;
+        frontend.osu.credential_target = None;
+        frontend.osu.last_connected_username = None;
+
+        let mut backend = AppSettings::default();
+        backend.osu.client_id = Some("61835".into());
+        backend.osu.user = Some("3426414".into());
+        backend.osu.credential_target = Some("Clipline osu!:61835:3426414".into());
+        backend.osu.last_connected_username = Some("Dain".into());
+
+        preserve_backend_owned_settings_fields(&mut frontend, &backend);
+
+        assert_eq!(frontend.osu, backend.osu);
     }
 
     #[test]
@@ -2260,6 +2345,7 @@ mod tests {
     fn osu_title_events_record_only_changed_osu_titles() {
         let mut inner = RuntimeInner {
             tx: None,
+            recording_generation: 0,
             settings: AppSettings::default(),
             lol_url: None,
             active_game: None,
@@ -2593,6 +2679,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
     fn active_full_session_game_sets_service_recording_mode() {
         let inner = RuntimeInner {
             tx: None,
+            recording_generation: 0,
             settings: AppSettings::default(),
             lol_url: None,
             active_game: Some(DetectedGame {
@@ -2626,6 +2713,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
     fn active_built_in_game_sets_service_plugin_id_for_event_sources() {
         let inner = RuntimeInner {
             tx: None,
+            recording_generation: 0,
             settings: AppSettings::default(),
             lol_url: Some("http://mock".into()),
             active_game: Some(DetectedGame {
