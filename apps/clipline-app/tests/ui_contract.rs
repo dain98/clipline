@@ -2180,6 +2180,16 @@ fn clipboard_copy_sends_selected_audio_tracks() {
 }
 
 #[test]
+fn file_rename_reapplies_selected_audio_preview() {
+    let js = main_js();
+
+    assert!(
+        js.contains("await applySelectedAudioTracksToPlayback({ forceResume: shouldResume });"),
+        "renaming the open source file should restore the selected audio-track preview"
+    );
+}
+
+#[test]
 fn app_notice_toasts_auto_clear() {
     let js = main_js();
 

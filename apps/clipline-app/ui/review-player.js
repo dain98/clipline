@@ -345,6 +345,8 @@ async function submitRenameFileDialog() {
     setNotice("file renamed", { transient: true });
     if (isCurrent && renamed.path !== oldPath) {
       setReviewVideoSource(renamed.path, { resumeTime, shouldResume, rate, trimRange });
+      currentReviewAudioKey = null;
+      await applySelectedAudioTracksToPlayback({ forceResume: shouldResume });
     } else if (mediaReleased) {
       restoreVideoAfterRename(renamed.path, resumeTime, shouldResume, rate);
     }

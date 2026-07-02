@@ -1669,8 +1669,13 @@ mod tests {
     #[test]
     fn source_type_falls_back_to_replay() {
         assert_eq!(source_type(Path::new("clipline-2026-06-16.mp4")), "replay");
-        assert_eq!(source_type(Path::new("full-session.mp4")), "session");
-        assert_eq!(source_type(Path::new("ranked-trim.mp4")), "trim");
+        assert_eq!(source_type(Path::new("full-session.mp4")), "replay");
+        assert_eq!(source_type(Path::new("ranked-trim.mp4")), "replay");
+        assert_eq!(source_type(Path::new("session_1781377615.mp4")), "session");
+        assert_eq!(
+            source_type(Path::new("clip_1_trim_001000_002000.mp4")),
+            "trim"
+        );
     }
 
     #[test]

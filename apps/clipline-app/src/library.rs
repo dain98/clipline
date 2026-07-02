@@ -319,6 +319,7 @@ pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Res
 fn remove_clip_files(target: &Path) -> Result<(), String> {
     std::fs::remove_file(target).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(target.with_extension("markers.json"));
+    let _ = std::fs::remove_file(clip_metadata_path(target));
     let _ = std::fs::remove_file(crate::osu_enrichment::pending_path(target));
     let _ = std::fs::remove_file(crate::poster::poster_path(target));
     Ok(())
@@ -478,7 +479,8 @@ fn rename_clip_files(
             return Err(format!("rename clip markers: {error}"));
         }
     }
-    if source_metadata.exists() && source_metadata != target_metadata {
+    let moved_metadata = source_metadata.exists() && source_metadata != target_metadata;
+    if moved_metadata {
         if let Err(error) = std::fs::rename(&source_metadata, &target_metadata) {
             let _ = std::fs::rename(&target_markers, &source_markers);
             let _ = std::fs::rename(&target, &source);
@@ -501,7 +503,16 @@ fn rename_clip_files(
     let mut target_metadata_value = read_clip_metadata(&target).unwrap_or(metadata);
     target_metadata_value.title = title.clone();
     target_metadata_value.kind = Some(kind.clone());
-    write_clip_metadata(&target, &target_metadata_value)?;
+    if let Err(error) = write_clip_metadata(&target, &target_metadata_value) {
+        rollback_renamed_clip_files(
+            &source,
+            &target,
+            &source_markers,
+            &target_markers,
+            moved_metadata.then_some((source_metadata.as_path(), target_metadata.as_path())),
+        );
+        return Err(error);
+    }
 
     let new_path = display_renamed_clip_path(&old_path, &target_name, parent);
     Ok(RenamedClipInfo {
@@ -511,6 +522,26 @@ fn rename_clip_files(
         title,
         kind,
     })
+}
+
+fn rollback_renamed_clip_files(
+    source: &Path,
+    target: &Path,
+    source_markers: &Path,
+    target_markers: &Path,
+    metadata: Option<(&Path, &Path)>,
+) {
+    if let Some((source_metadata, target_metadata)) = metadata {
+        if target_metadata.exists() && source_metadata != target_metadata {
+            let _ = std::fs::rename(target_metadata, source_metadata);
+        }
+    }
+    if target_markers.exists() && source_markers != target_markers {
+        let _ = std::fs::rename(target_markers, source_markers);
+    }
+    if target.exists() && source != target {
+        let _ = std::fs::rename(target, source);
+    }
 }
 
 #[tauri::command]
@@ -1067,7 +1098,47 @@ fn write_clip_metadata(path: &Path, metadata: &ClipMetadata) -> Result<(), Strin
         serde_json::to_vec_pretty(metadata).map_err(|e| format!("serialize clip metadata: {e}"))?;
     let tmp = target.with_extension("clipline.json.tmp");
     std::fs::write(&tmp, json).map_err(|e| format!("write clip metadata: {e}"))?;
-    std::fs::rename(&tmp, &target).map_err(|e| format!("replace clip metadata: {e}"))
+    replace_clip_metadata(&tmp, &target)
+}
+
+fn replace_clip_metadata(tmp: &Path, target: &Path) -> Result<(), String> {
+    match std::fs::rename(tmp, target) {
+        Ok(()) => Ok(()),
+        Err(error) if target.is_file() => replace_existing_clip_metadata(tmp, target, error),
+        Err(error) => {
+            let _ = std::fs::remove_file(tmp);
+            Err(format!("replace clip metadata: {error}"))
+        }
+    }
+}
+
+fn replace_existing_clip_metadata(
+    tmp: &Path,
+    target: &Path,
+    original_error: std::io::Error,
+) -> Result<(), String> {
+    let backup = target.with_extension(format!("json.{}.bak", std::process::id()));
+    if backup.exists() {
+        if let Err(error) = std::fs::remove_file(&backup) {
+            let _ = std::fs::remove_file(tmp);
+            return Err(format!(
+                "replace clip metadata: {original_error}; remove stale clip metadata backup: {error}"
+            ));
+        }
+    }
+    if let Err(error) = std::fs::rename(target, &backup) {
+        let _ = std::fs::remove_file(tmp);
+        return Err(format!(
+            "replace clip metadata: {original_error}; backup existing clip metadata: {error}"
+        ));
+    }
+    if let Err(error) = std::fs::rename(tmp, target) {
+        let _ = std::fs::rename(&backup, target);
+        let _ = std::fs::remove_file(tmp);
+        return Err(format!("replace clip metadata: {error}"));
+    }
+    let _ = std::fs::remove_file(backup);
+    Ok(())
 }
 
 fn clip_title_from_metadata(metadata: &ClipMetadata) -> Option<String> {
@@ -1110,9 +1181,9 @@ fn inferred_clip_kind_for_path(path: &Path) -> &'static str {
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if name.contains("trim") {
+    if name.contains("_trim_") {
         "trim"
-    } else if name.contains("session") {
+    } else if name.starts_with("session_") {
         "session"
     } else {
         "replay"
@@ -2286,6 +2357,69 @@ mod tests {
     }
 
     #[test]
+    fn remove_clip_files_deletes_clip_metadata_sidecar() {
+        let dir = TestDir::new("clipline-library", "delete-clip-metadata");
+        let clip = dir.path().join("clip.mp4");
+        touch_mp4(&clip);
+        std::fs::write(clip.with_extension("markers.json"), b"{}").unwrap();
+        std::fs::write(clip_metadata_path(&clip), br#"{"title":"Old title"}"#).unwrap();
+
+        remove_clip_files(&clip).unwrap();
+
+        assert!(!clip.exists());
+        assert!(!clip.with_extension("markers.json").exists());
+        assert!(!clip_metadata_path(&clip).exists());
+    }
+
+    #[test]
+    fn inferred_clip_kind_only_matches_generated_filename_patterns() {
+        assert_eq!(
+            inferred_clip_kind_for_path(Path::new("trimming-practice.mp4")),
+            "replay"
+        );
+        assert_eq!(
+            inferred_clip_kind_for_path(Path::new("obsession.mp4")),
+            "replay"
+        );
+        assert_eq!(
+            inferred_clip_kind_for_path(Path::new("clip_1_trim_001000_002000.mp4")),
+            "trim"
+        );
+        assert_eq!(
+            inferred_clip_kind_for_path(Path::new("session_1781377615.mp4")),
+            "session"
+        );
+    }
+
+    #[test]
+    fn write_clip_metadata_replaces_existing_sidecar() {
+        let dir = TestDir::new("clipline-library", "replace-clip-metadata");
+        let clip = dir.path().join("clip.mp4");
+        touch_mp4(&clip);
+
+        write_clip_metadata(
+            &clip,
+            &ClipMetadata {
+                title: Some("First title".to_string()),
+                kind: Some("replay".to_string()),
+            },
+        )
+        .unwrap();
+        write_clip_metadata(
+            &clip,
+            &ClipMetadata {
+                title: Some("Second title".to_string()),
+                kind: Some("session".to_string()),
+            },
+        )
+        .unwrap();
+
+        let metadata = read_clip_metadata(&clip).unwrap();
+        assert_eq!(metadata.title.as_deref(), Some("Second title"));
+        assert_eq!(metadata.kind.as_deref(), Some("session"));
+    }
+
+    #[test]
     fn rename_clip_updates_title_metadata_without_moving_file() {
         let dir = TestDir::new("clipline-library", "rename-title-metadata");
         let root = dir.path().join("media");
@@ -2346,6 +2480,35 @@ mod tests {
         assert_eq!(clips[0].name, "Ranked win.mp4");
         assert_eq!(clips[0].title, None);
         assert_eq!(clips[0].kind, "session");
+    }
+
+    #[test]
+    fn rename_clip_file_rolls_back_when_final_metadata_write_fails() {
+        let dir = TestDir::new("clipline-library", "rename-file-metadata-rollback");
+        let root = dir.path().join("media");
+        let source = root.join("session_123.mp4");
+        let target = root.join("Ranked win.mp4");
+        touch_mp4(&source);
+        std::fs::write(source.with_extension("markers.json"), b"{}").unwrap();
+        std::fs::create_dir_all(clip_metadata_path(&target)).unwrap();
+
+        let err = match rename_clip_files(
+            source.clone(),
+            source.display().to_string(),
+            normalized_clip_file_name("Ranked win").unwrap(),
+        ) {
+            Ok(_) => panic!("metadata write failure should roll back moved clip files"),
+            Err(error) => error,
+        };
+
+        assert!(
+            err.contains("clip metadata"),
+            "unexpected rename error: {err}"
+        );
+        assert!(source.exists(), "source MP4 should be restored");
+        assert!(source.with_extension("markers.json").exists());
+        assert!(!target.exists(), "target MP4 should be rolled back");
+        assert!(!target.with_extension("markers.json").exists());
     }
 
     fn touch_mp4(path: &Path) {
