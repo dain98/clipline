@@ -1582,6 +1582,18 @@ function customGameId(name) {
   return `custom-${slug}-${Date.now()}`;
 }
 
+function uniqueCustomGameId(name, usedIds = new Set(customGames.map((game) => game.id))) {
+  const baseId = customGameId(name);
+  let candidateId = baseId;
+  let suffix = 2;
+  while (usedIds.has(candidateId)) {
+    candidateId = `${baseId}-${suffix}`;
+    suffix += 1;
+  }
+  usedIds.add(candidateId);
+  return candidateId;
+}
+
 function detectedGameKey(candidate) {
   return String(candidate.id_hint || candidate.process_path || candidate.exe_name || candidate.name || "");
 }
@@ -1829,10 +1841,11 @@ function hideDetectedGamesPanel() {
   selectedDetectedGameIds = new Set();
 }
 
-function customGameFromDetectedCandidate(candidate) {
+function customGameFromDetectedCandidate(candidate, usedIds) {
+  const name = candidate.name || "Detected game";
   return normalizeCustomGame({
-    id: customGameId(candidate.name),
-    name: candidate.name || "Detected game",
+    id: uniqueCustomGameId(name, usedIds),
+    name,
     enabled: true,
     exe_name: candidate.exe_name || "",
     process_path: candidate.process_path || null,
@@ -1846,9 +1859,10 @@ function addSelectedDetectedGames() {
   const selected = detectedGameCandidates.filter((candidate) =>
     selectedDetectedGameIds.has(detectedGameKey(candidate)),
   );
+  const usedIds = new Set(customGames.map((game) => game.id));
   const additions = selected
     .filter((candidate) => !customGames.some((game) => customGameMatchesCandidate(game, candidate)))
-    .map(customGameFromDetectedCandidate);
+    .map((candidate) => customGameFromDetectedCandidate(candidate, usedIds));
   if (!additions.length) {
     renderDetectedGames();
     return;
