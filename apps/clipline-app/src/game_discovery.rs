@@ -120,8 +120,6 @@ where
                 &window_candidate,
                 &icon_for_path,
             ));
-        } else {
-            candidates.push(window_candidate);
         }
     }
 
@@ -1091,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn includes_running_non_steam_windows() {
+    fn ignores_running_non_steam_windows() {
         let candidates = candidates_from_sources(
             Vec::new(),
             vec![window(
@@ -1103,16 +1101,7 @@ mod tests {
             |_| None,
         );
 
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].source, DetectedGameSource::RunningWindow);
-        assert_eq!(candidates[0].name, "ffxiv_dx11");
-        assert_eq!(candidates[0].exe_name, "ffxiv_dx11.exe");
-        assert_eq!(
-            candidates[0].process_path.as_deref(),
-            Some(r"D:\Games\FFXIV\ffxiv_dx11.exe")
-        );
-        assert_eq!(candidates[0].window_title, "FINAL FANTASY XIV");
-        assert_eq!(candidates[0].confidence, 90);
+        assert!(candidates.is_empty());
     }
 
     #[test]
