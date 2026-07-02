@@ -1098,11 +1098,12 @@ const PlayerCore = (() => {
     const cardSummaryLabel = playerSummaryStatsLabel(summary, card.title_format) || summaryLabel;
     const fallback = String(fallbackTitle || "").trim();
     const clipName = clip && typeof clip.name === "string" ? clip.name.trim() : "";
+    const customTitle = clip && typeof clip.title === "string" ? clip.title.trim() : "";
     const legacyTitlePolicy = gallery.full_session_title === "summary" ? "summary_for_full_session" : "clip";
     const titlePolicy = typeof card.title === "string" && card.title.trim()
       ? card.title.trim()
       : legacyTitlePolicy;
-    const clipDisplayTitle = clipName.replace(/\.(mp4|mov|mkv|webm)$/i, "").trim() || clipName;
+    const clipDisplayTitle = customTitle || clipName.replace(/\.(mp4|mov|mkv|webm)$/i, "").trim() || clipName;
     const usesClipTitle = titlePolicy === "clip" || (titlePolicy === "osu_session_summary" && kind !== "session");
     const usesSummaryTitle = cardSummaryLabel
       && (
@@ -1110,7 +1111,7 @@ const PlayerCore = (() => {
         || (titlePolicy === "summary_for_full_session" && kind === "session")
         || (titlePolicy === "osu_session_summary" && kind === "session")
       );
-    const clipTitle = usesClipTitle && clipName ? clipDisplayTitle : fallback;
+    const clipTitle = usesClipTitle && clipDisplayTitle ? clipDisplayTitle : fallback;
     const out = {
       title: usesSummaryTitle ? cardSummaryLabel : clipTitle,
       titleSource: usesSummaryTitle ? "summary" : "clip",
@@ -1472,11 +1473,12 @@ const PlayerCore = (() => {
     return `${MONTHS[month0]} ${day} · ${h12}:${String(minutes).padStart(2, "0")} ${ampm}`;
   };
 
-  // Classify a library clip by its on-disk name so each kind can carry its own
-  // icon. Trimmed exports always include `_trim_`; full-session captures are
-  // written with a `session_` prefix.
-  const clipKind = (name) => {
-    const n = name || "";
+  // Prefer the backend's stable clip kind. Older clips can still be classified
+  // from their on-disk names.
+  const clipKind = (clip) => {
+    const explicit = clip && typeof clip === "object" ? String(clip.kind || "").trim() : "";
+    if (explicit === "replay" || explicit === "session" || explicit === "trim") return explicit;
+    const n = typeof clip === "string" ? clip : String(clip && clip.name || "");
     if (/_trim_/.test(n)) return "trim";
     if (/^session_/.test(n)) return "session";
     return "replay";

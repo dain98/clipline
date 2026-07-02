@@ -1673,6 +1673,37 @@ fn clip_kind_distinguishes_trims_from_replays() {
 }
 
 #[test]
+fn clip_kind_prefers_backend_kind_for_renamed_clips() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.clipKind({ name: 'Ranked win.mp4', kind: 'session' })"
+        ),
+        "session"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.clipKind({ name: 'Ranked win.mp4', kind: 'trim' })"
+        ),
+        "trim"
+    );
+}
+
+#[test]
+fn gallery_card_preview_prefers_custom_title() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.galleryCardPreview({ name: 'session_123.mp4', title: 'Ranked win vs Lux', markers: {} }, 'session', 'Jul 2 · 7:30 PM')"
+        ),
+        r#"{"title":"Ranked win vs Lux","titleSource":"clip","summary":""}"#
+    );
+}
+
+#[test]
 fn marker_digest_collapses_categories() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(

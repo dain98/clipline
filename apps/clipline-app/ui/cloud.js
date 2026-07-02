@@ -360,7 +360,7 @@ function clipNameStem(name) {
 }
 
 function clipUploadDefaultTitle(clip) {
-  return clipNameStem(clip && clip.name) || "Untitled clip";
+  return clipDisplayTitle(clip) || clipNameStem(clip && clip.name) || "Untitled clip";
 }
 
 function upsertCloudUploadRecord(record) {

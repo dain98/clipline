@@ -243,6 +243,11 @@ $("clip-menu-rename").addEventListener("click", () => {
   hideClipContextMenu();
   if (clip) beginClipRename(clip);
 });
+$("clip-menu-rename-file").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  hideClipContextMenu();
+  if (clip) openRenameFileDialog(clip);
+});
 $("clip-menu-delete").addEventListener("click", () => {
   const clip = clipContextTarget;
   hideClipContextMenu();
@@ -333,6 +338,17 @@ $("rename-input").addEventListener("keydown", (ev) => {
   if (ev.key !== "Escape") return;
   ev.preventDefault();
   cancelClipRename();
+});
+$("rename-file-save").addEventListener("click", submitRenameFileDialog);
+$("rename-file-cancel").addEventListener("click", () => closeRenameFileDialog());
+$("rename-file-input").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    ev.preventDefault();
+    submitRenameFileDialog();
+  } else if (ev.key === "Escape") {
+    ev.preventDefault();
+    closeRenameFileDialog();
+  }
 });
 $("upload-clip").addEventListener("click", () => {
   if (!currentClip) return;
