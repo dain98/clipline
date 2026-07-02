@@ -17,6 +17,8 @@ mod cloud;
 #[cfg(windows)]
 mod cloud_upload;
 #[cfg(windows)]
+mod game_discovery;
+#[cfg(windows)]
 mod game_icon;
 #[cfg(windows)]
 mod game_plugins;
