@@ -744,6 +744,17 @@ fn review_player_owns_all_controls() {
         "custom games must expose and persist per-game recording mode choices"
     );
     assert!(
+        styles_css().contains("max-height: clamp(180px, calc(100vh - 360px), 460px);")
+            && styles_css().contains("overflow-y: auto;")
+            && styles_css().contains(
+                "grid-template-columns: auto auto minmax(0, 1fr) minmax(220px, 320px) auto;"
+            )
+            && styles_css().contains(".custom-game-mode {\n  grid-column: auto;")
+            && main_js()
+                .contains("row.append(enabled, icon, meta, gameRecordingModeControl(game, index), remove);"),
+        "custom games list must scroll independently and keep recording mode on the right side"
+    );
+    assert!(
         main_js().contains("await invoke(\"list_game_plugins\")")
             && main_js().contains("renderGamePlugins")
             && main_js().contains("gamePluginSettings")

@@ -1013,6 +1013,12 @@ label span { white-space: nowrap; }
   min-width: 0;
 }
 
+.custom-games {
+  max-height: clamp(180px, calc(100vh - 360px), 460px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
 .game-profile,
 .custom-game,
 .detected-game,
@@ -1388,10 +1394,11 @@ label span { white-space: nowrap; }
 }
 
 .custom-game {
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) minmax(220px, 320px) auto;
   align-items: center;
   column-gap: 10px;
-  row-gap: 8px;
+  row-gap: 4px;
+  padding-block: 8px;
 }
 
 .custom-game .check-line {
@@ -1405,8 +1412,8 @@ label span { white-space: nowrap; }
 }
 
 .custom-game-mode {
-  grid-column: 3 / 5;
-  width: min(100%, 320px);
+  grid-column: auto;
+  width: 100%;
 }
 
 .custom-game-mode span {

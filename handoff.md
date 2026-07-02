@@ -179,7 +179,8 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
     - Settings > Games now has a manual Detect Games workflow beside Add Custom Game. Both flows
       open modal dialogs instead of inline panels; Detect Games scans Steam manifests only, shows
       unchecked candidates, dedupes existing custom games, and appends selected rows as normal
-      Custom games using the existing save-to-apply flow.
+      Custom games using the existing save-to-apply flow. Saved custom games render in a compact
+      scrollable list with each row's recording-mode toggle on the right.
 25. **Full-session game recording** — Each saved custom game persists its own recording-mode
     preference (`replays_only` default, `full_session` selectable). Games set to full session start
     a shared-encoder Hybrid MP4 sink when the detected window becomes the active capture target,

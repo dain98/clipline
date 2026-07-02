@@ -1757,7 +1757,7 @@ function renderCustomGames() {
       renderCustomGames();
     });
 
-    row.append(enabled, icon, meta, remove, gameRecordingModeControl(game, index));
+    row.append(enabled, icon, meta, gameRecordingModeControl(game, index), remove);
     root.appendChild(row);
   });
 }
