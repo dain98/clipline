@@ -515,9 +515,22 @@
                   <strong>Custom games</strong>
                   <span id="game-detection-status"></span>
                 </div>
-                <button id="add-custom-game" type="button">Add Custom Game</button>
+                <div class="games-panel-actions">
+                  <button id="detect-games" type="button">Detect Games</button>
+                  <button id="add-custom-game" type="button">Add Custom Game</button>
+                </div>
               </div>
               <div id="custom-games" class="custom-games"></div>
+              <div id="detected-games-panel" class="detected-games-panel" hidden>
+                <div class="game-window-picker-head">
+                  <strong>Detected games</strong>
+                  <div>
+                    <button id="add-detected-games" type="button" disabled>Add game(s)</button>
+                    <button id="cancel-detected-games" type="button">Cancel</button>
+                  </div>
+                </div>
+                <div id="detected-games-list" class="detected-games-list"></div>
+              </div>
               <div id="game-window-picker" class="game-window-picker" hidden>
                 <div class="game-window-picker-head">
                   <strong>Running windows</strong>

@@ -500,7 +500,12 @@ fn review_player_owns_all_controls() {
         "id=\"set-games-auto-detect\"",
         "id=\"supported-games\"",
         "id=\"custom-games\"",
+        "id=\"detect-games\"",
         "id=\"add-custom-game\"",
+        "id=\"detected-games-panel\"",
+        "id=\"detected-games-list\"",
+        "id=\"add-detected-games\"",
+        "id=\"cancel-detected-games\"",
         "id=\"game-window-picker\"",
         "id=\"refresh-game-windows\"",
         "id=\"game-window-list\"",
@@ -2105,6 +2110,13 @@ fn games_ui_wires_detection_commands() {
         assert!(
             app_rs().contains(required),
             "native command registry must expose detected game scan through {required}"
+        );
+    }
+
+    for required in [".detected-game", ".detected-games-panel[hidden]"] {
+        assert!(
+            styles_css().contains(required),
+            "styles.css must style detected games workflow through {required}"
         );
     }
 }

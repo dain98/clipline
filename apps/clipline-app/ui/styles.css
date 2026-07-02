@@ -1006,6 +1006,7 @@ label span { white-space: nowrap; }
 
 .supported-games,
 .custom-games,
+.detected-games-panel,
 .game-window-picker {
   display: grid;
   gap: 8px;
@@ -1014,6 +1015,7 @@ label span { white-space: nowrap; }
 
 .game-profile,
 .custom-game,
+.detected-game,
 .game-window {
   display: grid;
   gap: 2px;
@@ -1026,6 +1028,7 @@ label span { white-space: nowrap; }
 
 .game-profile strong,
 .custom-game strong,
+.detected-game strong,
 .game-window strong {
   min-width: 0;
   overflow: hidden;
@@ -1037,6 +1040,7 @@ label span { white-space: nowrap; }
 
 .game-profile span,
 .custom-game span,
+.detected-game span,
 .game-window span {
   min-width: 0;
   overflow: hidden;
@@ -1377,6 +1381,7 @@ label span { white-space: nowrap; }
   gap: 14px;
 }
 
+.games-panel-actions,
 .game-window-picker-head div {
   display: flex;
   gap: 8px;
@@ -1412,6 +1417,40 @@ label span { white-space: nowrap; }
   width: 30px;
   min-width: 30px;
   padding: 0;
+}
+
+.detected-games-panel {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-2);
+}
+
+.detected-games-panel[hidden] { display: none; }
+
+.detected-games-list {
+  display: grid;
+  gap: 6px;
+  max-height: 260px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.detected-game {
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 2px;
+}
+
+.detected-game .check-line {
+  justify-content: center;
+}
+
+.detected-game-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
 }
 
 .game-window-picker {
