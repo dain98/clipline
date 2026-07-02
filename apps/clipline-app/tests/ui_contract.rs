@@ -502,11 +502,11 @@ fn review_player_owns_all_controls() {
         "id=\"custom-games\"",
         "id=\"detect-games\"",
         "id=\"add-custom-game\"",
-        "id=\"detected-games-panel\"",
+        "id=\"detected-games-dialog\"",
         "id=\"detected-games-list\"",
         "id=\"add-detected-games\"",
         "id=\"cancel-detected-games\"",
-        "id=\"game-window-picker\"",
+        "id=\"game-window-picker-dialog\"",
         "id=\"refresh-game-windows\"",
         "id=\"game-window-list\"",
         "id=\"game-detection-status\"",
@@ -2095,7 +2095,8 @@ fn games_ui_wires_detection_commands() {
         "var detectedGamesScanId = 0",
         "await invoke(\"detect_installed_games\", { existingCustomGames: customGames })",
         "const scanId = ++detectedGamesScanId",
-        "if (scanId !== detectedGamesScanId || $(\"detected-games-panel\").hidden) return",
+        "$(\"detected-games-dialog\").showModal()",
+        "if (scanId !== detectedGamesScanId || !$(\"detected-games-dialog\").open) return",
         "detectedGamesScanId += 1",
         "const addableKeys = new Set(addable.map(detectedGameKey))",
         "selectedDetectedGameIds = new Set([...selectedDetectedGameIds].filter((key) => addableKeys.has(key)))",
@@ -2106,12 +2107,12 @@ fn games_ui_wires_detection_commands() {
         "renderCustomGames",
         "refreshGameWindows",
         "renderDetectedGames",
-        "showDetectedGamesPanel",
+        "showDetectedGamesDialog",
         "addSelectedDetectedGames",
         "$(\"add-custom-game\").addEventListener(\"click\", showGameWindowPicker)",
-        "$(\"detect-games\").addEventListener(\"click\", showDetectedGamesPanel)",
+        "$(\"detect-games\").addEventListener(\"click\", showDetectedGamesDialog)",
         "$(\"add-detected-games\").addEventListener(\"click\", addSelectedDetectedGames)",
-        "$(\"cancel-detected-games\").addEventListener(\"click\", hideDetectedGamesPanel)",
+        "$(\"cancel-detected-games\").addEventListener(\"click\", hideDetectedGamesDialog)",
         "$(\"refresh-game-windows\").addEventListener(\"click\", refreshGameWindows)",
         "$(\"cancel-game-picker\").addEventListener(\"click\", hideGameWindowPicker)",
     ] {
@@ -2131,7 +2132,11 @@ fn games_ui_wires_detection_commands() {
         );
     }
 
-    for required in [".detected-game,", ".detected-games-panel[hidden]"] {
+    for required in [
+        ".detected-game,",
+        "#detected-games-dialog,",
+        "#game-window-picker-dialog",
+    ] {
         assert!(
             styles_css().contains(required),
             "styles.css must style detected games workflow through {required}"

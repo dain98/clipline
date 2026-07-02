@@ -1600,14 +1600,10 @@ function detectedGameKey(candidate) {
 
 function detectedGameSourceLabel(candidate) {
   switch (candidate.source) {
-    case "steam_and_running_window":
-      return "Steam + running window";
     case "steam":
       return "Steam";
-    case "running_window":
-      return "Running window";
     default:
-      return "Detected";
+      return "Installed";
   }
 }
 
@@ -1809,9 +1805,9 @@ async function refreshGameWindows() {
   }
 }
 
-async function showDetectedGamesPanel() {
+async function showDetectedGamesDialog() {
   $("error").textContent = "";
-  $("detected-games-panel").hidden = false;
+  if (!$("detected-games-dialog").open) $("detected-games-dialog").showModal();
   const scanId = ++detectedGamesScanId;
   selectedDetectedGameIds = new Set();
   detectedGameCandidates = [];
@@ -1819,26 +1815,35 @@ async function showDetectedGamesPanel() {
   $("detected-games-list").replaceChildren();
   const loading = document.createElement("div");
   loading.className = "hint";
-  loading.textContent = "scanning installed and running games...";
+  loading.textContent = "scanning installed games...";
   $("detected-games-list").appendChild(loading);
   try {
     const candidates = await invoke("detect_installed_games", { existingCustomGames: customGames });
-    if (scanId !== detectedGamesScanId || $("detected-games-panel").hidden) return;
+    if (scanId !== detectedGamesScanId || !$("detected-games-dialog").open) return;
     detectedGameCandidates = candidates;
     renderDetectedGames();
   } catch (e) {
-    if (scanId !== detectedGamesScanId || $("detected-games-panel").hidden) return;
+    if (scanId !== detectedGamesScanId || !$("detected-games-dialog").open) return;
     $("error").textContent = e;
     detectedGameCandidates = [];
     renderDetectedGames();
   }
 }
 
-function hideDetectedGamesPanel() {
+function resetDetectedGamesDialog() {
   detectedGamesScanId += 1;
-  $("detected-games-panel").hidden = true;
   detectedGameCandidates = [];
   selectedDetectedGameIds = new Set();
+  $("add-detected-games").disabled = true;
+  $("detected-games-list").replaceChildren();
+}
+
+function hideDetectedGamesDialog() {
+  if ($("detected-games-dialog").open) {
+    $("detected-games-dialog").close();
+  } else {
+    resetDetectedGamesDialog();
+  }
 }
 
 function customGameFromDetectedCandidate(candidate, usedIds) {
@@ -1868,7 +1873,7 @@ function addSelectedDetectedGames() {
     return;
   }
   customGames.push(...additions);
-  hideDetectedGamesPanel();
+  hideDetectedGamesDialog();
   renderCustomGames();
   updateGameDetectionStatus();
   $("settings-status").textContent =
@@ -1878,12 +1883,12 @@ function addSelectedDetectedGames() {
 }
 
 async function showGameWindowPicker() {
-  $("game-window-picker").hidden = false;
+  if (!$("game-window-picker-dialog").open) $("game-window-picker-dialog").showModal();
   await refreshGameWindows();
 }
 
 function hideGameWindowPicker() {
-  $("game-window-picker").hidden = true;
+  if ($("game-window-picker-dialog").open) $("game-window-picker-dialog").close();
 }
 
 async function addCustomGameFromWindow(win) {

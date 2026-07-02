@@ -521,26 +521,6 @@
                 </div>
               </div>
               <div id="custom-games" class="custom-games"></div>
-              <div id="detected-games-panel" class="detected-games-panel" hidden>
-                <div class="game-window-picker-head">
-                  <strong>Detected games</strong>
-                  <div>
-                    <button id="add-detected-games" type="button" disabled>Add game(s)</button>
-                    <button id="cancel-detected-games" type="button">Cancel</button>
-                  </div>
-                </div>
-                <div id="detected-games-list" class="detected-games-list"></div>
-              </div>
-              <div id="game-window-picker" class="game-window-picker" hidden>
-                <div class="game-window-picker-head">
-                  <strong>Running windows</strong>
-                  <div>
-                    <button id="refresh-game-windows" type="button">Refresh</button>
-                    <button id="cancel-game-picker" type="button">Cancel</button>
-                  </div>
-                </div>
-                <div id="game-window-list" class="game-window-list"></div>
-              </div>
             </div>
           </div>
 
@@ -816,6 +796,32 @@
     <div class="confirm-actions">
       <button id="upload-confirm" class="primary" type="button">Upload</button>
       <button id="upload-cancel" type="button">Cancel</button>
+    </div>
+  </dialog>
+
+  <dialog id="detected-games-dialog" class="game-picker-dialog">
+    <div id="detected-games-panel" class="detected-games-panel">
+      <div class="game-window-picker-head">
+        <strong>Detected games</strong>
+        <div>
+          <button id="add-detected-games" type="button" disabled>Add game(s)</button>
+          <button id="cancel-detected-games" type="button">Cancel</button>
+        </div>
+      </div>
+      <div id="detected-games-list" class="detected-games-list"></div>
+    </div>
+  </dialog>
+
+  <dialog id="game-window-picker-dialog" class="game-picker-dialog">
+    <div id="game-window-picker" class="game-window-picker">
+      <div class="game-window-picker-head">
+        <strong>Running windows</strong>
+        <div>
+          <button id="refresh-game-windows" type="button">Refresh</button>
+          <button id="cancel-game-picker" type="button">Cancel</button>
+        </div>
+      </div>
+      <div id="game-window-list" class="game-window-list"></div>
     </div>
   </dialog>
 
