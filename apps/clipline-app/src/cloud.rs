@@ -1232,7 +1232,7 @@ fn upload_title(title: Option<&str>, path: &Path) -> String {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
-        .unwrap_or_else(|| clip_title(path))
+        .unwrap_or_else(|| crate::library::clip_title_for_path(path))
 }
 
 fn normalize_upload_description(description: Option<&str>) -> Option<String> {
@@ -1347,27 +1347,7 @@ fn clip_duration_ms(bytes: &[u8], markers: Option<&ClipMarkers>) -> Option<i64> 
 }
 
 fn source_type(path: &Path) -> String {
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if name.contains("session") {
-        "session"
-    } else if name.contains("trim") {
-        "trim"
-    } else {
-        "replay"
-    }
-    .to_string()
-}
-
-fn clip_title(path: &Path) -> String {
-    path.file_stem()
-        .or_else(|| path.file_name())
-        .map(|value| value.to_string_lossy().to_string())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "Clipline clip".to_string())
+    crate::library::clip_kind_for_path(path)
 }
 
 fn local_clip_id(path: &Path, meta: &std::fs::Metadata, checksum: &str) -> Result<String, String> {
@@ -1691,6 +1671,21 @@ mod tests {
         assert_eq!(source_type(Path::new("clipline-2026-06-16.mp4")), "replay");
         assert_eq!(source_type(Path::new("full-session.mp4")), "session");
         assert_eq!(source_type(Path::new("ranked-trim.mp4")), "trim");
+    }
+
+    #[test]
+    fn upload_metadata_uses_clip_title_and_kind_sidecar() {
+        let dir = TestDir::new("clipline-cloud", "clip-metadata-upload");
+        let clip = dir.path().join("Ranked win.mp4");
+        std::fs::write(&clip, b"mp4").unwrap();
+        std::fs::write(
+            clip.with_extension("clipline.json"),
+            r#"{"title":"Ranked win vs Lux","kind":"session"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(upload_title(None, &clip), "Ranked win vs Lux");
+        assert_eq!(source_type(&clip), "session");
     }
 
     #[test]

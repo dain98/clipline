@@ -48,6 +48,29 @@ function renderRailGame() {
   }
 }
 
+function clipFileStem(name) {
+  return String(name || "").replace(/\.(mp4|mov|mkv|webm)$/i, "").trim();
+}
+
+function clipDisplayTitle(clip) {
+  const title = String(clip && clip.title || "").trim();
+  return title || clipFileStem(clip && clip.name);
+}
+
+function replacePosterCachePath(oldPath, newPath) {
+  if (!oldPath || !newPath || oldPath === newPath || !posterCache.has(oldPath)) return;
+  posterCache.set(newPath, posterCache.get(oldPath));
+  posterCache.delete(oldPath);
+}
+
+function replaceClipInCache(oldPath, renamed) {
+  clipsCache = clipsCache.map((clip) => (clip.path === oldPath ? renamed : clip));
+  if (oldPath !== renamed.path && selectedClipPaths.delete(oldPath)) {
+    selectedClipPaths.add(renamed.path);
+  }
+  replacePosterCachePath(oldPath, renamed.path);
+}
+
 async function refreshClips(preferredCurrentPath = null) {
   clipsCache = await invoke("list_clips");
   if (currentClip) {
@@ -56,7 +79,7 @@ async function refreshClips(preferredCurrentPath = null) {
     if (fresh) {
       currentClip = fresh;
       pruneSelectedAudioTracks(fresh);
-      $("pname").textContent = fresh.name;
+      $("pname").textContent = clipDisplayTitle(fresh) || fresh.name;
       renderAudioTrackPanel();
     } else {
       closeReview();
@@ -858,10 +881,10 @@ function clipCard(c) {
     + (currentClip && currentClip.path === c.path ? " active" : "")
     + (selected ? " selected" : "");
   el.dataset.clipPath = c.path;
-  el.title = c.name;
+  el.title = clipDisplayTitle(c) || c.name;
   const cloudRecord = clipCloudRecord(c);
 
-  const kind = clipKind(c.name);
+  const kind = clipKind(c);
   const when = new Date(c.modified_unix * 1000);
   const markers = clipMarkers(c);
   const presentation = pluginPresentationForClip(c);
@@ -1089,13 +1112,13 @@ function syncBulkBar() {
 
 function filterGalleryClips(clips) {
   return clips.filter((c) => {
-    const kind = clipKind(c.name);
+    const kind = clipKind(c);
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
       && kind !== galleryFilter) return false;
     if (galleryFilter === "marked" && !clipMarkers(c).length) return false;
     if (gallerySearch) {
       const champ = c.markers && c.markers.player_summary ? c.markers.player_summary.champion_name : "";
-      const hay = `${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""}`.toLowerCase();
+      const hay = `${clipDisplayTitle(c)} ${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""}`.toLowerCase();
       if (!hay.includes(gallerySearch)) return false;
     }
     return true;
@@ -1300,6 +1323,7 @@ function showClipContextMenu(ev, clip) {
   upload.textContent = uploaded ? "Copy cloud link" : "Upload";
   upload.disabled = busy || (!uploaded && !cloudConnected());
   $("clip-menu-rename").hidden = false;
+  $("clip-menu-rename-file").hidden = false;
   $("clip-menu-delete").hidden = false;
   const menu = $("clip-context-menu");
   menu.hidden = false;
@@ -1322,6 +1346,7 @@ function showCloudClipContextMenu(ev, entry) {
   $("clip-menu-export-play").hidden = true;
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
+  $("clip-menu-rename-file").hidden = true;
   $("clip-menu-delete").hidden = true;
   const menu = $("clip-context-menu");
   menu.hidden = false;
@@ -1344,6 +1369,7 @@ function showGamePlayContextMenu(ev, play) {
   exportPlay.textContent = "Export play as clip";
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
+  $("clip-menu-rename-file").hidden = true;
   $("clip-menu-delete").hidden = true;
   const menu = $("clip-context-menu");
   menu.hidden = false;
