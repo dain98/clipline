@@ -2097,6 +2097,16 @@ fn games_ui_wires_detection_commands() {
             "main.js must wire the custom game workflow through {required}"
         );
     }
+
+    for required in [
+        "fn detect_installed_games",
+        "detect_installed_games,",
+    ] {
+        assert!(
+            app_rs().contains(required),
+            "native command registry must expose detected game scan through {required}"
+        );
+    }
 }
 
 #[test]
