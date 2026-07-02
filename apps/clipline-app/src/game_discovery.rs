@@ -742,6 +742,8 @@ fn is_helper_exe_name(name: &str) -> bool {
         || key.contains("crashhandler")
         || key.contains("crashpad")
         || key.contains("crashreporter")
+        || key == "launcher"
+        || key.ends_with("launcher")
     {
         return true;
     }
@@ -920,6 +922,7 @@ mod tests {
         assert!(!is_helper_exe_name("CrashBandicoot.exe"));
         assert!(is_helper_exe_name("UnityCrashHandler64.exe"));
         assert!(is_helper_exe_name("crashpad_handler.exe"));
+        assert!(is_helper_exe_name("SkyrimSELauncher.exe"));
     }
 
     #[test]
@@ -936,6 +939,23 @@ mod tests {
         assert_eq!(
             exe.file_name().and_then(|name| name.to_str()),
             Some("Crashlands.exe")
+        );
+    }
+
+    #[test]
+    fn executable_inference_skips_launcher_exes() {
+        let dir = TestDir::new("clipline-game-discovery", "launcher-exe");
+        let install_dir = dir.path().join("SkyrimSE");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::write(install_dir.join("SkyrimSE.exe"), b"").unwrap();
+        std::fs::write(install_dir.join("SkyrimSELauncher.exe"), b"").unwrap();
+
+        let exe = infer_executable_path(&install_dir, "Skyrim Special Edition")
+            .expect("game executable should be selected");
+
+        assert_eq!(
+            exe.file_name().and_then(|name| name.to_str()),
+            Some("SkyrimSE.exe")
         );
     }
 
