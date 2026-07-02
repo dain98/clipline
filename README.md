@@ -1,14 +1,12 @@
 <div align="center">
 
-# Clipline
+![Clipline](clipline-social-preview.jpg)
 
 Lightweight, local-first game recording for Windows.
 
 [Docs](https://dain98.github.io/clipline-docs/) ·
 [Download nightly](https://github.com/dain98/clipline/releases) ·
 [Report an issue](https://github.com/dain98/clipline/issues/new/choose)
-
-![Clipline banner](clipline-social-preview.jpg)
 
 </div>
 
