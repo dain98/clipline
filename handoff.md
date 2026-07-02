@@ -326,6 +326,12 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > clips, likely after finishing a clearer labeling model.
 
 Recent fixes (2026-06-30):
+- Nightly 0.1.27 contains the osu! play-block polish and CI review fixes from PR #71. The
+  previous public nightly metadata was 0.1.26, so the app and Tauri package versions were bumped
+  to 0.1.27 for updater delivery. osu! timeline bars now handle overlapping intervals cleanly,
+  incomplete plays use their purple treatment, exported play clips keep the song title without
+  intrusive marker metadata, account settings preserve saved API credentials, and the cross-platform
+  UI contract tests declare their serde_json dependency explicitly.
 - Nightly 0.1.26 contains the gallery hover/enrichment refresh-loop hotfix from PR #70. The
   previous public nightly metadata was 0.1.25, so the app and Tauri package versions were bumped
   to 0.1.26 for updater delivery. Library card hover no longer flickers from repeated refreshes,
