@@ -2115,7 +2115,8 @@ label span { white-space: nowrap; }
 #confirm-dialog,
 #quit-dialog,
 #update-dialog,
-#upload-dialog {
+#upload-dialog,
+#rename-file-dialog {
   width: 380px;
   padding: 0;
   border: 1px solid var(--line-strong);
@@ -2127,7 +2128,8 @@ label span { white-space: nowrap; }
 #confirm-dialog::backdrop,
 #quit-dialog::backdrop,
 #update-dialog::backdrop,
-#upload-dialog::backdrop { background: rgba(5, 7, 10, 0.62); }
+#upload-dialog::backdrop,
+#rename-file-dialog::backdrop { background: rgba(5, 7, 10, 0.62); }
 
 .confirm-body {
   display: grid;
@@ -2162,7 +2164,8 @@ label span { white-space: nowrap; }
   color: var(--muted);
   font-size: 11.5px;
 }
-#upload-dialog-status:empty { display: none; }
+#upload-dialog-status:empty,
+#rename-file-status:empty { display: none; }
 
 .stage {
   position: relative;
