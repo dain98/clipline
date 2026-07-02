@@ -330,7 +330,13 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > shape is a full-size clapper icon on the left, only for videos that are actually user-created
 > clips, likely after finishing a clearer labeling model.
 
-Recent fixes (2026-06-30):
+Recent fixes (2026-07-02):
+- Nightly 0.1.28 contains the custom game detection workflow and review follow-ups from PRs
+  #72 and #73. The previous public nightly metadata was 0.1.27, so the app and Tauri package
+  versions were bumped to 0.1.28 for updater delivery. Custom games can now be added from a
+  Steam-based detected-games modal with checkbox selection, the custom games list is compact and
+  scroll-contained, and visible non-game windows are no longer added as standalone detection
+  results.
 - Nightly 0.1.27 contains the osu! play-block polish and CI review fixes from PR #71. The
   previous public nightly metadata was 0.1.26, so the app and Tauri package versions were bumped
   to 0.1.27 for updater delivery. osu! timeline bars now handle overlapping intervals cleanly,
