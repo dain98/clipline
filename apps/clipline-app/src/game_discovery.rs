@@ -2,6 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
+use clipline_capture::windows::{enumerate_capturable_windows, CapturableWindow};
+
+use crate::game_icon;
+use crate::settings::CustomGameSettings;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DetectedGameSource {
@@ -44,6 +49,328 @@ struct SteamApp {
 enum VdfEntry {
     Pair { key: String, value: String },
     Object { key: String, entries: Vec<VdfEntry> },
+}
+
+pub fn detect_installed_games(
+    existing_custom_games: &[CustomGameSettings],
+) -> Vec<DetectedGameCandidate> {
+    let steam_apps = steam_install_roots()
+        .and_then(|roots| steam_apps_from_roots(&roots))
+        .unwrap_or_default();
+    candidates_from_sources(
+        steam_apps,
+        enumerate_capturable_windows(),
+        existing_custom_games,
+        game_icon::extract_exe_icon_data_url,
+    )
+}
+
+fn candidates_from_sources<F>(
+    steam_apps: Vec<SteamApp>,
+    windows: Vec<CapturableWindow>,
+    existing_custom_games: &[CustomGameSettings],
+    icon_for_path: F,
+) -> Vec<DetectedGameCandidate>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut consumed_windows = vec![false; windows.len()];
+    let mut candidates = Vec::new();
+
+    for app in steam_apps {
+        let matching_window = windows.iter().enumerate().find_map(|(index, window)| {
+            if consumed_windows[index] || is_noise_window(window) {
+                return None;
+            }
+            window
+                .exe_path
+                .as_deref()
+                .is_some_and(|path| is_path_within(path, &app.install_dir))
+                .then_some(index)
+        });
+
+        if let Some(index) = matching_window {
+            consumed_windows[index] = true;
+            let window = &windows[index];
+            let process_path = window.exe_path.clone().or_else(|| {
+                app.process_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+            });
+            let icon = process_path.as_deref().and_then(&icon_for_path);
+            candidates.push(DetectedGameCandidate {
+                id_hint: format!("steam-{}", app.app_id),
+                name: app.name,
+                source: DetectedGameSource::SteamAndRunningWindow,
+                steam_app_id: Some(app.app_id),
+                install_dir: Some(app.install_dir.to_string_lossy().into_owned()),
+                exe_name: if window.exe_name.trim().is_empty() {
+                    app.exe_name.unwrap_or_default()
+                } else {
+                    window.exe_name.clone()
+                },
+                process_path,
+                window_title: window.title.clone(),
+                icon,
+                confidence: 100,
+            });
+        } else if let (Some(exe_name), Some(process_path)) = (app.exe_name, app.process_path) {
+            let process_path = process_path.to_string_lossy().into_owned();
+            let icon = icon_for_path(&process_path);
+            candidates.push(DetectedGameCandidate {
+                id_hint: format!("steam-{}", app.app_id),
+                name: app.name,
+                source: DetectedGameSource::Steam,
+                steam_app_id: Some(app.app_id),
+                install_dir: Some(app.install_dir.to_string_lossy().into_owned()),
+                exe_name,
+                process_path: Some(process_path),
+                window_title: String::new(),
+                icon,
+                confidence: 75,
+            });
+        }
+    }
+
+    for (index, window) in windows.into_iter().enumerate() {
+        if consumed_windows[index] || is_noise_window(&window) {
+            continue;
+        }
+        let process_path = window.exe_path.clone();
+        let confidence = if process_path.is_some() { 90 } else { 65 };
+        let icon = process_path.as_deref().and_then(&icon_for_path);
+        candidates.push(DetectedGameCandidate {
+            id_hint: format!("window-{}-{}", window.process_id, window.exe_name),
+            name: game_name_from_window(&window),
+            source: DetectedGameSource::RunningWindow,
+            steam_app_id: None,
+            install_dir: None,
+            exe_name: window.exe_name,
+            process_path,
+            window_title: window.title,
+            icon,
+            confidence,
+        });
+    }
+
+    dedupe_candidates(candidates, existing_custom_games)
+}
+
+fn dedupe_candidates(
+    candidates: Vec<DetectedGameCandidate>,
+    existing_custom_games: &[CustomGameSettings],
+) -> Vec<DetectedGameCandidate> {
+    let mut candidates: Vec<_> = candidates
+        .into_iter()
+        .filter(has_match_identity)
+        .filter(|candidate| {
+            !existing_custom_games
+                .iter()
+                .any(|existing| matches_existing_custom_game(candidate, existing))
+        })
+        .collect();
+
+    candidates.sort_by(|left, right| {
+        sort_bucket(left)
+            .cmp(&sort_bucket(right))
+            .then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+            .then_with(|| left.id_hint.cmp(&right.id_hint))
+    });
+
+    let mut deduped = Vec::new();
+    for candidate in candidates {
+        if !deduped
+            .iter()
+            .any(|existing| same_candidate(existing, &candidate))
+        {
+            deduped.push(candidate);
+        }
+    }
+    deduped
+}
+
+fn has_match_identity(candidate: &DetectedGameCandidate) -> bool {
+    usable_process_path(candidate.process_path.as_deref()).is_some()
+        || !candidate.exe_name.trim().is_empty()
+        || !normalized_name_key(&candidate.name).is_empty()
+}
+
+fn matches_existing_custom_game(
+    candidate: &DetectedGameCandidate,
+    existing: &CustomGameSettings,
+) -> bool {
+    let candidate_path = usable_process_path(candidate.process_path.as_deref());
+    let existing_path = usable_process_path(existing.process_path.as_deref());
+    if let (Some(candidate_path), Some(existing_path)) = (&candidate_path, &existing_path) {
+        return candidate_path == existing_path;
+    }
+
+    let candidate_exe = candidate.exe_name.trim();
+    let existing_exe = existing.exe_name.trim();
+    if !candidate_exe.is_empty()
+        && !existing_exe.is_empty()
+        && candidate_exe.eq_ignore_ascii_case(existing_exe)
+    {
+        return true;
+    }
+
+    let candidate_name = normalized_name_key(&candidate.name);
+    let existing_name = normalized_name_key(&existing.name);
+    !candidate_name.is_empty() && candidate_name == existing_name
+}
+
+fn same_candidate(left: &DetectedGameCandidate, right: &DetectedGameCandidate) -> bool {
+    let left_path = usable_process_path(left.process_path.as_deref());
+    let right_path = usable_process_path(right.process_path.as_deref());
+    if let (Some(left_path), Some(right_path)) = (&left_path, &right_path) {
+        return left_path == right_path;
+    }
+
+    !left.exe_name.trim().is_empty()
+        && !right.exe_name.trim().is_empty()
+        && left
+            .exe_name
+            .trim()
+            .eq_ignore_ascii_case(right.exe_name.trim())
+}
+
+fn usable_process_path(path: Option<&str>) -> Option<String> {
+    path.map(normalize_path_string)
+        .filter(|path| !path.is_empty())
+}
+
+fn sort_bucket(candidate: &DetectedGameCandidate) -> u8 {
+    match candidate.source {
+        DetectedGameSource::RunningWindow => {
+            if candidate
+                .process_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+            {
+                0
+            } else {
+                3
+            }
+        }
+        DetectedGameSource::SteamAndRunningWindow => 1,
+        DetectedGameSource::Steam => 2,
+    }
+}
+
+fn is_path_within(path: &str, parent: &Path) -> bool {
+    let path = normalize_path_string(path);
+    let parent = normalize_path_string(&parent.to_string_lossy());
+    if path.is_empty() || parent.is_empty() {
+        return false;
+    }
+    path == parent
+        || path
+            .strip_prefix(&parent)
+            .is_some_and(|rest| rest.starts_with('\\'))
+}
+
+fn normalize_path_string(path: &str) -> String {
+    let mut normalized = path.trim().replace('/', "\\").to_ascii_lowercase();
+    while normalized.ends_with('\\') && !normalized.ends_with(":\\") {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn game_name_from_window(window: &CapturableWindow) -> String {
+    let exe_name = window.exe_name.trim();
+    if !exe_name.is_empty() {
+        let lower = exe_name.to_ascii_lowercase();
+        if lower.ends_with(".exe") {
+            return exe_name[..exe_name.len() - 4].to_owned();
+        }
+        return exe_name.to_owned();
+    }
+    window.title.trim().to_owned()
+}
+
+fn is_noise_window(window: &CapturableWindow) -> bool {
+    let exe_name = window.exe_name.trim().to_ascii_lowercase();
+    let title = window.title.trim().to_ascii_lowercase();
+    is_helper_exe_name(&exe_name)
+        || matches!(
+            exe_name.as_str(),
+            "arc.exe"
+                | "battle.net.exe"
+                | "brave.exe"
+                | "chrome.exe"
+                | "discord.exe"
+                | "eadesktop.exe"
+                | "ealauncher.exe"
+                | "epicgameslauncher.exe"
+                | "firefox.exe"
+                | "goggalaxy.exe"
+                | "itch.exe"
+                | "leagueclientux.exe"
+                | "librewolf.exe"
+                | "msedge.exe"
+                | "opera.exe"
+                | "origin.exe"
+                | "riotclientservices.exe"
+                | "riotclientux.exe"
+                | "slack.exe"
+                | "steam.exe"
+                | "steamwebhelper.exe"
+                | "teams.exe"
+                | "ubisoftconnect.exe"
+                | "uplay.exe"
+                | "vivaldi.exe"
+                | "waterfox.exe"
+                | "zoom.exe"
+        )
+        || title.contains("launcher")
+        || title.contains("updater")
+}
+
+fn steam_install_roots() -> Result<Vec<PathBuf>, String> {
+    let mut roots = Vec::new();
+    if let Some(path) = query_reg_sz(r"HKCU\Software\Valve\Steam", "SteamPath") {
+        add_unique_path(&mut roots, PathBuf::from(path.replace('/', "\\")));
+    }
+    if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
+        add_unique_path(&mut roots, PathBuf::from(program_files_x86).join("Steam"));
+    }
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        add_unique_path(&mut roots, PathBuf::from(program_files).join("Steam"));
+    }
+    Ok(roots.into_iter().filter(|path| path.exists()).collect())
+}
+
+fn query_reg_sz(key: &str, value_name: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = std::process::Command::new("reg.exe")
+        .args(["query", key, "/v", value_name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_reg_sz_output(&String::from_utf8_lossy(&output.stdout), value_name)
+}
+
+fn parse_reg_sz_output(output: &str, value_name: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let name = fields.next()?;
+        let kind = fields.next()?;
+        if !name.eq_ignore_ascii_case(value_name) || !kind.eq_ignore_ascii_case("REG_SZ") {
+            return None;
+        }
+        let value = fields.collect::<Vec<_>>().join(" ");
+        (!value.is_empty()).then_some(value)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,9 +717,31 @@ fn find_pair<'a>(entries: &'a [VdfEntry], key: &str) -> Option<&'a str> {
 mod tests {
     use std::path::PathBuf;
 
+    use clipline_capture::windows::CapturableWindow;
     use clipline_test_utils::TestDir;
 
+    use crate::settings::CustomGameSettings;
+
     use super::*;
+
+    fn window(title: &str, exe_name: &str, exe_path: Option<&str>) -> CapturableWindow {
+        window_with_pid(101, title, exe_name, exe_path)
+    }
+
+    fn window_with_pid(
+        process_id: u32,
+        title: &str,
+        exe_name: &str,
+        exe_path: Option<&str>,
+    ) -> CapturableWindow {
+        CapturableWindow {
+            handle: process_id as isize,
+            title: title.into(),
+            process_id,
+            exe_name: exe_name.into(),
+            exe_path: exe_path.map(str::to_string),
+        }
+    }
 
     fn vdf_path(path: &std::path::Path) -> String {
         path.to_string_lossy().replace('\\', "\\\\")
@@ -566,5 +915,222 @@ mod tests {
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].name, "Hades");
         assert_eq!(apps[0].exe_name.as_deref(), Some("Hades.exe"));
+    }
+
+    #[test]
+    fn running_window_under_steam_install_upgrades_steam_candidate() {
+        let steam = SteamApp {
+            app_id: 646570,
+            name: "Slay the Spire".into(),
+            install_dir: PathBuf::from(r"C:\Steam\steamapps\common\SlayTheSpire"),
+            exe_name: Some("SlayTheSpire.exe".into()),
+            process_path: Some(PathBuf::from(
+                r"C:\Steam\steamapps\common\SlayTheSpire\SlayTheSpire.exe",
+            )),
+        };
+        let candidates = candidates_from_sources(
+            vec![steam],
+            vec![window(
+                "Slay the Spire",
+                "SlayTheSpire.exe",
+                Some(r"C:\Steam\steamapps\common\SlayTheSpire\SlayTheSpire.exe"),
+            )],
+            &[],
+            |_| None,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].source,
+            DetectedGameSource::SteamAndRunningWindow
+        );
+        assert_eq!(candidates[0].window_title, "Slay the Spire");
+        assert_eq!(candidates[0].confidence, 100);
+    }
+
+    #[test]
+    fn keeps_running_non_steam_window_as_candidate() {
+        let candidates = candidates_from_sources(
+            Vec::new(),
+            vec![window(
+                "FINAL FANTASY XIV",
+                "ffxiv_dx11.exe",
+                Some(r"D:\Games\FFXIV\ffxiv_dx11.exe"),
+            )],
+            &[],
+            |_| None,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name, "ffxiv_dx11");
+        assert_eq!(candidates[0].source, DetectedGameSource::RunningWindow);
+        assert_eq!(candidates[0].exe_name, "ffxiv_dx11.exe");
+    }
+
+    #[test]
+    fn filters_launcher_browser_and_helper_windows() {
+        let candidates = candidates_from_sources(
+            Vec::new(),
+            vec![
+                window(
+                    "Steam",
+                    "steam.exe",
+                    Some(r"C:\Program Files (x86)\Steam\steam.exe"),
+                ),
+                window(
+                    "Docs",
+                    "chrome.exe",
+                    Some(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+                ),
+                window(
+                    "Game Crash Handler",
+                    "UnityCrashHandler64.exe",
+                    Some(r"D:\Game\UnityCrashHandler64.exe"),
+                ),
+                window(
+                    "33 Immortals",
+                    "33Immortals.exe",
+                    Some(r"D:\Game\33Immortals.exe"),
+                ),
+            ],
+            &[],
+            |_| None,
+        );
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.exe_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["33Immortals.exe"]
+        );
+    }
+
+    #[test]
+    fn dedupes_against_existing_custom_games() {
+        let existing = CustomGameSettings {
+            id: "custom-factorio".into(),
+            name: "factorio".into(),
+            enabled: true,
+            exe_name: "factorio.exe".into(),
+            process_path: Some(r"D:\Steam\steamapps\common\Factorio\bin\x64\factorio.exe".into()),
+            window_title: "Factorio".into(),
+            recording_mode: crate::settings::GameRecordingMode::ReplaysOnly,
+            icon: None,
+        };
+        let candidates = candidates_from_sources(
+            Vec::new(),
+            vec![window(
+                "Factorio: Space Age",
+                "factorio.exe",
+                Some(r"D:\Steam\steamapps\common\Factorio\bin\x64\factorio.exe"),
+            )],
+            &[existing],
+            |_| None,
+        );
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn keeps_candidate_when_existing_custom_game_has_same_exe_but_different_path() {
+        let existing = CustomGameSettings {
+            id: "custom-game-a".into(),
+            name: "Game A".into(),
+            enabled: true,
+            exe_name: "game.exe".into(),
+            process_path: Some(r"D:\Games\A\game.exe".into()),
+            window_title: "Game A".into(),
+            recording_mode: crate::settings::GameRecordingMode::ReplaysOnly,
+            icon: None,
+        };
+        let candidates = candidates_from_sources(
+            Vec::new(),
+            vec![window("Game B", "game.exe", Some(r"E:\Games\B\game.exe"))],
+            &[existing],
+            |_| None,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].process_path.as_deref(),
+            Some(r"E:\Games\B\game.exe")
+        );
+    }
+
+    #[test]
+    fn keeps_candidate_when_existing_custom_game_has_same_name_but_different_path() {
+        let existing = CustomGameSettings {
+            id: "custom-hades-epic".into(),
+            name: "Hades".into(),
+            enabled: true,
+            exe_name: "Hades.exe".into(),
+            process_path: Some(r"D:\Epic\Hades\Hades.exe".into()),
+            window_title: "Hades".into(),
+            recording_mode: crate::settings::GameRecordingMode::ReplaysOnly,
+            icon: None,
+        };
+        let candidates = candidates_from_sources(
+            Vec::new(),
+            vec![window(
+                "Hades",
+                "Hades.exe",
+                Some(r"E:\Steam\steamapps\common\Hades\Hades.exe"),
+            )],
+            &[existing],
+            |_| None,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].process_path.as_deref(),
+            Some(r"E:\Steam\steamapps\common\Hades\Hades.exe")
+        );
+    }
+
+    #[test]
+    fn keeps_discovered_candidates_with_same_exe_but_different_paths() {
+        let candidates = candidates_from_sources(
+            Vec::new(),
+            vec![
+                window_with_pid(101, "Game A", "game.exe", Some(r"D:\Games\A\game.exe")),
+                window_with_pid(202, "Game B", "game.exe", Some(r"E:\Games\B\game.exe")),
+            ],
+            &[],
+            |_| None,
+        );
+
+        let mut paths = candidates
+            .iter()
+            .filter_map(|candidate| candidate.process_path.as_deref())
+            .collect::<Vec<_>>();
+        paths.sort_unstable();
+        assert_eq!(paths, vec![r"D:\Games\A\game.exe", r"E:\Games\B\game.exe"]);
+    }
+
+    #[test]
+    fn still_dedupes_existing_custom_game_by_exe_when_existing_path_is_missing() {
+        let existing = CustomGameSettings {
+            id: "custom-game".into(),
+            name: "Configured Game".into(),
+            enabled: true,
+            exe_name: "game.exe".into(),
+            process_path: None,
+            window_title: "Configured Game".into(),
+            recording_mode: crate::settings::GameRecordingMode::ReplaysOnly,
+            icon: None,
+        };
+        let candidates = candidates_from_sources(
+            Vec::new(),
+            vec![window(
+                "Detected Game",
+                "game.exe",
+                Some(r"E:\Games\B\game.exe"),
+            )],
+            &[existing],
+            |_| None,
+        );
+
+        assert!(candidates.is_empty());
     }
 }
