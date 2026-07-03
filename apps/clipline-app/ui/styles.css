@@ -806,6 +806,7 @@ label span { white-space: nowrap; }
   border-bottom: 1px solid var(--line);
 }
 .settings-tabs .tab {
+  position: relative;
   height: auto;
   min-width: 0;
   padding: 10px 2px 8px;
@@ -821,6 +822,17 @@ label span { white-space: nowrap; }
 .settings-tabs .tab.active {
   color: var(--text);
   border-bottom-color: var(--accent);
+}
+.settings-tabs .tab.settings-tab-changed::after {
+  content: "";
+  position: absolute;
+  top: 7px;
+  right: -9px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #78a8ff;
+  box-shadow: 0 0 10px rgba(61, 123, 253, 0.95);
 }
 
 .settings-body {
@@ -928,6 +940,14 @@ button.primary.settings-save-glow {
   grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
   gap: 18px;
   padding: 12px 0;
+}
+.setting-changed {
+  border-color: rgba(122, 184, 255, 0.38);
+  border-radius: 8px;
+  margin-inline: -10px;
+  padding-inline: 10px;
+  background: rgba(61, 123, 253, 0.08);
+  box-shadow: 0 0 0 1px rgba(122, 184, 255, 0.24), 0 0 18px rgba(61, 123, 253, 0.2);
 }
 
 .setting-info { display: grid; gap: 3px; min-width: 0; }

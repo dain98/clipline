@@ -7,6 +7,7 @@ function cloneSettings(settings) {
 }
 
 var settingsDiscardWarningArmed = false;
+var settingsIndicatorBaseline = null;
 
 function stableSettingsSnapshot(value) {
   if (Array.isArray(value)) {
@@ -24,11 +25,47 @@ function stableSettingsSnapshot(value) {
 }
 
 function settingsSnapshot(value) {
-  return JSON.stringify(stableSettingsSnapshot(value || null));
+  return JSON.stringify(stableSettingsSnapshot(value ?? null));
 }
 
 function settingsHaveUnsavedChanges() {
   return settingsSnapshot(settingsDraft) !== settingsSnapshot(currentSettings);
+}
+
+function settingsValueAtPath(source, path) {
+  return String(path || "")
+    .split(".")
+    .filter(Boolean)
+    .reduce((value, key) => (value == null ? undefined : value[key]), source);
+}
+
+function settingKeyChanged(path, draft, baseline) {
+  return settingsSnapshot(settingsValueAtPath(draft, path))
+    !== settingsSnapshot(settingsValueAtPath(baseline, path));
+}
+
+function settingsNodeKeys(node) {
+  return String(node.dataset.settingsKey || "")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function syncSettingsChangeIndicators() {
+  const draft = settingsDraft || {};
+  const baseline = settingsIndicatorBaseline || currentSettings || {};
+  const dirtyTabs = new Set();
+  document.querySelectorAll("#settings-page [data-settings-key]").forEach((node) => {
+    const changed = settingsNodeKeys(node).some((key) => settingKeyChanged(key, draft, baseline));
+    node.classList.toggle("setting-changed", changed);
+    const section = node.closest(".settings-section");
+    if (changed && section && section.dataset.section) dirtyTabs.add(section.dataset.section);
+  });
+  document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
+    const changed = dirtyTabs.has(tab.dataset.tab);
+    tab.classList.toggle("settings-tab-changed", changed);
+    if (changed) tab.setAttribute("aria-label", `${tab.textContent.trim()} has unsaved changes`);
+    else tab.removeAttribute("aria-label");
+  });
 }
 
 function resetSettingsDiscardWarning() {
@@ -44,6 +81,7 @@ function syncSettingsDirtyState({ resetDiscard = false } = {}) {
   $("settings-close").textContent = dirty ? "Discard Changes" : "Close";
   $("settings-close").classList.toggle("settings-discard", dirty);
   $("settings-save").classList.toggle("settings-save-glow", dirty && settingsDiscardWarningArmed);
+  syncSettingsChangeIndicators();
   return dirty;
 }
 
@@ -137,6 +175,7 @@ function fillSettings(s) {
   syncUploadClipButton();
   applyTimelineEditorPreference();
   renderClips();
+  settingsIndicatorBaseline = readSettings();
   syncSettingsDirtyState({ resetDiscard: true });
 }
 
@@ -1010,6 +1049,7 @@ function renderGamePlugins() {
     empty.className = "hint";
     empty.textContent = "no supported games available";
     root.appendChild(empty);
+    syncSettingsChangeIndicators();
     return;
   }
 
@@ -1020,6 +1060,7 @@ function renderGamePlugins() {
     const row = document.createElement("div");
     row.className = "game-profile supported";
     row.dataset.gamePluginId = plugin.id;
+    row.dataset.settingsKey = `games.plugins.${plugin.id}`;
 
     const enabled = document.createElement("label");
     enabled.className = "check-line";
@@ -1057,6 +1098,7 @@ function renderGamePlugins() {
     );
     root.appendChild(row);
   }
+  syncSettingsChangeIndicators();
 }
 
 function displayCaptureValue(display) {
@@ -1781,11 +1823,13 @@ function renderCustomGames() {
     empty.className = "hint";
     empty.textContent = "no custom games saved";
     root.appendChild(empty);
+    syncSettingsChangeIndicators();
     return;
   }
   customGames.forEach((game, index) => {
     const row = document.createElement("div");
     row.className = "custom-game";
+    row.dataset.settingsKey = "games.custom_games";
 
     const enabled = document.createElement("label");
     enabled.className = "check-line";
@@ -1822,6 +1866,7 @@ function renderCustomGames() {
     row.append(enabled, icon, meta, gameRecordingModeControl(game, index), remove);
     root.appendChild(row);
   });
+  syncSettingsChangeIndicators();
 }
 
 function renderGameWindows() {

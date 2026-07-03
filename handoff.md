@@ -337,6 +337,8 @@ Recent fixes (2026-07-03):
   and makes `Save Settings` glow. A second discard button press closes and restores the last
   saved settings. Backdrop clicks close only when the form is clean; with unsaved edits they
   warn/shake/glow repeatedly until the user presses `Save Settings` or `Discard Changes`.
+  Rows with unsaved changes now get a blue glow, and tabs containing changed rows show a pip;
+  indicators clear when edits are saved, discarded, or reverted.
   Verified with `cargo test --workspace` and
   `cargo clean -p clipline-app; cargo clippy --workspace --all-targets -- -D warnings`.
 

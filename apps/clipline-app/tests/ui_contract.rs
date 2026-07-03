@@ -1139,6 +1139,55 @@ fn settings_opens_as_popup_and_guards_unsaved_discard() {
 }
 
 #[test]
+fn settings_marks_changed_rows_and_tabs() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    for required in [
+        "data-settings-key=\"open_on_startup\"",
+        "data-settings-key=\"capture_mode capture_region window_title\"",
+        "data-settings-key=\"audio.output_enabled audio.output_device_id audio.output_volume audio.split_output_by_process\"",
+        "data-settings-key=\"games.plugins\"",
+        "data-settings-key=\"games.custom_games\"",
+        "data-settings-key=\"cloud.default_visibility\"",
+        "data-settings-key=\"hotkey\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "settings dirty indicator markup must include `{required}`"
+        );
+    }
+
+    for required in [
+        ".setting-changed",
+        ".settings-tabs .tab.settings-tab-changed::after",
+    ] {
+        assert!(
+            css.contains(required),
+            "settings dirty indicator CSS must include `{required}`"
+        );
+    }
+
+    for required in [
+        "var settingsIndicatorBaseline = null;",
+        "function settingsValueAtPath(source, path)",
+        "function settingKeyChanged(path, draft, baseline)",
+        "function syncSettingsChangeIndicators()",
+        "node.classList.toggle(\"setting-changed\", changed)",
+        "tab.classList.toggle(\"settings-tab-changed\", changed)",
+        "settingsIndicatorBaseline = readSettings();",
+        "row.dataset.settingsKey = `games.plugins.${plugin.id}`;",
+        "row.dataset.settingsKey = \"games.custom_games\";",
+    ] {
+        assert!(
+            js.contains(required),
+            "settings dirty indicator JS must include `{required}`"
+        );
+    }
+}
+
+#[test]
 fn osu_play_blocks_are_centered_and_taller_in_timeline() {
     let css = styles_css();
     let timeline_rule = css_rule_body(&css, ".timeline-main");
