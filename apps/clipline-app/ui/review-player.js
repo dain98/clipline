@@ -449,10 +449,10 @@ function renderVisibleSettingsSection() {
   }
 }
 
-function requestSettingsClose() {
+function requestSettingsClose({ allowDiscard = true } = {}) {
   if (!settingsOpen) return;
   if (settingsHaveUnsavedChanges()) {
-    if (!settingsDiscardWarningArmed) {
+    if (!settingsDiscardWarningArmed || !allowDiscard) {
       showSettingsDiscardWarning();
       return;
     }

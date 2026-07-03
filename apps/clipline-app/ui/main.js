@@ -411,6 +411,9 @@ $("rail-settings").addEventListener("click", () => {
 $("settings-close").addEventListener("click", requestSettingsClose);
 $("settings-page").addEventListener("input", () => syncSettingsDraftFromForm());
 $("settings-page").addEventListener("change", () => syncSettingsDraftFromForm());
+$("settings-page").addEventListener("click", (ev) => {
+  if (ev.target === $("settings-page")) requestSettingsClose({ allowDiscard: false });
+});
 $("set-hotkey").addEventListener("focus", beginHotkeyCapture);
 $("set-hotkey").addEventListener("click", beginHotkeyCapture);
 $("set-hotkey").addEventListener("keydown", recordHotkey);

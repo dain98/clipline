@@ -34,7 +34,6 @@ function settingsHaveUnsavedChanges() {
 function resetSettingsDiscardWarning() {
   settingsDiscardWarningArmed = false;
   $("settings-discard-warning").hidden = true;
-  $("settings-page").classList.remove("settings-warning-visible");
   $("settings-save").classList.remove("settings-save-glow");
   $("settings-popup-shell").classList.remove("settings-shake");
 }
@@ -52,7 +51,6 @@ function showSettingsDiscardWarning() {
   settingsDiscardWarningArmed = true;
   $("settings-discard-warning").textContent = "Careful--your changes aren't saved.";
   $("settings-discard-warning").hidden = false;
-  $("settings-page").classList.add("settings-warning-visible");
   $("settings-save").classList.add("settings-save-glow");
   const shell = $("settings-popup-shell");
   shell.classList.remove("settings-shake");

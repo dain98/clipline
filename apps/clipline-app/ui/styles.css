@@ -772,9 +772,6 @@ label span { white-space: nowrap; }
   z-index: 30;
 }
 .settings-page[hidden] { display: none; }
-.settings-page.settings-warning-visible {
-  grid-template-columns: minmax(600px, min(760px, calc(100% - 252px))) 220px;
-}
 
 .settings-popup-shell {
   display: grid;
@@ -835,11 +832,12 @@ label span { white-space: nowrap; }
 .settings-section[hidden] { display: none; }
 
 .settings-discard-warning {
-  align-self: center;
+  min-width: 0;
   color: #ff7b86;
   font-size: 13px;
   font-weight: 650;
   line-height: 1.35;
+  white-space: nowrap;
   text-shadow: 0 0 14px rgba(229, 72, 77, 0.34);
 }
 .settings-discard-warning[hidden] { display: none; }
@@ -870,13 +868,8 @@ button.primary.settings-save-glow {
     align-content: center;
   }
 
-  .settings-page.settings-warning-visible {
-    grid-template-columns: minmax(0, 720px);
-  }
-
   .settings-discard-warning {
-    justify-self: end;
-    align-self: start;
+    white-space: normal;
   }
 }
 .update-controls {

@@ -1087,6 +1087,13 @@ fn settings_opens_as_popup_and_guards_unsaved_discard() {
         );
     }
 
+    assert!(
+        html.contains(
+            "<button id=\"settings-close\" type=\"button\">Close</button>\n          <span id=\"settings-discard-warning\""
+        ),
+        "settings discard warning must render next to the footer close/discard button"
+    );
+
     for required in [
         ".settings-popup-shell",
         ".settings-discard-warning",
@@ -1107,12 +1114,15 @@ fn settings_opens_as_popup_and_guards_unsaved_discard() {
         "function syncSettingsDirtyState",
         "function showSettingsDiscardWarning()",
         "function resetSettingsDiscardWarning()",
-        "function requestSettingsClose()",
+        "function requestSettingsClose({ allowDiscard = true } = {})",
+        "if (!settingsDiscardWarningArmed || !allowDiscard)",
         "$(\"settings-close\").textContent = dirty ? \"Discard Changes\" : \"Close\"",
         "$(\"settings-save\").classList.toggle(\"settings-save-glow\"",
         "$(\"settings-discard-warning\").textContent = \"Careful--your changes aren't saved.\"",
         "$(\"rail-settings\").addEventListener(\"click\", () => {",
         "$(\"settings-close\").addEventListener(\"click\", requestSettingsClose)",
+        "$(\"settings-page\").addEventListener(\"click\", (ev) => {",
+        "if (ev.target === $(\"settings-page\")) requestSettingsClose({ allowDiscard: false });",
         "requestSettingsClose();",
     ] {
         assert!(

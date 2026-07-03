@@ -16,7 +16,7 @@
   - Add a focused test that locks the popup markup, CSS affordances, dirty-state helper names, and guarded close wiring.
 - Modify `apps/clipline-app/ui/index.html`
   - Wrap existing settings content in `#settings-popup-shell`.
-  - Add `role="dialog"`, `aria-modal="true"`, `aria-labelledby="settings-title"`, and `#settings-discard-warning`.
+  - Add `role="dialog"`, `aria-modal="true"`, `aria-labelledby="settings-title"`, and footer-adjacent `#settings-discard-warning`.
 - Modify `apps/clipline-app/ui/styles.css`
   - Convert `.settings-page` from a full-bleed stacked page to an overlay.
   - Add `.settings-popup-shell`, `.settings-discard-warning`, `.settings-shake`, and `.settings-save-glow`.
@@ -25,9 +25,10 @@
   - Ensure programmatic custom-game changes refresh the draft dirty state.
 - Modify `apps/clipline-app/ui/review-player.js`
   - Keep Gallery/Review visible behind the settings overlay.
-  - Add `requestSettingsClose()` to run the discard guard before closing.
+  - Add `requestSettingsClose({ allowDiscard })` to run the discard guard before closing. Button/Escape closes can confirm discard; backdrop closes can only warn while dirty.
 - Modify `apps/clipline-app/ui/main.js`
   - Wire rail Settings, footer Close/Discard, and Escape through `requestSettingsClose()`.
+  - Wire backdrop clicks on `#settings-page` through `requestSettingsClose({ allowDiscard: false })`.
 - Modify `handoff.md`
   - Add a short note after implementation because this is a visible Settings workflow change.
 
@@ -145,16 +146,16 @@ to:
     </header>
 ```
 
-Then move the existing `</section>` so the existing Settings content closes `</div>` first, followed by the warning:
+Then move the existing `</section>` so the warning sits directly beside the close/discard button in the existing Settings footer:
 
 ```html
     <footer class="settings-actions">
       <button id="settings-save" type="button" class="primary">Save Settings</button>
       <button id="settings-close" type="button">Close</button>
+      <span id="settings-discard-warning" class="settings-discard-warning" hidden>Careful--your changes aren't saved.</span>
       <span id="settings-status" class="hint"></span>
     </footer>
   </div>
-  <span id="settings-discard-warning" class="settings-discard-warning" hidden>Careful--your changes aren't saved.</span>
 </section>
 ```
 
@@ -169,10 +170,9 @@ Replace the existing `.settings-page` block with:
   position: relative;
   z-index: 30;
   display: grid;
-  grid-template-columns: minmax(600px, min(760px, calc(100% - 252px))) 220px;
+  grid-template-columns: minmax(600px, min(760px, 100%));
   align-items: center;
   justify-content: center;
-  gap: 16px;
   min-height: 0;
   min-width: 0;
   padding: 24px;
@@ -198,11 +198,12 @@ Keep the existing settings head/tabs/body rules, then add:
 
 ```css
 .settings-discard-warning {
-  align-self: center;
+  min-width: 0;
   color: #ff7b86;
   font-size: 13px;
   font-weight: 650;
   line-height: 1.35;
+  white-space: nowrap;
   text-shadow: 0 0 14px rgba(229, 72, 77, 0.34);
 }
 .settings-discard-warning[hidden] { display: none; }
@@ -234,8 +235,7 @@ button.primary.settings-save-glow {
   }
 
   .settings-discard-warning {
-    justify-self: end;
-    align-self: start;
+    white-space: normal;
   }
 }
 ```
@@ -353,10 +353,10 @@ function updateViews() {
 Add before `toggleSettings()`:
 
 ```javascript
-function requestSettingsClose() {
+function requestSettingsClose({ allowDiscard = true } = {}) {
   if (!settingsOpen) return;
   if (settingsHaveUnsavedChanges()) {
-    if (!settingsDiscardWarningArmed) {
+    if (!settingsDiscardWarningArmed || !allowDiscard) {
       showSettingsDiscardWarning();
       return;
     }
@@ -384,9 +384,12 @@ $("rail-settings").addEventListener("click", () => {
   else toggleSettings(true);
 });
 $("settings-close").addEventListener("click", requestSettingsClose);
+$("settings-page").addEventListener("click", (ev) => {
+  if (ev.target === $("settings-page")) requestSettingsClose({ allowDiscard: false });
+});
 ```
 
-In the Escape handler, replace `toggleSettings(false);` with `requestSettingsClose();`.
+In the Escape handler, replace `toggleSettings(false);` with `requestSettingsClose();`. A second footer `Discard Changes` press or second Escape can discard; repeated backdrop clicks only reshake/warn until the user presses a footer button.
 
 - [ ] **Step 4: Run the focused test and verify GREEN**
 
