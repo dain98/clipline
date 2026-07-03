@@ -433,9 +433,9 @@ var settingsOpen = false;
 
 function updateViews() {
   $("settings-page").hidden = !settingsOpen;
-  $("review-viewer").hidden = settingsOpen || !currentClip;
-  // The gallery is the home whenever neither the editor nor settings is open.
-  $("gallery-view").hidden = settingsOpen || !!currentClip;
+  $("review-viewer").hidden = !currentClip;
+  // Settings is an overlay; gallery/review visibility follows only clip state.
+  $("gallery-view").hidden = !!currentClip;
 }
 
 function renderVisibleSettingsSection() {
@@ -449,12 +449,25 @@ function renderVisibleSettingsSection() {
   }
 }
 
+function requestSettingsClose() {
+  if (!settingsOpen) return;
+  if (settingsHaveUnsavedChanges()) {
+    if (!settingsDiscardWarningArmed) {
+      showSettingsDiscardWarning();
+      return;
+    }
+  }
+  toggleSettings(false);
+}
+
 function toggleSettings(open = !settingsOpen) {
   const wasOpen = settingsOpen;
   settingsOpen = open;
   // The clip survives the round-trip; just don't play behind the page.
   if (settingsOpen && !video.paused) video.pause();
   if (settingsOpen && !wasOpen) {
+    resetSettingsDiscardWarning();
+    syncSettingsDirtyState({ resetDiscard: true });
     ensureDisplaysLoaded().then(renderVisibleSettingsSection).catch((e) => $("error").textContent = e);
     ensureAudioDevicesLoaded().catch((e) => $("error").textContent = e);
     ensureVideoEncodersLoaded().catch((e) => $("error").textContent = e);

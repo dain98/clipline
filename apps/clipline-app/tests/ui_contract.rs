@@ -1069,6 +1069,66 @@ fn review_player_owns_all_controls() {
 }
 
 #[test]
+fn settings_opens_as_popup_and_guards_unsaved_discard() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    for required in [
+        "id=\"settings-page\" class=\"settings-page\" hidden role=\"dialog\" aria-modal=\"true\"",
+        "id=\"settings-title\"",
+        "id=\"settings-popup-shell\"",
+        "id=\"settings-discard-warning\"",
+        "Careful--your changes aren't saved.",
+    ] {
+        assert!(
+            html.contains(required),
+            "settings popup markup must include `{required}`"
+        );
+    }
+
+    for required in [
+        ".settings-popup-shell",
+        ".settings-discard-warning",
+        ".settings-save-glow",
+        ".settings-shake",
+        "@keyframes settings-shake",
+        "@keyframes settings-save-glow",
+    ] {
+        assert!(
+            css.contains(required),
+            "settings popup CSS must include `{required}`"
+        );
+    }
+
+    for required in [
+        "function stableSettingsSnapshot(value)",
+        "function settingsHaveUnsavedChanges()",
+        "function syncSettingsDirtyState",
+        "function showSettingsDiscardWarning()",
+        "function resetSettingsDiscardWarning()",
+        "function requestSettingsClose()",
+        "$(\"settings-close\").textContent = dirty ? \"Discard Changes\" : \"Close\"",
+        "$(\"settings-save\").classList.toggle(\"settings-save-glow\"",
+        "$(\"settings-discard-warning\").textContent = \"Careful--your changes aren't saved.\"",
+        "$(\"rail-settings\").addEventListener(\"click\", () => {",
+        "$(\"settings-close\").addEventListener(\"click\", requestSettingsClose)",
+        "requestSettingsClose();",
+    ] {
+        assert!(
+            js.contains(required),
+            "settings popup JS must include `{required}`"
+        );
+    }
+
+    assert!(
+        js.contains("$(\"review-viewer\").hidden = !currentClip")
+            && js.contains("$(\"gallery-view\").hidden = !!currentClip"),
+        "settings popup must not hide the underlying review/gallery view"
+    );
+}
+
+#[test]
 fn osu_play_blocks_are_centered_and_taller_in_timeline() {
     let css = styles_css();
     let timeline_rule = css_rule_body(&css, ".timeline-main");

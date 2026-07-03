@@ -300,9 +300,10 @@
         </div>
       </div>
 
-      <section id="settings-page" class="settings-page" hidden>
+      <section id="settings-page" class="settings-page" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div id="settings-popup-shell" class="settings-popup-shell">
         <header class="settings-head">
-          <h1>Settings</h1>
+          <h1 id="settings-title">Settings</h1>
         </header>
 
         <nav id="settings-tabs" class="settings-tabs">
@@ -734,6 +735,8 @@
           <button id="settings-close" type="button">Close</button>
           <span id="settings-status" class="hint"></span>
         </footer>
+        </div>
+        <span id="settings-discard-warning" class="settings-discard-warning" hidden>Careful--your changes aren't saved.</span>
       </section>
     </main>
   </div>
