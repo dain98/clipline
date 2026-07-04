@@ -1108,6 +1108,13 @@ fn settings_opens_as_popup_and_guards_unsaved_discard() {
         );
     }
 
+    let popup_shell_rule = css_rule_body(&css, ".settings-popup-shell");
+    assert!(
+        css_decl_value(popup_shell_rule, "border-radius").is_some()
+            && css_decl_value(popup_shell_rule, "overflow") == Some("hidden"),
+        "settings popup shell must clip child backgrounds to preserve all rounded corners"
+    );
+
     for required in [
         "function stableSettingsSnapshot(value)",
         "function settingsHaveUnsavedChanges()",
