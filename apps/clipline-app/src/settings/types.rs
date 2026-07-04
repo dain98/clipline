@@ -17,8 +17,8 @@ use super::persistence::{
     normalize_replay_cache_dir, optional_string_field, replay_cache_quota_bytes_from_gb,
 };
 use super::validation::{
-    MAX_AUDIO_VOLUME, MAX_BITRATE_MBPS, MAX_CAPTURE_REGION_SIDE, MAX_EXACT_FPS, MIN_BITRATE_MBPS,
-    MIN_CAPTURE_REGION_SIDE, MIN_EXACT_FPS,
+    MAX_AUDIO_VOLUME, MAX_BITRATE_MBPS, MAX_CAPTURE_REGION_SIDE, MAX_EXACT_FPS, MIN_ADVANCED_OUTPUT_HEIGHT,
+    MIN_ADVANCED_OUTPUT_WIDTH, MIN_BITRATE_MBPS, MIN_CAPTURE_REGION_SIDE, MIN_EXACT_FPS,
 };
 
 pub const MAX_ICON_DATA_URL_LEN: usize = 256 * 1024;
@@ -225,10 +225,10 @@ impl AdvancedRecordingSettings {
         Self {
             enabled: bool_field(object, "enabled").unwrap_or(defaults.enabled),
             output_width: integer_field(object, "output_width")
-                .map(repair_output_dimension)
+                .map(repair_advanced_output_width)
                 .unwrap_or(defaults.output_width),
             output_height: integer_field(object, "output_height")
-                .map(repair_output_dimension)
+                .map(repair_advanced_output_height)
                 .unwrap_or(defaults.output_height),
             bitrate_mbps: f64_field(object, "bitrate_mbps")
                 .map(repair_bitrate_mbps)
@@ -242,8 +242,8 @@ impl AdvancedRecordingSettings {
     pub(crate) fn repaired(self) -> Self {
         Self {
             enabled: self.enabled,
-            output_width: repair_output_dimension(i64::from(self.output_width)),
-            output_height: repair_output_dimension(i64::from(self.output_height)),
+            output_width: repair_advanced_output_width(i64::from(self.output_width)),
+            output_height: repair_advanced_output_height(i64::from(self.output_height)),
             bitrate_mbps: repair_bitrate_mbps(self.bitrate_mbps),
             fps: repair_exact_fps(i64::from(self.fps)),
         }
@@ -257,13 +257,21 @@ impl AdvancedRecordingSettings {
     }
 }
 
-fn repair_output_dimension(value: i64) -> u32 {
-    let value = clamp_u32(value, MIN_CAPTURE_REGION_SIDE, MAX_CAPTURE_REGION_SIDE);
+fn repair_output_dimension(value: i64, min: u32) -> u32 {
+    let value = clamp_u32(value, min, MAX_CAPTURE_REGION_SIDE);
     if value.is_multiple_of(2) {
         value
     } else {
         value.saturating_add(1).min(MAX_CAPTURE_REGION_SIDE)
     }
+}
+
+fn repair_advanced_output_width(value: i64) -> u32 {
+    repair_output_dimension(value, MIN_ADVANCED_OUTPUT_WIDTH)
+}
+
+fn repair_advanced_output_height(value: i64) -> u32 {
+    repair_output_dimension(value, MIN_ADVANCED_OUTPUT_HEIGHT)
 }
 
 fn repair_bitrate_mbps(value: f64) -> f64 {

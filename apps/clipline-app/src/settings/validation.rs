@@ -19,6 +19,8 @@ pub const MIN_BITRATE_MBPS: f64 = 1.0;
 pub const MAX_BITRATE_MBPS: f64 = 100.0;
 pub const MIN_EXACT_FPS: u32 = 1;
 pub const MAX_EXACT_FPS: u32 = 240;
+pub const MIN_ADVANCED_OUTPUT_WIDTH: u32 = 640;
+pub const MIN_ADVANCED_OUTPUT_HEIGHT: u32 = 360;
 pub const MIN_AUDIO_VOLUME: f64 = 0.0;
 pub const MAX_AUDIO_VOLUME: f64 = 2.0;
 pub const MIN_CAPTURE_REGION_SIDE: u32 = 2;
@@ -86,6 +88,20 @@ impl AppSettings {
             return Err(format!(
                 "advanced fps must be between {MIN_EXACT_FPS} and {MAX_EXACT_FPS}"
             ));
+        }
+        if self.advanced_recording.enabled {
+            validate_range(
+                "advanced output width",
+                f64::from(self.advanced_recording.output_width),
+                f64::from(MIN_ADVANCED_OUTPUT_WIDTH),
+                f64::from(MAX_CAPTURE_REGION_SIDE),
+            )?;
+            validate_range(
+                "advanced output height",
+                f64::from(self.advanced_recording.output_height),
+                f64::from(MIN_ADVANCED_OUTPUT_HEIGHT),
+                f64::from(MAX_CAPTURE_REGION_SIDE),
+            )?;
         }
         if !self.update_channel.enabled() {
             return Err(format!(

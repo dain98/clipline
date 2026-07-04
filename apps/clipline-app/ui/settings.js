@@ -302,7 +302,8 @@ function outputBoundsForResolution(id) {
     case "720p": return { width: 1280, height: 720 };
     case "1080p": return { width: 1920, height: 1080 };
     case "1440p": return { width: 2560, height: 1440 };
-    default: return { width: 2560, height: 1440 };
+    case "source": return { width: 2560, height: 16384 };
+    default: return { width: 2560, height: 16384 };
   }
 }
 
@@ -1330,13 +1331,6 @@ function syncRecordingFields() {
 
 function syncRecordingModeFields() {
   const advanced = isAdvancedRecordingMode();
-  if (!advanced) {
-    const preset = advancedRecordingFromPresetControls();
-    $("set-output-width").value = String(preset.output_width);
-    $("set-output-height").value = String(preset.output_height);
-    $("set-custom-bitrate").value = String(preset.bitrate_mbps);
-    $("set-custom-fps").value = String(preset.fps);
-  }
   $("recording-basic-fields").hidden = advanced;
   $("recording-advanced-fields").hidden = !advanced;
   for (const id of ["set-output-resolution", "set-bitrate", "set-fps"]) {

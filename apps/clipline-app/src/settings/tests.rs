@@ -768,6 +768,24 @@ fn advanced_recording_load_repairs_numeric_values() {
 }
 
 #[test]
+fn advanced_recording_load_repairs_tiny_dimensions_to_encoder_safe_min() {
+    let value = serde_json::json!({
+        "advanced_recording": {
+            "enabled": true,
+            "output_width": 320,
+            "output_height": 180,
+            "bitrate_mbps": 12.0,
+            "fps": 60
+        }
+    });
+
+    let settings = AppSettings::load_from_object(value.as_object().unwrap());
+
+    assert_eq!(settings.advanced_recording.output_width, 640);
+    assert_eq!(settings.advanced_recording.output_height, 360);
+}
+
+#[test]
 fn service_options_include_display_region_source() {
     let settings = AppSettings {
         capture_mode: CaptureMode::DisplayRegion,
