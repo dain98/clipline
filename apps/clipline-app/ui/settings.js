@@ -24,19 +24,38 @@ function stableSettingsSnapshot(value) {
   return value;
 }
 
+function stripEphemeralSettingsState(value) {
+  const stable = stableSettingsSnapshot(value ?? null);
+  if (!stable || typeof stable !== "object" || Array.isArray(stable)) return stable;
+  if (!stable.cloud || typeof stable.cloud !== "object" || Array.isArray(stable.cloud)) return stable;
+  const out = { ...stable };
+  const cloud = { ...out.cloud };
+  delete cloud.uploads;
+  out.cloud = cloud;
+  return out;
+}
+
 function settingsSnapshot(value) {
-  return JSON.stringify(stableSettingsSnapshot(value ?? null));
+  return JSON.stringify(stripEphemeralSettingsState(value));
+}
+
+function settingsBaselineForComparison() {
+  return settingsIndicatorBaseline || currentSettings;
 }
 
 function settingsHaveUnsavedChanges() {
-  return settingsSnapshot(settingsDraft) !== settingsSnapshot(currentSettings);
+  return settingsSnapshot(settingsDraft) !== settingsSnapshot(settingsBaselineForComparison());
 }
 
 function settingsValueAtPath(source, path) {
   return String(path || "")
     .split(".")
     .filter(Boolean)
-    .reduce((value, key) => (value == null ? undefined : value[key]), source);
+    .reduce((value, key) => {
+      if (value == null) return undefined;
+      if (Array.isArray(value)) return value.find((item) => item && String(item.id) === key);
+      return value[key];
+    }, source);
 }
 
 function settingKeyChanged(path, draft, baseline) {
@@ -52,7 +71,7 @@ function settingsNodeKeys(node) {
 
 function syncSettingsChangeIndicators() {
   const draft = settingsDraft || {};
-  const baseline = settingsIndicatorBaseline || currentSettings || {};
+  const baseline = settingsBaselineForComparison() || {};
   const dirtyTabs = new Set();
   document.querySelectorAll("#settings-page [data-settings-key]").forEach((node) => {
     const changed = settingsNodeKeys(node).some((key) => settingKeyChanged(key, draft, baseline));
@@ -66,6 +85,20 @@ function syncSettingsChangeIndicators() {
     if (changed) tab.setAttribute("aria-label", `${tab.textContent.trim()} has unsaved changes`);
     else tab.removeAttribute("aria-label");
   });
+}
+
+function resetSettingsBaselineFromForm() {
+  settingsIndicatorBaseline = readSettings();
+  settingsDraft = cloneSettings(settingsIndicatorBaseline);
+  syncSettingsDirtyState({ resetDiscard: true });
+}
+
+function refreshSettingsBaselineIfClean() {
+  if (settingsHaveUnsavedChanges()) {
+    syncSettingsDirtyState();
+    return;
+  }
+  resetSettingsBaselineFromForm();
 }
 
 function resetSettingsDiscardWarning() {
@@ -100,9 +133,9 @@ function settingsFormSource() {
   return settingsDraft || currentSettings || {};
 }
 
-function syncSettingsDraftFromForm() {
+function syncSettingsDraftFromForm({ resetDiscard = true } = {}) {
   settingsDraft = readSettings();
-  syncSettingsDirtyState({ resetDiscard: true });
+  syncSettingsDirtyState({ resetDiscard });
   return settingsDraft;
 }
 
@@ -175,8 +208,7 @@ function fillSettings(s) {
   syncUploadClipButton();
   applyTimelineEditorPreference();
   renderClips();
-  settingsIndicatorBaseline = readSettings();
-  syncSettingsDirtyState({ resetDiscard: true });
+  resetSettingsBaselineFromForm();
 }
 
 function readSettings() {
@@ -1159,6 +1191,7 @@ function renderCaptureTargetSelect() {
     ? desired
     : captureSettingsValue({ capture_mode: "primary_monitor" });
   syncCaptureFields();
+  if (settingsIndicatorBaseline) refreshSettingsBaselineIfClean();
 }
 
 function selectedCaptureSettings() {
@@ -1291,6 +1324,7 @@ function renderAudioDeviceSelects() {
   const audio = settingsFormSource().audio || defaultAudioSettings();
   fillDeviceSelect("set-output-device", audioDevices.outputs, "Default output device", audio.output_device_id);
   fillDeviceSelect("set-mic-device", audioDevices.inputs, "Default microphone", audio.mic_device_id);
+  if (settingsIndicatorBaseline) refreshSettingsBaselineIfClean();
 }
 
 function renderVideoEncoderSelect() {
@@ -1532,6 +1566,7 @@ function applyHotkeyCaptureResult(result) {
     case "captured":
       $("set-hotkey").value = result.value;
       endHotkeyCapture("Ready to save.", "ready");
+      syncSettingsDraftFromForm();
       break;
     case "pending":
       setHotkeyStatus(result.message, "recording");
@@ -1570,6 +1605,7 @@ function setRegion(next) {
         height: Math.max(2, Math.round(next.height || 2)),
       };
   renderRegionEditor();
+  if (typeof settingsOpen !== "undefined" && settingsOpen) syncSettingsDraftFromForm();
 }
 
 async function loadDisplays() {
@@ -1829,7 +1865,7 @@ function renderCustomGames() {
   customGames.forEach((game, index) => {
     const row = document.createElement("div");
     row.className = "custom-game";
-    row.dataset.settingsKey = "games.custom_games";
+    row.dataset.settingsKey = `games.custom_games.${game.id}`;
 
     const enabled = document.createElement("label");
     enabled.className = "check-line";

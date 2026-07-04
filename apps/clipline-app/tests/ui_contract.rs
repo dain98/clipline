@@ -1121,7 +1121,7 @@ fn settings_opens_as_popup_and_guards_unsaved_discard() {
         "$(\"settings-discard-warning\").textContent = \"Careful--your changes aren't saved.\"",
         "$(\"rail-settings\").addEventListener(\"click\", () => {",
         "$(\"settings-close\").addEventListener(\"click\", requestSettingsClose)",
-        "$(\"settings-page\").addEventListener(\"click\", (ev) => {",
+        "$(\"settings-page\").addEventListener(\"pointerdown\", (ev) => {",
         "if (ev.target === $(\"settings-page\")) requestSettingsClose({ allowDiscard: false });",
         "requestSettingsClose();",
     ] {
@@ -1178,13 +1178,49 @@ fn settings_marks_changed_rows_and_tabs() {
         "tab.classList.toggle(\"settings-tab-changed\", changed)",
         "settingsIndicatorBaseline = readSettings();",
         "row.dataset.settingsKey = `games.plugins.${plugin.id}`;",
-        "row.dataset.settingsKey = \"games.custom_games\";",
+        "row.dataset.settingsKey = `games.custom_games.${game.id}`;",
     ] {
         assert!(
             js.contains(required),
             "settings dirty indicator JS must include `{required}`"
         );
     }
+}
+
+#[test]
+fn settings_popup_review_feedback_edges_are_guarded() {
+    let js = main_js();
+
+    for required in [
+        "function settingsBaselineForComparison()",
+        "function stripEphemeralSettingsState(value)",
+        "delete cloud.uploads;",
+        "function resetSettingsBaselineFromForm()",
+        "function refreshSettingsBaselineIfClean()",
+        "function syncSettingsDraftFromForm({ resetDiscard = true } = {})",
+        "syncSettingsDraftFromForm({ resetDiscard: false });",
+        "function syncSettingsModalBackground()",
+        "document.querySelector(\".sidebar\")",
+        "node.inert = settingsOpen;",
+        "node.setAttribute(\"aria-hidden\", settingsOpen ? \"true\" : \"false\")",
+        "$(\"settings-page\").addEventListener(\"pointerdown\", (ev) => {",
+        "if (ev.target === $(\"settings-page\")) requestSettingsClose({ allowDiscard: false });",
+        "if (settingsOpen) {",
+        "showSettingsDiscardWarning();",
+        "return;",
+        "refreshSettingsBaselineIfClean();",
+        "row.dataset.settingsKey = `games.custom_games.${game.id}`;",
+    ] {
+        assert!(
+            js.contains(required),
+            "settings popup review feedback JS must include `{required}`"
+        );
+    }
+
+    assert!(
+        !js.contains("$(\"settings-page\").addEventListener(\"click\", (ev) => {\n  if (ev.target === $(\"settings-page\")) requestSettingsClose({ allowDiscard: false });\n});"),
+        "settings backdrop close guard must not use click because drag release can dispatch click on the overlay"
+    );
 }
 
 #[test]
@@ -1670,7 +1706,7 @@ fn settings_tabs_preserve_unsaved_draft_until_save() {
         .expect("video handlers follow settings save");
     let save_handler = &js[save_handler_start..video_start];
     let sync_start = js
-        .find("function syncSettingsDraftFromForm()")
+        .find("function syncSettingsDraftFromForm({ resetDiscard = true } = {})")
         .expect("settings draft sync helper");
     let fill_start = js[sync_start..]
         .find("function fillSettings")
@@ -1681,7 +1717,7 @@ fn settings_tabs_preserve_unsaved_draft_until_save() {
     assert!(
         js.contains("settingsDraft = null")
             && js.contains("function settingsFormSource()")
-            && js.contains("function syncSettingsDraftFromForm()"),
+            && js.contains("function syncSettingsDraftFromForm({ resetDiscard = true } = {})"),
         "settings must keep an explicit unsaved draft while the settings page is open"
     );
     assert!(
