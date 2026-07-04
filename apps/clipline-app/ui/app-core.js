@@ -68,6 +68,7 @@ var {
   alignRegion,
   settingDurationLabel,
   recordingQualityPreset,
+  recordingQualitySummary,
   qualityIndexForBitrate,
   smoothnessPreset,
   smoothnessIndexForFps,

@@ -8,14 +8,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::service::{
-    AudioChannelMode, AudioOptions, CaptureRegion, OutputResolution, ReplayStorageOptions,
+    AudioChannelMode, AudioOptions, CaptureRegion, OutputResolution, OutputResolutionBounds,
+    ReplayStorageOptions,
 };
 
 use super::persistence::{
     bool_field, clamp_u32, deserialize_field, f64_field, i32_field, integer_field,
     normalize_replay_cache_dir, optional_string_field, replay_cache_quota_bytes_from_gb,
 };
-use super::validation::{MAX_AUDIO_VOLUME, MAX_CAPTURE_REGION_SIDE, MIN_CAPTURE_REGION_SIDE};
+use super::validation::{
+    MAX_AUDIO_VOLUME, MAX_BITRATE_MBPS, MAX_CAPTURE_REGION_SIDE, MAX_EXACT_FPS, MIN_ADVANCED_OUTPUT_HEIGHT,
+    MIN_ADVANCED_OUTPUT_WIDTH, MIN_BITRATE_MBPS, MIN_CAPTURE_REGION_SIDE, MIN_EXACT_FPS,
+};
 
 pub const MAX_ICON_DATA_URL_LEN: usize = 256 * 1024;
 
@@ -167,6 +171,119 @@ impl AudioSettings {
             mic_channels: self.mic_channels,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct AdvancedRecordingSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_advanced_output_width")]
+    pub output_width: u32,
+    #[serde(default = "default_advanced_output_height")]
+    pub output_height: u32,
+    #[serde(default = "default_advanced_bitrate_mbps")]
+    pub bitrate_mbps: f64,
+    #[serde(default = "default_advanced_fps")]
+    pub fps: u32,
+}
+
+fn default_advanced_output_width() -> u32 {
+    1920
+}
+
+fn default_advanced_output_height() -> u32 {
+    1080
+}
+
+fn default_advanced_bitrate_mbps() -> f64 {
+    12.0
+}
+
+fn default_advanced_fps() -> u32 {
+    60
+}
+
+impl Default for AdvancedRecordingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            output_width: default_advanced_output_width(),
+            output_height: default_advanced_output_height(),
+            bitrate_mbps: default_advanced_bitrate_mbps(),
+            fps: default_advanced_fps(),
+        }
+    }
+}
+
+impl AdvancedRecordingSettings {
+    pub(crate) fn load_from_value(value: Option<&Value>) -> Self {
+        let defaults = Self::default();
+        let Some(object) = value.and_then(Value::as_object) else {
+            return defaults;
+        };
+
+        Self {
+            enabled: bool_field(object, "enabled").unwrap_or(defaults.enabled),
+            output_width: integer_field(object, "output_width")
+                .map(repair_advanced_output_width)
+                .unwrap_or(defaults.output_width),
+            output_height: integer_field(object, "output_height")
+                .map(repair_advanced_output_height)
+                .unwrap_or(defaults.output_height),
+            bitrate_mbps: f64_field(object, "bitrate_mbps")
+                .map(repair_bitrate_mbps)
+                .unwrap_or(defaults.bitrate_mbps),
+            fps: integer_field(object, "fps")
+                .map(repair_exact_fps)
+                .unwrap_or(defaults.fps),
+        }
+    }
+
+    pub(crate) fn repaired(self) -> Self {
+        Self {
+            enabled: self.enabled,
+            output_width: repair_advanced_output_width(i64::from(self.output_width)),
+            output_height: repair_advanced_output_height(i64::from(self.output_height)),
+            bitrate_mbps: repair_bitrate_mbps(self.bitrate_mbps),
+            fps: repair_exact_fps(i64::from(self.fps)),
+        }
+    }
+
+    pub fn output_bounds(self) -> Option<OutputResolutionBounds> {
+        self.enabled.then_some(OutputResolutionBounds {
+            width: self.output_width,
+            height: self.output_height,
+        })
+    }
+}
+
+fn repair_output_dimension(value: i64, min: u32) -> u32 {
+    let value = clamp_u32(value, min, MAX_CAPTURE_REGION_SIDE);
+    if value.is_multiple_of(2) {
+        value
+    } else {
+        value.saturating_add(1).min(MAX_CAPTURE_REGION_SIDE)
+    }
+}
+
+fn repair_advanced_output_width(value: i64) -> u32 {
+    repair_output_dimension(value, MIN_ADVANCED_OUTPUT_WIDTH)
+}
+
+fn repair_advanced_output_height(value: i64) -> u32 {
+    repair_output_dimension(value, MIN_ADVANCED_OUTPUT_HEIGHT)
+}
+
+fn repair_bitrate_mbps(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(MIN_BITRATE_MBPS, MAX_BITRATE_MBPS)
+    } else {
+        default_advanced_bitrate_mbps()
+    }
+}
+
+fn repair_exact_fps(value: i64) -> u32 {
+    clamp_u32(value, MIN_EXACT_FPS, MAX_EXACT_FPS)
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

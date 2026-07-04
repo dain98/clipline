@@ -330,6 +330,16 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > shape is a full-size clapper icon on the left, only for videos that are actually user-created
 > clips, likely after finishing a clearer labeling model.
 
+Recent fixes (2026-07-04):
+- Settings > Recording now has an Advanced toggle for exact recording overrides. When enabled,
+  `advanced_recording` supplies custom max output bounds (aspect-preserving, never stretching),
+  exact bitrate Mbps, and exact FPS to the recorder while the normal preset controls remain the
+  default path. Video-quality summaries now include the preset bitrate (for example,
+  `Sharp quality - more detail. 24 Mbps.`), and the disk replay estimate follows the exact
+  bitrate when Advanced is enabled.
+  Verified with focused settings/UI/player-core tests, `cargo test --workspace`, and
+  `cargo clean -p clipline-app; cargo clippy --workspace --all-targets -- -D warnings`.
+
 Recent fixes (2026-07-03):
 - Settings now opens as a popup over the current Library/Review view instead of replacing the
   main pane. Unsaved edits change `Close` to `Discard Changes`; the first discard attempt

@@ -16,7 +16,9 @@ use crate::service::VideoEncoder;
 use crate::updates::normalize_channel;
 
 use super::hotkey::normalize_hotkey;
-use super::types::{AudioSettings, CaptureMode, CaptureRegionSettings, ReplayStorageMode};
+use super::types::{
+    AdvancedRecordingSettings, AudioSettings, CaptureMode, CaptureRegionSettings, ReplayStorageMode,
+};
 use super::validation::{
     repair_disk_quota_gb, repair_fps, repair_video_quality_from_legacy_bitrate, MAX_BITRATE_MBPS,
     MAX_REPLAY_WINDOW_S, MIN_BITRATE_MBPS, MIN_REPLAY_WINDOW_S,
@@ -66,6 +68,9 @@ impl AppSettings {
             fps: integer_field(object, "fps")
                 .map(repair_fps)
                 .unwrap_or(defaults.fps),
+            advanced_recording: AdvancedRecordingSettings::load_from_value(
+                object.get("advanced_recording"),
+            ),
             video_encoder: deserialize_field(object, "video_encoder")
                 .unwrap_or(defaults.video_encoder),
             output_resolution,
@@ -114,6 +119,7 @@ impl AppSettings {
         settings.cloud.normalize();
         settings.osu.normalize();
         settings.media_dir = settings.media_dir_path()?.display().to_string();
+        settings.advanced_recording = settings.advanced_recording.repaired();
         settings.bitrate_mbps = settings.effective_bitrate_mbps();
         if matches!(settings.replay_storage.mode, ReplayStorageMode::Disk) {
             settings.replay_storage.disk_dir =
