@@ -1030,8 +1030,20 @@ button.primary.settings-save-glow {
 
 .advanced-fields[hidden] { display: none; }
 
-.recording-advanced {
-  border-bottom: 0;
+.recording-mode-bar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.recording-mode-control {
+  width: min(100%, 240px);
+}
+
+#recording-basic-fields[hidden],
+#recording-advanced-fields[hidden] {
+  display: none;
 }
 
 .exact-resolution-control {

@@ -184,7 +184,8 @@ function fillSettings(s) {
     ...advancedRecordingFromPresetControls(),
     ...(s.advanced_recording || {}),
   };
-  $("set-recording-advanced").checked = !!advanced.enabled;
+  $("recording-mode-basic").checked = !advanced.enabled;
+  $("recording-mode-advanced").checked = !!advanced.enabled;
   $("set-output-width").value = String(advanced.output_width);
   $("set-output-height").value = String(advanced.output_height);
   $("set-custom-bitrate").value = String(advanced.bitrate_mbps);
@@ -324,10 +325,14 @@ function advancedRecordingFromPresetControls() {
   };
 }
 
+function isAdvancedRecordingMode() {
+  return $("recording-mode-advanced").checked;
+}
+
 function readAdvancedRecordingSettings() {
   const fallback = advancedRecordingFromPresetControls();
   return {
-    enabled: $("set-recording-advanced").checked,
+    enabled: isAdvancedRecordingMode(),
     output_width: numberFieldValue("set-output-width", fallback.output_width, { integer: true }),
     output_height: numberFieldValue("set-output-height", fallback.output_height, { integer: true }),
     bitrate_mbps: numberFieldValue("set-custom-bitrate", fallback.bitrate_mbps),
@@ -336,7 +341,7 @@ function readAdvancedRecordingSettings() {
 }
 
 function currentRecordingBitrateMbps() {
-  if ($("set-recording-advanced").checked) {
+  if (isAdvancedRecordingMode()) {
     return numberFieldValue(
       "set-custom-bitrate",
       recordingQualityPreset(Number($("set-bitrate").value), $("set-output-resolution").value).bitrate
@@ -1319,22 +1324,26 @@ function syncRecordingFields() {
       : `${outputResolution.label} output, ${outputResolution.hint}.`;
   $("quality-summary").textContent = recordingQualitySummary(quality);
   $("fps-summary").textContent = `${smoothness.label} - ${smoothness.hint}.`;
-  syncAdvancedRecordingFields();
+  syncRecordingModeFields();
   syncReplayStorageFields();
 }
 
-function syncAdvancedRecordingFields() {
-  const enabled = $("set-recording-advanced").checked;
-  if (!enabled) {
+function syncRecordingModeFields() {
+  const advanced = isAdvancedRecordingMode();
+  if (!advanced) {
     const preset = advancedRecordingFromPresetControls();
     $("set-output-width").value = String(preset.output_width);
     $("set-output-height").value = String(preset.output_height);
     $("set-custom-bitrate").value = String(preset.bitrate_mbps);
     $("set-custom-fps").value = String(preset.fps);
   }
-  $("advanced-recording-fields").hidden = !enabled;
+  $("recording-basic-fields").hidden = advanced;
+  $("recording-advanced-fields").hidden = !advanced;
+  for (const id of ["set-output-resolution", "set-bitrate", "set-fps"]) {
+    $(id).disabled = advanced;
+  }
   for (const id of ["set-output-width", "set-output-height", "set-custom-bitrate", "set-custom-fps"]) {
-    $(id).disabled = !enabled;
+    $(id).disabled = !advanced;
   }
 }
 

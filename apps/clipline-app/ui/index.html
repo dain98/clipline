@@ -527,6 +527,18 @@
 
           <div class="settings-section" data-section="recording" hidden>
             <input id="set-buffer" type="hidden" value="75" />
+            <div class="recording-mode-bar">
+              <div class="segmented-control recording-mode-control" role="radiogroup" aria-label="Recording settings mode">
+                <label>
+                  <input id="recording-mode-basic" type="radio" name="recording-mode" value="basic" checked />
+                  <span>Basic</span>
+                </label>
+                <label>
+                  <input id="recording-mode-advanced" type="radio" name="recording-mode" value="advanced" />
+                  <span>Advanced</span>
+                </label>
+              </div>
+            </div>
             <div class="setting-row" data-settings-key="video_encoder">
               <div class="setting-info">
                 <strong>Encoder</strong>
@@ -535,22 +547,6 @@
               <div class="recording-control">
                 <select id="set-encoder"></select>
                 <span id="encoder-summary" class="setting-summary"></span>
-              </div>
-            </div>
-            <div class="setting-row" data-settings-key="output_resolution">
-              <div class="setting-info">
-                <strong>Output size</strong>
-                <span>Caps saved video resolution while preserving aspect ratio.</span>
-              </div>
-              <div class="recording-control">
-                <select id="set-output-resolution">
-                  <option value="source">Source</option>
-                  <option value="1440p">1440p</option>
-                  <option value="1080p">1080p</option>
-                  <option value="720p">720p</option>
-                  <option value="480p">480p</option>
-                </select>
-                <span id="output-resolution-summary" class="setting-summary"></span>
               </div>
             </div>
             <div class="setting-row" data-settings-key="replay_window_s buffer_seconds">
@@ -571,6 +567,23 @@
                   <button type="button" data-replay-preset="120">2 min</button>
                 </div>
                 <span id="replay-summary" class="setting-summary"></span>
+              </div>
+            </div>
+            <div id="recording-basic-fields">
+            <div class="setting-row" data-settings-key="output_resolution">
+              <div class="setting-info">
+                <strong>Output size</strong>
+                <span>Caps saved video resolution while preserving aspect ratio.</span>
+              </div>
+              <div class="recording-control">
+                <select id="set-output-resolution">
+                  <option value="source">Source</option>
+                  <option value="1440p">1440p</option>
+                  <option value="1080p">1080p</option>
+                  <option value="720p">720p</option>
+                  <option value="480p">480p</option>
+                </select>
+                <span id="output-resolution-summary" class="setting-summary"></span>
               </div>
             </div>
             <div class="setting-row" data-settings-key="video_quality">
@@ -605,41 +618,32 @@
                 <span id="fps-summary" class="setting-summary"></span>
               </div>
             </div>
-            <div class="advanced-box recording-advanced" data-settings-key="advanced_recording">
-              <div class="setting-info">
-                <strong>Advanced</strong>
-                <span>Set exact recording caps for new captures.</span>
+            </div>
+            <div id="recording-advanced-fields" hidden>
+              <div class="setting-row" data-settings-key="advanced_recording">
+                <div class="setting-info">
+                  <strong>Output bounds</strong>
+                  <span>Saved video fits inside this size without stretching.</span>
+                </div>
+                <div class="exact-resolution-control">
+                  <input id="set-output-width" type="number" min="2" max="16384" step="2" inputmode="numeric" aria-label="Exact output width" />
+                  <span aria-hidden="true">x</span>
+                  <input id="set-output-height" type="number" min="2" max="16384" step="2" inputmode="numeric" aria-label="Exact output height" />
+                </div>
               </div>
-              <label class="check-line">
-                <input id="set-recording-advanced" type="checkbox" />
-                <span>Use exact recording settings</span>
-              </label>
-              <div id="advanced-recording-fields" class="advanced-fields">
-                <div class="setting-row compact">
-                  <div class="setting-info">
-                    <strong>Output bounds</strong>
-                    <span>Saved video fits inside this size without stretching.</span>
-                  </div>
-                  <div class="exact-resolution-control">
-                    <input id="set-output-width" type="number" min="2" max="16384" step="2" inputmode="numeric" aria-label="Exact output width" />
-                    <span aria-hidden="true">x</span>
-                    <input id="set-output-height" type="number" min="2" max="16384" step="2" inputmode="numeric" aria-label="Exact output height" />
-                  </div>
+              <div class="setting-row" data-settings-key="advanced_recording">
+                <div class="setting-info">
+                  <strong>Bitrate</strong>
+                  <span>Mbps for new recordings.</span>
                 </div>
-                <div class="setting-row compact">
-                  <div class="setting-info">
-                    <strong>Bitrate</strong>
-                    <span>Mbps for new recordings.</span>
-                  </div>
-                  <input id="set-custom-bitrate" type="number" min="1" max="100" step="0.25" inputmode="decimal" />
+                <input id="set-custom-bitrate" type="number" min="1" max="100" step="0.25" inputmode="decimal" />
+              </div>
+              <div class="setting-row" data-settings-key="advanced_recording">
+                <div class="setting-info">
+                  <strong>FPS</strong>
+                  <span>Frames per second for new recordings.</span>
                 </div>
-                <div class="setting-row compact">
-                  <div class="setting-info">
-                    <strong>FPS</strong>
-                    <span>Frames per second for new recordings.</span>
-                  </div>
-                  <input id="set-custom-fps" type="number" min="1" max="240" step="1" inputmode="numeric" />
-                </div>
+                <input id="set-custom-fps" type="number" min="1" max="240" step="1" inputmode="numeric" />
               </div>
             </div>
           </div>

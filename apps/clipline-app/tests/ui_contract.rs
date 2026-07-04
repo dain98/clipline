@@ -471,8 +471,10 @@ fn review_player_owns_all_controls() {
         "id=\"set-fps\"",
         "id=\"fps-summary\"",
         "id=\"fps-scale\"",
-        "id=\"set-recording-advanced\"",
-        "id=\"advanced-recording-fields\"",
+        "id=\"recording-mode-basic\"",
+        "id=\"recording-mode-advanced\"",
+        "id=\"recording-basic-fields\"",
+        "id=\"recording-advanced-fields\"",
         "id=\"set-output-width\"",
         "id=\"set-output-height\"",
         "id=\"set-custom-bitrate\"",
@@ -620,7 +622,7 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains("data-settings-key=\"advanced_recording\"")
             && main_js().contains("advanced_recording")
-            && main_js().contains("syncAdvancedRecordingFields"),
+            && main_js().contains("syncRecordingModeFields"),
         "recording tab must expose and persist advanced exact recording controls"
     );
     assert!(
