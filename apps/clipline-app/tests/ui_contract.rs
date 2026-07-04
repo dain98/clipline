@@ -471,6 +471,12 @@ fn review_player_owns_all_controls() {
         "id=\"set-fps\"",
         "id=\"fps-summary\"",
         "id=\"fps-scale\"",
+        "id=\"set-recording-advanced\"",
+        "id=\"advanced-recording-fields\"",
+        "id=\"set-output-width\"",
+        "id=\"set-output-height\"",
+        "id=\"set-custom-bitrate\"",
+        "id=\"set-custom-fps\"",
         "id=\"set-media-dir\"",
         "id=\"choose-media-folder\"",
         "id=\"set-quota\"",
@@ -610,6 +616,12 @@ fn review_player_owns_all_controls() {
     assert!(
         html[fps_start..=fps_tag_end].contains("type=\"range\""),
         "smoothness must be a slider, not a dropdown"
+    );
+    assert!(
+        html.contains("data-settings-key=\"advanced_recording\"")
+            && main_js().contains("advanced_recording")
+            && main_js().contains("syncAdvancedRecordingFields"),
+        "recording tab must expose and persist advanced exact recording controls"
     );
     assert!(
         html.contains("id=\"hotkey-status\""),

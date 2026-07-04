@@ -168,7 +168,19 @@ $("cloud-host-url").addEventListener("change", syncCloudHttpWarning);
 $("cloud-connect").addEventListener("click", connectCloud);
 $("cloud-disconnect").addEventListener("click", disconnectCloud);
 $("set-games-auto-detect").addEventListener("change", updateGameDetectionStatus);
-for (const id of ["set-buffer", "set-replay", "set-encoder", "set-output-resolution", "set-bitrate", "set-fps"]) {
+for (const id of [
+  "set-buffer",
+  "set-replay",
+  "set-encoder",
+  "set-output-resolution",
+  "set-bitrate",
+  "set-fps",
+  "set-recording-advanced",
+  "set-output-width",
+  "set-output-height",
+  "set-custom-bitrate",
+  "set-custom-fps",
+]) {
   $(id).addEventListener("input", syncRecordingFields);
   $(id).addEventListener("change", syncRecordingFields);
 }

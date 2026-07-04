@@ -605,6 +605,43 @@
                 <span id="fps-summary" class="setting-summary"></span>
               </div>
             </div>
+            <div class="advanced-box recording-advanced" data-settings-key="advanced_recording">
+              <div class="setting-info">
+                <strong>Advanced</strong>
+                <span>Set exact recording caps for new captures.</span>
+              </div>
+              <label class="check-line">
+                <input id="set-recording-advanced" type="checkbox" />
+                <span>Use exact recording settings</span>
+              </label>
+              <div id="advanced-recording-fields" class="advanced-fields">
+                <div class="setting-row compact">
+                  <div class="setting-info">
+                    <strong>Output bounds</strong>
+                    <span>Saved video fits inside this size without stretching.</span>
+                  </div>
+                  <div class="exact-resolution-control">
+                    <input id="set-output-width" type="number" min="2" max="16384" step="2" inputmode="numeric" aria-label="Exact output width" />
+                    <span aria-hidden="true">x</span>
+                    <input id="set-output-height" type="number" min="2" max="16384" step="2" inputmode="numeric" aria-label="Exact output height" />
+                  </div>
+                </div>
+                <div class="setting-row compact">
+                  <div class="setting-info">
+                    <strong>Bitrate</strong>
+                    <span>Mbps for new recordings.</span>
+                  </div>
+                  <input id="set-custom-bitrate" type="number" min="1" max="100" step="0.25" inputmode="decimal" />
+                </div>
+                <div class="setting-row compact">
+                  <div class="setting-info">
+                    <strong>FPS</strong>
+                    <span>Frames per second for new recordings.</span>
+                  </div>
+                  <input id="set-custom-fps" type="number" min="1" max="240" step="1" inputmode="numeric" />
+                </div>
+              </div>
+            </div>
           </div>
 
           <div class="settings-section" data-section="storage" hidden>

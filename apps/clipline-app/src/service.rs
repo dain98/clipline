@@ -369,6 +369,12 @@ pub enum RecordingMode {
     ReplaysOnly,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputResolutionBounds {
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum OutputResolution {
     #[default]
@@ -470,6 +476,7 @@ pub struct ServiceOptions {
     pub bitrate_bps: u32,
     pub video_encoder: VideoEncoder,
     pub output_resolution: OutputResolution,
+    pub output_resolution_bounds: Option<OutputResolutionBounds>,
     /// Codecs the in-app review player can decode. `Auto` is restricted to
     /// these so we never record a clip the user can't play back. The
     /// frontend reports the real set (canPlayType); H.264 is always safe.
@@ -499,6 +506,7 @@ impl Default for ServiceOptions {
             bitrate_bps: 12_000_000,
             video_encoder: VideoEncoder::Auto,
             output_resolution: OutputResolution::Source,
+            output_resolution_bounds: None,
             decodable_codecs: vec![Codec::H264],
             audio: AudioOptions::default(),
         }
@@ -731,7 +739,12 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         return Err("expected a GPU frame".into());
     };
     let (in_w, in_h) = d3d11::texture_size(tex);
-    let (enc_w, enc_h) = output_dimensions(in_w, in_h, opts.output_resolution);
+    let (enc_w, enc_h) = output_dimensions_with_bounds(
+        in_w,
+        in_h,
+        opts.output_resolution,
+        opts.output_resolution_bounds,
+    );
 
     let (encoder, active) = build_encoder(&device, &opts, in_w, in_h, enc_w, enc_h, events)?;
     let encoder_status = encoder_label(active);
@@ -1115,8 +1128,21 @@ fn encoder_capabilities() -> &'static [EncoderCapability] {
     })
 }
 
+#[cfg(test)]
 fn output_dimensions(in_w: u32, in_h: u32, resolution: OutputResolution) -> (u32, u32) {
-    let max_box = resolution.bounds().unwrap_or((2560, u32::MAX));
+    output_dimensions_with_bounds(in_w, in_h, resolution, None)
+}
+
+fn output_dimensions_with_bounds(
+    in_w: u32,
+    in_h: u32,
+    resolution: OutputResolution,
+    bounds: Option<OutputResolutionBounds>,
+) -> (u32, u32) {
+    let max_box = bounds
+        .map(|bounds| (bounds.width, bounds.height))
+        .or_else(|| resolution.bounds())
+        .unwrap_or((2560, u32::MAX));
     let scale = (max_box.0 as f64 / in_w.max(1) as f64)
         .min(max_box.1 as f64 / in_h.max(1) as f64)
         .min(1.0);

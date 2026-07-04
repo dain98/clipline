@@ -43,8 +43,8 @@ pub use persistence::{
 };
 #[allow(unused_imports)]
 pub use types::{
-    AudioSettings, CaptureMode, CaptureRegionSettings, CustomGameSettings, ReplayStorageMode,
-    ReplayStorageSettings, VideoQuality,
+    AdvancedRecordingSettings, AudioSettings, CaptureMode, CaptureRegionSettings,
+    CustomGameSettings, ReplayStorageMode, ReplayStorageSettings, VideoQuality,
 };
 
 /// The replay ring holds the save window plus this margin (for keyframe
@@ -71,6 +71,8 @@ pub struct AppSettings {
     pub video_quality: VideoQuality,
     pub bitrate_mbps: f64,
     pub fps: u32,
+    #[serde(default)]
+    pub advanced_recording: AdvancedRecordingSettings,
     #[serde(default, deserialize_with = "persistence::deserialize_video_encoder")]
     pub video_encoder: crate::service::VideoEncoder,
     #[serde(default)]
@@ -119,6 +121,7 @@ impl Default for AppSettings {
             video_quality: VideoQuality::Balanced,
             bitrate_mbps: 12.0,
             fps: 60,
+            advanced_recording: AdvancedRecordingSettings::default(),
             video_encoder: crate::service::VideoEncoder::Auto,
             output_resolution: OutputResolution::Source,
             disk_quota_gb: 10.0,
@@ -167,13 +170,28 @@ impl AppSettings {
             replay_storage: self.replay_storage.to_service_options()?,
             disk_quota_bytes: quota_bytes_from_gb(self.disk_quota_gb)?,
             recording_mode: RecordingMode::ReplaysOnly,
-            fps: self.fps,
+            fps: self.effective_fps(),
             bitrate_bps: (self.effective_bitrate_mbps() * 1_000_000.0).round() as u32,
             video_encoder: self.video_encoder,
             output_resolution: self.output_resolution,
+            output_resolution_bounds: self.effective_output_resolution_bounds(),
             decodable_codecs: vec![clipline_capture::probe::Codec::H264],
             audio: self.audio.to_service_options(),
         })
+    }
+
+    pub fn effective_fps(&self) -> u32 {
+        if self.advanced_recording.enabled {
+            self.advanced_recording.fps
+        } else {
+            self.fps
+        }
+    }
+
+    pub fn effective_output_resolution_bounds(
+        &self,
+    ) -> Option<crate::service::OutputResolutionBounds> {
+        self.advanced_recording.repaired().output_bounds()
     }
 }
 

@@ -17,6 +17,8 @@ pub const MIN_BUFFER_SECONDS: f64 = 10.0;
 pub const MAX_BUFFER_SECONDS: f64 = 20.0 * 60.0;
 pub const MIN_BITRATE_MBPS: f64 = 1.0;
 pub const MAX_BITRATE_MBPS: f64 = 100.0;
+pub const MIN_EXACT_FPS: u32 = 1;
+pub const MAX_EXACT_FPS: u32 = 240;
 pub const MIN_AUDIO_VOLUME: f64 = 0.0;
 pub const MAX_AUDIO_VOLUME: f64 = 2.0;
 pub const MIN_CAPTURE_REGION_SIDE: u32 = 2;
@@ -78,6 +80,13 @@ impl AppSettings {
         if !matches!(self.fps, 30 | 60 | 90 | 120) {
             return Err("fps must be 30, 60, 90, or 120".into());
         }
+        if self.advanced_recording.enabled
+            && !(MIN_EXACT_FPS..=MAX_EXACT_FPS).contains(&self.advanced_recording.fps)
+        {
+            return Err(format!(
+                "advanced fps must be between {MIN_EXACT_FPS} and {MAX_EXACT_FPS}"
+            ));
+        }
         if !self.update_channel.enabled() {
             return Err(format!(
                 "{} update channel is not available yet",
@@ -94,7 +103,11 @@ impl AppSettings {
     }
 
     pub fn effective_bitrate_mbps(&self) -> f64 {
-        self.video_quality.bitrate_mbps(self.output_resolution)
+        if self.advanced_recording.enabled {
+            self.advanced_recording.bitrate_mbps
+        } else {
+            self.video_quality.bitrate_mbps(self.output_resolution)
+        }
     }
 
     fn validate_games(&self) -> Result<(), String> {

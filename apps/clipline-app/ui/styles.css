@@ -1030,6 +1030,23 @@ button.primary.settings-save-glow {
 
 .advanced-fields[hidden] { display: none; }
 
+.recording-advanced {
+  border-bottom: 0;
+}
+
+.exact-resolution-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.exact-resolution-control span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .danger-check {
   align-items: flex-start;
   color: var(--warn);

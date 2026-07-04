@@ -180,6 +180,15 @@ function fillSettings(s) {
     ? PlayerCore.qualityIndexForId(s.video_quality)
     : qualityIndexForBitrate(s.bitrate_mbps, $("set-output-resolution").value);
   $("set-fps").value = smoothnessIndexForFps(s.fps);
+  const advanced = {
+    ...advancedRecordingFromPresetControls(),
+    ...(s.advanced_recording || {}),
+  };
+  $("set-recording-advanced").checked = !!advanced.enabled;
+  $("set-output-width").value = String(advanced.output_width);
+  $("set-output-height").value = String(advanced.output_height);
+  $("set-custom-bitrate").value = String(advanced.bitrate_mbps);
+  $("set-custom-fps").value = String(advanced.fps);
   $("set-quota").value = s.disk_quota_gb;
   $("set-media-dir").value = s.media_dir ?? "";
   $("set-replay-disk-enabled").checked = replayStorage.mode === "disk";
@@ -253,6 +262,7 @@ function readSettings() {
       $("set-output-resolution").value
     ).bitrate,
     fps: smoothnessPreset(Number($("set-fps").value)).fps,
+    advanced_recording: readAdvancedRecordingSettings(),
     disk_quota_gb: Number($("set-quota").value),
     media_dir: $("set-media-dir").value.trim(),
     replay_storage: {
@@ -283,6 +293,56 @@ function defaultAudioSettings() {
     mic_volume: 1,
     mic_channels: "mono",
   };
+}
+
+function outputBoundsForResolution(id) {
+  switch (outputResolutionOption(id).id) {
+    case "480p": return { width: 854, height: 480 };
+    case "720p": return { width: 1280, height: 720 };
+    case "1080p": return { width: 1920, height: 1080 };
+    case "1440p": return { width: 2560, height: 1440 };
+    default: return { width: 2560, height: 1440 };
+  }
+}
+
+function numberFieldValue(id, fallback, { integer = false } = {}) {
+  const value = Number($(id).value);
+  if (!Number.isFinite(value)) return fallback;
+  return integer ? Math.round(value) : value;
+}
+
+function advancedRecordingFromPresetControls() {
+  const bounds = outputBoundsForResolution($("set-output-resolution").value);
+  const quality = recordingQualityPreset(Number($("set-bitrate").value), $("set-output-resolution").value);
+  const smoothness = smoothnessPreset(Number($("set-fps").value));
+  return {
+    enabled: false,
+    output_width: bounds.width,
+    output_height: bounds.height,
+    bitrate_mbps: quality.bitrate,
+    fps: smoothness.fps,
+  };
+}
+
+function readAdvancedRecordingSettings() {
+  const fallback = advancedRecordingFromPresetControls();
+  return {
+    enabled: $("set-recording-advanced").checked,
+    output_width: numberFieldValue("set-output-width", fallback.output_width, { integer: true }),
+    output_height: numberFieldValue("set-output-height", fallback.output_height, { integer: true }),
+    bitrate_mbps: numberFieldValue("set-custom-bitrate", fallback.bitrate_mbps),
+    fps: numberFieldValue("set-custom-fps", fallback.fps, { integer: true }),
+  };
+}
+
+function currentRecordingBitrateMbps() {
+  if ($("set-recording-advanced").checked) {
+    return numberFieldValue(
+      "set-custom-bitrate",
+      recordingQualityPreset(Number($("set-bitrate").value), $("set-output-resolution").value).bitrate
+    );
+  }
+  return recordingQualityPreset(Number($("set-bitrate").value), $("set-output-resolution").value).bitrate;
 }
 
 function defaultReplayStorageSettings() {
@@ -1257,19 +1317,35 @@ function syncRecordingFields() {
     outputResolution.id === "source"
       ? "Uses the captured size, capped only when needed for encoder compatibility."
       : `${outputResolution.label} output, ${outputResolution.hint}.`;
-  $("quality-summary").textContent = `${quality.label} quality - ${quality.hint}.`;
+  $("quality-summary").textContent = recordingQualitySummary(quality);
   $("fps-summary").textContent = `${smoothness.label} - ${smoothness.hint}.`;
+  syncAdvancedRecordingFields();
   syncReplayStorageFields();
+}
+
+function syncAdvancedRecordingFields() {
+  const enabled = $("set-recording-advanced").checked;
+  if (!enabled) {
+    const preset = advancedRecordingFromPresetControls();
+    $("set-output-width").value = String(preset.output_width);
+    $("set-output-height").value = String(preset.output_height);
+    $("set-custom-bitrate").value = String(preset.bitrate_mbps);
+    $("set-custom-fps").value = String(preset.fps);
+  }
+  $("advanced-recording-fields").hidden = !enabled;
+  for (const id of ["set-output-width", "set-output-height", "set-custom-bitrate", "set-custom-fps"]) {
+    $(id).disabled = !enabled;
+  }
 }
 
 function syncReplayStorageFields() {
   const enabled = $("set-replay-disk-enabled").checked;
   const fields = $("replay-disk-fields");
   fields.hidden = !enabled;
-  const quality = recordingQualityPreset(Number($("set-bitrate").value), $("set-output-resolution").value);
-  const gbPerHour = quality.bitrate * 1_000_000 / 8 * 3600 / (1000 ** 3);
+  const bitrate = currentRecordingBitrateMbps();
+  const gbPerHour = bitrate * 1_000_000 / 8 * 3600 / (1000 ** 3);
   $("replay-disk-estimate").textContent =
-    `${quality.bitrate} Mbps: about ${gbPerHour.toFixed(quality.bitrate >= 40 ? 0 : 1)} GB/hour written while recording.`;
+    `${bitrate} Mbps: about ${gbPerHour.toFixed(bitrate >= 40 ? 0 : 1)} GB/hour written while recording.`;
   for (const id of ["set-replay-disk-dir", "choose-replay-cache-folder", "set-replay-disk-quota", "set-replay-disk-ack"]) {
     $(id).disabled = !enabled;
   }

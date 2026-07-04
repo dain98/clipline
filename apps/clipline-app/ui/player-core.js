@@ -208,6 +208,15 @@ const PlayerCore = (() => {
     return { ...QUALITY_PRESETS[clamped], bitrate: qualityBitrates(outputResolution)[clamped] };
   };
 
+  const mbpsLabel = (mbps) => {
+    const value = Number(mbps);
+    if (!Number.isFinite(value)) return "0 Mbps";
+    return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)} Mbps`;
+  };
+
+  const recordingQualitySummary = (quality) =>
+    `${quality.label} quality - ${quality.hint}. ${mbpsLabel(quality.bitrate)}.`;
+
   const qualityIndexForBitrate = (mbps, outputResolution = "source") => {
     const bitrates = qualityBitrates(outputResolution);
     const presets = QUALITY_PRESETS.map((preset, index) => ({ ...preset, bitrate: bitrates[index] }));
@@ -1788,6 +1797,7 @@ const PlayerCore = (() => {
     fmtAgo,
     settingDurationLabel,
     recordingQualityPreset,
+    recordingQualitySummary,
     qualityIndexForBitrate,
     qualityIndexForId,
     smoothnessPreset,

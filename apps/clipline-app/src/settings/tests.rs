@@ -720,6 +720,54 @@ fn service_options_include_output_resolution_choice() {
 }
 
 #[test]
+fn advanced_recording_overrides_preset_service_values() {
+    let settings = AppSettings {
+        advanced_recording: AdvancedRecordingSettings {
+            enabled: true,
+            output_width: 1600,
+            output_height: 900,
+            bitrate_mbps: 13.5,
+            fps: 75,
+        },
+        output_resolution: OutputResolution::P720,
+        video_quality: VideoQuality::Compact,
+        bitrate_mbps: 2.5,
+        fps: 30,
+        ..AppSettings::default()
+    };
+
+    let opts = settings.to_service_options(None).unwrap();
+    let bounds = opts.output_resolution_bounds.unwrap();
+
+    assert_eq!(opts.output_resolution, OutputResolution::P720);
+    assert_eq!(bounds.width, 1600);
+    assert_eq!(bounds.height, 900);
+    assert_eq!(opts.bitrate_bps, 13_500_000);
+    assert_eq!(opts.fps, 75);
+}
+
+#[test]
+fn advanced_recording_load_repairs_numeric_values() {
+    let value = serde_json::json!({
+        "advanced_recording": {
+            "enabled": true,
+            "output_width": 1919,
+            "output_height": 1079,
+            "bitrate_mbps": 17.25,
+            "fps": 75
+        }
+    });
+
+    let settings = AppSettings::load_from_object(value.as_object().unwrap());
+
+    assert!(settings.advanced_recording.enabled);
+    assert_eq!(settings.advanced_recording.output_width, 1920);
+    assert_eq!(settings.advanced_recording.output_height, 1080);
+    assert_eq!(settings.advanced_recording.bitrate_mbps, 17.25);
+    assert_eq!(settings.advanced_recording.fps, 75);
+}
+
+#[test]
 fn service_options_include_display_region_source() {
     let settings = AppSettings {
         capture_mode: CaptureMode::DisplayRegion,

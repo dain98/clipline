@@ -258,7 +258,7 @@ fn setting_duration_labels_are_human_readable() {
 }
 
 #[test]
-fn recording_quality_labels_hide_bitrate_jargon() {
+fn recording_quality_labels_include_bitrate_amounts() {
     let mut ctx = player_core_context();
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.recordingQualityPreset(0)"),
@@ -283,6 +283,13 @@ fn recording_quality_labels_hide_bitrate_jargon() {
     assert_eq!(eval(&mut ctx, "PlayerCore.qualityIndexForBitrate(13)"), "1");
     assert_eq!(eval(&mut ctx, "PlayerCore.qualityIndexForBitrate(35)"), "3");
     assert_eq!(eval(&mut ctx, "PlayerCore.qualityIndexForId('sharp')"), "2");
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.recordingQualitySummary(PlayerCore.recordingQualityPreset(2))"
+        ),
+        "Sharp quality - more detail. 24 Mbps."
+    );
 }
 
 #[test]
