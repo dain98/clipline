@@ -330,6 +330,18 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > shape is a full-size clapper icon on the left, only for videos that are actually user-created
 > clips, likely after finishing a clearer labeling model.
 
+Recent fixes (2026-07-03):
+- Settings now opens as a popup over the current Library/Review view instead of replacing the
+  main pane. Unsaved edits change `Close` to `Discard Changes`; the first discard attempt
+  shakes the popup, shows `Careful--your changes aren't saved.` in red beside `Discard Changes`,
+  and makes `Save Settings` glow. A second discard button press closes and restores the last
+  saved settings. Backdrop clicks close only when the form is clean; with unsaved edits they
+  warn/shake/glow repeatedly until the user presses `Save Settings` or `Discard Changes`.
+  Rows with unsaved changes now get a blue glow, and tabs containing changed rows show a pip;
+  indicators clear when edits are saved, discarded, or reverted.
+  Verified with `cargo test --workspace` and
+  `cargo clean -p clipline-app; cargo clippy --workspace --all-targets -- -D warnings`.
+
 Recent fixes (2026-07-02):
 - Nightly 0.1.28 contains the custom game detection workflow and review follow-ups from PRs
   #72 and #73. The previous public nightly metadata was 0.1.27, so the app and Tauri package

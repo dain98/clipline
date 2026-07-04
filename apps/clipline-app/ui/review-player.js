@@ -360,6 +360,14 @@ async function submitRenameFileDialog() {
 }
 
 function openClip(clip) {
+  if (settingsOpen) {
+    syncSettingsDraftFromForm({ resetDiscard: false });
+    if (settingsHaveUnsavedChanges()) {
+      showSettingsDiscardWarning();
+      return;
+    }
+    toggleSettings(false);
+  }
   audioPreviewSeq += 1;
   clearOverlayIdleCheck();
   pendingSeek = null;
@@ -376,7 +384,6 @@ function openClip(clip) {
   $("pmeta").textContent = `${clip.size_mb.toFixed(1)} MB · ${clip.path}`;
   syncReviewLocalActions();
   syncUploadClipButton();
-  settingsOpen = false;
   updateViews();
   updateStageFrame();
   video.src = convertFileSrc(clip.path);
@@ -431,11 +438,20 @@ function closeReview() {
 
 var settingsOpen = false;
 
+function syncSettingsModalBackground() {
+  for (const node of [document.querySelector(".sidebar"), $("gallery-view"), $("review-viewer")]) {
+    if (!node) continue;
+    node.inert = settingsOpen;
+    node.setAttribute("aria-hidden", settingsOpen ? "true" : "false");
+  }
+}
+
 function updateViews() {
   $("settings-page").hidden = !settingsOpen;
-  $("review-viewer").hidden = settingsOpen || !currentClip;
-  // The gallery is the home whenever neither the editor nor settings is open.
-  $("gallery-view").hidden = settingsOpen || !!currentClip;
+  $("review-viewer").hidden = !currentClip;
+  // Settings is an overlay; gallery/review visibility follows only clip state.
+  $("gallery-view").hidden = !!currentClip;
+  syncSettingsModalBackground();
 }
 
 function renderVisibleSettingsSection() {
@@ -449,12 +465,26 @@ function renderVisibleSettingsSection() {
   }
 }
 
+function requestSettingsClose({ allowDiscard = true } = {}) {
+  if (!settingsOpen) return;
+  syncSettingsDraftFromForm({ resetDiscard: false });
+  if (settingsHaveUnsavedChanges()) {
+    if (!settingsDiscardWarningArmed || !allowDiscard) {
+      showSettingsDiscardWarning();
+      return;
+    }
+  }
+  toggleSettings(false);
+}
+
 function toggleSettings(open = !settingsOpen) {
   const wasOpen = settingsOpen;
   settingsOpen = open;
   // The clip survives the round-trip; just don't play behind the page.
   if (settingsOpen && !video.paused) video.pause();
   if (settingsOpen && !wasOpen) {
+    resetSettingsDiscardWarning();
+    syncSettingsDirtyState({ resetDiscard: true });
     ensureDisplaysLoaded().then(renderVisibleSettingsSection).catch((e) => $("error").textContent = e);
     ensureAudioDevicesLoaded().catch((e) => $("error").textContent = e);
     ensureVideoEncodersLoaded().catch((e) => $("error").textContent = e);
@@ -1446,6 +1476,7 @@ async function chooseMediaFolder() {
     });
     if (selected) {
       $("set-media-dir").value = selected;
+      syncSettingsDraftFromForm();
       $("settings-status").textContent = "folder selected - save to apply";
     }
   } catch (e) {
@@ -1460,6 +1491,7 @@ async function chooseReplayCacheFolder() {
     });
     if (selected) {
       $("set-replay-disk-dir").value = selected;
+      syncSettingsDraftFromForm();
       $("settings-status").textContent = "replay cache folder selected - save to apply";
     }
   } catch (e) {

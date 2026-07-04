@@ -404,10 +404,16 @@ $("keys-dialog").addEventListener("click", (ev) => {
 
 $("rail-save").addEventListener("click", () => invoke("save_replay"));
 $("rail-profile").addEventListener("click", openRailProfile);
-$("rail-settings").addEventListener("click", () => toggleSettings());
-$("settings-close").addEventListener("click", () => toggleSettings(false));
+$("rail-settings").addEventListener("click", () => {
+  if (settingsOpen) requestSettingsClose();
+  else toggleSettings(true);
+});
+$("settings-close").addEventListener("click", requestSettingsClose);
 $("settings-page").addEventListener("input", () => syncSettingsDraftFromForm());
 $("settings-page").addEventListener("change", () => syncSettingsDraftFromForm());
+$("settings-page").addEventListener("pointerdown", (ev) => {
+  if (ev.target === $("settings-page")) requestSettingsClose({ allowDiscard: false });
+});
 $("set-hotkey").addEventListener("focus", beginHotkeyCapture);
 $("set-hotkey").addEventListener("click", beginHotkeyCapture);
 $("set-hotkey").addEventListener("keydown", recordHotkey);
@@ -479,7 +485,7 @@ document.addEventListener("keydown", (ev) => {
   ) return; // a dialog owns the keyboard
   if (ev.code === "Escape" && settingsOpen) {
     ev.preventDefault();
-    toggleSettings(false);
+    requestSettingsClose();
     return;
   }
   if (settingsOpen) return; // player shortcuts are inert behind the page

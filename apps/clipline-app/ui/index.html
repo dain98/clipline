@@ -300,9 +300,10 @@
         </div>
       </div>
 
-      <section id="settings-page" class="settings-page" hidden>
+      <section id="settings-page" class="settings-page" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div id="settings-popup-shell" class="settings-popup-shell">
         <header class="settings-head">
-          <h1>Settings</h1>
+          <h1 id="settings-title">Settings</h1>
         </header>
 
         <nav id="settings-tabs" class="settings-tabs">
@@ -317,7 +318,7 @@
 
         <div class="settings-body">
           <div class="settings-section" data-section="general">
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="open_on_startup">
               <div class="setting-info">
                 <strong>Open on startup</strong>
                 <span>Launch Clipline automatically when you sign in to Windows.</span>
@@ -327,7 +328,7 @@
                 <span>Start Clipline on Windows login</span>
               </label>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="close_to_tray">
               <div class="setting-info">
                 <strong>Close to Tray</strong>
                 <span>Keep recording in the tray when the window is closed.</span>
@@ -337,7 +338,7 @@
                 <span>Send Close to the system tray</span>
               </label>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="minimize_to_tray">
               <div class="setting-info">
                 <strong>Minimize to Tray</strong>
                 <span>Hide the window in the tray instead of the taskbar when minimized.</span>
@@ -347,7 +348,7 @@
                 <span>Send Minimize to the system tray</span>
               </label>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="legacy_timeline_editor">
               <div class="setting-info">
                 <strong>Legacy timeline editor</strong>
                 <span>Use the zoom navigator, snap toggle, and always-visible trim handles.</span>
@@ -357,7 +358,7 @@
                 <span>Use legacy timeline editor</span>
               </label>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="update_channel">
               <div class="setting-info">
                 <strong>Updates</strong>
                 <span>Choose which GitHub release channel Clipline checks for app updates.</span>
@@ -374,7 +375,7 @@
           </div>
 
           <div class="settings-section" data-section="capture" hidden>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="capture_mode capture_region window_title">
               <div class="setting-info">
                 <strong>Capture target</strong>
                 <span>What the recorder captures when no custom game is active.</span>
@@ -384,7 +385,7 @@
                 <option value="display_region">SET REGION</option>
               </select>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="capture_backend">
               <div class="setting-info">
                 <strong>Capture backend</strong>
                 <span>How displays and regions are captured.</span>
@@ -398,7 +399,7 @@
                 <span id="backend-summary" class="setting-summary"></span>
               </div>
             </div>
-            <div id="capture-region-editor" class="capture-region-editor" hidden>
+            <div id="capture-region-editor" class="capture-region-editor" hidden data-settings-key="capture_region">
               <div class="region-head">
                 <div class="setting-info">
                   <strong>Region</strong>
@@ -436,7 +437,7 @@
                 </div>
               </div>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="audio.output_enabled audio.output_device_id audio.output_volume audio.split_output_by_process">
               <div class="setting-info">
                 <strong>Audio output</strong>
                 <span>Sound from the selected Windows playback device.</span>
@@ -457,7 +458,7 @@
                 </div>
               </div>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="audio.mic_enabled audio.mic_device_id audio.mic_volume audio.mic_channels">
               <div class="setting-info">
                 <strong>Microphone</strong>
                 <span>Voice input mixed into saved clip audio.</span>
@@ -490,7 +491,7 @@
           </div>
 
           <div class="settings-section" data-section="games" hidden>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="games.auto_detect">
               <div class="setting-info">
                 <strong>Game detection</strong>
                 <span>When a saved game is running, Clipline records that window instead of the fallback capture target.</span>
@@ -500,7 +501,7 @@
                 <span>Automatically switch to detected games</span>
               </label>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="games.plugins">
               <div class="setting-info">
                 <strong>Supported games</strong>
                 <span>Enable game-specific capture behavior and recording modes.</span>
@@ -509,7 +510,7 @@
                 <div class="hint">loading supported games...</div>
               </div>
             </div>
-            <div class="games-panel">
+            <div class="games-panel" data-settings-key="games.custom_games">
               <div class="games-panel-head">
                 <div class="setting-info">
                   <strong>Custom games</strong>
@@ -526,7 +527,7 @@
 
           <div class="settings-section" data-section="recording" hidden>
             <input id="set-buffer" type="hidden" value="75" />
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="video_encoder">
               <div class="setting-info">
                 <strong>Encoder</strong>
                 <span>Encoder and codec used for new recordings.</span>
@@ -536,7 +537,7 @@
                 <span id="encoder-summary" class="setting-summary"></span>
               </div>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="output_resolution">
               <div class="setting-info">
                 <strong>Output size</strong>
                 <span>Caps saved video resolution while preserving aspect ratio.</span>
@@ -552,7 +553,7 @@
                 <span id="output-resolution-summary" class="setting-summary"></span>
               </div>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="replay_window_s buffer_seconds">
               <div class="setting-info">
                 <strong>Save length</strong>
                 <span>How much recent footage each replay saves.</span>
@@ -572,7 +573,7 @@
                 <span id="replay-summary" class="setting-summary"></span>
               </div>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="video_quality">
               <div class="setting-info">
                 <strong>Video quality</strong>
                 <span>Higher quality keeps more detail and uses more disk space.</span>
@@ -588,7 +589,7 @@
                 <span id="quality-summary" class="setting-summary"></span>
               </div>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="fps">
               <div class="setting-info">
                 <strong>Smoothness</strong>
                 <span>Higher FPS feels smoother and costs more performance.</span>
@@ -607,7 +608,7 @@
           </div>
 
           <div class="settings-section" data-section="storage" hidden>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="media_dir">
               <div class="setting-info">
                 <strong>Media folder</strong>
                 <span>Where Clipline saves recordings, exports, markers, and clip metadata. Existing clips stay in the old folder and won't appear in the library after you change this.</span>
@@ -617,14 +618,14 @@
                 <button id="choose-media-folder" type="button">Choose Folder</button>
               </div>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="disk_quota_gb">
               <div class="setting-info">
                 <strong>Disk quota (GiB)</strong>
                 <span>Budget for saved clips — oldest clips are cleaned up after each save.</span>
               </div>
               <input id="set-quota" type="number" min="0" step="0.5" />
             </div>
-            <div class="advanced-box">
+            <div class="advanced-box" data-settings-key="replay_storage.mode replay_storage.disk_dir replay_storage.disk_quota_gb replay_storage.disk_acknowledged">
               <div class="setting-info">
                 <strong>Disk replay buffer (advanced)</strong>
                 <span>Only turn this on if you know what you're doing. Clipline will continuously write encoded replay data while recording. This can add significant SSD wear.</span>
@@ -634,7 +635,7 @@
                 <span>Store the replay buffer on disk instead of RAM</span>
               </label>
               <div id="replay-disk-fields" class="advanced-fields">
-                <div class="setting-row compact">
+                <div class="setting-row compact" data-settings-key="replay_storage.disk_dir">
                   <div class="setting-info">
                     <strong>Replay cache folder</strong>
                     <span>Temporary rolling cache files. Use a separate folder from saved clips.</span>
@@ -644,7 +645,7 @@
                     <button id="choose-replay-cache-folder" type="button" aria-label="Choose replay cache folder">Choose Folder</button>
                   </div>
                 </div>
-                <div class="setting-row compact">
+                <div class="setting-row compact" data-settings-key="replay_storage.disk_quota_gb">
                   <div class="setting-info">
                     <strong>Replay cache quota (GiB)</strong>
                     <span>Hard cap for temporary replay cache files.</span>
@@ -661,7 +662,7 @@
           </div>
 
           <div class="settings-section" data-section="cloud" hidden>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="cloud.credential_target cloud.connected_user_id">
               <div class="setting-info">
                 <strong>Connection</strong>
                 <span id="cloud-connection-status">Not connected</span>
@@ -682,7 +683,7 @@
                 <span id="cloud-connect-status" class="hint"></span>
               </div>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="cloud.default_visibility">
               <div class="setting-info">
                 <strong>Default visibility</strong>
                 <span>Applied to manual clip uploads from the library.</span>
@@ -693,7 +694,7 @@
                 <option value="public">Public</option>
               </select>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="cloud.delete_local_after_upload">
               <div class="setting-info">
                 <strong>Delete local after upload</strong>
                 <span>Remove the local MP4 and marker sidecar after the cloud copy is ready.</span>
@@ -703,7 +704,7 @@
                 <span>Delete local files after successful upload</span>
               </label>
             </div>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="cloud.auto_upload_rules">
               <div class="setting-info">
                 <strong>Automatic uploads</strong>
                 <span>Manual uploads are available now; rules will be configured in a later release.</span>
@@ -716,7 +717,7 @@
           </div>
 
           <div class="settings-section" data-section="hotkeys" hidden>
-            <div class="setting-row">
+            <div class="setting-row" data-settings-key="hotkey">
               <div class="setting-info">
                 <strong>Save Replay</strong>
                 <span>Global shortcut - use an F-key, a mouse button, or Ctrl/Alt/Shift plus a keyboard key.</span>
@@ -732,8 +733,10 @@
         <footer class="settings-actions">
           <button id="settings-save" type="button" class="primary">Save Settings</button>
           <button id="settings-close" type="button">Close</button>
+          <span id="settings-discard-warning" class="settings-discard-warning" hidden>Careful--your changes aren't saved.</span>
           <span id="settings-status" class="hint"></span>
         </footer>
+        </div>
       </section>
     </main>
   </div>

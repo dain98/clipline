@@ -1069,6 +1069,168 @@ fn review_player_owns_all_controls() {
 }
 
 #[test]
+fn settings_opens_as_popup_and_guards_unsaved_discard() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    for required in [
+        "id=\"settings-page\" class=\"settings-page\" hidden role=\"dialog\" aria-modal=\"true\"",
+        "id=\"settings-title\"",
+        "id=\"settings-popup-shell\"",
+        "id=\"settings-discard-warning\"",
+        "Careful--your changes aren't saved.",
+    ] {
+        assert!(
+            html.contains(required),
+            "settings popup markup must include `{required}`"
+        );
+    }
+
+    assert!(
+        html.contains(
+            "<button id=\"settings-close\" type=\"button\">Close</button>\n          <span id=\"settings-discard-warning\""
+        ),
+        "settings discard warning must render next to the footer close/discard button"
+    );
+
+    for required in [
+        ".settings-popup-shell",
+        ".settings-discard-warning",
+        ".settings-save-glow",
+        ".settings-shake",
+        "@keyframes settings-shake",
+        "@keyframes settings-save-glow",
+    ] {
+        assert!(
+            css.contains(required),
+            "settings popup CSS must include `{required}`"
+        );
+    }
+
+    let popup_shell_rule = css_rule_body(&css, ".settings-popup-shell");
+    assert!(
+        css_decl_value(popup_shell_rule, "border-radius").is_some()
+            && css_decl_value(popup_shell_rule, "overflow") == Some("hidden"),
+        "settings popup shell must clip child backgrounds to preserve all rounded corners"
+    );
+
+    for required in [
+        "function stableSettingsSnapshot(value)",
+        "function settingsHaveUnsavedChanges()",
+        "function syncSettingsDirtyState",
+        "function showSettingsDiscardWarning()",
+        "function resetSettingsDiscardWarning()",
+        "function requestSettingsClose({ allowDiscard = true } = {})",
+        "if (!settingsDiscardWarningArmed || !allowDiscard)",
+        "$(\"settings-close\").textContent = dirty ? \"Discard Changes\" : \"Close\"",
+        "$(\"settings-save\").classList.toggle(\"settings-save-glow\"",
+        "$(\"settings-discard-warning\").textContent = \"Careful--your changes aren't saved.\"",
+        "$(\"rail-settings\").addEventListener(\"click\", () => {",
+        "$(\"settings-close\").addEventListener(\"click\", requestSettingsClose)",
+        "$(\"settings-page\").addEventListener(\"pointerdown\", (ev) => {",
+        "if (ev.target === $(\"settings-page\")) requestSettingsClose({ allowDiscard: false });",
+        "requestSettingsClose();",
+    ] {
+        assert!(
+            js.contains(required),
+            "settings popup JS must include `{required}`"
+        );
+    }
+
+    assert!(
+        js.contains("$(\"review-viewer\").hidden = !currentClip")
+            && js.contains("$(\"gallery-view\").hidden = !!currentClip"),
+        "settings popup must not hide the underlying review/gallery view"
+    );
+}
+
+#[test]
+fn settings_marks_changed_rows_and_tabs() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    for required in [
+        "data-settings-key=\"open_on_startup\"",
+        "data-settings-key=\"capture_mode capture_region window_title\"",
+        "data-settings-key=\"audio.output_enabled audio.output_device_id audio.output_volume audio.split_output_by_process\"",
+        "data-settings-key=\"games.plugins\"",
+        "data-settings-key=\"games.custom_games\"",
+        "data-settings-key=\"cloud.default_visibility\"",
+        "data-settings-key=\"hotkey\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "settings dirty indicator markup must include `{required}`"
+        );
+    }
+
+    for required in [
+        ".setting-changed",
+        ".settings-tabs .tab.settings-tab-changed::after",
+    ] {
+        assert!(
+            css.contains(required),
+            "settings dirty indicator CSS must include `{required}`"
+        );
+    }
+
+    for required in [
+        "var settingsIndicatorBaseline = null;",
+        "function settingsValueAtPath(source, path)",
+        "function settingKeyChanged(path, draft, baseline)",
+        "function syncSettingsChangeIndicators()",
+        "node.classList.toggle(\"setting-changed\", changed)",
+        "tab.classList.toggle(\"settings-tab-changed\", changed)",
+        "settingsIndicatorBaseline = readSettings();",
+        "row.dataset.settingsKey = `games.plugins.${plugin.id}`;",
+        "row.dataset.settingsKey = `games.custom_games.${game.id}`;",
+    ] {
+        assert!(
+            js.contains(required),
+            "settings dirty indicator JS must include `{required}`"
+        );
+    }
+}
+
+#[test]
+fn settings_popup_review_feedback_edges_are_guarded() {
+    let js = main_js();
+
+    for required in [
+        "function settingsBaselineForComparison()",
+        "function stripEphemeralSettingsState(value)",
+        "delete cloud.uploads;",
+        "function resetSettingsBaselineFromForm()",
+        "function refreshSettingsBaselineIfClean()",
+        "function syncSettingsDraftFromForm({ resetDiscard = true } = {})",
+        "syncSettingsDraftFromForm({ resetDiscard: false });",
+        "function syncSettingsModalBackground()",
+        "document.querySelector(\".sidebar\")",
+        "node.inert = settingsOpen;",
+        "node.setAttribute(\"aria-hidden\", settingsOpen ? \"true\" : \"false\")",
+        "$(\"settings-page\").addEventListener(\"pointerdown\", (ev) => {",
+        "if (ev.target === $(\"settings-page\")) requestSettingsClose({ allowDiscard: false });",
+        "if (settingsOpen) {",
+        "showSettingsDiscardWarning();",
+        "return;",
+        "refreshSettingsBaselineIfClean();",
+        "row.dataset.settingsKey = `games.custom_games.${game.id}`;",
+    ] {
+        assert!(
+            js.contains(required),
+            "settings popup review feedback JS must include `{required}`"
+        );
+    }
+
+    assert!(
+        !js.contains("$(\"settings-page\").addEventListener(\"click\", (ev) => {\n  if (ev.target === $(\"settings-page\")) requestSettingsClose({ allowDiscard: false });\n});"),
+        "settings backdrop close guard must not use click because drag release can dispatch click on the overlay"
+    );
+}
+
+#[test]
 fn osu_play_blocks_are_centered_and_taller_in_timeline() {
     let css = styles_css();
     let timeline_rule = css_rule_body(&css, ".timeline-main");
@@ -1551,7 +1713,7 @@ fn settings_tabs_preserve_unsaved_draft_until_save() {
         .expect("video handlers follow settings save");
     let save_handler = &js[save_handler_start..video_start];
     let sync_start = js
-        .find("function syncSettingsDraftFromForm()")
+        .find("function syncSettingsDraftFromForm({ resetDiscard = true } = {})")
         .expect("settings draft sync helper");
     let fill_start = js[sync_start..]
         .find("function fillSettings")
@@ -1562,7 +1724,7 @@ fn settings_tabs_preserve_unsaved_draft_until_save() {
     assert!(
         js.contains("settingsDraft = null")
             && js.contains("function settingsFormSource()")
-            && js.contains("function syncSettingsDraftFromForm()"),
+            && js.contains("function syncSettingsDraftFromForm({ resetDiscard = true } = {})"),
         "settings must keep an explicit unsaved draft while the settings page is open"
     );
     assert!(

@@ -6,12 +6,136 @@ function cloneSettings(settings) {
   return settings ? JSON.parse(JSON.stringify(settings)) : null;
 }
 
+var settingsDiscardWarningArmed = false;
+var settingsIndicatorBaseline = null;
+
+function stableSettingsSnapshot(value) {
+  if (Array.isArray(value)) {
+    return value.map(stableSettingsSnapshot);
+  }
+  if (value && typeof value === "object") {
+    return Object.keys(value)
+      .sort()
+      .reduce((out, key) => {
+        out[key] = stableSettingsSnapshot(value[key]);
+        return out;
+      }, {});
+  }
+  return value;
+}
+
+function stripEphemeralSettingsState(value) {
+  const stable = stableSettingsSnapshot(value ?? null);
+  if (!stable || typeof stable !== "object" || Array.isArray(stable)) return stable;
+  if (!stable.cloud || typeof stable.cloud !== "object" || Array.isArray(stable.cloud)) return stable;
+  const out = { ...stable };
+  const cloud = { ...out.cloud };
+  delete cloud.uploads;
+  out.cloud = cloud;
+  return out;
+}
+
+function settingsSnapshot(value) {
+  return JSON.stringify(stripEphemeralSettingsState(value));
+}
+
+function settingsBaselineForComparison() {
+  return settingsIndicatorBaseline || currentSettings;
+}
+
+function settingsHaveUnsavedChanges() {
+  return settingsSnapshot(settingsDraft) !== settingsSnapshot(settingsBaselineForComparison());
+}
+
+function settingsValueAtPath(source, path) {
+  return String(path || "")
+    .split(".")
+    .filter(Boolean)
+    .reduce((value, key) => {
+      if (value == null) return undefined;
+      if (Array.isArray(value)) return value.find((item) => item && String(item.id) === key);
+      return value[key];
+    }, source);
+}
+
+function settingKeyChanged(path, draft, baseline) {
+  return settingsSnapshot(settingsValueAtPath(draft, path))
+    !== settingsSnapshot(settingsValueAtPath(baseline, path));
+}
+
+function settingsNodeKeys(node) {
+  return String(node.dataset.settingsKey || "")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function syncSettingsChangeIndicators() {
+  const draft = settingsDraft || {};
+  const baseline = settingsBaselineForComparison() || {};
+  const dirtyTabs = new Set();
+  document.querySelectorAll("#settings-page [data-settings-key]").forEach((node) => {
+    const changed = settingsNodeKeys(node).some((key) => settingKeyChanged(key, draft, baseline));
+    node.classList.toggle("setting-changed", changed);
+    const section = node.closest(".settings-section");
+    if (changed && section && section.dataset.section) dirtyTabs.add(section.dataset.section);
+  });
+  document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
+    const changed = dirtyTabs.has(tab.dataset.tab);
+    tab.classList.toggle("settings-tab-changed", changed);
+    if (changed) tab.setAttribute("aria-label", `${tab.textContent.trim()} has unsaved changes`);
+    else tab.removeAttribute("aria-label");
+  });
+}
+
+function resetSettingsBaselineFromForm() {
+  settingsIndicatorBaseline = readSettings();
+  settingsDraft = cloneSettings(settingsIndicatorBaseline);
+  syncSettingsDirtyState({ resetDiscard: true });
+}
+
+function refreshSettingsBaselineIfClean() {
+  if (settingsHaveUnsavedChanges()) {
+    syncSettingsDirtyState();
+    return;
+  }
+  resetSettingsBaselineFromForm();
+}
+
+function resetSettingsDiscardWarning() {
+  settingsDiscardWarningArmed = false;
+  $("settings-discard-warning").hidden = true;
+  $("settings-save").classList.remove("settings-save-glow");
+  $("settings-popup-shell").classList.remove("settings-shake");
+}
+
+function syncSettingsDirtyState({ resetDiscard = false } = {}) {
+  const dirty = settingsHaveUnsavedChanges();
+  if (resetDiscard || !dirty) resetSettingsDiscardWarning();
+  $("settings-close").textContent = dirty ? "Discard Changes" : "Close";
+  $("settings-close").classList.toggle("settings-discard", dirty);
+  $("settings-save").classList.toggle("settings-save-glow", dirty && settingsDiscardWarningArmed);
+  syncSettingsChangeIndicators();
+  return dirty;
+}
+
+function showSettingsDiscardWarning() {
+  settingsDiscardWarningArmed = true;
+  $("settings-discard-warning").textContent = "Careful--your changes aren't saved.";
+  $("settings-discard-warning").hidden = false;
+  $("settings-save").classList.add("settings-save-glow");
+  const shell = $("settings-popup-shell");
+  shell.classList.remove("settings-shake");
+  void shell.offsetWidth;
+  shell.classList.add("settings-shake");
+}
+
 function settingsFormSource() {
   return settingsDraft || currentSettings || {};
 }
 
-function syncSettingsDraftFromForm() {
+function syncSettingsDraftFromForm({ resetDiscard = true } = {}) {
   settingsDraft = readSettings();
+  syncSettingsDirtyState({ resetDiscard });
   return settingsDraft;
 }
 
@@ -84,6 +208,7 @@ function fillSettings(s) {
   syncUploadClipButton();
   applyTimelineEditorPreference();
   renderClips();
+  resetSettingsBaselineFromForm();
 }
 
 function readSettings() {
@@ -297,7 +422,10 @@ function gamePluginSetting(plugin) {
 }
 
 function syncGamePluginSettingsDraft() {
-  if (currentSettings || settingsDraft) settingsDraft = readSettings();
+  if (currentSettings || settingsDraft) {
+    settingsDraft = readSettings();
+    syncSettingsDirtyState({ resetDiscard: true });
+  }
 }
 
 function gamePluginSettingsDialogPlugin() {
@@ -953,6 +1081,7 @@ function renderGamePlugins() {
     empty.className = "hint";
     empty.textContent = "no supported games available";
     root.appendChild(empty);
+    syncSettingsChangeIndicators();
     return;
   }
 
@@ -963,6 +1092,7 @@ function renderGamePlugins() {
     const row = document.createElement("div");
     row.className = "game-profile supported";
     row.dataset.gamePluginId = plugin.id;
+    row.dataset.settingsKey = `games.plugins.${plugin.id}`;
 
     const enabled = document.createElement("label");
     enabled.className = "check-line";
@@ -1000,6 +1130,7 @@ function renderGamePlugins() {
     );
     root.appendChild(row);
   }
+  syncSettingsChangeIndicators();
 }
 
 function displayCaptureValue(display) {
@@ -1060,6 +1191,7 @@ function renderCaptureTargetSelect() {
     ? desired
     : captureSettingsValue({ capture_mode: "primary_monitor" });
   syncCaptureFields();
+  if (settingsIndicatorBaseline) refreshSettingsBaselineIfClean();
 }
 
 function selectedCaptureSettings() {
@@ -1192,6 +1324,7 @@ function renderAudioDeviceSelects() {
   const audio = settingsFormSource().audio || defaultAudioSettings();
   fillDeviceSelect("set-output-device", audioDevices.outputs, "Default output device", audio.output_device_id);
   fillDeviceSelect("set-mic-device", audioDevices.inputs, "Default microphone", audio.mic_device_id);
+  if (settingsIndicatorBaseline) refreshSettingsBaselineIfClean();
 }
 
 function renderVideoEncoderSelect() {
@@ -1433,6 +1566,7 @@ function applyHotkeyCaptureResult(result) {
     case "captured":
       $("set-hotkey").value = result.value;
       endHotkeyCapture("Ready to save.", "ready");
+      syncSettingsDraftFromForm();
       break;
     case "pending":
       setHotkeyStatus(result.message, "recording");
@@ -1471,6 +1605,7 @@ function setRegion(next) {
         height: Math.max(2, Math.round(next.height || 2)),
       };
   renderRegionEditor();
+  if (typeof settingsOpen !== "undefined" && settingsOpen) syncSettingsDraftFromForm();
 }
 
 async function loadDisplays() {
@@ -1724,11 +1859,13 @@ function renderCustomGames() {
     empty.className = "hint";
     empty.textContent = "no custom games saved";
     root.appendChild(empty);
+    syncSettingsChangeIndicators();
     return;
   }
   customGames.forEach((game, index) => {
     const row = document.createElement("div");
     row.className = "custom-game";
+    row.dataset.settingsKey = `games.custom_games.${game.id}`;
 
     const enabled = document.createElement("label");
     enabled.className = "check-line";
@@ -1759,11 +1896,13 @@ function renderCustomGames() {
     remove.addEventListener("click", () => {
       customGames.splice(index, 1);
       renderCustomGames();
+      syncSettingsDraftFromForm();
     });
 
     row.append(enabled, icon, meta, gameRecordingModeControl(game, index), remove);
     root.appendChild(row);
   });
+  syncSettingsChangeIndicators();
 }
 
 function renderGameWindows() {
@@ -1880,6 +2019,7 @@ function addSelectedDetectedGames() {
   hideDetectedGamesDialog();
   renderCustomGames();
   updateGameDetectionStatus();
+  syncSettingsDraftFromForm();
   $("settings-status").textContent =
     additions.length === 1
       ? "custom game added - save to apply"
@@ -1919,6 +2059,7 @@ async function addCustomGameFromWindow(win) {
   }));
   hideGameWindowPicker();
   renderCustomGames();
+  syncSettingsDraftFromForm();
   $("settings-status").textContent = "custom game added - save to apply";
 }
 
