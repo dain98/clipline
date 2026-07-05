@@ -53,6 +53,16 @@ pub use types::{
 pub const BUFFER_HEADROOM_S: f64 = 15.0;
 const DEFAULT_REPLAY_CACHE_QUOTA_GB: f64 = 2.0;
 
+/// UI color theme. Booth is the warm amber default; Classic restores the
+/// original midnight-blue palette via the [data-theme] override in styles.css.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UiTheme {
+    #[default]
+    Booth,
+    Classic,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppSettings {
     pub capture_mode: CaptureMode,
@@ -91,6 +101,8 @@ pub struct AppSettings {
     pub minimize_to_tray: bool,
     #[serde(default)]
     pub legacy_timeline_editor: bool,
+    #[serde(default)]
+    pub ui_theme: UiTheme,
     #[serde(default)]
     pub update_channel: UpdateChannel,
     #[serde(default)]
@@ -132,6 +144,7 @@ impl Default for AppSettings {
             close_to_tray: true,
             minimize_to_tray: false,
             legacy_timeline_editor: false,
+            ui_theme: UiTheme::default(),
             update_channel: UpdateChannel::Nightly,
             cloud: CloudSettings::default(),
             osu: OsuApiSettings::default(),

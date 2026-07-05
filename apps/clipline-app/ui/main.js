@@ -126,6 +126,7 @@ $("set-capture").addEventListener("change", () => {
   syncCaptureFields();
 });
 $("set-backend").addEventListener("change", syncCaptureBackendSummary);
+$("set-theme").addEventListener("change", () => applyUiTheme($("set-theme").value));
 for (const id of ["set-output-enabled", "set-audio-split-output", "set-mic-enabled"]) {
   $(id).addEventListener("change", syncAudioFields);
 }

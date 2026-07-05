@@ -28,7 +28,7 @@
       <div class="sidebar-top">
         <h1 class="brand">
           <img class="logo-mark" src="assets/clipline-icon.svg" alt="" aria-hidden="true" />
-          <span>Clipline</span>
+          <span>Clip<b>line</b></span>
         </h1>
         <div id="memory-usage" class="memory-usage">Using -- RAM</div>
         <div id="rail-hotkey" class="rail-hotkey" title="Save Replay: Alt+F10">Alt+F10</div>
@@ -93,9 +93,9 @@
           <div class="gallery-filter-row">
             <div class="gallery-filter-chips">
               <button class="g-chip on" data-filter="all" type="button">All</button>
-              <button class="g-chip" data-filter="replay" type="button"><span class="g-dot" style="background:var(--ok)"></span>Replays</button>
+              <button class="g-chip" data-filter="replay" type="button"><span class="g-dot" style="background:var(--accent)"></span>Replays</button>
               <button class="g-chip" data-filter="session" type="button"><span class="g-dot" style="background:var(--session)"></span>Sessions</button>
-              <button class="g-chip" data-filter="trim" type="button"><span class="g-dot" style="background:var(--marker)"></span>Trims</button>
+              <button class="g-chip" data-filter="trim" type="button"><span class="g-dot" style="background:var(--ok)"></span>Trims</button>
               <span class="g-sep"></span>
               <button class="g-chip" data-filter="marked" type="button">Has markers</button>
             </div>
@@ -282,6 +282,8 @@
               <div id="audio-track-list" class="audio-track-list"></div>
             </details>
 
+            <span id="deck-status" class="deck-status"></span>
+
             <div id="trim-action-panel" class="trim-action-panel">
               <button id="trim-mode-toggle" type="button" title="Trim clip" aria-label="Trim clip" aria-pressed="false">
                 <svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm0 12c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM19 3l-6 6 2 2 7-7V3h-3z"/></svg>
@@ -295,7 +297,6 @@
               <span>Clip</span>
             </button>
             <span class="trim-readout"><span id="trim-summary"></span> <span class="hint">· snaps to keyframes</span></span>
-            <span id="deck-status" class="deck-status"></span>
           </div>
         </div>
       </div>
@@ -357,6 +358,16 @@
                 <input id="set-legacy-timeline-editor" type="checkbox" />
                 <span>Use legacy timeline editor</span>
               </label>
+            </div>
+            <div class="setting-row" data-settings-key="ui_theme">
+              <div class="setting-info">
+                <strong>Theme</strong>
+                <span>Color palette for the app. Changes preview instantly; Save keeps them.</span>
+              </div>
+              <select id="set-theme">
+                <option value="booth">Booth (warm amber)</option>
+                <option value="classic">Classic (midnight blue)</option>
+              </select>
             </div>
             <div class="setting-row" data-settings-key="update_channel">
               <div class="setting-info">
