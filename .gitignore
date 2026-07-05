@@ -2,3 +2,6 @@
 **/*.rs.bk
 *.mp4
 .local-secrets/
+# WebView2 Fixed Version runtime for the standalone installer variant
+# (~650 MB, re-downloaded per docs/release-updates.md; never committed)
+apps/clipline-app/webview2-fixed/
