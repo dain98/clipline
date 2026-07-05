@@ -92,6 +92,7 @@ impl AppSettings {
                 .unwrap_or(defaults.minimize_to_tray),
             legacy_timeline_editor: bool_field(object, "legacy_timeline_editor")
                 .unwrap_or(defaults.legacy_timeline_editor),
+            ui_theme: deserialize_field(object, "ui_theme").unwrap_or(defaults.ui_theme),
             update_channel: deserialize_field(object, "update_channel")
                 .map(normalize_channel)
                 .unwrap_or(defaults.update_channel),

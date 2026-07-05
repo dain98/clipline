@@ -139,6 +139,13 @@ function syncSettingsDraftFromForm({ resetDiscard = true } = {}) {
   return settingsDraft;
 }
 
+// Booth (default) needs no attribute; "classic" flips the [data-theme]
+// override block in styles.css.
+function applyUiTheme(theme) {
+  if (theme === "classic") document.documentElement.dataset.theme = "classic";
+  else delete document.documentElement.dataset.theme;
+}
+
 function fillSettings(s) {
   const audio = { ...defaultAudioSettings(), ...(s.audio || {}) };
   const replayStorage = { ...defaultReplayStorageSettings(), ...(s.replay_storage || {}) };
@@ -202,6 +209,8 @@ function fillSettings(s) {
   $("set-close-to-tray").checked = s.close_to_tray !== false;
   $("set-minimize-to-tray").checked = !!s.minimize_to_tray;
   $("set-legacy-timeline-editor").checked = !!s.legacy_timeline_editor;
+  $("set-theme").value = s.ui_theme || "booth";
+  applyUiTheme(s.ui_theme);
   $("set-update-channel").value = s.update_channel || "nightly";
   fillCloudSettings(cloud);
   endHotkeyCapture("Click the field to record a new shortcut.");
@@ -277,6 +286,7 @@ function readSettings() {
     close_to_tray: $("set-close-to-tray").checked,
     minimize_to_tray: $("set-minimize-to-tray").checked,
     legacy_timeline_editor: $("set-legacy-timeline-editor").checked,
+    ui_theme: $("set-theme").value,
     update_channel: $("set-update-channel").value,
     cloud: readCloudSettings(),
     osu: readOsuApiSettings(),

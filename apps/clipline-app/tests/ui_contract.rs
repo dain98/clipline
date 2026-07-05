@@ -962,7 +962,7 @@ fn review_player_owns_all_controls() {
             && !styles_css().contains(".game-event-rail ol button.marker-kill .game-event-kind-icon img")
             && !styles_css().contains(".game-event-rail ol button.marker-death .game-event-kind-icon img")
             && styles_css().contains("border: 0;\n  border-radius: 0;\n  background: transparent;")
-            && styles_css().contains("filter:\n    drop-shadow(1px 0 0 rgba(2, 6, 23, 0.9))")
+            && styles_css().contains("filter:\n    drop-shadow(1px 0 0 rgba(var(--scrim-a-rgb), 0.9))")
             && styles_css().contains(".game-event-name")
             && styles_css().contains(".game-event-rail:hover .game-event-rail-tab")
             && styles_css().contains("--game-event-rail-pad: 10px;")
@@ -1884,6 +1884,7 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     let metadata_fields_rule = css_rule_body(&css, ".game-metadata-fields");
     let timeline_footer_row_rule = css_rule_body(&css, ".timeline-footer-row");
     let trim_action_panel_rule = css_rule_body(&css, ".trim-action-panel");
+    let deck_status_rule = css_rule_body(&css, ".deck-status");
     let timeline_main_rule = css_rule_body(&css, ".timeline-main");
     let timeline_rule = css_rule_body(&css, "#timeline");
     let timeline_progress_rule = css_rule_body(&css, "#timeline::before");
@@ -1900,7 +1901,7 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
             && css_decl_value(timeline_footer_row_rule, "border-top").is_some()
             && css_decl_value(trim_action_panel_rule, "display") == Some("flex")
             && css_decl_value(trim_action_panel_rule, "justify-content") == Some("flex-end")
-            && css_decl_value(trim_action_panel_rule, "margin-left") == Some("auto")
+            && css_decl_value(deck_status_rule, "margin-left") == Some("auto")
             && css_decl_value(trim_action_panel_rule, "border-top").is_none()
             && css_decl_value(timeline_main_rule, "position").is_some()
             && css_decl_value(timeline_main_rule, "border") == Some("0")
@@ -1984,7 +1985,7 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     );
     assert!(
         css.contains(".marker .glyph.img")
-            && css.contains("mask: var(--marker-img) center / contain no-repeat;\n  filter:\n    drop-shadow(1px 0 0 rgba(2, 6, 23, 0.9))"),
+            && css.contains("mask: var(--marker-img) center / contain no-repeat;\n  filter:\n    drop-shadow(1px 0 0 rgba(var(--scrim-a-rgb), 0.9))"),
         "timeline marker image glyphs must use the same black alpha-outline as event rail icons"
     );
 }
