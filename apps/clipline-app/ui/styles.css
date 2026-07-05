@@ -1103,13 +1103,22 @@ button.primary.settings-save-glow {
   min-width: 0;
 }
 
-#set-hotkey {
+.hotkey-recorder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+#set-hotkey,
+#set-hotkey-2 {
   cursor: pointer;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
-#set-hotkey.recording {
+#set-hotkey.recording,
+#set-hotkey-2.recording {
   border-color: var(--accent);
   background: var(--hotkey-rec-bg);
   box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.18);

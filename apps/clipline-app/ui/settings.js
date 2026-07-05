@@ -204,7 +204,8 @@ function fillSettings(s) {
   $("set-replay-disk-quota").value = replayStorage.disk_quota_gb ?? 2;
   $("set-replay-disk-ack").checked = !!replayStorage.disk_acknowledged;
   $("set-hotkey").value = s.hotkey;
-  updateHotkeyLabels(s.hotkey);
+  $("set-hotkey-2").value = s.hotkey_secondary || "";
+  updateHotkeyLabels(s.hotkey, s.hotkey_secondary || "");
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
   $("set-minimize-to-tray").checked = !!s.minimize_to_tray;
@@ -213,7 +214,7 @@ function fillSettings(s) {
   applyUiTheme(s.ui_theme);
   $("set-update-channel").value = s.update_channel || "nightly";
   fillCloudSettings(cloud);
-  endHotkeyCapture("Click the field to record a new shortcut.");
+  endAllHotkeyCaptures();
   syncCaptureFields();
   renderAudioDeviceSelects();
   renderVideoEncoderSelect();
@@ -281,7 +282,7 @@ function readSettings() {
       disk_quota_gb: Number($("set-replay-disk-quota").value),
       disk_acknowledged: $("set-replay-disk-ack").checked,
     },
-    hotkey: $("set-hotkey").value,
+    ...readHotkeySettings(),
     open_on_startup: $("set-open-on-startup").checked,
     close_to_tray: $("set-close-to-tray").checked,
     minimize_to_tray: $("set-minimize-to-tray").checked,
@@ -290,6 +291,16 @@ function readSettings() {
     update_channel: $("set-update-channel").value,
     cloud: readCloudSettings(),
     osu: readOsuApiSettings(),
+  };
+}
+
+// Either field may be cleared with Esc, so the first non-empty keybind is
+// promoted to the primary slot; the backend rejects an empty primary.
+function readHotkeySettings() {
+  const keybinds = HOTKEY_FIELD_IDS.map((fieldId) => $(fieldId).value.trim()).filter(Boolean);
+  return {
+    hotkey: keybinds[0] || "",
+    hotkey_secondary: keybinds[1] || null,
   };
 }
 
@@ -1583,11 +1594,17 @@ function saveHotkeyLabel() {
   return (currentSettings && currentSettings.hotkey) || $("set-hotkey").value || "Alt+F10";
 }
 
-function updateHotkeyLabels(hotkey = saveHotkeyLabel()) {
+function saveSecondaryHotkeyLabel() {
+  return (currentSettings && currentSettings.hotkey_secondary) || "";
+}
+
+function updateHotkeyLabels(hotkey = saveHotkeyLabel(), secondary = saveSecondaryHotkeyLabel()) {
   const label = String(hotkey || "Alt+F10");
+  // The rail stays compact with the primary keybind; tooltips list both.
+  const full = secondary ? `${label} / ${secondary}` : label;
   $("rail-hotkey").textContent = label;
-  $("rail-hotkey").title = `Save Replay: ${label}`;
-  $("rail-save").title = `Save Replay (${label})`;
+  $("rail-hotkey").title = `Save Replay: ${full}`;
+  $("rail-save").title = `Save Replay (${full})`;
 }
 
 function fallbackCaptureSourceLabel(settings) {
@@ -1612,57 +1629,77 @@ async function toggleRecording() {
   }
 }
 
+// The two Save Replay keybind fields sit side by side and share one status
+// line. Esc while recording clears a field; at least one keybind must remain.
+const HOTKEY_FIELD_IDS = ["set-hotkey", "set-hotkey-2"];
+const HOTKEY_IDLE_MESSAGE = "Click a field to record a shortcut. Esc clears it.";
+
+function otherHotkeyFieldId(fieldId) {
+  return fieldId === "set-hotkey" ? "set-hotkey-2" : "set-hotkey";
+}
+
 function setHotkeyStatus(message, state = "") {
   const status = $("hotkey-status");
   status.textContent = message;
   status.dataset.state = state;
 }
 
-function beginHotkeyCapture() {
-  hotkeyCaptureActive = true;
-  $("set-hotkey").classList.add("recording");
-  setHotkeyStatus("Press an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key.", "recording");
+function beginHotkeyCapture(fieldId) {
+  if (activeHotkeyCaptureId && activeHotkeyCaptureId !== fieldId) {
+    $(activeHotkeyCaptureId).classList.remove("recording");
+  }
+  activeHotkeyCaptureId = fieldId;
+  $(fieldId).classList.add("recording");
+  setHotkeyStatus("Press an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key - or Esc to clear.", "recording");
 }
 
-function endHotkeyCapture(message = "Click the field to record a new shortcut.", state = "") {
-  hotkeyCaptureActive = false;
-  $("set-hotkey").classList.remove("recording");
+function endHotkeyCapture(fieldId, message = HOTKEY_IDLE_MESSAGE, state = "") {
+  if (activeHotkeyCaptureId === fieldId) activeHotkeyCaptureId = null;
+  $(fieldId).classList.remove("recording");
   setHotkeyStatus(message, state);
 }
 
-function recordHotkey(ev) {
-  if (!hotkeyCaptureActive) beginHotkeyCapture();
+function endAllHotkeyCaptures() {
+  HOTKEY_FIELD_IDS.forEach((fieldId) => endHotkeyCapture(fieldId));
+}
+
+function recordHotkey(fieldId, ev) {
+  if (activeHotkeyCaptureId !== fieldId) beginHotkeyCapture(fieldId);
   ev.preventDefault();
   ev.stopPropagation();
 
-  applyHotkeyCaptureResult(hotkeyFromKeyEvent(ev));
+  applyHotkeyCaptureResult(fieldId, hotkeyFromKeyEvent(ev));
 }
 
-function recordMouseHotkey(ev) {
-  if (!hotkeyCaptureActive) {
-    if (ev.button === 0) return;
-    beginHotkeyCapture();
-  }
+function recordMouseHotkey(fieldId, ev) {
   if (ev.button === 0) return;
+  if (activeHotkeyCaptureId !== fieldId) beginHotkeyCapture(fieldId);
   ev.preventDefault();
   ev.stopPropagation();
 
-  applyHotkeyCaptureResult(hotkeyFromMouseEvent(ev));
+  applyHotkeyCaptureResult(fieldId, hotkeyFromMouseEvent(ev));
 }
 
-function applyHotkeyCaptureResult(result) {
+function applyHotkeyCaptureResult(fieldId, result) {
   switch (result.kind) {
     case "captured":
-      $("set-hotkey").value = result.value;
-      endHotkeyCapture("Ready to save.", "ready");
+      if ($(otherHotkeyFieldId(fieldId)).value === result.value) {
+        setHotkeyStatus("Already used by the other Save Replay keybind.", "error");
+        break;
+      }
+      $(fieldId).value = result.value;
+      endHotkeyCapture(fieldId, "Ready to save.", "ready");
       syncSettingsDraftFromForm();
       break;
     case "pending":
       setHotkeyStatus(result.message, "recording");
       break;
     case "cancel":
-      endHotkeyCapture("Shortcut unchanged.", "");
-      $("set-hotkey").blur();
+      // Esc clears the keybind; the other field can still hold one.
+      $(fieldId).value = "";
+      endHotkeyCapture(fieldId, "Keybind cleared. Ready to save.", "ready");
+      syncSettingsDraftFromForm();
+      $(fieldId).blur();
       break;
     case "invalid":
       setHotkeyStatus(result.message, "error");

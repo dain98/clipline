@@ -93,6 +93,9 @@ pub struct AppSettings {
     #[serde(default)]
     pub replay_storage: ReplayStorageSettings,
     pub hotkey: String,
+    /// Optional second keybind for Save Replay; `None` disables it.
+    #[serde(default)]
+    pub hotkey_secondary: Option<String>,
     #[serde(default)]
     pub open_on_startup: bool,
     #[serde(default = "default_enabled")]
@@ -140,6 +143,7 @@ impl Default for AppSettings {
             media_dir: default_media_dir(),
             replay_storage: ReplayStorageSettings::default(),
             hotkey: "Alt+F10".into(),
+            hotkey_secondary: None,
             open_on_startup: false,
             close_to_tray: true,
             minimize_to_tray: false,
@@ -155,6 +159,18 @@ impl Default for AppSettings {
 impl AppSettings {
     pub fn media_dir_path(&self) -> Result<std::path::PathBuf, String> {
         normalize_media_dir(&self.media_dir)
+    }
+
+    /// All configured Save Replay keybinds: the primary plus the optional
+    /// secondary. Blank secondaries are treated as disabled.
+    pub fn hotkeys(&self) -> Vec<&str> {
+        let mut hotkeys = vec![self.hotkey.as_str()];
+        if let Some(secondary) = self.hotkey_secondary.as_deref() {
+            if !secondary.trim().is_empty() {
+                hotkeys.push(secondary);
+            }
+        }
+        hotkeys
     }
 
     pub fn to_service_options(&self, lol_url: Option<String>) -> Result<ServiceOptions, String> {

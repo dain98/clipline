@@ -104,7 +104,7 @@ fn validate_hotkey_combination(
                 "Delete" if ctrl && alt => {
                     return Err("Ctrl+Alt+Delete is reserved by Windows".into());
                 }
-                "Esc" => return Err("Escape is reserved for cancelling hotkey capture".into()),
+                "Esc" => return Err("Escape is reserved for clearing hotkey capture".into()),
                 _ => {}
             }
         }

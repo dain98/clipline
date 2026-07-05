@@ -85,6 +85,10 @@ impl AppSettings {
             hotkey: string_field(object, "hotkey")
                 .and_then(|raw| normalize_hotkey(&raw).ok())
                 .unwrap_or_else(|| defaults.hotkey.clone()),
+            // An unparseable secondary is dropped (it is optional) instead of
+            // failing or resetting the whole file.
+            hotkey_secondary: string_field(object, "hotkey_secondary")
+                .and_then(|raw| normalize_hotkey(&raw).ok()),
             open_on_startup: bool_field(object, "open_on_startup")
                 .unwrap_or(defaults.open_on_startup),
             close_to_tray: bool_field(object, "close_to_tray").unwrap_or(defaults.close_to_tray),
@@ -103,6 +107,9 @@ impl AppSettings {
         settings.games.normalize();
         settings.cloud.normalize();
         settings.osu.normalize();
+        if settings.hotkey_secondary.as_deref() == Some(settings.hotkey.as_str()) {
+            settings.hotkey_secondary = None;
+        }
         settings.buffer_seconds = super::replay_buffer_seconds(&settings);
         settings.bitrate_mbps = settings.effective_bitrate_mbps();
         if matches!(settings.capture_mode, CaptureMode::WindowTitle)
@@ -116,6 +123,10 @@ impl AppSettings {
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
         let mut settings = self.clone();
         settings.hotkey = normalize_hotkey(&settings.hotkey)?;
+        settings.hotkey_secondary = match settings.hotkey_secondary.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
+            _ => None,
+        };
         settings.games.normalize();
         settings.cloud.normalize();
         settings.osu.normalize();

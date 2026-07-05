@@ -1172,7 +1172,7 @@ fn settings_marks_changed_rows_and_tabs() {
         "data-settings-key=\"games.plugins\"",
         "data-settings-key=\"games.custom_games\"",
         "data-settings-key=\"cloud.default_visibility\"",
-        "data-settings-key=\"hotkey\"",
+        "data-settings-key=\"hotkey hotkey_secondary\"",
     ] {
         assert!(
             html.contains(required),
