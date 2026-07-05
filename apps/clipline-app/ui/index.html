@@ -769,14 +769,17 @@
           </div>
 
           <div class="settings-section" data-section="hotkeys" hidden>
-            <div class="setting-row" data-settings-key="hotkey">
+            <div class="setting-row" data-settings-key="hotkey hotkey_secondary">
               <div class="setting-info">
                 <strong>Save Replay</strong>
-                <span>Global shortcut - use an F-key, a mouse button, or Ctrl/Alt/Shift plus a keyboard key.</span>
+                <span>Global shortcuts - use an F-key, a mouse button, or Ctrl/Alt/Shift plus a keyboard key. Either keybind saves.</span>
               </div>
               <div class="hotkey-recorder">
-                <input id="set-hotkey" spellcheck="false" readonly inputmode="none" aria-describedby="hotkey-status" />
-                <span id="hotkey-status" class="hint">Click the field, then press F1-F11/F13-F24, middle mouse, Mouse4, Mouse5, or a modified keyboard key.</span>
+                <div class="hotkey-recorder-row">
+                  <input id="set-hotkey" spellcheck="false" readonly inputmode="none" placeholder="Not set" aria-describedby="hotkey-status" />
+                  <input id="set-hotkey-2" spellcheck="false" readonly inputmode="none" placeholder="Not set" aria-describedby="hotkey-status" />
+                </div>
+                <span id="hotkey-status" class="hint">Click a field, then press F1-F11/F13-F24, middle mouse, Mouse4, Mouse5, or a modified keyboard key. Esc clears the keybind.</span>
               </div>
             </div>
           </div>

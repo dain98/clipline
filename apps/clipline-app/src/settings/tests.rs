@@ -472,6 +472,90 @@ fn load_migrates_invalid_legacy_hotkey_without_resetting_settings() {
 }
 
 #[test]
+fn load_drops_invalid_or_duplicate_secondary_hotkey() {
+    let dir = TestDir::new("clipline-settings", "secondary-hotkey-repair");
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "buffer_seconds": 120.0,
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 24.0,
+                "fps": 90,
+                "disk_quota_gb": 6.0,
+                "hotkey": "Alt+F9",
+                "hotkey_secondary": "F12"
+            }"#,
+    )
+    .unwrap();
+    let settings = AppSettings::load_from(&path).unwrap();
+    assert_eq!(settings.hotkey, "Alt+F9");
+    assert_eq!(settings.hotkey_secondary, None);
+
+    std::fs::write(
+        &path,
+        r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "buffer_seconds": 120.0,
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 24.0,
+                "fps": 90,
+                "disk_quota_gb": 6.0,
+                "hotkey": "Alt+F9",
+                "hotkey_secondary": "alt+f9"
+            }"#,
+    )
+    .unwrap();
+    let settings = AppSettings::load_from(&path).unwrap();
+    assert_eq!(settings.hotkey, "Alt+F9");
+    assert_eq!(settings.hotkey_secondary, None);
+}
+
+#[test]
+fn secondary_hotkey_round_trips_and_lists_both_keybinds() {
+    let dir = TestDir::new("clipline-settings", "secondary-hotkey-round-trip");
+    let path = dir.path().join("settings.json");
+    let settings = AppSettings {
+        hotkey: "Alt+F10".into(),
+        hotkey_secondary: Some("Ctrl+Mouse5".into()),
+        ..AppSettings::default()
+    };
+
+    assert_eq!(settings.hotkeys(), vec!["Alt+F10", "Ctrl+Mouse5"]);
+
+    settings.save_to(&path).unwrap();
+    let loaded = AppSettings::load_from(&path).unwrap();
+    assert_eq!(loaded.hotkey_secondary.as_deref(), Some("Ctrl+Mouse5"));
+}
+
+#[test]
+fn validation_rejects_secondary_hotkey_matching_primary() {
+    let settings = AppSettings {
+        hotkey: "Alt+F10".into(),
+        hotkey_secondary: Some("alt+f10".into()),
+        ..AppSettings::default()
+    };
+    assert!(settings.validate().is_err());
+
+    let distinct = AppSettings {
+        hotkey: "Alt+F10".into(),
+        hotkey_secondary: Some("Ctrl+F9".into()),
+        ..AppSettings::default()
+    };
+    assert!(distinct.validate().is_ok());
+
+    let blank = AppSettings {
+        hotkey_secondary: Some("  ".into()),
+        ..AppSettings::default()
+    };
+    assert!(blank.validate().is_ok());
+    assert_eq!(blank.hotkeys(), vec!["Alt+F10"]);
+}
+
+#[test]
 fn load_tolerates_unknown_video_encoder_without_resetting_settings() {
     let dir = TestDir::new("clipline-settings", "unknown-encoder");
     let path = dir.path().join("settings.json");

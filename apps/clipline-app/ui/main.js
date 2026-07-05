@@ -280,6 +280,11 @@ window.addEventListener("resize", () => {
 $("settings-save").addEventListener("click", async () => {
   $("settings-status").textContent = "";
   $("error").textContent = "";
+  if (!syncSettingsDraftFromForm().hotkey) {
+    setHotkeyStatus("Save Replay needs at least one keybind.", "error");
+    $("settings-status").textContent = "Save Replay needs at least one keybind.";
+    return;
+  }
   try {
     const saved = await invoke("save_settings", { settings: syncSettingsDraftFromForm() });
     fillSettings(saved);
@@ -428,16 +433,19 @@ $("settings-page").addEventListener("change", () => syncSettingsDraftFromForm())
 $("settings-page").addEventListener("pointerdown", (ev) => {
   if (ev.target === $("settings-page")) requestSettingsClose({ allowDiscard: false });
 });
-$("set-hotkey").addEventListener("focus", beginHotkeyCapture);
-$("set-hotkey").addEventListener("click", beginHotkeyCapture);
-$("set-hotkey").addEventListener("keydown", recordHotkey);
-$("set-hotkey").addEventListener("mousedown", recordMouseHotkey);
-$("set-hotkey").addEventListener("auxclick", (ev) => ev.preventDefault());
-$("set-hotkey").addEventListener("contextmenu", (ev) => ev.preventDefault());
-$("set-hotkey").addEventListener("paste", (ev) => ev.preventDefault());
-$("set-hotkey").addEventListener("blur", () => {
-  if (hotkeyCaptureActive) endHotkeyCapture("Shortcut unchanged.");
-});
+for (const hotkeyFieldId of HOTKEY_FIELD_IDS) {
+  const field = $(hotkeyFieldId);
+  field.addEventListener("focus", () => beginHotkeyCapture(hotkeyFieldId));
+  field.addEventListener("click", () => beginHotkeyCapture(hotkeyFieldId));
+  field.addEventListener("keydown", (ev) => recordHotkey(hotkeyFieldId, ev));
+  field.addEventListener("mousedown", (ev) => recordMouseHotkey(hotkeyFieldId, ev));
+  field.addEventListener("auxclick", (ev) => ev.preventDefault());
+  field.addEventListener("contextmenu", (ev) => ev.preventDefault());
+  field.addEventListener("paste", (ev) => ev.preventDefault());
+  field.addEventListener("blur", () => {
+    if (activeHotkeyCaptureId === hotkeyFieldId) endHotkeyCapture(hotkeyFieldId, "Shortcut unchanged.");
+  });
+}
 
 document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
   tab.addEventListener("click", () => {

@@ -112,7 +112,15 @@ impl AppSettings {
         super::quota_bytes_from_gb(self.disk_quota_gb)?;
         self.media_dir_path()?;
         self.validate_replay_storage()?;
-        super::hotkey::normalize_hotkey(&self.hotkey)?;
+        let primary = super::hotkey::normalize_hotkey(&self.hotkey)?;
+        if let Some(secondary) = self.hotkey_secondary.as_deref() {
+            if !secondary.trim().is_empty() {
+                let secondary = super::hotkey::normalize_hotkey(secondary)?;
+                if secondary == primary {
+                    return Err("secondary hotkey matches the primary hotkey".into());
+                }
+            }
+        }
         self.cloud.validate()?;
         self.osu.validate()?;
         Ok(())

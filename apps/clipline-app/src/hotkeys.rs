@@ -39,7 +39,7 @@ struct HookHotkey {
 }
 
 struct HookState {
-    hotkey: Mutex<HookHotkey>,
+    hotkeys: Mutex<Vec<HookHotkey>>,
     down_keys: Mutex<BTreeSet<u32>>,
     trigger_tx: Sender<()>,
     mouse_hook: Mutex<Option<MouseHookThread>>,
@@ -51,18 +51,18 @@ struct MouseHookThread {
 }
 
 impl HookState {
-    fn set_hotkey(&self, raw: &str) -> Result<(), String> {
-        let parsed = parse_hook_hotkey(raw)?;
-        if parsed.requires_mouse_hook() {
+    fn set_hotkeys(&self, raws: &[&str]) -> Result<(), String> {
+        let parsed = parse_hook_hotkeys(raws)?;
+        let requires_mouse_hook = parsed.iter().any(HookHotkey::requires_mouse_hook);
+        if requires_mouse_hook {
             self.ensure_mouse_hook()?;
         }
-        let mut hotkey = self
-            .hotkey
+        let mut hotkeys = self
+            .hotkeys
             .lock()
             .map_err(|_| "save hotkey lock poisoned".to_string())?;
-        let requires_mouse_hook = parsed.requires_mouse_hook();
-        *hotkey = parsed;
-        drop(hotkey);
+        *hotkeys = parsed;
+        drop(hotkeys);
         if !requires_mouse_hook {
             self.stop_mouse_hook();
         }
@@ -79,11 +79,14 @@ impl HookState {
         }
         drop(down_keys);
 
-        let hotkey = match self.hotkey.lock() {
-            Ok(hotkey) => hotkey,
+        let hotkeys = match self.hotkeys.lock() {
+            Ok(hotkeys) => hotkeys,
             Err(_) => return false,
         };
-        if hotkey.matches(vk_code, ctrl, alt, shift) {
+        if hotkeys
+            .iter()
+            .any(|hotkey| hotkey.matches(vk_code, ctrl, alt, shift))
+        {
             let _ = self.trigger_tx.send(());
             return true;
         }
@@ -149,15 +152,15 @@ impl MouseHookThread {
     }
 }
 
-pub fn install_save_hook<F>(hotkey: &str, on_trigger: F) -> Result<(), String>
+pub fn install_save_hook<F>(hotkeys: &[&str], on_trigger: F) -> Result<(), String>
 where
     F: Fn() + Send + Sync + 'static,
 {
     if let Some(state) = SAVE_HOOK.get() {
-        return state.set_hotkey(hotkey);
+        return state.set_hotkeys(hotkeys);
     }
 
-    let parsed_hotkey = parse_hook_hotkey(hotkey)?;
+    let parsed_hotkeys = parse_hook_hotkeys(hotkeys)?;
     let (trigger_tx, trigger_rx) = mpsc::channel();
     thread::Builder::new()
         .name("clipline-save-hotkey-dispatch".into())
@@ -168,13 +171,14 @@ where
         })
         .map_err(|e| format!("spawn save hotkey dispatcher: {e}"))?;
 
+    let requires_mouse_hook = parsed_hotkeys.iter().any(HookHotkey::requires_mouse_hook);
     let state = Arc::new(HookState {
-        hotkey: Mutex::new(parsed_hotkey.clone()),
+        hotkeys: Mutex::new(parsed_hotkeys),
         down_keys: Mutex::new(BTreeSet::new()),
         trigger_tx,
         mouse_hook: Mutex::new(None),
     });
-    if parsed_hotkey.requires_mouse_hook() {
+    if requires_mouse_hook {
         state.ensure_mouse_hook()?;
     }
     SAVE_HOOK
@@ -188,11 +192,15 @@ where
     Ok(())
 }
 
-pub fn set_save_hotkey(hotkey: &str) -> Result<(), String> {
+pub fn set_save_hotkeys(hotkeys: &[&str]) -> Result<(), String> {
     if let Some(state) = SAVE_HOOK.get() {
-        state.set_hotkey(hotkey)?;
+        state.set_hotkeys(hotkeys)?;
     }
     Ok(())
+}
+
+fn parse_hook_hotkeys(raws: &[&str]) -> Result<Vec<HookHotkey>, String> {
+    raws.iter().map(|raw| parse_hook_hotkey(raw)).collect()
 }
 
 fn parse_hook_hotkey(raw: &str) -> Result<HookHotkey, String> {
@@ -478,6 +486,32 @@ mod tests {
     }
 
     #[test]
+    fn either_configured_hotkey_triggers_a_save() {
+        let (trigger_tx, trigger_rx) = mpsc::channel();
+        let state = HookState {
+            hotkeys: Mutex::new(parse_hook_hotkeys(&["Alt+F10", "Ctrl+Mouse5"]).unwrap()),
+            down_keys: Mutex::new(BTreeSet::new()),
+            trigger_tx,
+            mouse_hook: Mutex::new(None),
+        };
+
+        assert!(state.on_key_down(VK_F1_CODE + 9, false, true, false));
+        assert!(trigger_rx.try_recv().is_ok());
+
+        assert!(state.on_key_down(VK_XBUTTON2_CODE, true, false, false));
+        assert!(trigger_rx.try_recv().is_ok());
+
+        assert!(!state.on_key_down(VK_F1_CODE + 8, false, true, false));
+        assert!(trigger_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn parse_hook_hotkeys_fails_atomically_on_any_invalid_entry() {
+        assert!(parse_hook_hotkeys(&["Alt+F10", "F12"]).is_err());
+        assert_eq!(parse_hook_hotkeys(&["Alt+F10"]).unwrap().len(), 1);
+    }
+
+    #[test]
     fn hook_requirement_tracks_mouse_button_hotkeys() {
         assert!(!parse_hook_hotkey("Alt+F10").unwrap().requires_mouse_hook());
         assert!(parse_hook_hotkey("Ctrl+Mouse5")
@@ -499,12 +533,12 @@ mod tests {
     fn hotkey_lock_contention_waits_instead_of_dropping_trigger() {
         let (trigger_tx, trigger_rx) = mpsc::channel();
         let state = Arc::new(HookState {
-            hotkey: Mutex::new(parse_hook_hotkey("Ctrl+Mouse5").unwrap()),
+            hotkeys: Mutex::new(parse_hook_hotkeys(&["Ctrl+Mouse5"]).unwrap()),
             down_keys: Mutex::new(BTreeSet::new()),
             trigger_tx,
             mouse_hook: Mutex::new(None),
         });
-        let guard = state.hotkey.lock().unwrap();
+        let guard = state.hotkeys.lock().unwrap();
         let worker_state = Arc::clone(&state);
         let worker =
             thread::spawn(move || worker_state.on_key_down(VK_XBUTTON2_CODE, true, false, false));
