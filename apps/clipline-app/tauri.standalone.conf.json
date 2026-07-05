@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": [
+      "webview2-fixed/Microsoft.WebView2.FixedVersionRuntime.150.0.4078.48.x64/**/*"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "fixedRuntime",
+        "path": "./webview2-fixed/Microsoft.WebView2.FixedVersionRuntime.150.0.4078.48.x64",
+        "silent": null
+      }
+    }
+  }
+}

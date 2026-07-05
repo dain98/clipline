@@ -5,6 +5,15 @@ pub const NIGHTLY_UPDATE_ENDPOINT: &str =
 pub const STABLE_UPDATE_ENDPOINT: &str =
     "https://github.com/dain98/clipline/releases/latest/download/latest.json";
 
+// Standalone builds bundle a fixed WebView2 runtime instead of installing the
+// Evergreen runtime system-wide. They must update into the standalone
+// installer: the regular one would run the WebView2 bootstrapper on a machine
+// whose owner chose not to have WebView2 installed.
+pub const NIGHTLY_STANDALONE_UPDATE_ENDPOINT: &str =
+    "https://github.com/dain98/clipline/releases/download/nightly/latest-standalone.json";
+pub const STABLE_STANDALONE_UPDATE_ENDPOINT: &str =
+    "https://github.com/dain98/clipline/releases/latest/download/latest-standalone.json";
+
 // Flip this once Clipline has stable, non-prerelease GitHub releases.
 pub const STABLE_CHANNEL_ENABLED: bool = false;
 
@@ -24,10 +33,15 @@ impl UpdateChannel {
         }
     }
 
-    pub fn endpoint(self) -> &'static str {
-        match self {
-            Self::Stable => STABLE_UPDATE_ENDPOINT,
-            Self::Nightly => NIGHTLY_UPDATE_ENDPOINT,
+    /// `standalone` is whether this build bundles a fixed WebView2 runtime
+    /// (derived from the Tauri config baked into the binary, so an installed
+    /// app keeps its variant across updates).
+    pub fn endpoint(self, standalone: bool) -> &'static str {
+        match (self, standalone) {
+            (Self::Stable, false) => STABLE_UPDATE_ENDPOINT,
+            (Self::Stable, true) => STABLE_STANDALONE_UPDATE_ENDPOINT,
+            (Self::Nightly, false) => NIGHTLY_UPDATE_ENDPOINT,
+            (Self::Nightly, true) => NIGHTLY_STANDALONE_UPDATE_ENDPOINT,
         }
     }
 
@@ -63,8 +77,20 @@ mod tests {
     #[test]
     fn nightly_channel_points_at_fixed_github_prerelease_endpoint() {
         assert_eq!(
-            UpdateChannel::Nightly.endpoint(),
+            UpdateChannel::Nightly.endpoint(false),
             "https://github.com/dain98/clipline/releases/download/nightly/latest.json"
+        );
+    }
+
+    #[test]
+    fn standalone_installs_update_from_the_standalone_manifest() {
+        assert_eq!(
+            UpdateChannel::Nightly.endpoint(true),
+            "https://github.com/dain98/clipline/releases/download/nightly/latest-standalone.json"
+        );
+        assert_eq!(
+            UpdateChannel::Stable.endpoint(true),
+            "https://github.com/dain98/clipline/releases/latest/download/latest-standalone.json"
         );
     }
 }

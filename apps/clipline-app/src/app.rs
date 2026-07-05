@@ -1049,6 +1049,17 @@ fn set_recording<R: Runtime>(
     state.set_recording(app, recording)
 }
 
+/// Whether this build bundles a fixed WebView2 runtime (the "standalone"
+/// installer variant). The install mode comes from the Tauri config baked in
+/// at compile time, so the answer is a property of the installed binary, not
+/// of the machine it runs on.
+fn is_standalone_install<R: Runtime>(app: &AppHandle<R>) -> bool {
+    matches!(
+        app.config().bundle.windows.webview_install_mode,
+        tauri::utils::config::WebviewInstallMode::FixedRuntime { .. }
+    )
+}
+
 async fn check_update_for_channel<R: Runtime>(
     app: &AppHandle<R>,
     channel: UpdateChannel,
@@ -1058,7 +1069,7 @@ async fn check_update_for_channel<R: Runtime>(
     }
 
     let endpoint = channel
-        .endpoint()
+        .endpoint(is_standalone_install(app))
         .parse()
         .map_err(|e| format!("parse update endpoint: {e}"))?;
     let updater = app
@@ -1106,7 +1117,7 @@ async fn check_for_updates<R: Runtime>(
             .as_ref()
             .and_then(|update| update.date.map(|date| date.to_string())),
         notes: update.as_ref().and_then(|update| update.body.clone()),
-        endpoint: channel.endpoint(),
+        endpoint: channel.endpoint(is_standalone_install(&app)),
         status,
     })
 }
