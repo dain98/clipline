@@ -732,6 +732,7 @@ function cloudClipCard(entry) {
   kindChip.innerHTML =
     '<svg viewBox="0 0 24 24"><path d="M7.2 18h10.2a4.1 4.1 0 0 0 .4-8.2A6.2 6.2 0 0 0 5.9 8.1 5 5 0 0 0 7.2 18z"/></svg>';
   const kindLabel = document.createElement("span");
+  kindLabel.className = "card-kind-label";
   kindLabel.textContent = "Cloud";
   kindChip.appendChild(kindLabel);
   thumb.appendChild(kindChip);
@@ -920,6 +921,7 @@ function clipCard(c) {
   kindChip.title = CLIP_KIND_LABELS[kind];
   kindChip.innerHTML = CLIP_KIND_ICONS[kind]; // static markup, safe
   const kindLabel = document.createElement("span");
+  kindLabel.className = "card-kind-label";
   kindLabel.textContent = CARD_KIND_LABELS[kind];
   kindChip.appendChild(kindLabel);
 

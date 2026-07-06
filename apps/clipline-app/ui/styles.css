@@ -2236,6 +2236,7 @@ button.primary.settings-save-glow {
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em;
 }
 .card-kind svg { display: block; width: 12px; height: 12px; fill: currentColor; }
+.card-kind-label { display: block; line-height: 1; }
 .card-kind.replay { background: var(--accent); color: #14100c; }
 .card-kind.session { background: var(--session); color: #14100c; }
 .card-kind.trim { background: var(--ok); color: #14100c; }
@@ -2456,6 +2457,10 @@ button.primary.settings-save-glow {
   display: grid;
   gap: 5px;
   padding: 18px 18px 12px;
+}
+.update-dialog-drag {
+  cursor: move;
+  user-select: none;
 }
 .confirm-body strong { font-size: 15px; }
 #confirm-detail {

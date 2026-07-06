@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::probe::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
@@ -102,34 +103,61 @@ fn group_capabilities(mut pairs: Vec<(EncoderBackend, Codec)>) -> Vec<EncoderCap
     caps
 }
 
-/// Candidate locations for `ffmpeg`, most-specific first: an explicit
-/// `CLIPLINE_FFMPEG` override, next to our own exe, the per-user
-/// `%APPDATA%\Clipline\ffmpeg` bundle, then a bare name for a PATH lookup.
-pub fn search_paths() -> Vec<PathBuf> {
-    let exe_name = if cfg!(windows) {
+static BUNDLED_FFMPEG: OnceLock<PathBuf> = OnceLock::new();
+
+/// Register the packaged ffmpeg resource path discovered by the desktop shell.
+/// The explicit environment override remains first so developers and users can
+/// intentionally replace the subprocess binary.
+pub fn set_bundled_ffmpeg(path: PathBuf) {
+    let _ = BUNDLED_FFMPEG.set(path);
+}
+
+fn ffmpeg_exe_name() -> &'static str {
+    if cfg!(windows) {
         "ffmpeg.exe"
     } else {
         "ffmpeg"
-    };
-    let mut paths = Vec::new();
-    if let Some(explicit) = std::env::var_os("CLIPLINE_FFMPEG") {
-        paths.push(PathBuf::from(explicit));
     }
-    if let Ok(exe) = std::env::current_exe() {
+}
+
+fn search_paths_from(
+    exe_name: &str,
+    explicit: Option<PathBuf>,
+    current_exe: Option<PathBuf>,
+    appdata: Option<PathBuf>,
+    bundled: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(explicit) = explicit {
+        paths.push(explicit);
+    }
+    if let Some(bundled) = bundled {
+        paths.push(bundled);
+    }
+    if let Some(exe) = current_exe {
         if let Some(dir) = exe.parent() {
             paths.push(dir.join(exe_name));
         }
     }
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        paths.push(
-            Path::new(&appdata)
-                .join("Clipline")
-                .join("ffmpeg")
-                .join(exe_name),
-        );
+    if let Some(appdata) = appdata {
+        paths.push(appdata.join("Clipline").join("ffmpeg").join(exe_name));
     }
     paths.push(PathBuf::from(exe_name)); // PATH fallback
     paths
+}
+
+/// Candidate locations for `ffmpeg`, most-specific first: an explicit
+/// `CLIPLINE_FFMPEG` override, the packaged app resource, next to our own exe,
+/// the per-user `%APPDATA%\Clipline\ffmpeg` bundle, then a bare name for a PATH
+/// lookup.
+pub fn search_paths() -> Vec<PathBuf> {
+    search_paths_from(
+        ffmpeg_exe_name(),
+        std::env::var_os("CLIPLINE_FFMPEG").map(PathBuf::from),
+        std::env::current_exe().ok(),
+        std::env::var_os("APPDATA").map(PathBuf::from),
+        BUNDLED_FFMPEG.get().cloned(),
+    )
 }
 
 /// Locate a runnable `ffmpeg`: the first search path that answers
@@ -323,5 +351,48 @@ mod tests {
         let paths = search_paths();
         let last = paths.last().unwrap();
         assert!(last.as_os_str() == "ffmpeg" || last.as_os_str() == "ffmpeg.exe");
+    }
+
+    fn fixture_path(parts: &[&str]) -> PathBuf {
+        parts.iter().collect()
+    }
+
+    #[test]
+    fn bundled_ffmpeg_resource_wins_over_appdata_and_path() {
+        let install_exe = fixture_path(&["clipline-install", "Clipline.exe"]);
+        let appdata = fixture_path(&["user-profile", "AppData", "Roaming"]);
+        let bundled = fixture_path(&["clipline-install", "resources", "ffmpeg", "ffmpeg.exe"]);
+
+        let paths = search_paths_from(
+            "ffmpeg.exe",
+            None,
+            Some(install_exe),
+            Some(appdata.clone()),
+            Some(bundled.clone()),
+        );
+
+        assert_eq!(paths[0], bundled);
+        assert_eq!(paths[1], fixture_path(&["clipline-install", "ffmpeg.exe"]));
+        assert_eq!(
+            paths[2],
+            appdata.join("Clipline").join("ffmpeg").join("ffmpeg.exe")
+        );
+    }
+
+    #[test]
+    fn explicit_ffmpeg_override_stays_first() {
+        let explicit = fixture_path(&["tools", "ffmpeg.exe"]);
+        let bundled = fixture_path(&["clipline-install", "resources", "ffmpeg", "ffmpeg.exe"]);
+
+        let paths = search_paths_from(
+            "ffmpeg.exe",
+            Some(explicit.clone()),
+            Some(fixture_path(&["clipline-install", "Clipline.exe"])),
+            None,
+            Some(bundled.clone()),
+        );
+
+        assert_eq!(paths[0], explicit);
+        assert_eq!(paths[1], bundled);
     }
 }

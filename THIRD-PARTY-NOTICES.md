@@ -6,10 +6,11 @@ attribution requirements are reproduced here.
 
 ## FFmpeg (LGPL v2.1+)
 
-Clipline's optional encoder tier (HEVC / AV1 / additional H.264 backends)
-works by invoking a bundled **FFmpeg** executable as a separate process. It
-pipes raw NV12 frames to `ffmpeg.exe` and reads back the encoded elementary
-stream; Clipline does not link the FFmpeg libraries into its own binary.
+Clipline invokes a bundled **FFmpeg** executable as a separate process for
+gallery poster extraction and for its optional encoder tier (HEVC / AV1 /
+additional H.264 backends). For encoding, it pipes raw NV12 frames to
+`ffmpeg.exe` and reads back the encoded elementary stream; Clipline does not
+link the FFmpeg libraries into its own binary.
 
 - Clipline ships an **LGPL** build of FFmpeg (configured **without**
   `--enable-gpl` / `--enable-nonfree`). It contains SVT-AV1 (BSD) and the

@@ -166,6 +166,11 @@ fn tauri_config() -> String {
     fs::read_to_string(path).expect("read tauri.conf.json")
 }
 
+fn tauri_standalone_config() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.standalone.conf.json");
+    fs::read_to_string(path).expect("read tauri.standalone.conf.json")
+}
+
 fn cargo_toml() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     fs::read_to_string(path).expect("read Cargo.toml")
@@ -221,6 +226,43 @@ fn windows_installer_repairs_webview2_with_bootstrapper() {
         config.contains("\"webviewInstallMode\"")
             && config.contains("\"type\": \"embedBootstrapper\""),
         "the default NSIS installer should embed the small Evergreen bootstrapper instead of bundling the offline WebView2 installer"
+    );
+}
+
+#[test]
+fn installer_bundles_ffmpeg_for_thumbnail_generation() {
+    let config: serde_json::Value =
+        serde_json::from_str(&tauri_config()).expect("tauri.conf.json should parse");
+    let resources = config
+        .pointer("/bundle/resources")
+        .and_then(serde_json::Value::as_array)
+        .expect("bundle.resources should be listed");
+    assert!(
+        resources
+            .iter()
+            .any(|resource| resource.as_str() == Some("ffmpeg/")),
+        "fresh installs need the LGPL ffmpeg resource bundle so local gallery posters can be generated"
+    );
+    let standalone: serde_json::Value = serde_json::from_str(&tauri_standalone_config())
+        .expect("tauri.standalone.conf.json should parse");
+    let standalone_resources = standalone
+        .pointer("/bundle/resources")
+        .and_then(serde_json::Value::as_array)
+        .expect("standalone bundle.resources should be listed");
+    assert!(
+        standalone_resources
+            .iter()
+            .any(|resource| resource.as_str() == Some("ffmpeg/")),
+        "standalone installs must keep the ffmpeg resource when overlaying WebView2 resources"
+    );
+
+    let app = app_rs();
+    assert!(
+        app.contains("BaseDirectory::Resource")
+            && app.contains("configure_bundled_ffmpeg")
+            && app.contains("ffmpeg/ffmpeg.exe")
+            && app.contains("clipline_capture::ffmpeg::set_bundled_ffmpeg"),
+        "Tauri setup must register the bundled ffmpeg resource path before thumbnails or encoder probing run"
     );
 }
 
@@ -285,6 +327,38 @@ fn frontend_reports_webview_readiness_to_native_shell() {
     assert!(
         js.contains("invoke(\"frontend_ready\")"),
         "main.js must report readiness once the frontend JavaScript boots"
+    );
+}
+
+#[test]
+fn update_dialog_body_can_drag_frameless_window() {
+    let html = index_html();
+    let css = styles_css();
+
+    let dialog_start = html
+        .find("<dialog id=\"update-dialog\"")
+        .expect("update dialog exists");
+    let dialog_end = html[dialog_start..]
+        .find("</dialog>")
+        .map(|offset| dialog_start + offset)
+        .expect("update dialog closes");
+    let dialog = &html[dialog_start..dialog_end];
+
+    assert!(
+        dialog.contains("<div class=\"confirm-body update-dialog-drag\" data-tauri-drag-region>"),
+        "the update-available modal needs a non-interactive drag region because it appears over the frameless window on launch"
+    );
+    assert!(
+        !dialog
+            .split("class=\"confirm-actions\"")
+            .nth(1)
+            .unwrap_or_default()
+            .contains("data-tauri-drag-region"),
+        "update dialog action buttons must stay clickable rather than becoming drag handles"
+    );
+    assert!(
+        css.contains(".update-dialog-drag") && css.contains("cursor: move"),
+        "the draggable update dialog body should advertise that it can move the window"
     );
 }
 
@@ -2129,6 +2203,36 @@ fn controls_have_custom_range_and_scrollbar_skin() {
         css.contains("background-position: right 12px center")
             && css.contains("-webkit-appearance: none"),
         "select arrows should use the app inset instead of the native edge-hugging arrow"
+    );
+}
+
+#[test]
+fn card_kind_badges_keep_text_optically_centered() {
+    let css = styles_css();
+    let js = main_js();
+
+    assert!(
+        js.matches("kindLabel.className = \"card-kind-label\"")
+            .count()
+            >= 2,
+        "card kind badge labels must be addressable separately from their icons"
+    );
+
+    let label_rule = css_rule_body(&css, ".card-kind-label");
+    assert_eq!(
+        css_decl_value(label_rule, "display"),
+        Some("block"),
+        "badge text should use a tight block line box inside the flex pill"
+    );
+    assert_eq!(
+        css_decl_value(label_rule, "line-height"),
+        Some("1"),
+        "badge text should not inherit loose font line-height metrics"
+    );
+
+    assert!(
+        !css.contains(".card-kind.session .card-kind-label"),
+        "badge label centering should come from shared text metrics, not a session-only nudge"
     );
 }
 
