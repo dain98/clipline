@@ -232,6 +232,7 @@ function clipMarkers(clip = currentClip) {
     rawClipMarkers(clip),
     clipPlayerSummary(clip),
     gameReviewSettingsForClip(clip),
+    pluginPresentationForClip(clip),
   );
 }
 
@@ -247,6 +248,7 @@ function clipMatchEventMarkers(clip = currentClip) {
     rawClipMarkers(clip),
     clipPlayerSummary(clip),
     gameReviewSettingsForClip(clip),
+    pluginPresentationForClip(clip),
   );
 }
 

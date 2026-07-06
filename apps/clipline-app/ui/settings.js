@@ -635,7 +635,7 @@ const GAME_REVIEW_GROUPS = [
       ["enemy_kills", "Enemy kills"],
       ["enemy_deaths", "Enemy deaths"],
       ["objectives", "Objectives"],
-      ["turrets", "Turrets"],
+      ["turrets", "Structures"],
     ],
   },
   {
@@ -646,7 +646,7 @@ const GAME_REVIEW_GROUPS = [
       ["user_deaths", "User deaths"],
       ["user_assists", "User assists"],
       ["objectives", "Objectives"],
-      ["turrets", "Turrets"],
+      ["turrets", "Structures"],
     ],
   },
 ];
@@ -680,8 +680,8 @@ const GAME_REVIEW_OPTION_GROUPS = {
 
 const GAME_PLUGIN_SETTINGS_TAB_DEFINITIONS = {
   general: { label: "General" },
-  match_events: { label: "Match events", pluginIds: ["league_of_legends"] },
-  timeline_markers: { label: "Timeline markers", pluginIds: ["league_of_legends"] },
+  match_events: { label: "Match events", requiresEventMarkers: true },
+  timeline_markers: { label: "Timeline markers", requiresEventMarkers: true },
   osu_account: { label: "Account", pluginIds: ["osu"] },
   osu_plays: { label: "Plays", pluginIds: ["osu"] },
 };
@@ -692,6 +692,7 @@ function gamePluginSettingsTabs(plugin) {
   if (!plugin) return ["general"];
   return GAME_PLUGIN_SETTINGS_TABS.filter((tab) => {
     const definition = GAME_PLUGIN_SETTINGS_TAB_DEFINITIONS[tab];
+    if (definition.requiresEventMarkers && !plugin.event_markers) return false;
     return !definition.pluginIds || definition.pluginIds.includes(plugin.id);
   });
 }

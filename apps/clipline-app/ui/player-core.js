@@ -769,11 +769,14 @@ const PlayerCore = (() => {
     ).length;
 
   // EventKind variant name -> visual category. Unknown kinds degrade to info.
+  // Categories also drive the review filters, so annotation echoes that arrive
+  // alongside a real kill event (FirstBlood rides with its ChampionKill) must
+  // not share the kill category or they'd render twice.
   const DEFAULT_MARKER_KINDS = {
     ChampionKill: "kill",
     ChampionAssist: "assist",
     ChampionDeath: "death",
-    FirstBlood: "kill",
+    FirstBlood: "spree",
     Multikill: "spree",
     Ace: "spree",
     DragonKill: "objective",
@@ -1325,33 +1328,42 @@ const PlayerCore = (() => {
       && marker.assisters.some((name) => playerIdentityKey(name) === localKey);
   };
 
-  const isObjectiveMarker = (marker) =>
-    marker && (marker.kind === "DragonKill" || marker.kind === "HeraldKill" || marker.kind === "BaronKill");
+  // Filter semantics key on the marker's category (profile-declared, with the
+  // built-in kind table as fallback), not on game-specific kind names. A game
+  // profile opts a kind into a surface by giving it a filtered category
+  // (kill/death/assist/objective/structure); annotation echoes like sprees and
+  // info events stay off both surfaces.
+  const isObjectiveMarker = (marker, presentation) =>
+    Boolean(marker) && markerCategory(marker.kind, presentation) === "objective";
 
-  const isTurretMarker = (marker) => marker && marker.kind === "TurretKilled";
+  const isStructureMarker = (marker, presentation) =>
+    Boolean(marker) && markerCategory(marker.kind, presentation) === "structure";
 
-  const isLocalKill = (marker, summary) =>
-    marker && marker.kind === "ChampionKill"
+  const isKillMarker = (marker, presentation) =>
+    Boolean(marker) && markerCategory(marker.kind, presentation) === "kill";
+
+  const isLocalKill = (marker, summary, presentation) =>
+    isKillMarker(marker, presentation)
       && (markerRelation(summary, marker.actor) === "user"
         || (marker.involves_local_player === true && markerRelation(summary, marker.victim) !== "user"));
 
-  const isLocalDeath = (marker, summary) =>
-    marker
-      && (marker.kind === "ChampionDeath"
-        || (marker.kind === "ChampionKill" && markerRelation(summary, marker.victim) === "user"))
+  const isLocalDeath = (marker, summary, presentation) =>
+    Boolean(marker)
+      && (markerCategory(marker.kind, presentation) === "death"
+        || (isKillMarker(marker, presentation) && markerRelation(summary, marker.victim) === "user"))
       && (markerRelation(summary, marker.victim) === "user" || marker.involves_local_player === true);
 
-  const isLocalAssist = (marker, summary) =>
-    marker && marker.kind === "ChampionAssist"
+  const isLocalAssist = (marker, summary, presentation) =>
+    Boolean(marker) && markerCategory(marker.kind, presentation) === "assist"
       && (markerRelation(summary, marker.actor) === "user"
         || markerHasLocalAssist(marker, summary)
         || marker.involves_local_player === true);
 
-  const matchEventEnabled = (marker, summary, settings) => {
-    if (isLocalKill(marker, summary)) return settings.user_kills;
-    if (isLocalDeath(marker, summary)) return settings.user_deaths;
-    if (isLocalAssist(marker, summary)) return settings.user_assists;
-    if (marker && marker.kind === "ChampionKill") {
+  const matchEventEnabled = (marker, summary, settings, presentation) => {
+    if (isLocalKill(marker, summary, presentation)) return settings.user_kills;
+    if (isLocalDeath(marker, summary, presentation)) return settings.user_deaths;
+    if (isLocalAssist(marker, summary, presentation)) return settings.user_assists;
+    if (isKillMarker(marker, presentation)) {
       const actorRelation = markerRelation(summary, marker.actor);
       const victimRelation = markerRelation(summary, marker.victim);
       return (actorRelation === "team" && settings.team_kills)
@@ -1359,33 +1371,35 @@ const PlayerCore = (() => {
         || (actorRelation === "enemy" && settings.enemy_kills)
         || (victimRelation === "enemy" && settings.enemy_deaths);
     }
-    if (isObjectiveMarker(marker)) return settings.objectives;
-    if (isTurretMarker(marker)) return settings.turrets;
+    if (isObjectiveMarker(marker, presentation)) return settings.objectives;
+    // The saved settings key stays "turrets" (its League-era name) so existing
+    // user settings keep working; it governs the whole structure category.
+    if (isStructureMarker(marker, presentation)) return settings.turrets;
     return false;
   };
 
-  const timelineMarkerEnabled = (marker, summary, settings) => {
-    if (isLocalKill(marker, summary)) return settings.user_kills;
-    if (isLocalDeath(marker, summary)) return settings.user_deaths;
-    if (isLocalAssist(marker, summary)) return settings.user_assists;
-    if (isObjectiveMarker(marker)) return settings.objectives;
-    if (isTurretMarker(marker)) return settings.turrets;
+  const timelineMarkerEnabled = (marker, summary, settings, presentation) => {
+    if (isLocalKill(marker, summary, presentation)) return settings.user_kills;
+    if (isLocalDeath(marker, summary, presentation)) return settings.user_deaths;
+    if (isLocalAssist(marker, summary, presentation)) return settings.user_assists;
+    if (isObjectiveMarker(marker, presentation)) return settings.objectives;
+    if (isStructureMarker(marker, presentation)) return settings.turrets;
     return false;
   };
 
-  const reviewMatchEventMarkers = (markers, summary = null, settings = null) => {
+  const reviewMatchEventMarkers = (markers, summary = null, settings = null, presentation = null) => {
     const normalized = normalizeGameReviewSettings(settings);
     if (!normalized.enabled || !normalized.match_events.enabled) return [];
     return (markers || []).filter((marker) =>
-      matchEventEnabled(marker, summary, normalized.match_events)
+      matchEventEnabled(marker, summary, normalized.match_events, presentation)
     );
   };
 
-  const reviewTimelineMarkers = (markers, summary = null, settings = null) => {
+  const reviewTimelineMarkers = (markers, summary = null, settings = null, presentation = null) => {
     const normalized = normalizeGameReviewSettings(settings);
     if (!normalized.enabled || !normalized.timeline_markers.enabled) return [];
     return (markers || []).filter((marker) =>
-      timelineMarkerEnabled(marker, summary, normalized.timeline_markers)
+      timelineMarkerEnabled(marker, summary, normalized.timeline_markers, presentation)
     );
   };
 

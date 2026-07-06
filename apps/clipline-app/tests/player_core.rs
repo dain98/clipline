@@ -561,6 +561,8 @@ fn review_marker_filters_apply_per_surface_game_settings() {
           { id: 'dragon', kind: 'DragonKill', actor: 'Ally Bot', involves_local_player: false },
           { id: 'herald', kind: 'HeraldKill', actor: 'Enemy Mid', involves_local_player: false },
           { id: 'turret', kind: 'TurretKilled', actor: 'Ally Bot', involves_local_player: false },
+          { id: 'inhib', kind: 'InhibKilled', actor: 'Ally Bot', involves_local_player: false },
+          { id: 'first-blood', kind: 'FirstBlood', actor: 'Dain', victim: 'Enemy Mid', involves_local_player: true },
           { id: 'noise', kind: 'MinionsSpawning', actor: '', involves_local_player: false }
         ];
         const REVIEW_SETTINGS = {
@@ -595,7 +597,7 @@ fn review_marker_filters_apply_per_surface_game_settings() {
             &mut ctx,
             "PlayerCore.reviewMatchEventMarkers(REVIEW_MARKERS, REVIEW_SUMMARY, REVIEW_SETTINGS).map(m => m.id)"
         ),
-        r#"["local-kill","local-assist","local-death","enemy-kill","dragon","herald","turret"]"#
+        r#"["local-kill","local-assist","local-death","enemy-kill","dragon","herald","turret","inhib"]"#
     );
     assert_eq!(
         eval_json(
@@ -615,6 +617,64 @@ fn review_marker_filters_apply_per_surface_game_settings() {
         eval_json(
             &mut ctx,
             "PlayerCore.reviewTimelineMarkers(REVIEW_MARKERS, REVIEW_SUMMARY, { ...REVIEW_SETTINGS, timeline_markers: { ...REVIEW_SETTINGS.timeline_markers, enabled: false } })"
+        ),
+        "[]"
+    );
+}
+
+#[test]
+fn review_marker_filters_honor_profile_declared_categories() {
+    // A future supported game (CS2-shaped) whose kind names player-core has no
+    // built-in knowledge of: its profile's marker_kinds categories alone must
+    // opt events into the review surfaces.
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const CS_PRESENTATION = {
+          marker_kinds: {
+            PlayerKill: { category: 'kill' },
+            PlayerDeath: { category: 'death' },
+            BombPlanted: { category: 'objective' },
+            RoundStart: { category: 'info' }
+          }
+        };
+        const CS_SUMMARY = {
+          player_name: 'Dain',
+          team: 'CT',
+          participants: [
+            { player_name: 'Dain', team: 'CT' },
+            { player_name: 'Rival', team: 'T' }
+          ]
+        };
+        const CS_MARKERS = [
+          { id: 'kill', kind: 'PlayerKill', actor: 'Dain', victim: 'Rival', involves_local_player: true },
+          { id: 'death', kind: 'PlayerDeath', actor: 'Rival', victim: 'Dain', involves_local_player: true },
+          { id: 'plant', kind: 'BombPlanted', actor: 'Rival', involves_local_player: false },
+          { id: 'round', kind: 'RoundStart', actor: '', involves_local_player: false }
+        ];
+        "#,
+    ))
+    .expect("define profile-driven filter inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.reviewTimelineMarkers(CS_MARKERS, CS_SUMMARY, null, CS_PRESENTATION).map(m => m.id)"
+        ),
+        r#"["kill","death","plant"]"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.reviewMatchEventMarkers(CS_MARKERS, CS_SUMMARY, null, CS_PRESENTATION).map(m => m.id)"
+        ),
+        r#"["kill","death","plant"]"#
+    );
+    // Without the profile the kinds are unknown -> info category -> filtered out.
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.reviewTimelineMarkers(CS_MARKERS, CS_SUMMARY, null, null)"
         ),
         "[]"
     );
@@ -1207,9 +1267,12 @@ fn marker_styles_map_kinds_to_categories() {
         eval_json(&mut ctx, "PlayerCore.markerStyle('ChampionAssist')"),
         r#"{"glyph":"+","cls":"assist"}"#
     );
+    // FirstBlood is an annotation that rides along with its ChampionKill, so it
+    // lives in the spree category — sharing "kill" would double-count it in
+    // digests and render it twice on the filtered review surfaces.
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.markerStyle('FirstBlood')"),
-        r#"{"glyph":"✕","cls":"kill"}"#
+        r#"{"glyph":"★","cls":"spree"}"#
     );
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.markerStyle('Multikill')"),

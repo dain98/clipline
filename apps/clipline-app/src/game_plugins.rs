@@ -559,7 +559,22 @@ const LEAGUE_PROFILE_MANIFEST_JSON: &str = r#"{
         "category": "structure",
         "icon": "assets/markers/turret.png",
         "rail": { "layout": "actor_event", "allegiance": "actor_team" }
-      }
+      },
+      "HeraldKill": {
+        "category": "objective",
+        "rail": { "layout": "actor_event", "allegiance": "actor_team" }
+      },
+      "InhibKilled": {
+        "category": "structure",
+        "rail": { "layout": "actor_event", "allegiance": "actor_team" }
+      },
+      "FirstBlood": { "category": "spree" },
+      "Multikill": { "category": "spree" },
+      "Ace": { "category": "spree" },
+      "FirstBrick": { "category": "info" },
+      "GameStart": { "category": "info" },
+      "MinionsSpawning": { "category": "info" },
+      "GameEnd": { "category": "info" }
     },
     "marker_categories": {
       "kill": { "singular": "kill", "plural": "kills", "glyph": "✕" },
@@ -1018,6 +1033,41 @@ mod tests {
             .and_then(|presentation| presentation.pointer("/event_rail/actor_icons/0/asset"))
             .and_then(serde_json::Value::as_str)
             .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+    }
+
+    #[test]
+    fn league_profile_declares_categories_for_all_live_client_kinds() {
+        // The review filters key on marker categories, so every EventKind the
+        // Live Client poller can emit needs a deliberate category — otherwise
+        // it silently degrades to "info" and disappears from both surfaces.
+        let manifest = league_profile_manifest();
+        let presentation = manifest.presentation.expect("presentation");
+        let kinds = [
+            ("GameStart", "info"),
+            ("MinionsSpawning", "info"),
+            ("FirstBrick", "info"),
+            ("TurretKilled", "structure"),
+            ("InhibKilled", "structure"),
+            ("DragonKill", "objective"),
+            ("HeraldKill", "objective"),
+            ("BaronKill", "objective"),
+            ("ChampionKill", "kill"),
+            ("ChampionAssist", "assist"),
+            ("ChampionDeath", "death"),
+            ("Multikill", "spree"),
+            ("Ace", "spree"),
+            ("FirstBlood", "spree"),
+            ("GameEnd", "info"),
+        ];
+        for (kind, category) in kinds {
+            assert_eq!(
+                presentation
+                    .pointer(&format!("/marker_kinds/{kind}/category"))
+                    .and_then(serde_json::Value::as_str),
+                Some(category),
+                "League profile should categorize {kind}"
+            );
+        }
     }
 
     #[test]
