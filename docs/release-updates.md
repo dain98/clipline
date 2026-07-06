@@ -39,6 +39,12 @@ For now, publish Nightly manually from a Windows checkout:
 
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content .local-secrets\clipline-updater.key -Raw
 
+# Stage the LGPL FFmpeg resource bundle used for gallery poster generation
+# and the optional FFmpeg encoder tier. Defaults to
+# %APPDATA%\Clipline\ffmpeg, which should contain ffmpeg.exe, its DLLs, and
+# the license texts from the LGPL shared distribution.
+.\scripts\stage-ffmpeg-resource.ps1
+
 # 1. Regular build (from apps/clipline-app so config discovery works)
 Set-Location apps/clipline-app
 cargo tauri build
@@ -59,6 +65,9 @@ gh release create nightly <bundle assets> --prerelease --title "Clipline Nightly
 The release must include both updater metadata assets (`latest.json`,
 `latest-standalone.json`). When bumping the pinned WebView2 runtime, update
 the version in `tauri.standalone.conf.json` and re-download the runtime.
+When bumping or replacing FFmpeg, update the source bundle staged by
+`scripts\stage-ffmpeg-resource.ps1`; `apps/clipline-app/ffmpeg/` is a build
+staging directory and its binaries are intentionally git-ignored.
 A GitHub Actions workflow can automate this later, but pushing workflow files
 requires a token with GitHub's `workflow` scope.
 

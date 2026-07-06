@@ -742,8 +742,11 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   are fully unit-tested on both CI OSes.
 - Ship an **lgpl-shared** build (BtbN) under `%APPDATA%\Clipline\ffmpeg` — it has SVT-AV1 + GPU
   encoders but **no libx264/libx265**, so no software H.264/HEVC. The dev box has it installed
-  there; the search order (`CLIPLINE_FFMPEG` override → exe dir → that folder → PATH) means it
-  wins over any GPL PATH ffmpeg. Attribution: `THIRD-PARTY-NOTICES.md`.
+  there; release builds stage that bundle into `apps/clipline-app/ffmpeg/` so the installer ships
+  it as a Tauri resource for gallery poster generation and the optional encoder tier. The search
+  order (`CLIPLINE_FFMPEG` override → bundled resource → exe dir → `%APPDATA%\Clipline\ffmpeg` →
+  PATH) means the packaged LGPL build wins over any GPL PATH ffmpeg. Attribution:
+  `THIRD-PARTY-NOTICES.md`.
 - AMF **rejects tiny resolutions** (`Init() failed with error 5` at 128×72) — the probe
   test-encodes at 640×360. SVT-AV1 **errors on `-maxrate`/`-bufsize`** (exit -22): CBR capping is
   hardware-only; SVT-AV1 gets `-b:v` + `-preset 8` (VBR-ish; the ring evicts by bytes anyway).

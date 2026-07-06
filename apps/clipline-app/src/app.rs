@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
+use tauri::path::BaseDirectory;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, Emitter, Manager, Runtime, WebviewWindow, WebviewWindowBuilder, WindowEvent,
@@ -171,6 +172,24 @@ fn log_diagnostic(message: impl AsRef<str>) {
         if let Some(file) = log.as_mut() {
             let _ = writeln!(file, "{line}");
             let _ = file.flush();
+        }
+    }
+}
+
+fn configure_bundled_ffmpeg<R: Runtime>(app: &tauri::App<R>) {
+    match app
+        .path()
+        .resolve("ffmpeg/ffmpeg.exe", BaseDirectory::Resource)
+    {
+        Ok(path) if path.exists() => {
+            clipline_capture::ffmpeg::set_bundled_ffmpeg(path.clone());
+            log_diagnostic(format!("bundled ffmpeg resource={path:?}"));
+        }
+        Ok(path) => {
+            log_diagnostic(format!("bundled ffmpeg resource missing at {path:?}"));
+        }
+        Err(e) => {
+            log_diagnostic(format!("resolve bundled ffmpeg resource failed: {e}"));
         }
     }
 }
@@ -1620,6 +1639,7 @@ pub fn run() {
             crate::library::storage_status
         ])
         .setup(move |app| {
+            configure_bundled_ffmpeg(app);
             let osu_app = app.handle().clone();
             let osu_media_root = media_dir_for_setup.clone();
             tauri::async_runtime::spawn(async move {
