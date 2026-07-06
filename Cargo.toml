@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/clipline-events",
     "crates/clipline-lol",
+    "crates/clipline-cs2",
     "crates/clipline-buffer",
     "crates/clipline-storage",
     "crates/clipline-capture",

@@ -559,6 +559,28 @@ mod tests {
     }
 
     #[test]
+    fn detects_cs2_window_as_built_in_replays_only() {
+        let detected = detect_active_game_from_windows(
+            &GameSettings::default(),
+            vec![window(
+                4,
+                "Counter-Strike 2",
+                "cs2.exe",
+                Some(r"D:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe"),
+            )],
+        )
+        .expect("CS2 window should match");
+
+        assert_eq!(detected.id, crate::game_plugins::CS2_ID);
+        assert_eq!(detected.name, "Counter-Strike 2");
+        assert_eq!(detected.hwnd, 4);
+        // Menus and matches share one window, so full-session recording
+        // would capture hours of lobby: replays-only is the safe default
+        // until match-armed sessions land.
+        assert_eq!(detected.recording_mode, GameRecordingMode::ReplaysOnly);
+    }
+
+    #[test]
     fn league_client_alone_does_not_count_as_in_game() {
         assert!(detect_active_game_from_windows(
             &GameSettings::default(),

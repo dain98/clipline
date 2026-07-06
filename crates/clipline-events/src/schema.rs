@@ -29,6 +29,17 @@ pub enum EventKind {
     // parsed defensively, never relied upon.
     FirstBlood,
     GameEnd,
+    // CS2 Game State Integration kinds. Own-play GSI carries no victim
+    // names or roster, so these are actor-light by design.
+    PlayerKill,
+    PlayerDeath,
+    PlayerAssist,
+    BombPlanted,
+    BombDefused,
+    BombExploded,
+    RoundWon,
+    RoundLost,
+    Mvp,
     Other,
 }
 
@@ -61,9 +72,16 @@ pub fn is_review_event(event: &GameEvent) -> bool {
             | EventKind::ChampionAssist
             | EventKind::ChampionDeath
             | EventKind::TurretKilled
+            | EventKind::InhibKilled
             | EventKind::DragonKill
             | EventKind::HeraldKill
             | EventKind::BaronKill
+            | EventKind::PlayerKill
+            | EventKind::PlayerDeath
+            | EventKind::PlayerAssist
+            | EventKind::BombPlanted
+            | EventKind::BombDefused
+            | EventKind::BombExploded
     )
 }
 
@@ -112,19 +130,28 @@ mod tests {
         assert!(is_review_event(&ev(EventKind::ChampionAssist, true)));
         assert!(is_review_event(&ev(EventKind::ChampionDeath, false)));
         assert!(is_review_event(&ev(EventKind::TurretKilled, false)));
+        assert!(is_review_event(&ev(EventKind::InhibKilled, false)));
         assert!(is_review_event(&ev(EventKind::DragonKill, false)));
         assert!(is_review_event(&ev(EventKind::HeraldKill, false)));
         assert!(is_review_event(&ev(EventKind::BaronKill, false)));
+        assert!(is_review_event(&ev(EventKind::PlayerKill, true)));
+        assert!(is_review_event(&ev(EventKind::PlayerDeath, true)));
+        assert!(is_review_event(&ev(EventKind::PlayerAssist, true)));
+        assert!(is_review_event(&ev(EventKind::BombPlanted, false)));
+        assert!(is_review_event(&ev(EventKind::BombDefused, false)));
+        assert!(is_review_event(&ev(EventKind::BombExploded, false)));
 
         for kind in [
             EventKind::GameStart,
             EventKind::MinionsSpawning,
             EventKind::FirstBrick,
-            EventKind::InhibKilled,
             EventKind::Multikill,
             EventKind::Ace,
             EventKind::FirstBlood,
             EventKind::GameEnd,
+            EventKind::RoundWon,
+            EventKind::RoundLost,
+            EventKind::Mvp,
             EventKind::Other,
         ] {
             assert!(

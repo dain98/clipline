@@ -20,6 +20,8 @@ use crate::settings::{
 
 pub const LEAGUE_OF_LEGENDS_ID: &str = "league_of_legends";
 pub const LEAGUE_LIVE_CLIENT_EVENT_SOURCE: &str = "league_live_client";
+pub const CS2_ID: &str = "cs2";
+pub const CS2_GSI_EVENT_SOURCE: &str = "cs2_gsi";
 pub const OSU_ID: &str = "osu";
 pub const GAME_PROFILE_SCHEMA_VERSION: u32 = 1;
 
@@ -28,6 +30,8 @@ pub type EventSourceSpawner = fn(GameEventSourceContext) -> Receiver<PollerMsg>;
 #[derive(Clone, Debug)]
 pub struct GameEventSourceContext {
     pub lol_url: Option<String>,
+    /// Override for the CS2 GSI loopback endpoint (tests/mock feeds).
+    pub cs2_gsi_addr: Option<String>,
     pub recording_t0: Instant,
 }
 
@@ -371,6 +375,9 @@ pub fn all() -> &'static [GamePlugin] {
                     manifest: league_profile_manifest(),
                 },
                 GamePlugin {
+                    manifest: cs2_profile_manifest(),
+                },
+                GamePlugin {
                     manifest: osu_profile_manifest(),
                 },
             ]
@@ -393,7 +400,7 @@ pub fn plugin_id_for_game_id(game_id: GameId) -> &'static str {
     match game_id {
         GameId::LeagueOfLegends => LEAGUE_OF_LEGENDS_ID,
         GameId::Valorant => "valorant",
-        GameId::Cs2 => "cs2",
+        GameId::Cs2 => CS2_ID,
         GameId::Osu => OSU_ID,
     }
 }
@@ -441,6 +448,11 @@ pub fn league_profile_manifest() -> GameProfileManifest {
         .expect("built-in League profile manifest is valid")
 }
 
+pub fn cs2_profile_manifest() -> GameProfileManifest {
+    GameProfileManifest::from_json(CS2_PROFILE_MANIFEST_JSON)
+        .expect("built-in CS2 profile manifest is valid")
+}
+
 pub fn osu_profile_manifest() -> GameProfileManifest {
     GameProfileManifest::from_json(OSU_PROFILE_MANIFEST_JSON)
         .expect("built-in osu! profile manifest is valid")
@@ -449,6 +461,7 @@ pub fn osu_profile_manifest() -> GameProfileManifest {
 fn event_source_spawner(name: &str) -> Option<EventSourceSpawner> {
     match name {
         LEAGUE_LIVE_CLIENT_EVENT_SOURCE => Some(league_of_legends::spawn_event_source),
+        CS2_GSI_EVENT_SOURCE => Some(cs2::spawn_event_source),
         _ => None,
     }
 }
@@ -683,6 +696,47 @@ const LEAGUE_PROFILE_MANIFEST_JSON: &str = r#"{
   }
 }"#;
 
+const CS2_PROFILE_MANIFEST_JSON: &str = r#"{
+  "schema_version": 1,
+  "id": "cs2",
+  "name": "Counter-Strike 2",
+  "summary": "Keeps a replay buffer while CS2 is open; match markers come from Valve's Game State Integration.",
+  "default_enabled": true,
+  "default_recording_mode": "replays_only",
+  "icon": { "type": "extracted" },
+  "window_match": { "exe_name": "cs2.exe", "selection": "longest_title" },
+  "event_source": "cs2_gsi",
+  "presentation": {
+    "marker_kinds": {
+      "PlayerKill": { "category": "kill" },
+      "PlayerDeath": { "category": "death" },
+      "PlayerAssist": { "category": "assist" },
+      "BombPlanted": { "category": "objective" },
+      "BombDefused": { "category": "objective" },
+      "BombExploded": { "category": "objective" },
+      "Multikill": { "category": "spree" },
+      "Mvp": { "category": "spree" },
+      "RoundWon": { "category": "info" },
+      "RoundLost": { "category": "info" }
+    },
+    "gallery": {
+      "card": {
+        "title": "summary_for_full_session",
+        "title_format": {
+          "type": "player_summary_stats",
+          "separator": " | ",
+          "stats": [ { "type": "kda" } ]
+        }
+      }
+    },
+    "event_rail": {
+      "enabled": true,
+      "title": "Match events",
+      "layout": "text"
+    }
+  }
+}"#;
+
 const OSU_PROFILE_MANIFEST_JSON: &str = r#"{
   "schema_version": 1,
   "id": "osu",
@@ -727,6 +781,17 @@ mod league_of_legends {
 
     pub fn spawn_event_source(context: GameEventSourceContext) -> Receiver<PollerMsg> {
         crate::markers::spawn(context.lol_url, context.recording_t0)
+    }
+}
+
+mod cs2 {
+    use std::sync::mpsc::Receiver;
+
+    use super::GameEventSourceContext;
+    use crate::markers::PollerMsg;
+
+    pub fn spawn_event_source(context: GameEventSourceContext) -> Receiver<PollerMsg> {
+        crate::cs2_markers::spawn(context.cs2_gsi_addr, context.recording_t0)
     }
 }
 
@@ -853,6 +918,56 @@ mod tests {
             .pointer("/event_rail/actor_icons/1/asset")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+    }
+
+    #[test]
+    fn cs2_profile_is_registered_with_gsi_event_source() {
+        let profile = all()
+            .iter()
+            .find(|profile| profile.id() == CS2_ID)
+            .expect("cs2 profile");
+        let info = profile.info();
+
+        assert_eq!(plugin_id_for_game_id(GameId::Cs2), CS2_ID);
+        assert_eq!(info.name, "Counter-Strike 2");
+        assert!(info.default_enabled);
+        assert_eq!(info.default_recording_mode, GameRecordingMode::ReplaysOnly);
+        assert!(info.event_markers);
+        assert!(has_event_source(Some(CS2_ID)));
+
+        let presentation = info.presentation.expect("cs2 presentation");
+        // Filters key on these categories; every kind the GSI tracker emits
+        // needs a deliberate one.
+        for (kind, category) in [
+            ("PlayerKill", "kill"),
+            ("PlayerDeath", "death"),
+            ("PlayerAssist", "assist"),
+            ("BombPlanted", "objective"),
+            ("BombDefused", "objective"),
+            ("BombExploded", "objective"),
+            ("Multikill", "spree"),
+            ("Mvp", "spree"),
+            ("RoundWon", "info"),
+            ("RoundLost", "info"),
+        ] {
+            assert_eq!(
+                presentation
+                    .pointer(&format!("/marker_kinds/{kind}/category"))
+                    .and_then(serde_json::Value::as_str),
+                Some(category),
+                "CS2 profile should categorize {kind}"
+            );
+        }
+        assert_eq!(
+            presentation
+                .pointer("/event_rail/title")
+                .and_then(serde_json::Value::as_str),
+            Some("Match events")
+        );
+
+        let windows = vec![window(1, "Counter-Strike 2", "cs2.exe", None)];
+        let matched = profile.match_window(&windows).expect("cs2 window");
+        assert_eq!(matched.handle, 1);
     }
 
     #[test]

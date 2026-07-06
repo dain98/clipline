@@ -582,6 +582,7 @@ fn marker_source_kind(opts: &ServiceOptions) -> MarkerSourceKind {
 fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver<PollerMsg> {
     let context = crate::game_plugins::GameEventSourceContext {
         lol_url: opts.lol_url.clone(),
+        cs2_gsi_addr: None,
         recording_t0,
     };
     match marker_source_kind(opts) {
@@ -834,6 +835,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
 
         while let Ok(msg) = marker_rx.try_recv() {
             match msg {
+                PollerMsg::Heartbeat => {}
                 PollerMsg::Event(event) => {
                     // GameEnd means the match is over even while the Live
                     // Client API lingers; stop attributing saves to it.

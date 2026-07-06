@@ -21,6 +21,10 @@ pub enum PollerMsg {
     PlayerSummary(PlayerSummary),
     MatchStarted,
     MatchEnded,
+    /// No-op liveness probe: lets a source holding a real resource (the CS2
+    /// GSI listener owns a TCP port) notice the service dropped its receiver
+    /// even when the game goes silent for minutes.
+    Heartbeat,
 }
 
 /// Spawn the poller. `base_url` overrides the local Live Client endpoint

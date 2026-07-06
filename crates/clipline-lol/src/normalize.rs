@@ -122,7 +122,9 @@ fn base_importance(kind: EventKind) -> u8 {
         | EventKind::HeraldKill => 5,
         EventKind::TurretKilled | EventKind::FirstBrick => 4,
         EventKind::GameEnd => 3,
-        EventKind::GameStart | EventKind::MinionsSpawning | EventKind::Other => 1,
+        // Other-game kinds (CS2, …) never come out of the Live Client API;
+        // they are scored by their own adapters.
+        _ => 1,
     }
 }
 

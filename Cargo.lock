@@ -922,6 +922,7 @@ dependencies = [
  "chrono",
  "clipline-capture",
  "clipline-cloud-api",
+ "clipline-cs2",
  "clipline-events",
  "clipline-lol",
  "clipline-mp4",
@@ -986,6 +987,15 @@ version = "1.2.18"
 source = "git+https://github.com/dain98/clipline-cloud?rev=304f7f6490bd1f6078f4d703fdc33dcd1ecdafcf#304f7f6490bd1f6078f4d703fdc33dcd1ecdafcf"
 dependencies = [
  "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "clipline-cs2"
+version = "0.1.0"
+dependencies = [
+ "clipline-events",
  "serde",
  "serde_json",
 ]
