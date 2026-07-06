@@ -353,48 +353,46 @@ mod tests {
         assert!(last.as_os_str() == "ffmpeg" || last.as_os_str() == "ffmpeg.exe");
     }
 
+    fn fixture_path(parts: &[&str]) -> PathBuf {
+        parts.iter().collect()
+    }
+
     #[test]
     fn bundled_ffmpeg_resource_wins_over_appdata_and_path() {
+        let install_exe = fixture_path(&["clipline-install", "Clipline.exe"]);
+        let appdata = fixture_path(&["user-profile", "AppData", "Roaming"]);
+        let bundled = fixture_path(&["clipline-install", "resources", "ffmpeg", "ffmpeg.exe"]);
+
         let paths = search_paths_from(
             "ffmpeg.exe",
             None,
-            Some(PathBuf::from(r"C:\Program Files\Clipline\Clipline.exe")),
-            Some(PathBuf::from(r"C:\Users\Dain\AppData\Roaming")),
-            Some(PathBuf::from(
-                r"C:\Program Files\Clipline\resources\ffmpeg\ffmpeg.exe",
-            )),
+            Some(install_exe),
+            Some(appdata.clone()),
+            Some(bundled.clone()),
         );
 
-        assert_eq!(
-            paths[0],
-            PathBuf::from(r"C:\Program Files\Clipline\resources\ffmpeg\ffmpeg.exe")
-        );
-        assert_eq!(
-            paths[1],
-            PathBuf::from(r"C:\Program Files\Clipline\ffmpeg.exe")
-        );
+        assert_eq!(paths[0], bundled);
+        assert_eq!(paths[1], fixture_path(&["clipline-install", "ffmpeg.exe"]));
         assert_eq!(
             paths[2],
-            PathBuf::from(r"C:\Users\Dain\AppData\Roaming\Clipline\ffmpeg\ffmpeg.exe")
+            appdata.join("Clipline").join("ffmpeg").join("ffmpeg.exe")
         );
     }
 
     #[test]
     fn explicit_ffmpeg_override_stays_first() {
+        let explicit = fixture_path(&["tools", "ffmpeg.exe"]);
+        let bundled = fixture_path(&["clipline-install", "resources", "ffmpeg", "ffmpeg.exe"]);
+
         let paths = search_paths_from(
             "ffmpeg.exe",
-            Some(PathBuf::from(r"D:\tools\ffmpeg.exe")),
-            Some(PathBuf::from(r"C:\Program Files\Clipline\Clipline.exe")),
+            Some(explicit.clone()),
+            Some(fixture_path(&["clipline-install", "Clipline.exe"])),
             None,
-            Some(PathBuf::from(
-                r"C:\Program Files\Clipline\resources\ffmpeg\ffmpeg.exe",
-            )),
+            Some(bundled.clone()),
         );
 
-        assert_eq!(paths[0], PathBuf::from(r"D:\tools\ffmpeg.exe"));
-        assert_eq!(
-            paths[1],
-            PathBuf::from(r"C:\Program Files\Clipline\resources\ffmpeg\ffmpeg.exe")
-        );
+        assert_eq!(paths[0], explicit);
+        assert_eq!(paths[1], bundled);
     }
 }
