@@ -330,6 +330,16 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 > shape is a full-size clapper icon on the left, only for videos that are actually user-created
 > clips, likely after finishing a clearer labeling model.
 
+Recent fixes (2026-07-06):
+- Nightly 0.1.33 contains the profile-category review filter work from PR #80 and the library
+  launch-surface fixes from PR #81. The previous public nightly metadata was 0.1.32, so the app
+  and Tauri package versions were bumped to 0.1.33 for updater delivery. Review timeline and match
+  event filters now key off profile-declared marker categories instead of League-only kind names;
+  `InhibKilled` appears under Structures and `FirstBlood` is no longer double-counted as a kill.
+  Library badges keep SESSION/TRIM/CLOUD text optically centered, fresh installs bundle the LGPL
+  FFmpeg resource used for gallery posters, and the launch-time update dialog is draggable while
+  leaving its action buttons clickable.
+
 Recent fixes (2026-07-04):
 - Settings > Recording now has an Advanced toggle for exact recording overrides. When enabled,
   `advanced_recording` supplies custom max output bounds (aspect-preserving, never stretching),
