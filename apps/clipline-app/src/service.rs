@@ -89,9 +89,42 @@ impl TimedFrameSource for DxgiDuplicationCapture {
 /// The live screen-capture engine, chosen at recording start. WGC is the
 /// default and the only per-window option; DXGI Desktop Duplication is the
 /// opt-in borderless display/region backend (issue #42).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SwitchTargetIdentity {
+    Window(isize),
+    Slate,
+}
+
+fn switch_target_identity(target: &SwitchCaptureTarget) -> SwitchTargetIdentity {
+    match target {
+        SwitchCaptureTarget::Window { hwnd, .. } => SwitchTargetIdentity::Window(*hwnd),
+        SwitchCaptureTarget::Slate { .. } => SwitchTargetIdentity::Slate,
+    }
+}
+
 enum LiveBackend {
     Wgc(WgcCapture),
     Dxgi(DxgiDuplicationCapture),
+    Slate(SlateCapture),
+}
+
+struct SlateCapture {
+    frame: FrameData,
+    next_pts_s: f64,
+    frame_interval_s: f64,
+}
+
+impl SlateCapture {
+    fn new(device: &ID3D11Device, width: u32, height: u32, fps: u32) -> Result<Self, String> {
+        let pixels = privacy_slate_bgra(width, height);
+        let texture = d3d11::create_bgra_texture_from_pixels(device, width, height, &pixels)
+            .map_err(|e| format!("slate texture: {e}"))?;
+        Ok(Self {
+            frame: FrameData::Gpu(texture),
+            next_pts_s: 0.0,
+            frame_interval_s: 1.0 / fps.max(1) as f64,
+        })
+    }
 }
 
 impl TimedFrameSource for LiveBackend {
@@ -99,7 +132,19 @@ impl TimedFrameSource for LiveBackend {
         match self {
             LiveBackend::Wgc(cap) => cap.next_frame_timeout(timeout),
             LiveBackend::Dxgi(cap) => cap.next_frame_timeout(timeout),
+            LiveBackend::Slate(cap) => cap.next_frame_timeout(timeout),
         }
+    }
+}
+
+impl TimedFrameSource for SlateCapture {
+    fn next_frame_timeout(&mut self, _timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+        let pts_s = self.next_pts_s;
+        self.next_pts_s += self.frame_interval_s;
+        Ok(Some(Frame {
+            pts_s,
+            data: self.frame.clone(),
+        }))
     }
 }
 
@@ -161,7 +206,147 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
     }
 }
 
-type LiveCapture = CadencedCapture<LiveBackend>;
+fn privacy_slate_bgra(width: u32, height: u32) -> Vec<u8> {
+    let mut pixels = vec![0x12; width as usize * height as usize * 4];
+    for px in pixels.chunks_exact_mut(4) {
+        px[0] = 0x1b;
+        px[1] = 0x18;
+        px[2] = 0x14;
+        px[3] = 0xff;
+    }
+    let banner_w = (width * 3 / 5).max(12).min(width);
+    let banner_h = (height / 7).max(8).min(height);
+    let left = (width - banner_w) / 2;
+    let top = (height - banner_h) / 2;
+    fill_bgra_rect(
+        &mut pixels,
+        width,
+        left,
+        top,
+        banner_w,
+        banner_h,
+        [0x28, 0x2f, 0x39, 0xff],
+    );
+    fill_bgra_rect(
+        &mut pixels,
+        width,
+        left + banner_w / 12,
+        top + banner_h / 3,
+        banner_w * 5 / 6,
+        (banner_h / 6).max(2),
+        [0x80, 0x88, 0x94, 0xff],
+    );
+    pixels
+}
+
+fn fill_bgra_rect(
+    pixels: &mut [u8],
+    stride_width: u32,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    bgra: [u8; 4],
+) {
+    for row in y..y.saturating_add(h) {
+        for col in x..x.saturating_add(w) {
+            let idx = ((row * stride_width + col) * 4) as usize;
+            if idx + 4 <= pixels.len() {
+                pixels[idx..idx + 4].copy_from_slice(&bgra);
+            }
+        }
+    }
+}
+
+struct SwitchableLiveCapture {
+    state: std::sync::Arc<std::sync::Mutex<SwitchableLiveCaptureState>>,
+}
+
+struct SwitchableCaptureController {
+    state: std::sync::Arc<std::sync::Mutex<SwitchableLiveCaptureState>>,
+}
+
+struct SwitchableLiveCaptureState {
+    device: ID3D11Device,
+    clock: RelativeClock,
+    fps: u32,
+    canvas: (u32, u32),
+    active: LiveBackend,
+    identity: SwitchTargetIdentity,
+}
+
+impl SwitchableLiveCapture {
+    fn new(
+        device: ID3D11Device,
+        clock: RelativeClock,
+        fps: u32,
+        canvas: (u32, u32),
+        active: LiveBackend,
+        identity: SwitchTargetIdentity,
+    ) -> (Self, SwitchableCaptureController) {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(SwitchableLiveCaptureState {
+            device,
+            clock,
+            fps,
+            canvas,
+            active,
+            identity,
+        }));
+        (
+            Self {
+                state: state.clone(),
+            },
+            SwitchableCaptureController { state },
+        )
+    }
+}
+
+impl TimedFrameSource for SwitchableLiveCapture {
+    fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CaptureError::DeviceLost("switchable capture lock poisoned".into()))?;
+        state.active.next_frame_timeout(timeout)
+    }
+}
+
+impl SwitchableCaptureController {
+    fn switch_to(&self, target: SwitchCaptureTarget) -> Result<(), String> {
+        let next_identity = switch_target_identity(&target);
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "switchable capture lock poisoned".to_string())?;
+        if state.identity == next_identity {
+            return Ok(());
+        }
+        let slate = LiveBackend::Slate(SlateCapture::new(
+            &state.device,
+            state.canvas.0,
+            state.canvas.1,
+            state.fps,
+        )?);
+        let old = std::mem::replace(&mut state.active, slate);
+        state.identity = SwitchTargetIdentity::Slate;
+        drop(old);
+        let next = match target {
+            SwitchCaptureTarget::Window { hwnd, title, .. } => {
+                let hwnd = window_from_raw_handle(hwnd)
+                    .ok_or_else(|| format!("game window {title:?} is no longer available"))?;
+                let cap = WgcCapture::for_window_client_on(state.device.clone(), hwnd, state.clock)
+                    .map_err(|e| e.to_string())?;
+                LiveBackend::Wgc(cap)
+            }
+            SwitchCaptureTarget::Slate { .. } => return Ok(()),
+        };
+        state.active = next;
+        state.identity = next_identity;
+        Ok(())
+    }
+}
+
+type LiveCapture = CadencedCapture<SwitchableLiveCapture>;
 type LiveRecorder = Recorder<LiveCapture, Box<dyn Encoder>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -740,6 +925,27 @@ fn open_wgc(
     }
 }
 
+fn canvas_dimensions_from_capture_source(source: &CaptureSource) -> Result<(u32, u32), String> {
+    match source {
+        CaptureSource::DisplayRegion(region) => Ok((region.width, region.height)),
+        CaptureSource::PrimaryMonitor => {
+            let (display, _) =
+                clipline_capture::windows::display::display_handle_by_id_or_primary(None)
+                    .map_err(|e| e.to_string())?;
+            Ok((display.info.width, display.info.height))
+        }
+        CaptureSource::WindowTitle(_) | CaptureSource::WindowHandle { .. } => Ok((1920, 1080)),
+    }
+}
+
+fn initial_canvas_dimensions(
+    opts: &ServiceOptions,
+    _device: &ID3D11Device,
+    _events: &Sender<Event>,
+) -> Result<(u32, u32), String> {
+    canvas_dimensions_from_capture_source(&opts.capture_source)
+}
+
 fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> Result<(), String> {
     let init = |e: &dyn std::fmt::Display| format!("init: {e}");
     let (device, _ctx) = d3d11::create_device().map_err(|e| init(&e))?;
@@ -754,18 +960,39 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     // in for a display/region source, else WGC — and pull the first frame,
     // which fixes the capture size. A DXGI failure (multi-GPU, rotated display,
     // secure desktop on the first frame, …) silently falls back to WGC.
-    let (cap, first) = open_screen_capture(
-        &device,
-        clock,
-        &opts.capture_source,
-        opts.capture_backend,
-        events,
-    )?;
+    let ((in_w, in_h), cap, first, identity) =
+        if opts.focus_follow_enabled && opts.active_game.is_none() {
+            let (in_w, in_h) = initial_canvas_dimensions(&opts, &device, events)?;
+            let mut cap = SlateCapture::new(&device, in_w, in_h, opts.fps)?;
+            let first = cap
+                .next_frame_timeout(Duration::ZERO)
+                .map_err(|e| format!("init: {e}"))?
+                .ok_or("capture ended before the first frame")?;
+            (
+                (in_w, in_h),
+                LiveBackend::Slate(cap),
+                first,
+                SwitchTargetIdentity::Slate,
+            )
+        } else {
+            let (cap, first) = open_screen_capture(
+                &device,
+                clock,
+                &opts.capture_source,
+                opts.capture_backend,
+                events,
+            )?;
+            let FrameData::Gpu(tex) = &first.data else {
+                return Err("expected a GPU frame".into());
+            };
+            let (in_w, in_h) = d3d11::texture_size(tex);
+            let identity = match &opts.capture_source {
+                CaptureSource::WindowHandle { hwnd, .. } => SwitchTargetIdentity::Window(*hwnd),
+                _ => SwitchTargetIdentity::Slate,
+            };
+            ((in_w, in_h), cap, first, identity)
+        };
     // Output resolution caps scale down while preserving the captured aspect ratio.
-    let FrameData::Gpu(tex) = &first.data else {
-        return Err("expected a GPU frame".into());
-    };
-    let (in_w, in_h) = d3d11::texture_size(tex);
     let (enc_w, enc_h) = output_dimensions_with_bounds(
         in_w,
         in_h,
@@ -788,6 +1015,8 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                 .ok_or_else(|| "disk replay cache was not prepared".to_string())?,
         },
     };
+    let (cap, switch_controller) =
+        SwitchableLiveCapture::new(device.clone(), clock, opts.fps, (in_w, in_h), cap, identity);
     let cap = CadencedCapture::new(cap, opts.fps, &first);
     let mut rec = Recorder::new_with_replay_storage(cap, encoder, replay_storage)
         .map_err(|e| format!("replay cache: {e}"))?;
@@ -955,7 +1184,11 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     }
                     return Ok(());
                 }
-                Ok(Cmd::SwitchCapture(_target)) => {}
+                Ok(Cmd::SwitchCapture(target)) => {
+                    if let Err(e) = switch_controller.switch_to(target) {
+                        warn_user(events, format!("switch capture: {e}"));
+                    }
+                }
                 Err(TryRecvError::Disconnected) => {
                     let _ = shutdown_recorder(
                         &mut rec,
@@ -2100,6 +2333,52 @@ mod tests {
         assert_eq!(
             output_dimensions(5120, 1440, OutputResolution::Source),
             (2560, 720)
+        );
+    }
+
+    #[test]
+    fn initial_canvas_uses_display_region_without_opening_capture() {
+        let region = CaptureRegion {
+            display_id: None,
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 720,
+        };
+
+        assert_eq!(
+            canvas_dimensions_from_capture_source(&CaptureSource::DisplayRegion(region)).unwrap(),
+            (1280, 720)
+        );
+    }
+
+    #[test]
+    fn switch_target_identity_dedupes_repeated_slate_and_window() {
+        let slate = SwitchCaptureTarget::Slate {
+            reason: SlateReason::NoEnabledForegroundGame,
+        };
+        let window = SwitchCaptureTarget::Window {
+            hwnd: 42,
+            title: "Game".into(),
+            active_game: Some(ActiveGame {
+                id: "g".into(),
+                name: "Game".into(),
+            }),
+            active_game_plugin_id: None,
+            recording_mode: RecordingMode::ReplaysOnly,
+        };
+
+        assert_eq!(
+            switch_target_identity(&slate),
+            switch_target_identity(&slate)
+        );
+        assert_eq!(
+            switch_target_identity(&window),
+            switch_target_identity(&window)
+        );
+        assert_ne!(
+            switch_target_identity(&slate),
+            switch_target_identity(&window)
         );
     }
 
