@@ -76,6 +76,12 @@ impl CropRect {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeMode {
+    Stretch,
+    Fit,
+}
+
 /// One converter per recording. The MP4 output size stays fixed, but window
 /// captures can resize, so the video processor is rebuilt when input changes.
 pub struct VideoConverter {
@@ -89,6 +95,7 @@ pub struct VideoConverter {
     out_width: u32,
     out_height: u32,
     source_rect: Option<RECT>,
+    resize_mode: ResizeMode,
 }
 
 impl VideoConverter {
@@ -99,7 +106,7 @@ impl VideoConverter {
         out_w: u32,
         out_h: u32,
     ) -> WinResult<Self> {
-        Self::new_with_crop(device, in_w, in_h, out_w, out_h, None)
+        Self::new_with_crop_and_resize(device, in_w, in_h, out_w, out_h, None, ResizeMode::Stretch)
     }
 
     pub fn new_with_crop(
@@ -109,6 +116,18 @@ impl VideoConverter {
         out_w: u32,
         out_h: u32,
         crop: Option<CropRect>,
+    ) -> WinResult<Self> {
+        Self::new_with_crop_and_resize(device, in_w, in_h, out_w, out_h, crop, ResizeMode::Stretch)
+    }
+
+    pub fn new_with_crop_and_resize(
+        device: &ID3D11Device,
+        in_w: u32,
+        in_h: u32,
+        out_w: u32,
+        out_h: u32,
+        crop: Option<CropRect>,
+        resize_mode: ResizeMode,
     ) -> WinResult<Self> {
         let video_device: ID3D11VideoDevice = device.cast()?;
         // SAFETY: trivial getter on a valid device.
@@ -127,6 +146,7 @@ impl VideoConverter {
             out_width: out_w,
             out_height: out_h,
             source_rect: crop.map(CropRect::to_rect),
+            resize_mode,
         })
     }
 
@@ -205,6 +225,21 @@ impl VideoConverter {
                 );
             }
         }
+        if self.resize_mode == ResizeMode::Fit {
+            let rect = aspect_fit_rect(in_width, in_height, self.out_width, self.out_height);
+            unsafe {
+                self.video_context.VideoProcessorSetOutputTargetRect(
+                    &self.processor,
+                    true,
+                    Some(&rect),
+                );
+            }
+        } else {
+            unsafe {
+                self.video_context
+                    .VideoProcessorSetOutputTargetRect(&self.processor, false, None);
+            }
+        }
         // SAFETY: processor/views are live; one enabled stream, no past or
         // future frames. ManuallyDrop field: we drop the view ourselves after.
         let result = unsafe {
@@ -219,6 +254,24 @@ impl VideoConverter {
         drop(std::mem::ManuallyDrop::into_inner(stream.pInputSurface));
         result?;
         Ok(out)
+    }
+}
+
+fn aspect_fit_rect(in_w: u32, in_h: u32, out_w: u32, out_h: u32) -> RECT {
+    let in_w = in_w.max(1) as f64;
+    let in_h = in_h.max(1) as f64;
+    let out_w_f = out_w.max(1) as f64;
+    let out_h_f = out_h.max(1) as f64;
+    let scale = (out_w_f / in_w).min(out_h_f / in_h);
+    let fit_w = (in_w * scale).round().clamp(1.0, out_w_f) as i32;
+    let fit_h = (in_h * scale).round().clamp(1.0, out_h_f) as i32;
+    let left = (out_w as i32 - fit_w) / 2;
+    let top = (out_h as i32 - fit_h) / 2;
+    RECT {
+        left,
+        top,
+        right: left + fit_w,
+        bottom: top + fit_h,
     }
 }
 
@@ -330,6 +383,33 @@ pub fn read_nv12(device: &ID3D11Device, src: &ID3D11Texture2D) -> WinResult<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aspect_fit_rect_keeps_same_aspect_full_frame() {
+        let rect = aspect_fit_rect(1920, 1080, 1280, 720);
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (0, 0, 1280, 720)
+        );
+    }
+
+    #[test]
+    fn aspect_fit_rect_pillarboxes_wide_output() {
+        let rect = aspect_fit_rect(4, 3, 1920, 1080);
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (240, 0, 1680, 1080)
+        );
+    }
+
+    #[test]
+    fn aspect_fit_rect_letterboxes_tall_output() {
+        let rect = aspect_fit_rect(16, 9, 1000, 1000);
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (0, 218, 1000, 781)
+        );
+    }
 
     #[test]
     fn reads_back_converted_nv12_as_contiguous_bytes() {

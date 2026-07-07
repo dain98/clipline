@@ -12,9 +12,9 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11VideoContext, ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor,
     ID3D11VideoProcessorEnumerator, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
     D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_MAP_FLAG_DO_NOT_WAIT, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEX2D_VPIV,
-    D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
-    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
+    D3D11_MAP_FLAG_DO_NOT_WAIT, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
+    D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_USAGE_STAGING, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
@@ -92,6 +92,38 @@ pub fn create_bgra_texture(
     // SAFETY: desc is fully initialized; out-param receives a valid pointer
     // on success.
     unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture))? };
+    Ok(texture.expect("texture out-param set on Ok"))
+}
+
+pub fn create_bgra_texture_from_pixels(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+    bgra: &[u8],
+) -> WinResult<ID3D11Texture2D> {
+    assert_eq!(bgra.len(), width as usize * height as usize * 4);
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let data = D3D11_SUBRESOURCE_DATA {
+        pSysMem: bgra.as_ptr().cast(),
+        SysMemPitch: width * 4,
+        SysMemSlicePitch: 0,
+    };
+    let mut texture = None;
+    unsafe { device.CreateTexture2D(&desc, Some(&data), Some(&mut texture))? };
     Ok(texture.expect("texture out-param set on Ok"))
 }
 
@@ -561,6 +593,14 @@ pub fn copy_texture_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creates_bgra_texture_from_cpu_pixels() {
+        let (device, _ctx) = create_device_for_tests().expect("WARP D3D11 device");
+        let pixels = vec![0x33; 4 * 4 * 4];
+        let texture = create_bgra_texture_from_pixels(&device, 4, 4, &pixels).expect("texture");
+        assert_eq!(texture_size(&texture), (4, 4));
+    }
 
     #[test]
     fn fit_within_preserves_aspect_and_does_not_upscale() {

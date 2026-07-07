@@ -17,7 +17,7 @@ use clipline_capture::probe::{
 use clipline_capture::traits::{
     AudioSource, CaptureEngine, CaptureError, Encoder, Frame, FrameData,
 };
-use clipline_capture::windows::nv12::CropRect;
+use clipline_capture::windows::nv12::{CropRect, ResizeMode};
 use clipline_capture::windows::wasapi::{
     enumerate_output_processes, process_loopback_available, AudioProcessInfo, WasapiChannelMode,
 };
@@ -1263,6 +1263,11 @@ fn open_candidate(
     enc_h: u32,
     ffmpeg_path: &Option<PathBuf>,
 ) -> Result<Box<dyn Encoder>, String> {
+    let resize_mode = if opts.focus_follow_enabled {
+        ResizeMode::Fit
+    } else {
+        ResizeMode::Stretch
+    };
     match candidate.api {
         EncoderApi::Mft => {
             if candidate.backend == EncoderBackend::MfSoftware {
@@ -1274,6 +1279,7 @@ fn open_candidate(
                 fps: opts.fps,
                 bitrate_bps: opts.bitrate_bps,
                 encoder_backend: Some(candidate.backend),
+                resize_mode,
             };
             MftH264Encoder::new(device, in_w, in_h, cfg)
                 .map(|e| Box::new(e) as Box<dyn Encoder>)
@@ -1283,7 +1289,7 @@ fn open_candidate(
             let ffmpeg = ffmpeg_path
                 .as_deref()
                 .ok_or_else(|| "ffmpeg not located".to_string())?;
-            FfmpegVideoEncoder::new_on(
+            FfmpegVideoEncoder::new_on_with_resize(
                 device,
                 ffmpeg,
                 candidate.backend,
@@ -1295,6 +1301,7 @@ fn open_candidate(
                 enc_h,
                 opts.fps,
                 opts.bitrate_bps,
+                resize_mode,
             )
             .map(|e| Box::new(e) as Box<dyn Encoder>)
             .map_err(|e| e.to_string())

@@ -110,6 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fps: FPS,
                 bitrate_bps: 12_000_000,
                 encoder_backend: None,
+                resize_mode: clipline_capture::windows::nv12::ResizeMode::Stretch,
             };
             Box::new(MftH264Encoder::new(&device, in_w, in_h, cfg)?)
         }

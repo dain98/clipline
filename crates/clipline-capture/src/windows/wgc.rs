@@ -663,6 +663,7 @@ mod tests {
             fps: 60,
             bitrate_bps: 2_000_000,
             encoder_backend: None,
+            resize_mode: crate::windows::nv12::ResizeMode::Stretch,
         };
         // Pull one frame to learn the capture size, then hand the engine on.
         let mut cap = cap;
