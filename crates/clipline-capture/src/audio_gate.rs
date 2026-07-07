@@ -6,8 +6,8 @@ mod tests {
     #[test]
     fn game_mode_passes_inner_packets_through() {
         let state = AudioPrivacyState::new_game();
-        let mut gate = PrivacyAudioGate::new(Box::new(MockAudioSource::new(48_000, 20)), state)
-            .expect("gate");
+        let mut gate =
+            PrivacyAudioGate::new(Box::new(MockAudioSource::new(48_000, 20)), state).expect("gate");
 
         let packets = gate.poll_packets(0.04).unwrap();
 
@@ -19,8 +19,9 @@ mod tests {
     #[test]
     fn slate_mode_drains_inner_and_emits_silence() {
         let state = AudioPrivacyState::new_game();
-        let mut gate = PrivacyAudioGate::new(Box::new(MockAudioSource::new(48_000, 20)), state.clone())
-            .expect("gate");
+        let mut gate =
+            PrivacyAudioGate::new(Box::new(MockAudioSource::new(48_000, 20)), state.clone())
+                .expect("gate");
         state.set_slate(true);
 
         let packets = gate.poll_packets(0.06).unwrap();
@@ -38,8 +39,8 @@ mod tests {
     }
 }
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use clipline_mp4::AudioTrackConfig;
 
@@ -76,7 +77,10 @@ pub struct PrivacyAudioGate {
 }
 
 impl PrivacyAudioGate {
-    pub fn new(inner: Box<dyn AudioSource>, state: AudioPrivacyState) -> Result<Self, CaptureError> {
+    pub fn new(
+        inner: Box<dyn AudioSource>,
+        state: AudioPrivacyState,
+    ) -> Result<Self, CaptureError> {
         Ok(Self {
             inner,
             state,
