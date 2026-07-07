@@ -622,7 +622,8 @@ fn review_player_owns_all_controls() {
     for required in [
         "var capturePrivacyState = { kind: \"game\", label: null, slate_reason: null }",
         "s.capture_kind || \"game\"",
-        "Privacy slate active. Focus a saved game to resume capture.",
+        "Desktop fallback active. Focus a saved game to switch back.",
+        "Recording the focused saved game; other windows record from the desktop.",
     ] {
         assert!(
             main_js().contains(required),

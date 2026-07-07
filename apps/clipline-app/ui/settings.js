@@ -2194,8 +2194,12 @@ async function addCustomGameFromWindow(win) {
 }
 
 function updateGameDetectionStatus() {
+  if (capturePrivacyState.kind === "desktop" && $("set-games-follow-focused").checked) {
+    $("game-detection-status").textContent = "Desktop fallback active. Focus a saved game to switch back.";
+    return;
+  }
   if (capturePrivacyState.kind === "slate" && $("set-games-follow-focused").checked) {
-    $("game-detection-status").textContent = "Privacy slate active. Focus a saved game to resume capture.";
+    $("game-detection-status").textContent = "Privacy slate active after a capture failure. Focus a saved game to retry.";
     return;
   }
   if (activeDetectedGame && activeDetectedGame.active) {
@@ -2207,7 +2211,7 @@ function updateGameDetectionStatus() {
       return;
     }
     if ($("set-games-follow-focused").checked) {
-      $("game-detection-status").textContent = "Recording the focused saved game; private windows use a slate.";
+      $("game-detection-status").textContent = "Recording the focused saved game; other windows record from the desktop.";
       return;
     }
     const enabledPlugins = gamePlugins.filter((plugin) => gamePluginSetting(plugin).enabled);

@@ -51,6 +51,7 @@ pub enum Cmd {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SwitchCaptureTarget {
+    Desktop,
     Window {
         hwnd: isize,
         title: String,
@@ -76,6 +77,7 @@ pub enum SlateReason {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CaptureKind {
     Game,
+    Desktop,
     Slate,
 }
 
@@ -100,12 +102,14 @@ impl TimedFrameSource for DxgiDuplicationCapture {
 /// opt-in borderless display/region backend (issue #42).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SwitchTargetIdentity {
+    Desktop,
     Window(isize),
     Slate,
 }
 
 fn switch_target_identity(target: &SwitchCaptureTarget) -> SwitchTargetIdentity {
     match target {
+        SwitchCaptureTarget::Desktop => SwitchTargetIdentity::Desktop,
         SwitchCaptureTarget::Window { hwnd, .. } => SwitchTargetIdentity::Window(*hwnd),
         SwitchCaptureTarget::Slate { .. } => SwitchTargetIdentity::Slate,
     }
@@ -363,6 +367,10 @@ impl SwitchableCaptureController {
         state.identity = SwitchTargetIdentity::Slate;
         drop(old);
         let next = match target {
+            SwitchCaptureTarget::Desktop => {
+                let cap = open_desktop_fallback(&state.device, state.clock)?;
+                LiveBackend::Wgc(cap)
+            }
             SwitchCaptureTarget::Window { hwnd, title, .. } => {
                 let hwnd = window_from_raw_handle(*hwnd)
                     .ok_or_else(|| format!("game window {title:?} is no longer available"))?;
@@ -776,22 +784,29 @@ struct FocusRunState {
 
 impl FocusRunState {
     fn from_options(opts: &ServiceOptions) -> Self {
-        let is_focus_follow_slate = opts.focus_follow_enabled && opts.active_game.is_none();
+        let is_desktop_fallback = opts.focus_follow_enabled && opts.active_game.is_none();
         Self {
-            capture_kind: if is_focus_follow_slate {
-                CaptureKind::Slate
+            capture_kind: if is_desktop_fallback {
+                CaptureKind::Desktop
             } else {
                 CaptureKind::Game
             },
             active_game: opts.active_game.clone(),
             active_game_plugin_id: opts.active_game_plugin_id.clone(),
             recording_mode: opts.recording_mode,
-            slate_reason: is_focus_follow_slate.then_some(SlateReason::NoEnabledForegroundGame),
+            slate_reason: None,
         }
     }
 
     fn apply_target(&mut self, target: &SwitchCaptureTarget) {
         match target {
+            SwitchCaptureTarget::Desktop => {
+                self.capture_kind = CaptureKind::Desktop;
+                self.active_game = None;
+                self.active_game_plugin_id = None;
+                self.recording_mode = RecordingMode::ReplaysOnly;
+                self.slate_reason = None;
+            }
             SwitchCaptureTarget::Window {
                 active_game,
                 active_game_plugin_id,
@@ -817,6 +832,10 @@ impl FocusRunState {
     fn accepts_plugin_markers(&self, plugin_id: &str) -> bool {
         self.capture_kind == CaptureKind::Game
             && self.active_game_plugin_id.as_deref() == Some(plugin_id)
+    }
+
+    fn should_mute_audio(&self) -> bool {
+        self.capture_kind == CaptureKind::Slate
     }
 }
 
@@ -854,6 +873,7 @@ impl CaptureSwitchLog {
                 t_s: entry.pts_s - start_s,
                 kind: match entry.state.capture_kind {
                     CaptureKind::Game => "game".into(),
+                    CaptureKind::Desktop => "desktop".into(),
                     CaptureKind::Slate => "slate".into(),
                 },
                 game_id: entry.state.active_game.as_ref().map(|game| game.id.clone()),
@@ -1250,6 +1270,14 @@ fn open_wgc(
     }
 }
 
+fn open_desktop_fallback(
+    device: &ID3D11Device,
+    clock: RelativeClock,
+) -> Result<WgcCapture, String> {
+    WgcCapture::primary_monitor_on(device.clone(), clock).map_err(|e| format!("init: {e}"))
+}
+
+#[cfg(test)]
 fn canvas_dimensions_from_capture_source(source: &CaptureSource) -> Result<(u32, u32), String> {
     match source {
         CaptureSource::DisplayRegion(region) => Ok((region.width, region.height)),
@@ -1261,14 +1289,6 @@ fn canvas_dimensions_from_capture_source(source: &CaptureSource) -> Result<(u32,
         }
         CaptureSource::WindowTitle(_) | CaptureSource::WindowHandle { .. } => Ok((1920, 1080)),
     }
-}
-
-fn initial_canvas_dimensions(
-    opts: &ServiceOptions,
-    _device: &ID3D11Device,
-    _events: &Sender<Event>,
-) -> Result<(u32, u32), String> {
-    canvas_dimensions_from_capture_source(&opts.capture_source)
 }
 
 fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> Result<(), String> {
@@ -1287,17 +1307,20 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     // secure desktop on the first frame, …) silently falls back to WGC.
     let ((in_w, in_h), cap, first, identity) =
         if opts.focus_follow_enabled && opts.active_game.is_none() {
-            let (in_w, in_h) = initial_canvas_dimensions(&opts, &device, events)?;
-            let mut cap = SlateCapture::new(&device, in_w, in_h, opts.fps)?;
+            let mut cap = open_desktop_fallback(&device, clock)?;
             let first = cap
-                .next_frame_timeout(Duration::ZERO)
+                .next_frame_timeout(FIRST_FRAME_TIMEOUT)
                 .map_err(|e| format!("init: {e}"))?
                 .ok_or("capture ended before the first frame")?;
+            let FrameData::Gpu(tex) = &first.data else {
+                return Err("expected a GPU frame".into());
+            };
+            let (in_w, in_h) = d3d11::texture_size(tex);
             (
                 (in_w, in_h),
-                LiveBackend::Slate(cap),
+                LiveBackend::Wgc(cap),
                 first,
-                SwitchTargetIdentity::Slate,
+                SwitchTargetIdentity::Desktop,
             )
         } else {
             let (cap, first) = open_screen_capture(
@@ -1313,7 +1336,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             let (in_w, in_h) = d3d11::texture_size(tex);
             let identity = match &opts.capture_source {
                 CaptureSource::WindowHandle { hwnd, .. } => SwitchTargetIdentity::Window(*hwnd),
-                _ => SwitchTargetIdentity::Slate,
+                _ => SwitchTargetIdentity::Desktop,
             };
             ((in_w, in_h), cap, first, identity)
         };
@@ -1347,7 +1370,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         .map_err(|e| format!("replay cache: {e}"))?;
     let audio_privacy = clipline_capture::AudioPrivacyState::new_game();
     let mut focus_state = FocusRunState::from_options(&opts);
-    audio_privacy.set_slate(focus_state.capture_kind == CaptureKind::Slate);
+    audio_privacy.set_slate(focus_state.should_mute_audio());
     let audio_tracks = audio_sources_from_options(clock, &opts.audio, events);
     let audio_track_metadata: Vec<ClipAudioTrack> = audio_tracks
         .iter()
@@ -1528,7 +1551,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                                 focus_state.active_game_plugin_id.as_deref(),
                                 last_frame_pts_s,
                             );
-                            audio_privacy.set_slate(focus_state.capture_kind == CaptureKind::Slate);
+                            audio_privacy.set_slate(focus_state.should_mute_audio());
                             if focus_state != old_state {
                                 switch_log.push(last_frame_pts_s, &focus_state);
                             }
@@ -2891,7 +2914,8 @@ mod tests {
     }
 
     #[test]
-    fn switch_target_identity_dedupes_repeated_slate_and_window() {
+    fn switch_target_identity_dedupes_desktop_slate_and_window() {
+        let desktop = SwitchCaptureTarget::Desktop;
         let slate = SwitchCaptureTarget::Slate {
             reason: SlateReason::NoEnabledForegroundGame,
         };
@@ -2907,6 +2931,10 @@ mod tests {
         };
 
         assert_eq!(
+            switch_target_identity(&desktop),
+            switch_target_identity(&desktop)
+        );
+        assert_eq!(
             switch_target_identity(&slate),
             switch_target_identity(&slate)
         );
@@ -2917,6 +2945,14 @@ mod tests {
         assert_ne!(
             switch_target_identity(&slate),
             switch_target_identity(&window)
+        );
+        assert_ne!(
+            switch_target_identity(&desktop),
+            switch_target_identity(&window)
+        );
+        assert_ne!(
+            switch_target_identity(&desktop),
+            switch_target_identity(&slate)
         );
     }
 
@@ -3340,6 +3376,21 @@ mod tests {
     }
 
     #[test]
+    fn focus_run_state_desktop_fallback_keeps_audio_public() {
+        let mut state = FocusRunState::from_options(&ServiceOptions::default());
+
+        state.apply_target(&SwitchCaptureTarget::Desktop);
+
+        assert_eq!(state.capture_kind, CaptureKind::Desktop);
+        assert_eq!(state.active_game, None);
+        assert_eq!(state.active_game_plugin_id, None);
+        assert_eq!(state.recording_mode, RecordingMode::ReplaysOnly);
+        assert_eq!(state.slate_reason, None);
+        assert!(!state.accepts_plugin_markers(crate::game_plugins::LEAGUE_OF_LEGENDS_ID));
+        assert!(!state.should_mute_audio());
+    }
+
+    #[test]
     fn focus_run_state_rejects_stale_plugin_markers_after_plugin_switch() {
         let mut state = FocusRunState::from_options(&ServiceOptions {
             active_game_plugin_id: Some("plugin_a".into()),
@@ -3413,6 +3464,32 @@ mod tests {
             active_game_plugin_id: None,
             recording_mode: RecordingMode::ReplaysOnly,
             slate_reason: Some(SlateReason::NoEnabledForegroundGame),
+        };
+
+        assert_eq!(
+            full_session_transition(Some("a"), &old, &next),
+            FullSessionTransition::None
+        );
+    }
+
+    #[test]
+    fn full_session_transition_keeps_recording_when_focus_moves_to_desktop() {
+        let old = FocusRunState {
+            capture_kind: CaptureKind::Game,
+            active_game: Some(ActiveGame {
+                id: "a".into(),
+                name: "A".into(),
+            }),
+            active_game_plugin_id: None,
+            recording_mode: RecordingMode::FullSession,
+            slate_reason: None,
+        };
+        let next = FocusRunState {
+            capture_kind: CaptureKind::Desktop,
+            active_game: None,
+            active_game_plugin_id: None,
+            recording_mode: RecordingMode::ReplaysOnly,
+            slate_reason: None,
         };
 
         assert_eq!(
