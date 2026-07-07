@@ -2104,6 +2104,7 @@ mod tests {
                 },
             ],
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: Vec::new(),
         }
     }

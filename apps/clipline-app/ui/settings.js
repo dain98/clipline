@@ -2194,6 +2194,10 @@ async function addCustomGameFromWindow(win) {
 }
 
 function updateGameDetectionStatus() {
+  if (capturePrivacyState.kind === "slate" && $("set-games-follow-focused").checked) {
+    $("game-detection-status").textContent = "Privacy slate active. Focus a saved game to resume capture.";
+    return;
+  }
   if (activeDetectedGame && activeDetectedGame.active) {
     $("game-detection-status").textContent =
       `Active: ${activeDetectedGame.name} · ${activeDetectedGame.window_title}`;

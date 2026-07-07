@@ -104,6 +104,7 @@ var currentSettings = null;
 var settingsDraft = null;
 var recordingActive = false;
 var fullSessionRecordingActive = false;
+var capturePrivacyState = { kind: "game", label: null, slate_reason: null };
 var displays = [];
 var displaysLoaded = false;
 var displaysLoadPromise = null;

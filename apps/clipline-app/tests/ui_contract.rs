@@ -619,6 +619,16 @@ fn review_player_owns_all_controls() {
             && main_js().contains("$(\"set-games-follow-focused\").addEventListener(\"change\", updateGameDetectionStatus)"),
         "Settings JS must default, fill, read, and wire focus-follow"
     );
+    for required in [
+        "var capturePrivacyState = { kind: \"game\", label: null, slate_reason: null }",
+        "s.capture_kind || \"game\"",
+        "Privacy slate active. Focus a saved game to resume capture.",
+    ] {
+        assert!(
+            main_js().contains(required),
+            "focus-follow status wiring must include {required}"
+        );
+    }
     assert!(
         html.contains("Experimental")
             && html.contains("set-audio-split-output")

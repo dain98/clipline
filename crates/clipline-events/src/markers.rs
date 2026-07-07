@@ -127,6 +127,18 @@ pub struct ClipPlay {
     pub t_end_s: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClipSourceSwitch {
+    pub t_s: f64,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slate_reason: Option<String>,
+}
+
 /// The `<clip>.markers.json` sidecar document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipMarkers {
@@ -139,6 +151,8 @@ pub struct ClipMarkers {
     pub audio_tracks: Vec<ClipAudioTrack>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plays: Vec<ClipPlay>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_switches: Vec<ClipSourceSwitch>,
     pub markers: Vec<ClipMarker>,
 }
 
@@ -182,6 +196,7 @@ impl MarkerLog {
             player_summary: None,
             audio_tracks: Vec::new(),
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers,
         }
     }
@@ -301,6 +316,7 @@ mod tests {
         assert!(back.audio_tracks.is_empty());
         assert!(back.markers.is_empty());
         assert!(back.plays.is_empty());
+        assert!(back.source_switches.is_empty());
     }
 
     #[test]
@@ -310,7 +326,6 @@ mod tests {
             duration_s: 180.0,
             player_summary: None,
             audio_tracks: Vec::new(),
-            markers: Vec::new(),
             plays: vec![ClipPlay {
                 game_id: GameId::Osu,
                 source: "osu_api".into(),
@@ -337,6 +352,8 @@ mod tests {
                 t_start_s: 5.0,
                 t_end_s: Some(95.0),
             }],
+            source_switches: Vec::new(),
+            markers: Vec::new(),
         };
 
         let json = serde_json::to_string_pretty(&clip).unwrap();

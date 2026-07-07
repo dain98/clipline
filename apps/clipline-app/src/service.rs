@@ -70,6 +70,13 @@ pub enum SlateReason {
     SwitchFailed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CaptureKind {
+    Game,
+    Slate,
+}
+
 trait TimedFrameSource {
     fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError>;
 }
@@ -316,7 +323,7 @@ impl TimedFrameSource for SwitchableLiveCapture {
 
 impl SwitchableCaptureController {
     fn switch_to(&self, target: &SwitchCaptureTarget) -> Result<(), String> {
-        let next_identity = switch_target_identity(&target);
+        let next_identity = switch_target_identity(target);
         let mut state = self
             .state
             .lock()
@@ -629,6 +636,11 @@ pub enum Event {
         /// Active encoder label (e.g. "AMD AMF · H.264"); empty when stopped.
         #[serde(default)]
         encoder: String,
+        capture_kind: CaptureKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capture_label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slate_reason: Option<SlateReason>,
     },
     Saved {
         path: String,
@@ -728,6 +740,133 @@ impl Default for ServiceOptions {
             decodable_codecs: vec![Codec::H264],
             audio: AudioOptions::default(),
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FocusRunState {
+    capture_kind: CaptureKind,
+    active_game: Option<ActiveGame>,
+    active_game_plugin_id: Option<String>,
+    recording_mode: RecordingMode,
+    slate_reason: Option<SlateReason>,
+}
+
+impl FocusRunState {
+    fn from_options(opts: &ServiceOptions) -> Self {
+        let is_focus_follow_slate = opts.focus_follow_enabled && opts.active_game.is_none();
+        Self {
+            capture_kind: if is_focus_follow_slate {
+                CaptureKind::Slate
+            } else {
+                CaptureKind::Game
+            },
+            active_game: opts.active_game.clone(),
+            active_game_plugin_id: opts.active_game_plugin_id.clone(),
+            recording_mode: opts.recording_mode,
+            slate_reason: is_focus_follow_slate.then_some(SlateReason::NoEnabledForegroundGame),
+        }
+    }
+
+    fn apply_target(&mut self, target: &SwitchCaptureTarget) {
+        match target {
+            SwitchCaptureTarget::Window {
+                active_game,
+                active_game_plugin_id,
+                recording_mode,
+                ..
+            } => {
+                self.capture_kind = CaptureKind::Game;
+                self.active_game = active_game.clone();
+                self.active_game_plugin_id = active_game_plugin_id.clone();
+                self.recording_mode = *recording_mode;
+                self.slate_reason = None;
+            }
+            SwitchCaptureTarget::Slate { reason } => {
+                self.capture_kind = CaptureKind::Slate;
+                self.active_game = None;
+                self.active_game_plugin_id = None;
+                self.recording_mode = RecordingMode::ReplaysOnly;
+                self.slate_reason = Some(*reason);
+            }
+        }
+    }
+
+    fn accepts_plugin_markers(&self, plugin_id: &str) -> bool {
+        self.capture_kind == CaptureKind::Game
+            && self.active_game_plugin_id.as_deref() == Some(plugin_id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FullSessionTransition {
+    None,
+    Start,
+    Finish,
+    FinishThenStart,
+}
+
+#[derive(Default)]
+struct CaptureSwitchLog {
+    entries: Vec<CaptureSwitchEntry>,
+}
+
+struct CaptureSwitchEntry {
+    pts_s: f64,
+    state: FocusRunState,
+}
+
+impl CaptureSwitchLog {
+    fn push(&mut self, pts_s: f64, state: &FocusRunState) {
+        self.entries.push(CaptureSwitchEntry {
+            pts_s,
+            state: state.clone(),
+        });
+    }
+
+    fn clip_switches(&self, start_s: f64, end_s: f64) -> Vec<clipline_events::ClipSourceSwitch> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.pts_s >= start_s && entry.pts_s < end_s)
+            .map(|entry| clipline_events::ClipSourceSwitch {
+                t_s: entry.pts_s - start_s,
+                kind: match entry.state.capture_kind {
+                    CaptureKind::Game => "game".into(),
+                    CaptureKind::Slate => "slate".into(),
+                },
+                game_id: entry.state.active_game.as_ref().map(|game| game.id.clone()),
+                game_name: entry
+                    .state
+                    .active_game
+                    .as_ref()
+                    .map(|game| game.name.clone()),
+                slate_reason: entry.state.slate_reason.map(|reason| match reason {
+                    SlateReason::NoEnabledForegroundGame => "no_enabled_foreground_game".into(),
+                    SlateReason::WindowUnavailable => "window_unavailable".into(),
+                    SlateReason::SwitchFailed => "switch_failed".into(),
+                }),
+            })
+            .collect()
+    }
+}
+
+fn full_session_transition(
+    active_recording_game_id: Option<&str>,
+    _old_state: &FocusRunState,
+    next_state: &FocusRunState,
+) -> FullSessionTransition {
+    let next_full = next_state.capture_kind == CaptureKind::Game
+        && next_state.recording_mode == RecordingMode::FullSession;
+    let next_id = next_state.active_game.as_ref().map(|game| game.id.as_str());
+    match (active_recording_game_id, next_full, next_id) {
+        (None, true, Some(_)) => FullSessionTransition::Start,
+        (Some(_), false, _) if next_state.capture_kind == CaptureKind::Game => {
+            FullSessionTransition::Finish
+        }
+        (Some(current), true, Some(next)) if current != next => {
+            FullSessionTransition::FinishThenStart
+        }
+        _ => FullSessionTransition::None,
     }
 }
 
@@ -1026,13 +1165,18 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let cap = CadencedCapture::new(cap, opts.fps, &first);
     let mut rec = Recorder::new_with_replay_storage(cap, encoder, replay_storage)
         .map_err(|e| format!("replay cache: {e}"))?;
+    let audio_privacy = clipline_capture::AudioPrivacyState::new_game();
+    let mut focus_state = FocusRunState::from_options(&opts);
+    audio_privacy.set_slate(focus_state.capture_kind == CaptureKind::Slate);
     let audio_tracks = audio_sources_from_options(clock, &opts.audio, events);
     let audio_track_metadata: Vec<ClipAudioTrack> = audio_tracks
         .iter()
         .map(|(_, track)| track.clone())
         .collect();
     for (audio, _) in audio_tracks {
-        rec = rec.with_audio(audio);
+        let gated = clipline_capture::PrivacyAudioGate::new(audio, audio_privacy.clone())
+            .map_err(|e| format!("audio privacy: {e}"))?;
+        rec = rec.with_audio(Box::new(gated));
     }
     let (clips_dir, fell_back) = clips_dir_resolved(&opts.media_dir, default_clips_dir)?;
     if fell_back {
@@ -1061,18 +1205,23 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     // folder per detected match. Folders are created lazily at save time.
     let mut session = SessionTracker::new(local_session_label(false));
     let mut last_status = Instant::now();
+    let mut switch_log = CaptureSwitchLog::default();
+    let mut last_frame_pts_s = 0.0;
+    switch_log.push(0.0, &focus_state);
     let mut full_session = begin_full_session_recording(
         &mut rec,
         &clips_dir,
         session.current(),
-        opts.recording_mode,
-        opts.active_game.as_ref(),
+        focus_state.recording_mode,
+        focus_state.active_game.as_ref(),
         events,
     );
-    send_recording_status(events, &rec, &full_session, &encoder_status);
+    send_recording_status(events, &rec, &full_session, &encoder_status, &focus_state);
 
     loop {
-        match rec.step_with_frame(|_frame| {}) {
+        match rec.step_with_frame(|frame| {
+            last_frame_pts_s = frame.pts_s;
+        }) {
             Ok(true) => {}
             Ok(false) => break,
             // Idle screen: WGC delivers nothing — keep serving commands.
@@ -1083,6 +1232,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     &mut full_session,
                     RecorderFinishContext {
                         marker_log: &marker_log,
+                        switch_log: &switch_log,
                         player_summary: player_summary.full_session_summary(),
                         audio_tracks: &audio_track_metadata,
                         clips_dir: &clips_dir,
@@ -1095,33 +1245,42 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         }
 
         while let Ok(msg) = marker_rx.try_recv() {
+            let marker_allowed = focus_state
+                .active_game_plugin_id
+                .as_deref()
+                .is_some_and(|plugin_id| focus_state.accepts_plugin_markers(plugin_id));
             match msg {
                 PollerMsg::Event(event) => {
-                    // GameEnd means the match is over even while the Live
-                    // Client API lingers; stop attributing saves to it.
-                    if event.kind == EventKind::GameEnd {
-                        player_summary.match_ended();
-                        session.match_ended();
-                    }
-                    if is_review_event(&event) {
-                        marker_log.push(event);
+                    if marker_allowed {
+                        // GameEnd means the match is over even while the Live
+                        // Client API lingers; stop attributing saves to it.
+                        if event.kind == EventKind::GameEnd {
+                            player_summary.match_ended();
+                            session.match_ended();
+                        }
+                        if is_review_event(&event) {
+                            marker_log.push(event);
+                        }
                     }
                 }
-                PollerMsg::PlayerSummary(summary) => player_summary.update(summary),
-                PollerMsg::MatchStarted => {
+                PollerMsg::PlayerSummary(summary) if marker_allowed => {
+                    player_summary.update(summary)
+                }
+                PollerMsg::MatchStarted if marker_allowed => {
                     player_summary.match_started();
                     session.match_started(local_session_label(true));
                 }
-                PollerMsg::MatchEnded => {
+                PollerMsg::MatchEnded if marker_allowed => {
                     player_summary.match_ended();
                     session.match_ended();
                 }
+                _ => {}
             }
         }
 
         if last_status.elapsed() >= Duration::from_secs(1) {
             last_status = Instant::now();
-            send_recording_status(events, &rec, &full_session, &encoder_status);
+            send_recording_status(events, &rec, &full_session, &encoder_status, &focus_state);
             if replay_cache_dir.is_some() {
                 ensure_replay_cache_free_space(&opts)?;
             }
@@ -1137,7 +1296,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         });
                         continue;
                     }
-                    write_session_game_meta(&session_dir, opts.active_game.as_ref());
+                    write_session_game_meta(&session_dir, focus_state.active_game.as_ref());
                     let path = unique_media_path(&session_dir, "clip");
                     match save(&rec, &path, opts.replay_window_s) {
                         Ok((end, seconds)) => {
@@ -1146,6 +1305,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                             let markers = write_marker_sidecar(
                                 events,
                                 &marker_log,
+                                &switch_log,
                                 &path,
                                 end - seconds,
                                 end,
@@ -1178,6 +1338,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         &mut full_session,
                         RecorderFinishContext {
                             marker_log: &marker_log,
+                            switch_log: &switch_log,
                             player_summary: player_summary.full_session_summary(),
                             audio_tracks: &audio_track_metadata,
                             clips_dir: &clips_dir,
@@ -1191,8 +1352,55 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     return Ok(());
                 }
                 Ok(Cmd::SwitchCapture(target)) => {
-                    if let Err(e) = switch_controller.switch_to(&target) {
-                        warn_retryable_switch_failure(events, &target, e);
+                    let old_state = focus_state.clone();
+                    match switch_controller.switch_to(&target) {
+                        Ok(()) => {
+                            focus_state.apply_target(&target);
+                            audio_privacy.set_slate(focus_state.capture_kind == CaptureKind::Slate);
+                            if focus_state != old_state {
+                                switch_log.push(last_frame_pts_s, &focus_state);
+                            }
+                            reconcile_full_session_transition(
+                                &mut rec,
+                                &clips_dir,
+                                session.current(),
+                                &mut full_session,
+                                &old_state,
+                                &focus_state,
+                                &marker_log,
+                                &switch_log,
+                                player_summary.full_session_summary(),
+                                &audio_track_metadata,
+                                events,
+                                &opts,
+                            );
+                            send_recording_status(
+                                events,
+                                &rec,
+                                &full_session,
+                                &encoder_status,
+                                &focus_state,
+                            );
+                        }
+                        Err(e) => {
+                            warn_retryable_switch_failure(events, &target, e);
+                            let fallback = SwitchCaptureTarget::Slate {
+                                reason: SlateReason::SwitchFailed,
+                            };
+                            let _ = switch_controller.switch_to(&fallback);
+                            focus_state.apply_target(&fallback);
+                            audio_privacy.set_slate(true);
+                            if focus_state != old_state {
+                                switch_log.push(last_frame_pts_s, &focus_state);
+                            }
+                            send_recording_status(
+                                events,
+                                &rec,
+                                &full_session,
+                                &encoder_status,
+                                &focus_state,
+                            );
+                        }
                     }
                 }
                 Err(TryRecvError::Disconnected) => {
@@ -1201,6 +1409,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         &mut full_session,
                         RecorderFinishContext {
                             marker_log: &marker_log,
+                            switch_log: &switch_log,
                             player_summary: player_summary.full_session_summary(),
                             audio_tracks: &audio_track_metadata,
                             clips_dir: &clips_dir,
@@ -1220,6 +1429,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         &mut full_session,
         RecorderFinishContext {
             marker_log: &marker_log,
+            switch_log: &switch_log,
             player_summary: player_summary.full_session_summary(),
             audio_tracks: &audio_track_metadata,
             clips_dir: &clips_dir,
@@ -1390,7 +1600,10 @@ fn warn_retryable_switch_failure(
     if let SwitchCaptureTarget::Window { hwnd, .. } = target {
         let _ = events.send(Event::FocusFollowRetry { hwnd: *hwnd });
     }
-    warn_user(events, format!("switch capture: {error}"));
+    warn_user(
+        events,
+        format!("switch capture target: {error}; using privacy slate"),
+    );
 }
 
 /// Combined MFT + FFmpeg capabilities. Probing is hardware-stable per
@@ -1644,6 +1857,9 @@ fn send_stopped(events: &Sender<Event>) {
         buffered_mb: 0.0,
         full_session: false,
         encoder: String::new(),
+        capture_kind: CaptureKind::Game,
+        capture_label: None,
+        slate_reason: None,
     });
 }
 
@@ -1652,6 +1868,7 @@ fn send_recording_status(
     rec: &LiveRecorder,
     full_session: &Option<FullSessionRecording>,
     encoder_status: &str,
+    focus_state: &FocusRunState,
 ) {
     let _ = events.send(Event::Status {
         recording: true,
@@ -1660,6 +1877,12 @@ fn send_recording_status(
         buffered_mb: rec.ring_bytes() as f64 / (1024.0 * 1024.0),
         full_session: full_session.is_some(),
         encoder: encoder_status.to_string(),
+        capture_kind: focus_state.capture_kind,
+        capture_label: focus_state
+            .active_game
+            .as_ref()
+            .map(|game| game.name.clone()),
+        slate_reason: focus_state.slate_reason,
     });
 }
 
@@ -1695,6 +1918,7 @@ fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Event>) {
 
 struct RecorderFinishContext<'a> {
     marker_log: &'a MarkerLog,
+    switch_log: &'a CaptureSwitchLog,
     player_summary: Option<&'a PlayerSummary>,
     audio_tracks: &'a [ClipAudioTrack],
     clips_dir: &'a Path,
@@ -1748,6 +1972,70 @@ fn write_session_game_meta(session_dir: &Path, active_game: Option<&ActiveGame>)
     }
 }
 
+fn active_full_session_game_id(recording: &Option<FullSessionRecording>) -> Option<&str> {
+    recording
+        .as_ref()
+        .and_then(|recording| recording.game_id.as_deref())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_full_session_transition(
+    rec: &mut LiveRecorder,
+    clips_dir: &Path,
+    session_label: &str,
+    full_session: &mut Option<FullSessionRecording>,
+    old_state: &FocusRunState,
+    next_state: &FocusRunState,
+    marker_log: &MarkerLog,
+    switch_log: &CaptureSwitchLog,
+    player_summary: Option<&PlayerSummary>,
+    audio_tracks: &[ClipAudioTrack],
+    events: &Sender<Event>,
+    opts: &ServiceOptions,
+) {
+    let transition = full_session_transition(
+        active_full_session_game_id(full_session),
+        old_state,
+        next_state,
+    );
+    let ctx = RecorderFinishContext {
+        marker_log,
+        switch_log,
+        player_summary,
+        audio_tracks,
+        clips_dir,
+        opts,
+        events,
+    };
+    match transition {
+        FullSessionTransition::None => {}
+        FullSessionTransition::Finish => {
+            finish_full_session_recording(rec, full_session, &ctx);
+        }
+        FullSessionTransition::Start => {
+            *full_session = begin_full_session_recording(
+                rec,
+                clips_dir,
+                session_label,
+                next_state.recording_mode,
+                next_state.active_game.as_ref(),
+                events,
+            );
+        }
+        FullSessionTransition::FinishThenStart => {
+            finish_full_session_recording(rec, full_session, &ctx);
+            *full_session = begin_full_session_recording(
+                rec,
+                clips_dir,
+                session_label,
+                next_state.recording_mode,
+                next_state.active_game.as_ref(),
+                events,
+            );
+        }
+    }
+}
+
 fn begin_full_session_recording(
     rec: &mut LiveRecorder,
     clips_dir: &Path,
@@ -1794,6 +2082,7 @@ fn begin_full_session_recording(
         temp_path,
         wall_start_unix: unix_now(),
         min_duration_s: minimum_full_session_duration_s(active_game),
+        game_id: active_game.map(|game| game.id.clone()),
     })
 }
 
@@ -1845,6 +2134,7 @@ fn finish_full_session_recording(
             let markers = write_marker_sidecar(
                 ctx.events,
                 ctx.marker_log,
+                ctx.switch_log,
                 &recording.final_path,
                 summary.start_s,
                 summary.end_s,
@@ -1920,6 +2210,7 @@ struct FullSessionRecording {
     temp_path: PathBuf,
     wall_start_unix: i64,
     min_duration_s: f64,
+    game_id: Option<String>,
 }
 
 fn minimum_full_session_duration_s(active_game: Option<&ActiveGame>) -> f64 {
@@ -1964,9 +2255,11 @@ fn unique_media_path(session_dir: &Path, prefix: &str) -> PathBuf {
     session_dir.join(format!("{prefix}_{fallback}.mp4"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_marker_sidecar(
     events: &Sender<Event>,
     marker_log: &MarkerLog,
+    switch_log: &CaptureSwitchLog,
     path: &Path,
     start_s: f64,
     end_s: f64,
@@ -1977,11 +2270,13 @@ fn write_marker_sidecar(
     clip.markers.retain(|m| is_review_event(&m.event));
     clip.player_summary = player_summary.cloned();
     clip.audio_tracks = audio_tracks.to_vec();
+    clip.source_switches = switch_log.clip_switches(start_s, end_s);
     let markers = clip.markers.len();
     if markers == 0
         && clip.player_summary.is_none()
         && clip.audio_tracks.is_empty()
         && clip.plays.is_empty()
+        && clip.source_switches.is_empty()
     {
         return 0;
     }
@@ -2669,6 +2964,108 @@ mod tests {
     }
 
     #[test]
+    fn focus_run_state_uses_latest_active_game_for_save_meta() {
+        let mut state = FocusRunState::from_options(&ServiceOptions::default());
+        state.apply_target(&SwitchCaptureTarget::Window {
+            hwnd: 9,
+            title: "Game B".into(),
+            active_game: Some(ActiveGame {
+                id: "game-b".into(),
+                name: "Game B".into(),
+            }),
+            active_game_plugin_id: None,
+            recording_mode: RecordingMode::ReplaysOnly,
+        });
+
+        assert_eq!(
+            state.active_game.as_ref().map(|game| game.id.as_str()),
+            Some("game-b")
+        );
+        assert_eq!(state.recording_mode, RecordingMode::ReplaysOnly);
+    }
+
+    #[test]
+    fn focus_run_state_gates_plugin_markers_to_current_plugin() {
+        let mut state = FocusRunState::from_options(&ServiceOptions {
+            active_game_plugin_id: Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into()),
+            ..ServiceOptions::default()
+        });
+        assert!(state.accepts_plugin_markers(crate::game_plugins::LEAGUE_OF_LEGENDS_ID));
+
+        state.apply_target(&SwitchCaptureTarget::Slate {
+            reason: SlateReason::NoEnabledForegroundGame,
+        });
+        assert!(!state.accepts_plugin_markers(crate::game_plugins::LEAGUE_OF_LEGENDS_ID));
+    }
+
+    #[test]
+    fn full_session_transition_splits_between_different_full_session_games() {
+        let old = FocusRunState {
+            capture_kind: CaptureKind::Game,
+            active_game: Some(ActiveGame {
+                id: "a".into(),
+                name: "A".into(),
+            }),
+            active_game_plugin_id: None,
+            recording_mode: RecordingMode::FullSession,
+            slate_reason: None,
+        };
+        let next = FocusRunState {
+            capture_kind: CaptureKind::Game,
+            active_game: Some(ActiveGame {
+                id: "b".into(),
+                name: "B".into(),
+            }),
+            active_game_plugin_id: None,
+            recording_mode: RecordingMode::FullSession,
+            slate_reason: None,
+        };
+
+        assert_eq!(
+            full_session_transition(Some("a"), &old, &next),
+            FullSessionTransition::FinishThenStart
+        );
+    }
+
+    #[test]
+    fn capture_switch_log_filters_to_saved_window() {
+        let mut log = CaptureSwitchLog::default();
+        log.push(
+            0.5,
+            &FocusRunState {
+                capture_kind: CaptureKind::Game,
+                active_game: Some(ActiveGame {
+                    id: "a".into(),
+                    name: "A".into(),
+                }),
+                active_game_plugin_id: None,
+                recording_mode: RecordingMode::ReplaysOnly,
+                slate_reason: None,
+            },
+        );
+        log.push(
+            1.5,
+            &FocusRunState {
+                capture_kind: CaptureKind::Slate,
+                active_game: None,
+                active_game_plugin_id: None,
+                recording_mode: RecordingMode::ReplaysOnly,
+                slate_reason: Some(SlateReason::NoEnabledForegroundGame),
+            },
+        );
+
+        let switches = log.clip_switches(1.0, 2.0);
+
+        assert_eq!(switches.len(), 1);
+        assert_eq!(switches[0].t_s, 0.5);
+        assert_eq!(switches[0].kind, "slate");
+        assert_eq!(
+            switches[0].slate_reason.as_deref(),
+            Some("no_enabled_foreground_game")
+        );
+    }
+
+    #[test]
     fn write_marker_sidecar_keeps_player_summary_without_markers() {
         let dir = TestDir::new("clipline-service", "sidecar-summary");
         let path = dir.path().join("clip.mp4");
@@ -2690,6 +3087,7 @@ mod tests {
         let count = write_marker_sidecar(
             &tx,
             &MarkerLog::new(),
+            &CaptureSwitchLog::default(),
             &path,
             0.0,
             10.0,
@@ -2711,7 +3109,16 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let tracks = vec![audio_track("output", 0, "Output Audio", "output")];
 
-        let count = write_marker_sidecar(&tx, &MarkerLog::new(), &path, 0.0, 10.0, None, &tracks);
+        let count = write_marker_sidecar(
+            &tx,
+            &MarkerLog::new(),
+            &CaptureSwitchLog::default(),
+            &path,
+            0.0,
+            10.0,
+            None,
+            &tracks,
+        );
 
         assert_eq!(count, 0);
         let json = std::fs::read_to_string(path.with_extension("markers.json")).unwrap();
@@ -2755,7 +3162,16 @@ mod tests {
             false,
         ));
 
-        let count = write_marker_sidecar(&tx, &log, &path, 10.0, 20.0, None, &[]);
+        let count = write_marker_sidecar(
+            &tx,
+            &log,
+            &CaptureSwitchLog::default(),
+            &path,
+            10.0,
+            20.0,
+            None,
+            &[],
+        );
 
         assert_eq!(count, 3);
         let json = std::fs::read_to_string(path.with_extension("markers.json")).unwrap();
@@ -2858,7 +3274,8 @@ mod tests {
         ));
         assert!(matches!(
             rx.recv(),
-            Ok(Event::Error { message }) if message.contains("switch capture: window open failed")
+            Ok(Event::Error { message })
+                if message.contains("switch capture target: window open failed; using privacy slate")
         ));
     }
 
@@ -2944,6 +3361,7 @@ mod tests {
             temp_path: dir.path().join("session.mp4.recording"),
             wall_start_unix: 0,
             min_duration_s: 0.0,
+            game_id: None,
         };
         let (tx, rx) = mpsc::channel();
 
@@ -2959,6 +3377,7 @@ mod tests {
             temp_path: dir.path().join("session.mp4.recording"),
             wall_start_unix: 0,
             min_duration_s: 0.0,
+            game_id: None,
         };
         let (tx, rx) = mpsc::channel();
 

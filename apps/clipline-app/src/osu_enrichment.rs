@@ -219,6 +219,7 @@ fn write_plays_sidecar(
         player_summary: None,
         audio_tracks: Vec::new(),
         plays: Vec::new(),
+        source_switches: Vec::new(),
         markers: Vec::new(),
     });
     if markers.duration_s <= 0.0 || !markers.duration_s.is_finite() {
