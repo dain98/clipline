@@ -74,6 +74,15 @@ struct GameDetectionEvent {
     recording_mode: Option<GameRecordingMode>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FocusFollowTargetKey {
+    Window {
+        hwnd: isize,
+        recording_mode: GameRecordingMode,
+    },
+    Slate,
+}
+
 #[derive(serde::Serialize)]
 struct UpdateCheckResult {
     channel: UpdateChannel,
@@ -456,6 +465,7 @@ struct RuntimeInner {
     settings: AppSettings,
     lol_url: Option<String>,
     active_game: Option<DetectedGame>,
+    focus_follow_target: Option<FocusFollowTargetKey>,
     osu_title_events: Vec<OsuTitleEvent>,
     last_save_request: Option<Instant>,
     /// Codecs WebView2 can decode, reported by the frontend. Drives the
@@ -486,6 +496,7 @@ impl RuntimeState {
             settings,
             lol_url,
             active_game: None,
+            focus_follow_target: None,
             osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
@@ -538,6 +549,7 @@ impl RuntimeState {
     /// decodable codecs injected. Caller holds the lock.
     fn options(inner: &RuntimeInner) -> Result<service::ServiceOptions, String> {
         let mut opts = inner.settings.to_service_options(inner.lol_url.clone())?;
+        opts.focus_follow_enabled = inner.settings.games.follow_focused_windows;
         opts.decodable_codecs = inner.decodable_codecs.clone();
         if let Some(game) = &inner.active_game {
             opts.capture_source = service::CaptureSource::WindowHandle {
@@ -556,6 +568,53 @@ impl RuntimeState {
             });
         }
         Ok(opts)
+    }
+
+    fn focus_follow_key(detected: Option<&DetectedGame>) -> FocusFollowTargetKey {
+        match detected {
+            Some(game) => FocusFollowTargetKey::Window {
+                hwnd: game.hwnd,
+                recording_mode: game.recording_mode,
+            },
+            None => FocusFollowTargetKey::Slate,
+        }
+    }
+
+    fn focus_follow_command(detected: Option<&DetectedGame>) -> Cmd {
+        match detected {
+            Some(game) => Cmd::SwitchCapture(service::SwitchCaptureTarget::Window {
+                hwnd: game.hwnd,
+                title: game.window_title.clone(),
+                active_game: Some(service::ActiveGame {
+                    id: game.id.clone(),
+                    name: game.name.clone(),
+                }),
+                active_game_plugin_id: crate::game_plugins::contains(&game.id)
+                    .then(|| game.id.clone()),
+                recording_mode: game.recording_mode.into(),
+            }),
+            None => Cmd::SwitchCapture(service::SwitchCaptureTarget::Slate {
+                reason: service::SlateReason::NoEnabledForegroundGame,
+            }),
+        }
+    }
+
+    fn prepare_focus_follow_update(
+        inner: &mut RuntimeInner,
+        detected: Option<DetectedGame>,
+    ) -> Result<bool, String> {
+        record_osu_title_event(inner, detected.as_ref(), unix_now());
+        let next_key = Self::focus_follow_key(detected.as_ref());
+        if inner.focus_follow_target.as_ref() == Some(&next_key) {
+            return Ok(false);
+        }
+        let command = Self::focus_follow_command(detected.as_ref());
+        inner.active_game = detected;
+        inner.focus_follow_target = Some(next_key);
+        if let Some(tx) = &inner.tx {
+            let _ = tx.send(command);
+        }
+        Ok(true)
     }
 
     fn prepare_service_restart(
@@ -581,6 +640,7 @@ impl RuntimeState {
         if cleared_active_game {
             inner.active_game = None;
         }
+        inner.focus_follow_target = None;
         inner.settings = settings;
         let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
         Ok(PreparedRuntimeRestart {
@@ -765,6 +825,17 @@ impl RuntimeState {
         detected: Option<DetectedGame>,
     ) -> Result<(), String> {
         let event = GameDetectionEvent::from_detected(detected.as_ref());
+        {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            if inner.settings.games.follow_focused_windows {
+                let emit_event = Self::prepare_focus_follow_update(&mut inner, detected)?;
+                drop(inner);
+                if emit_event {
+                    let _ = app.emit("game-detection", event);
+                }
+                return Ok(());
+            }
+        }
         let (old_tx, next_options, emit_event) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             record_osu_title_event(&mut inner, detected.as_ref(), unix_now());
@@ -1830,7 +1901,11 @@ fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
             loop {
                 std::thread::sleep(GAME_DETECTOR_INTERVAL);
                 let settings = app.state::<RuntimeState>().settings();
-                let detected = crate::games::detect_active_game(&settings.games);
+                let detected = if settings.games.follow_focused_windows {
+                    crate::games::detect_focused_game(&settings.games)
+                } else {
+                    crate::games::detect_active_game(&settings.games)
+                };
                 match app
                     .state::<RuntimeState>()
                     .set_detected_game(app.clone(), detected)
@@ -2052,6 +2127,20 @@ mod tests {
         CloudUploadRecord, GameRecordingMode, ReplayStorageMode, ReplayStorageSettings,
     };
 
+    fn runtime_inner_with_sender(tx: Sender<Cmd>, settings: AppSettings) -> RuntimeInner {
+        RuntimeInner {
+            tx: Some(tx),
+            recording_generation: 1,
+            settings,
+            lol_url: None,
+            active_game: None,
+            focus_follow_target: None,
+            osu_title_events: Vec::new(),
+            last_save_request: None,
+            decodable_codecs: vec![service::Codec::H264],
+        }
+    }
+
     #[test]
     fn quota_parser_converts_gib_to_bytes() {
         assert_eq!(parse_quota_gb("1").unwrap(), Some(1024 * 1024 * 1024));
@@ -2067,6 +2156,59 @@ mod tests {
     fn quota_parser_rejects_negative_or_non_numeric_values() {
         assert!(parse_quota_gb("-1").is_err());
         assert!(parse_quota_gb("nope").is_err());
+    }
+
+    #[test]
+    fn focus_follow_update_sends_switch_command_without_restart() {
+        let (tx, rx) = mpsc::channel();
+        let mut settings = AppSettings::default();
+        settings.games.follow_focused_windows = true;
+        let mut inner = runtime_inner_with_sender(tx, settings);
+        let detected = DetectedGame {
+            id: "custom-game".into(),
+            name: "Game".into(),
+            hwnd: 42,
+            window_title: "Game Window".into(),
+            process_id: 7,
+            exe_name: "game.exe".into(),
+            recording_mode: GameRecordingMode::ReplaysOnly,
+        };
+
+        let emit = RuntimeState::prepare_focus_follow_update(&mut inner, Some(detected)).unwrap();
+
+        assert!(emit);
+        assert!(inner.tx.is_some(), "recorder sender stays installed");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Cmd::SwitchCapture(service::SwitchCaptureTarget::Window {
+                hwnd: 42,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn focus_follow_duplicate_target_sends_no_command() {
+        let (tx, rx) = mpsc::channel();
+        let mut settings = AppSettings::default();
+        settings.games.follow_focused_windows = true;
+        let mut inner = runtime_inner_with_sender(tx, settings);
+        let detected = DetectedGame {
+            id: "custom-game".into(),
+            name: "Game".into(),
+            hwnd: 42,
+            window_title: "Game Window".into(),
+            process_id: 7,
+            exe_name: "game.exe".into(),
+            recording_mode: GameRecordingMode::ReplaysOnly,
+        };
+
+        RuntimeState::prepare_focus_follow_update(&mut inner, Some(detected.clone())).unwrap();
+        let emit = RuntimeState::prepare_focus_follow_update(&mut inner, Some(detected)).unwrap();
+
+        assert!(!emit);
+        assert!(rx.try_recv().is_ok(), "first command exists");
+        assert!(rx.try_recv().is_err(), "duplicate command suppressed");
     }
 
     #[test]
@@ -2257,6 +2399,7 @@ mod tests {
             settings: invalid_disk_replay_settings(),
             lol_url: None,
             active_game: None,
+            focus_follow_target: None,
             osu_title_events: Vec::new(),
             last_save_request: Some(Instant::now()),
             decodable_codecs: vec![service::Codec::H264],
@@ -2284,6 +2427,7 @@ mod tests {
             settings: AppSettings::default(),
             lol_url: None,
             active_game: None,
+            focus_follow_target: None,
             osu_title_events: Vec::new(),
             last_save_request: Some(Instant::now()),
             decodable_codecs: vec![service::Codec::H264],
@@ -2314,6 +2458,7 @@ mod tests {
                 exe_name: "game.exe".into(),
                 recording_mode: GameRecordingMode::FullSession,
             }),
+            focus_follow_target: None,
             osu_title_events: Vec::new(),
             last_save_request: Some(Instant::now()),
             decodable_codecs: vec![service::Codec::H264],
@@ -2486,6 +2631,7 @@ mod tests {
             settings: AppSettings::default(),
             lol_url: None,
             active_game: None,
+            focus_follow_target: None,
             osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
@@ -2828,6 +2974,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 exe_name: "game.exe".into(),
                 recording_mode: GameRecordingMode::FullSession,
             }),
+            focus_follow_target: None,
             osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
@@ -2862,6 +3009,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 exe_name: "League of Legends.exe".into(),
                 recording_mode: GameRecordingMode::FullSession,
             }),
+            focus_follow_target: None,
             osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],

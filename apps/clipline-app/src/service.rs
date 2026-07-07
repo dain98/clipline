@@ -40,9 +40,34 @@ use crate::markers::PollerMsg;
 pub use clipline_capture::probe::Codec;
 
 const LOW_REPLAY_CACHE_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cmd {
     Save,
+    SwitchCapture(SwitchCaptureTarget),
     Stop { announce: bool },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SwitchCaptureTarget {
+    Window {
+        hwnd: isize,
+        title: String,
+        active_game: Option<ActiveGame>,
+        active_game_plugin_id: Option<String>,
+        recording_mode: RecordingMode,
+    },
+    Slate {
+        reason: SlateReason,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlateReason {
+    NoEnabledForegroundGame,
+    WindowUnavailable,
+    SwitchFailed,
 }
 
 trait TimedFrameSource {
@@ -440,7 +465,7 @@ pub enum Event {
 
 /// The game a recording run is attributed to (plugin or custom), recorded
 /// alongside saved clips so the library can show its icon.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveGame {
     pub id: String,
     pub name: String,
@@ -448,6 +473,7 @@ pub struct ActiveGame {
 
 pub struct ServiceOptions {
     pub capture_source: CaptureSource,
+    pub focus_follow_enabled: bool,
     /// Screen-capture backend preference for display/region capture.
     pub capture_backend: CaptureBackend,
     /// Built-in game plugin id for the active capture target, if any.
@@ -490,6 +516,7 @@ impl Default for ServiceOptions {
     fn default() -> Self {
         Self {
             capture_source: CaptureSource::PrimaryMonitor,
+            focus_follow_enabled: false,
             capture_backend: CaptureBackend::Auto,
             active_game_plugin_id: None,
             active_game: None,
@@ -928,6 +955,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     }
                     return Ok(());
                 }
+                Ok(Cmd::SwitchCapture(_target)) => {}
                 Err(TryRecvError::Disconnected) => {
                     let _ = shutdown_recorder(
                         &mut rec,

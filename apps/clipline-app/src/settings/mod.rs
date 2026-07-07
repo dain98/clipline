@@ -185,6 +185,7 @@ impl AppSettings {
                     CaptureSource::DisplayRegion(self.capture_region.to_service_region())
                 }
             },
+            focus_follow_enabled: false,
             capture_backend: self.capture_backend,
             active_game_plugin_id: None,
             active_game: None,
