@@ -561,7 +561,7 @@ impl RuntimeState {
     /// decodable codecs injected. Caller holds the lock.
     fn options(inner: &RuntimeInner) -> Result<service::ServiceOptions, String> {
         let mut opts = inner.settings.to_service_options(inner.lol_url.clone())?;
-        opts.focus_follow_enabled = inner.settings.games.follow_focused_windows;
+        opts.focus_follow_enabled = focus_follow_enabled(&inner.settings);
         opts.decodable_codecs = inner.decodable_codecs.clone();
         if let Some(game) = &inner.active_game {
             opts.capture_source = service::CaptureSource::WindowHandle {
@@ -621,11 +621,16 @@ impl RuntimeState {
             return Ok(false);
         }
         let command = Self::focus_follow_command(detected.as_ref());
+        let Some(tx) = inner.tx.as_ref() else {
+            return Ok(false);
+        };
+        if tx.send(command).is_err() {
+            inner.tx = None;
+            inner.last_save_request = None;
+            return Ok(false);
+        }
         inner.active_game = detected;
         inner.focus_follow_target = Some(next_key);
-        if let Some(tx) = &inner.tx {
-            let _ = tx.send(command);
-        }
         Ok(true)
     }
 
@@ -839,7 +844,7 @@ impl RuntimeState {
         let event = GameDetectionEvent::from_detected(detected.as_ref());
         {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            if inner.settings.games.follow_focused_windows {
+            if focus_follow_enabled(&inner.settings) {
                 let emit_event = Self::prepare_focus_follow_update(&mut inner, detected)?;
                 drop(inner);
                 if emit_event {
@@ -970,6 +975,10 @@ fn active_game_still_configured(settings: &AppSettings, active: Option<&Detected
                 .custom_games
                 .iter()
                 .any(|game| game.enabled && game.id == active.id))
+}
+
+fn focus_follow_enabled(settings: &AppSettings) -> bool {
+    settings.games.auto_detect && settings.games.follow_focused_windows
 }
 
 #[tauri::command]
@@ -1913,7 +1922,7 @@ fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
             loop {
                 std::thread::sleep(GAME_DETECTOR_INTERVAL);
                 let settings = app.state::<RuntimeState>().settings();
-                let detected = if settings.games.follow_focused_windows {
+                let detected = if focus_follow_enabled(&settings) {
                     crate::games::detect_focused_game(&settings.games)
                 } else {
                     crate::games::detect_active_game(&settings.games)
@@ -2159,6 +2168,18 @@ mod tests {
         }
     }
 
+    fn detected_game() -> DetectedGame {
+        DetectedGame {
+            id: "custom-game".into(),
+            name: "Game".into(),
+            hwnd: 42,
+            window_title: "Game Window".into(),
+            process_id: 7,
+            exe_name: "game.exe".into(),
+            recording_mode: GameRecordingMode::ReplaysOnly,
+        }
+    }
+
     #[test]
     fn quota_parser_converts_gib_to_bytes() {
         assert_eq!(parse_quota_gb("1").unwrap(), Some(1024 * 1024 * 1024));
@@ -2177,20 +2198,25 @@ mod tests {
     }
 
     #[test]
+    fn options_disable_focus_follow_when_auto_detect_is_off() {
+        let (tx, _rx) = mpsc::channel();
+        let mut settings = AppSettings::default();
+        settings.games.auto_detect = false;
+        settings.games.follow_focused_windows = true;
+        let inner = runtime_inner_with_sender(tx, settings);
+
+        let opts = RuntimeState::options(&inner).unwrap();
+
+        assert!(!opts.focus_follow_enabled);
+    }
+
+    #[test]
     fn focus_follow_update_sends_switch_command_without_restart() {
         let (tx, rx) = mpsc::channel();
         let mut settings = AppSettings::default();
         settings.games.follow_focused_windows = true;
         let mut inner = runtime_inner_with_sender(tx, settings);
-        let detected = DetectedGame {
-            id: "custom-game".into(),
-            name: "Game".into(),
-            hwnd: 42,
-            window_title: "Game Window".into(),
-            process_id: 7,
-            exe_name: "game.exe".into(),
-            recording_mode: GameRecordingMode::ReplaysOnly,
-        };
+        let detected = detected_game();
 
         let emit = RuntimeState::prepare_focus_follow_update(&mut inner, Some(detected)).unwrap();
 
@@ -2211,15 +2237,7 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.games.follow_focused_windows = true;
         let mut inner = runtime_inner_with_sender(tx, settings);
-        let detected = DetectedGame {
-            id: "custom-game".into(),
-            name: "Game".into(),
-            hwnd: 42,
-            window_title: "Game Window".into(),
-            process_id: 7,
-            exe_name: "game.exe".into(),
-            recording_mode: GameRecordingMode::ReplaysOnly,
-        };
+        let detected = detected_game();
 
         RuntimeState::prepare_focus_follow_update(&mut inner, Some(detected.clone())).unwrap();
         let emit = RuntimeState::prepare_focus_follow_update(&mut inner, Some(detected)).unwrap();
@@ -2230,20 +2248,43 @@ mod tests {
     }
 
     #[test]
+    fn focus_follow_send_failure_does_not_commit_dedupe_target() {
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        let mut settings = AppSettings::default();
+        settings.games.follow_focused_windows = true;
+        let mut inner = runtime_inner_with_sender(tx, settings);
+        let detected = detected_game();
+
+        let emit =
+            RuntimeState::prepare_focus_follow_update(&mut inner, Some(detected.clone())).unwrap();
+
+        assert!(!emit);
+        assert!(inner.tx.is_none(), "dead sender is cleared");
+        assert!(inner.active_game.is_none());
+        assert!(inner.focus_follow_target.is_none());
+
+        let (retry_tx, retry_rx) = mpsc::channel();
+        RuntimeState::install_recording_sender(&mut inner, retry_tx);
+        let emit = RuntimeState::prepare_focus_follow_update(&mut inner, Some(detected)).unwrap();
+
+        assert!(emit, "same focus target remains retryable");
+        assert!(matches!(
+            retry_rx.try_recv(),
+            Ok(Cmd::SwitchCapture(service::SwitchCaptureTarget::Window {
+                hwnd: 42,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn focus_follow_retryable_failure_allows_same_window_retry() {
         let (tx, rx) = mpsc::channel();
         let mut settings = AppSettings::default();
         settings.games.follow_focused_windows = true;
         let state = RuntimeState::with_sender(tx, settings, None);
-        let detected = DetectedGame {
-            id: "custom-game".into(),
-            name: "Game".into(),
-            hwnd: 42,
-            window_title: "Game Window".into(),
-            process_id: 7,
-            exe_name: "game.exe".into(),
-            recording_mode: GameRecordingMode::ReplaysOnly,
-        };
+        let detected = detected_game();
 
         {
             let mut inner = state.0.lock().unwrap();

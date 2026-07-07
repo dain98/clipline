@@ -28,7 +28,9 @@ use clipline_capture::windows::{
 use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
 };
-use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
+use clipline_events::{
+    is_review_event, ClipAudioTrack, EventKind, GameEvent, MarkerLog, PlayerSummary,
+};
 use clipline_storage::sessions::{session_label, SessionTracker};
 use clipline_storage::{enforce_quota, recover_recording_files, storage_status, StorageStatus};
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
@@ -880,9 +882,7 @@ fn full_session_transition(
     let next_id = next_state.active_game.as_ref().map(|game| game.id.as_str());
     match (active_recording_game_id, next_full, next_id) {
         (None, true, Some(_)) => FullSessionTransition::Start,
-        (Some(_), false, _) if next_state.capture_kind == CaptureKind::Game => {
-            FullSessionTransition::Finish
-        }
+        (Some(_), false, _) => FullSessionTransition::Finish,
         (Some(current), true, Some(next)) if current != next => {
             FullSessionTransition::FinishThenStart
         }
@@ -925,6 +925,95 @@ where
 
 fn marker_source_key(plugin_id: Option<&str>) -> MarkerSourceKey {
     marker_source_key_for(plugin_id, crate::game_plugins::has_event_source)
+}
+
+fn marker_events_allowed(focus_state: &FocusRunState, source_key: &MarkerSourceKey) -> bool {
+    match source_key {
+        MarkerSourceKey::Plugin(plugin_id) => focus_state.accepts_plugin_markers(plugin_id),
+        MarkerSourceKey::LegacyLeaguePoller => {
+            focus_state.capture_kind == CaptureKind::Game
+                && focus_state.active_game.is_none()
+                && focus_state.active_game_plugin_id.is_none()
+        }
+        MarkerSourceKey::NoMarkerSource => false,
+    }
+}
+
+fn marker_lifecycle_allowed(focus_state: &FocusRunState, source_key: &MarkerSourceKey) -> bool {
+    match source_key {
+        MarkerSourceKey::Plugin(plugin_id) => focus_state
+            .active_game_plugin_id
+            .as_deref()
+            .is_some_and(|active| active == plugin_id),
+        MarkerSourceKey::LegacyLeaguePoller => {
+            focus_state.active_game.is_none() && focus_state.active_game_plugin_id.is_none()
+        }
+        MarkerSourceKey::NoMarkerSource => false,
+    }
+}
+
+fn marker_event_is_fresh(event: &GameEvent, source_active_since_s: f64) -> bool {
+    const MARKER_SWITCH_EPSILON_S: f64 = 0.250;
+    event
+        .recording_offset_s
+        .is_none_or(|offset| offset + MARKER_SWITCH_EPSILON_S >= source_active_since_s)
+}
+
+fn handle_marker_message(
+    msg: PollerMsg,
+    source_key: &MarkerSourceKey,
+    source_active_since_s: f64,
+    focus_state: &FocusRunState,
+    marker_log: &mut MarkerLog,
+    player_summary: &mut PlayerSummaryState,
+    session: &mut SessionTracker,
+) {
+    let marker_allowed = marker_events_allowed(focus_state, source_key);
+    let lifecycle_allowed = marker_lifecycle_allowed(focus_state, source_key);
+    match msg {
+        PollerMsg::Event(event) => {
+            if !marker_event_is_fresh(&event, source_active_since_s) {
+                return;
+            }
+            if lifecycle_allowed && event.kind == EventKind::GameEnd {
+                player_summary.match_ended();
+                session.match_ended();
+            }
+            if marker_allowed && is_review_event(&event) {
+                marker_log.push(event);
+            }
+        }
+        PollerMsg::PlayerSummary(summary) if marker_allowed => player_summary.update(summary),
+        PollerMsg::MatchStarted if marker_allowed => {
+            player_summary.match_started();
+            session.match_started(local_session_label(true));
+        }
+        PollerMsg::MatchEnded if lifecycle_allowed => {
+            player_summary.match_ended();
+            session.match_ended();
+        }
+        _ => {}
+    }
+}
+
+fn drain_marker_runtime(
+    marker_runtime: &MarkerRuntime,
+    focus_state: &FocusRunState,
+    marker_log: &mut MarkerLog,
+    player_summary: &mut PlayerSummaryState,
+    session: &mut SessionTracker,
+) {
+    while let Ok(msg) = marker_runtime.try_recv() {
+        handle_marker_message(
+            msg,
+            marker_runtime.source_key(),
+            marker_runtime.source_active_since_s(),
+            focus_state,
+            marker_log,
+            player_summary,
+            session,
+        );
+    }
 }
 
 #[derive(Default)]
@@ -992,6 +1081,7 @@ struct MarkerRuntime {
     marker_rx: Receiver<PollerMsg>,
     lol_url: Option<String>,
     recording_t0: Instant,
+    source_active_since_s: f64,
 }
 
 impl MarkerRuntime {
@@ -1008,10 +1098,11 @@ impl MarkerRuntime {
             marker_rx,
             lol_url: opts.lol_url.clone(),
             recording_t0,
+            source_active_since_s: 0.0,
         }
     }
 
-    fn sync_to_plugin(&mut self, plugin_id: Option<&str>) {
+    fn sync_to_plugin(&mut self, plugin_id: Option<&str>, active_since_s: f64) {
         let next_key = marker_source_key(plugin_id);
         if next_key == self.source_key {
             return;
@@ -1023,10 +1114,19 @@ impl MarkerRuntime {
             self.recording_t0,
         );
         self.source_key = next_key;
+        self.source_active_since_s = active_since_s;
     }
 
     fn try_recv(&self) -> Result<PollerMsg, TryRecvError> {
         self.marker_rx.try_recv()
+    }
+
+    fn source_key(&self) -> &MarkerSourceKey {
+        &self.source_key
+    }
+
+    fn source_active_since_s(&self) -> f64 {
+        self.source_active_since_s
     }
 }
 
@@ -1322,39 +1422,13 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             }
         }
 
-        while let Ok(msg) = marker_runtime.try_recv() {
-            let marker_allowed = focus_state
-                .active_game_plugin_id
-                .as_deref()
-                .is_some_and(|plugin_id| focus_state.accepts_plugin_markers(plugin_id));
-            match msg {
-                PollerMsg::Event(event) => {
-                    if marker_allowed {
-                        // GameEnd means the match is over even while the Live
-                        // Client API lingers; stop attributing saves to it.
-                        if event.kind == EventKind::GameEnd {
-                            player_summary.match_ended();
-                            session.match_ended();
-                        }
-                        if is_review_event(&event) {
-                            marker_log.push(event);
-                        }
-                    }
-                }
-                PollerMsg::PlayerSummary(summary) if marker_allowed => {
-                    player_summary.update(summary)
-                }
-                PollerMsg::MatchStarted if marker_allowed => {
-                    player_summary.match_started();
-                    session.match_started(local_session_label(true));
-                }
-                PollerMsg::MatchEnded if marker_allowed => {
-                    player_summary.match_ended();
-                    session.match_ended();
-                }
-                _ => {}
-            }
-        }
+        drain_marker_runtime(
+            &marker_runtime,
+            &focus_state,
+            &mut marker_log,
+            &mut player_summary,
+            &mut session,
+        );
 
         if last_status.elapsed() >= Duration::from_secs(1) {
             last_status = Instant::now();
@@ -1431,11 +1505,27 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                 }
                 Ok(Cmd::SwitchCapture(target)) => {
                     let old_state = focus_state.clone();
+                    drain_marker_runtime(
+                        &marker_runtime,
+                        &old_state,
+                        &mut marker_log,
+                        &mut player_summary,
+                        &mut session,
+                    );
                     match switch_controller.switch_to(&target) {
                         Ok(()) => {
+                            drain_marker_runtime(
+                                &marker_runtime,
+                                &old_state,
+                                &mut marker_log,
+                                &mut player_summary,
+                                &mut session,
+                            );
                             focus_state.apply_target(&target);
-                            marker_runtime
-                                .sync_to_plugin(focus_state.active_game_plugin_id.as_deref());
+                            marker_runtime.sync_to_plugin(
+                                focus_state.active_game_plugin_id.as_deref(),
+                                last_frame_pts_s,
+                            );
                             audio_privacy.set_slate(focus_state.capture_kind == CaptureKind::Slate);
                             if focus_state != old_state {
                                 switch_log.push(last_frame_pts_s, &focus_state);
@@ -1464,17 +1554,47 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         }
                         Err(e) => {
                             warn_retryable_switch_failure(events, &target, e);
+                            drain_marker_runtime(
+                                &marker_runtime,
+                                &old_state,
+                                &mut marker_log,
+                                &mut player_summary,
+                                &mut session,
+                            );
                             let fallback = SwitchCaptureTarget::Slate {
                                 reason: SlateReason::SwitchFailed,
                             };
                             let _ = switch_controller.switch_to(&fallback);
+                            drain_marker_runtime(
+                                &marker_runtime,
+                                &old_state,
+                                &mut marker_log,
+                                &mut player_summary,
+                                &mut session,
+                            );
                             focus_state.apply_target(&fallback);
-                            marker_runtime
-                                .sync_to_plugin(focus_state.active_game_plugin_id.as_deref());
+                            marker_runtime.sync_to_plugin(
+                                focus_state.active_game_plugin_id.as_deref(),
+                                last_frame_pts_s,
+                            );
                             audio_privacy.set_slate(true);
                             if focus_state != old_state {
                                 switch_log.push(last_frame_pts_s, &focus_state);
                             }
+                            reconcile_full_session_transition(
+                                &mut rec,
+                                &clips_dir,
+                                session.current(),
+                                &mut full_session,
+                                &old_state,
+                                &focus_state,
+                                &marker_log,
+                                &switch_log,
+                                player_summary.full_session_summary(),
+                                &audio_track_metadata,
+                                events,
+                                &opts,
+                            );
                             send_recording_status(
                                 events,
                                 &rec,
@@ -3085,6 +3205,104 @@ mod tests {
     }
 
     #[test]
+    fn marker_gate_preserves_legacy_poller_for_default_capture() {
+        let state = FocusRunState::from_options(&ServiceOptions::default());
+
+        assert!(marker_events_allowed(
+            &state,
+            &MarkerSourceKey::LegacyLeaguePoller
+        ));
+    }
+
+    #[test]
+    fn marker_gate_rejects_legacy_review_events_on_slate_but_keeps_lifecycle() {
+        let mut state = FocusRunState::from_options(&ServiceOptions::default());
+        state.apply_target(&SwitchCaptureTarget::Slate {
+            reason: SlateReason::NoEnabledForegroundGame,
+        });
+
+        assert!(!marker_events_allowed(
+            &state,
+            &MarkerSourceKey::LegacyLeaguePoller
+        ));
+        assert!(marker_lifecycle_allowed(
+            &state,
+            &MarkerSourceKey::LegacyLeaguePoller
+        ));
+    }
+
+    #[test]
+    fn marker_gate_rejects_legacy_poller_for_custom_active_game() {
+        let state = FocusRunState::from_options(&ServiceOptions {
+            active_game: Some(ActiveGame {
+                id: "custom-game".into(),
+                name: "Custom Game".into(),
+            }),
+            ..ServiceOptions::default()
+        });
+
+        assert!(!marker_events_allowed(
+            &state,
+            &MarkerSourceKey::LegacyLeaguePoller
+        ));
+    }
+
+    #[test]
+    fn marker_handler_drops_review_events_that_predate_source_attach() {
+        let state = FocusRunState::from_options(&ServiceOptions::default());
+        let mut marker_log = MarkerLog::new();
+        let mut player_summary = PlayerSummaryState::default();
+        let mut session = SessionTracker::new("run".into());
+
+        handle_marker_message(
+            PollerMsg::Event(review_event(
+                EventKind::ChampionKill,
+                "Dain",
+                Some("Enemy"),
+                10.0,
+                true,
+            )),
+            &MarkerSourceKey::LegacyLeaguePoller,
+            20.0,
+            &state,
+            &mut marker_log,
+            &mut player_summary,
+            &mut session,
+        );
+
+        assert_eq!(marker_log.len(), 0);
+    }
+
+    #[test]
+    fn marker_handler_ends_match_during_slate_without_logging_review_event() {
+        let mut state = FocusRunState::from_options(&ServiceOptions::default());
+        state.apply_target(&SwitchCaptureTarget::Slate {
+            reason: SlateReason::NoEnabledForegroundGame,
+        });
+        let summary = player_summary("Nautilus", 3, 4, 22);
+        let mut marker_log = MarkerLog::new();
+        let mut player_summary = PlayerSummaryState::default();
+        player_summary.match_started();
+        player_summary.update(summary);
+        let mut session = SessionTracker::new("run".into());
+        session.match_started("match".into());
+
+        handle_marker_message(
+            PollerMsg::Event(review_event(EventKind::GameEnd, "Dain", None, 12.0, true)),
+            &MarkerSourceKey::LegacyLeaguePoller,
+            10.0,
+            &state,
+            &mut marker_log,
+            &mut player_summary,
+            &mut session,
+        );
+
+        assert_eq!(marker_log.len(), 0);
+        assert_eq!(player_summary.active_replay_summary(), None);
+        assert_eq!(session.current(), "run");
+    }
+
+    #[test]
     fn focus_run_state_uses_latest_active_game_for_save_meta() {
         let mut state = FocusRunState::from_options(&ServiceOptions::default());
         state.apply_target(&SwitchCaptureTarget::Window {
@@ -3172,6 +3390,32 @@ mod tests {
         assert_eq!(
             full_session_transition(Some("a"), &old, &next),
             FullSessionTransition::FinishThenStart
+        );
+    }
+
+    #[test]
+    fn full_session_transition_finishes_when_focus_moves_to_slate() {
+        let old = FocusRunState {
+            capture_kind: CaptureKind::Game,
+            active_game: Some(ActiveGame {
+                id: "a".into(),
+                name: "A".into(),
+            }),
+            active_game_plugin_id: None,
+            recording_mode: RecordingMode::FullSession,
+            slate_reason: None,
+        };
+        let next = FocusRunState {
+            capture_kind: CaptureKind::Slate,
+            active_game: None,
+            active_game_plugin_id: None,
+            recording_mode: RecordingMode::ReplaysOnly,
+            slate_reason: Some(SlateReason::NoEnabledForegroundGame),
+        };
+
+        assert_eq!(
+            full_session_transition(Some("a"), &old, &next),
+            FullSessionTransition::Finish
         );
     }
 

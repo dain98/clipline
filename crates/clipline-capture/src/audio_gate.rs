@@ -37,6 +37,21 @@ mod tests {
         assert_eq!(resumed.len(), 1);
         assert!(resumed[0].pts_s >= 0.06);
     }
+
+    #[test]
+    fn slate_mode_caps_silence_backfill_after_long_gap() {
+        let state = AudioPrivacyState::new_game();
+        let mut gate =
+            PrivacyAudioGate::new(Box::new(MockAudioSource::new(48_000, 20)), state.clone())
+                .expect("gate");
+        state.set_slate(true);
+
+        let packets = gate.poll_packets(30.0).unwrap();
+
+        assert!(packets.len() <= 101, "silence backfill should stay bounded");
+        assert!(packets[0].pts_s >= 30.0 - MAX_SILENCE_BACKFILL_S - 1e-9);
+        assert!(packets.iter().all(|packet| !packet.data.starts_with(b"P")));
+    }
 }
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +61,8 @@ use clipline_mp4::AudioTrackConfig;
 
 use crate::opus::{OpusFrameEncoder, FRAME_DURATION_S, FRAME_LEN};
 use crate::traits::{AudioPacket, AudioSource, CaptureError};
+
+const MAX_SILENCE_BACKFILL_S: f64 = 2.0;
 
 #[derive(Clone, Debug)]
 pub struct AudioPrivacyState {
@@ -105,6 +122,9 @@ impl AudioSource for PrivacyAudioGate {
         if let Some(first) = inner_packets.first() {
             self.next_silence_pts_s = self.next_silence_pts_s.max(first.pts_s);
         }
+        self.next_silence_pts_s = self
+            .next_silence_pts_s
+            .max((until_pts_s - MAX_SILENCE_BACKFILL_S).max(0.0));
         let mut out = Vec::new();
         while self.next_silence_pts_s + FRAME_DURATION_S <= until_pts_s + 1e-9 {
             let data = self

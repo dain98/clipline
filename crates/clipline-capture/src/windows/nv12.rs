@@ -5,15 +5,15 @@
 use windows::core::{Interface, Result as WinResult};
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1,
-    ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+    D3D11_VIDEO_COLOR_YCbCrA, ID3D11Device, ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext,
+    ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
     D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
-    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D,
+    D3D11_VIDEO_COLOR, D3D11_VIDEO_COLOR_0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
@@ -213,6 +213,7 @@ impl VideoConverter {
             pInputSurface: std::mem::ManuallyDrop::new(in_view),
             ..Default::default()
         };
+        set_output_background_black(&self.video_context, &self.processor);
         if let Some(rect) = &self.source_rect {
             // SAFETY: processor is live and `rect` is a valid source rectangle
             // for stream 0. The caller validates the crop against the input.
@@ -254,6 +255,31 @@ impl VideoConverter {
         drop(std::mem::ManuallyDrop::into_inner(stream.pInputSurface));
         result?;
         Ok(out)
+    }
+}
+
+fn set_output_background_black(
+    video_context: &ID3D11VideoContext,
+    processor: &ID3D11VideoProcessor,
+) {
+    let color = limited_ycbcr_black();
+    // SAFETY: `processor` belongs to this live video context, and `color`
+    // points to a valid YCbCr background for the duration of the call.
+    unsafe {
+        video_context.VideoProcessorSetOutputBackgroundColor(processor, true, &color);
+    }
+}
+
+fn limited_ycbcr_black() -> D3D11_VIDEO_COLOR {
+    D3D11_VIDEO_COLOR {
+        Anonymous: D3D11_VIDEO_COLOR_0 {
+            YCbCr: D3D11_VIDEO_COLOR_YCbCrA {
+                Y: 16.0 / 255.0,
+                Cb: 0.5,
+                Cr: 0.5,
+                A: 1.0,
+            },
+        },
     }
 }
 
@@ -409,6 +435,18 @@ mod tests {
             (rect.left, rect.top, rect.right, rect.bottom),
             (0, 218, 1000, 781)
         );
+    }
+
+    #[test]
+    fn fit_background_black_uses_limited_range_ycbcr() {
+        let color = limited_ycbcr_black();
+        // SAFETY: limited_ycbcr_black initializes the YCbCr union arm.
+        let ycbcr = unsafe { color.Anonymous.YCbCr };
+
+        assert!((ycbcr.Y - 16.0 / 255.0).abs() < f32::EPSILON);
+        assert_eq!(ycbcr.Cb, 0.5);
+        assert_eq!(ycbcr.Cr, 0.5);
+        assert_eq!(ycbcr.A, 1.0);
     }
 
     #[test]
