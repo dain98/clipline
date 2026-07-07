@@ -1,5 +1,6 @@
 /target
 .worktrees/
+.superpowers/
 **/*.rs.bk
 *.mp4
 .local-secrets/
