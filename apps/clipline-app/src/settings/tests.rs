@@ -17,6 +17,7 @@ fn defaults_match_current_recorder_behavior() {
 
     assert_eq!(settings.capture_mode, CaptureMode::PrimaryMonitor);
     assert!(settings.games.auto_detect);
+    assert!(!settings.games.follow_focused_windows);
     assert!(settings.games.plugins.is_empty());
     assert!(settings.games.custom_games.is_empty());
     assert!(settings.audio.output_enabled);
@@ -46,6 +47,7 @@ fn defaults_match_current_recorder_behavior() {
     assert_eq!(settings.update_channel, UpdateChannel::Nightly);
     assert!(!settings.legacy_timeline_editor);
     assert_eq!(serialized["legacy_timeline_editor"], false);
+    assert_eq!(serialized["games"]["follow_focused_windows"], false);
 }
 
 #[test]
@@ -188,6 +190,28 @@ fn legacy_custom_games_default_to_replays_only() {
 }
 
 #[test]
+fn legacy_games_default_focus_follow_off() {
+    let json = r#"{
+            "games": {
+                "auto_detect": true,
+                "custom_games": []
+            }
+        }"#;
+
+    let settings = AppSettings::load_from_object(
+        serde_json::from_str::<Value>(json)
+            .unwrap()
+            .as_object()
+            .unwrap(),
+    );
+
+    assert!(settings.games.auto_detect);
+    assert!(!settings.games.follow_focused_windows);
+    let saved = serde_json::to_value(&settings).unwrap();
+    assert_eq!(saved["games"]["follow_focused_windows"], false);
+}
+
+#[test]
 fn legacy_global_game_recording_mode_migrates_to_custom_games() {
     let json = r#"{
             "capture_mode": "primary_monitor",
@@ -281,6 +305,7 @@ fn supported_game_review_settings_default_to_current_enhanced_view() {
     let settings = AppSettings {
         games: GameSettings {
             auto_detect: true,
+            follow_focused_windows: false,
             plugins: BTreeMap::from([(
                 "league_of_legends".into(),
                 GamePluginSettings {
@@ -911,6 +936,7 @@ fn settings_round_trip_json() {
         update_channel: UpdateChannel::Nightly,
         games: GameSettings {
             auto_detect: true,
+            follow_focused_windows: false,
             plugins: BTreeMap::from([(
                 "league_of_legends".into(),
                 GamePluginSettings {
@@ -944,6 +970,7 @@ fn validation_rejects_custom_game_without_match_identity() {
     let settings = AppSettings {
         games: GameSettings {
             auto_detect: true,
+            follow_focused_windows: false,
             plugins: BTreeMap::new(),
             custom_games: vec![CustomGameSettings {
                 id: "custom-empty".into(),

@@ -169,6 +169,7 @@ $("cloud-host-url").addEventListener("change", syncCloudHttpWarning);
 $("cloud-connect").addEventListener("click", connectCloud);
 $("cloud-disconnect").addEventListener("click", disconnectCloud);
 $("set-games-auto-detect").addEventListener("change", updateGameDetectionStatus);
+$("set-games-follow-focused").addEventListener("change", updateGameDetectionStatus);
 for (const id of [
   "set-buffer",
   "set-replay",

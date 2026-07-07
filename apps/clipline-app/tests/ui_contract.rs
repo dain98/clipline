@@ -580,6 +580,7 @@ fn review_player_owns_all_controls() {
         "data-tab=\"games\"",
         "data-section=\"games\"",
         "id=\"set-games-auto-detect\"",
+        "id=\"set-games-follow-focused\"",
         "id=\"supported-games\"",
         "id=\"custom-games\"",
         "id=\"detect-games\"",
@@ -605,6 +606,18 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains("value=\"display_region\""),
         "capture target must expose the display_region mode"
+    );
+    assert!(
+        html.contains("id=\"set-games-follow-focused\"")
+            && html.contains("Follow focused game windows"),
+        "Settings > Games must expose the focus-follow toggle"
+    );
+    assert!(
+        main_js().contains("follow_focused_windows: false")
+            && main_js().contains("$(\"set-games-follow-focused\").checked = !!games.follow_focused_windows")
+            && main_js().contains("follow_focused_windows: $(\"set-games-follow-focused\").checked")
+            && main_js().contains("$(\"set-games-follow-focused\").addEventListener(\"change\", updateGameDetectionStatus)"),
+        "Settings JS must default, fill, read, and wire focus-follow"
     );
     assert!(
         html.contains("Experimental")
