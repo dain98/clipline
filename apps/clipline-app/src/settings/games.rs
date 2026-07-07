@@ -12,6 +12,10 @@ fn default_enabled() -> bool {
     true
 }
 
+fn default_disabled() -> bool {
+    false
+}
+
 fn default_game_recording_mode_full_session() -> GameRecordingMode {
     GameRecordingMode::FullSession
 }
@@ -147,6 +151,8 @@ impl Default for TimelineMarkerSettings {
 pub struct GameSettings {
     #[serde(default = "default_enabled")]
     pub auto_detect: bool,
+    #[serde(default = "default_disabled")]
+    pub follow_focused_windows: bool,
     #[serde(default)]
     pub plugins: BTreeMap<String, GamePluginSettings>,
     #[serde(default)]
@@ -157,6 +163,8 @@ pub struct GameSettings {
 struct GameSettingsWire {
     #[serde(default = "default_enabled")]
     auto_detect: bool,
+    #[serde(default = "default_disabled")]
+    follow_focused_windows: bool,
     #[serde(default)]
     plugins: BTreeMap<String, GamePluginSettings>,
     #[serde(default, rename = "recording_mode")]
@@ -169,6 +177,7 @@ impl Default for GameSettings {
     fn default() -> Self {
         Self {
             auto_detect: true,
+            follow_focused_windows: false,
             plugins: BTreeMap::new(),
             custom_games: Vec::new(),
         }
@@ -188,6 +197,7 @@ impl<'de> Deserialize<'de> for GameSettings {
         }
         Ok(Self {
             auto_detect: wire.auto_detect,
+            follow_focused_windows: wire.follow_focused_windows,
             plugins: wire.plugins,
             custom_games: wire.custom_games,
         })

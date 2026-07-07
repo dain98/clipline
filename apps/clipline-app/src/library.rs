@@ -1403,6 +1403,7 @@ fn has_marker_sidecar_content(markers: &ClipMarkers) -> bool {
         || markers.player_summary.is_some()
         || !markers.audio_tracks.is_empty()
         || !markers.plays.is_empty()
+        || !markers.source_switches.is_empty()
 }
 
 fn crop_markers(markers: &ClipMarkers, start_s: f64, end_s: f64) -> ClipMarkers {
@@ -1420,12 +1421,25 @@ fn crop_markers(markers: &ClipMarkers, start_s: f64, end_s: f64) -> ClipMarkers 
         .iter()
         .filter_map(|play| crop_play(play, start_s, end_s))
         .collect();
+    let source_switches = markers
+        .source_switches
+        .iter()
+        .filter(|switch| switch.t_s >= start_s && switch.t_s < end_s)
+        .map(|switch| clipline_events::ClipSourceSwitch {
+            t_s: switch.t_s - start_s,
+            kind: switch.kind.clone(),
+            game_id: switch.game_id.clone(),
+            game_name: switch.game_name.clone(),
+            slate_reason: switch.slate_reason.clone(),
+        })
+        .collect();
     ClipMarkers {
         recording_start_s: markers.recording_start_s + start_s,
         duration_s: end_s - start_s,
         player_summary: markers.player_summary.clone(),
         audio_tracks: markers.audio_tracks.clone(),
         plays,
+        source_switches,
         markers: cropped,
     }
 }
@@ -1624,6 +1638,7 @@ mod tests {
             }),
             audio_tracks: Vec::new(),
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: vec![marker(0.5), marker(1.5), marker(2.5)],
         };
 
@@ -1664,6 +1679,7 @@ mod tests {
             }),
             audio_tracks: Vec::new(),
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: vec![
                 marker_with(1.0, EventKind::ChampionKill, true),
                 marker_with(2.0, EventKind::ChampionKill, false),
@@ -1727,6 +1743,7 @@ mod tests {
             }),
             audio_tracks: Vec::new(),
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: Vec::new(),
         };
 
@@ -1741,6 +1758,7 @@ mod tests {
             player_summary: None,
             audio_tracks: Vec::new(),
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: Vec::new(),
         };
 
@@ -1755,6 +1773,7 @@ mod tests {
             player_summary: None,
             audio_tracks: Vec::new(),
             plays: vec![osu_play(2.0, Some(8.0), "score-1")],
+            source_switches: Vec::new(),
             markers: Vec::new(),
         };
 
@@ -1772,6 +1791,7 @@ mod tests {
             player_summary: None,
             audio_tracks: Vec::new(),
             plays: vec![osu_play(2.0, Some(8.0), "score-1")],
+            source_switches: Vec::new(),
             markers: Vec::new(),
         };
         std::fs::write(
@@ -1798,6 +1818,7 @@ mod tests {
                 osu_play(5.0, None, "point"),
                 osu_play(8.0, Some(12.0), "after"),
             ],
+            source_switches: Vec::new(),
             markers: Vec::new(),
         };
 
@@ -1829,6 +1850,7 @@ mod tests {
             player_summary: None,
             audio_tracks: tracks.clone(),
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: Vec::new(),
         };
 
@@ -1902,6 +1924,7 @@ mod tests {
                 },
             ],
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: Vec::new(),
         };
         std::fs::write(
@@ -1969,6 +1992,7 @@ mod tests {
                 },
             ],
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: Vec::new(),
         };
         std::fs::write(
@@ -2013,6 +2037,7 @@ mod tests {
                 },
             ],
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: Vec::new(),
         };
         std::fs::write(
@@ -2066,6 +2091,7 @@ mod tests {
                 },
             ],
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: Vec::new(),
         };
 
@@ -2107,6 +2133,7 @@ mod tests {
                 },
             ],
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: Vec::new(),
         };
         std::fs::write(
@@ -2226,6 +2253,7 @@ mod tests {
             player_summary: None,
             audio_tracks: Vec::new(),
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: vec![marker(1.0)],
         };
         std::fs::write(
@@ -2252,6 +2280,7 @@ mod tests {
             player_summary: None,
             audio_tracks: Vec::new(),
             plays: Vec::new(),
+            source_switches: Vec::new(),
             markers: vec![
                 marker_with(1.0, EventKind::DragonKill, false),
                 marker_with(8.0, EventKind::ChampionAssist, true),

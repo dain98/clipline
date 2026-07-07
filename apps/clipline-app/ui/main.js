@@ -16,8 +16,14 @@ listen("status", (e) => {
   const s = e.payload;
   recordingActive = s.recording;
   fullSessionRecordingActive = Boolean(s.full_session);
+  capturePrivacyState = {
+    kind: s.capture_kind || "game",
+    label: s.capture_label || null,
+    slate_reason: s.slate_reason || null,
+  };
   $("rail-dot").className = "dot" + (s.recording ? " on" : "");
   updateCaptureStatus();
+  updateGameDetectionStatus();
 });
 
 listen("saved", (e) => {
@@ -169,6 +175,7 @@ $("cloud-host-url").addEventListener("change", syncCloudHttpWarning);
 $("cloud-connect").addEventListener("click", connectCloud);
 $("cloud-disconnect").addEventListener("click", disconnectCloud);
 $("set-games-auto-detect").addEventListener("change", updateGameDetectionStatus);
+$("set-games-follow-focused").addEventListener("change", updateGameDetectionStatus);
 for (const id of [
   "set-buffer",
   "set-replay",

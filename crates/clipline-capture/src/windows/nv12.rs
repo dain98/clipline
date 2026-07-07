@@ -5,15 +5,15 @@
 use windows::core::{Interface, Result as WinResult};
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1,
-    ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+    D3D11_VIDEO_COLOR_YCbCrA, ID3D11Device, ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext,
+    ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
     D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
-    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D,
+    D3D11_VIDEO_COLOR, D3D11_VIDEO_COLOR_0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
@@ -76,6 +76,12 @@ impl CropRect {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeMode {
+    Stretch,
+    Fit,
+}
+
 /// One converter per recording. The MP4 output size stays fixed, but window
 /// captures can resize, so the video processor is rebuilt when input changes.
 pub struct VideoConverter {
@@ -89,6 +95,8 @@ pub struct VideoConverter {
     out_width: u32,
     out_height: u32,
     source_rect: Option<RECT>,
+    resize_mode: ResizeMode,
+    black_frame: Option<Vec<u8>>,
 }
 
 impl VideoConverter {
@@ -99,7 +107,7 @@ impl VideoConverter {
         out_w: u32,
         out_h: u32,
     ) -> WinResult<Self> {
-        Self::new_with_crop(device, in_w, in_h, out_w, out_h, None)
+        Self::new_with_crop_and_resize(device, in_w, in_h, out_w, out_h, None, ResizeMode::Stretch)
     }
 
     pub fn new_with_crop(
@@ -109,6 +117,18 @@ impl VideoConverter {
         out_w: u32,
         out_h: u32,
         crop: Option<CropRect>,
+    ) -> WinResult<Self> {
+        Self::new_with_crop_and_resize(device, in_w, in_h, out_w, out_h, crop, ResizeMode::Stretch)
+    }
+
+    pub fn new_with_crop_and_resize(
+        device: &ID3D11Device,
+        in_w: u32,
+        in_h: u32,
+        out_w: u32,
+        out_h: u32,
+        crop: Option<CropRect>,
+        resize_mode: ResizeMode,
     ) -> WinResult<Self> {
         let video_device: ID3D11VideoDevice = device.cast()?;
         // SAFETY: trivial getter on a valid device.
@@ -127,6 +147,8 @@ impl VideoConverter {
             out_width: out_w,
             out_height: out_h,
             source_rect: crop.map(CropRect::to_rect),
+            resize_mode,
+            black_frame: (resize_mode == ResizeMode::Fit).then(|| black_nv12_frame(out_w, out_h)),
         })
     }
 
@@ -148,7 +170,16 @@ impl VideoConverter {
             self.in_width = in_width;
             self.in_height = in_height;
         }
-        let out = d3d11::create_nv12_texture(&self.device, self.out_width, self.out_height)?;
+        let out = if let Some(black_frame) = &self.black_frame {
+            d3d11::create_nv12_texture_from_bytes(
+                &self.device,
+                self.out_width,
+                self.out_height,
+                black_frame,
+            )?
+        } else {
+            d3d11::create_nv12_texture(&self.device, self.out_width, self.out_height)?
+        };
 
         let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
             FourCC: 0,
@@ -193,6 +224,7 @@ impl VideoConverter {
             pInputSurface: std::mem::ManuallyDrop::new(in_view),
             ..Default::default()
         };
+        set_output_background_black(&self.video_context, &self.processor);
         if let Some(rect) = &self.source_rect {
             // SAFETY: processor is live and `rect` is a valid source rectangle
             // for stream 0. The caller validates the crop against the input.
@@ -203,6 +235,21 @@ impl VideoConverter {
                     true,
                     Some(rect),
                 );
+            }
+        }
+        if self.resize_mode == ResizeMode::Fit {
+            let rect = aspect_fit_rect(in_width, in_height, self.out_width, self.out_height);
+            unsafe {
+                self.video_context.VideoProcessorSetOutputTargetRect(
+                    &self.processor,
+                    true,
+                    Some(&rect),
+                );
+            }
+        } else {
+            unsafe {
+                self.video_context
+                    .VideoProcessorSetOutputTargetRect(&self.processor, false, None);
             }
         }
         // SAFETY: processor/views are live; one enabled stream, no past or
@@ -219,6 +266,56 @@ impl VideoConverter {
         drop(std::mem::ManuallyDrop::into_inner(stream.pInputSurface));
         result?;
         Ok(out)
+    }
+}
+
+fn set_output_background_black(
+    video_context: &ID3D11VideoContext,
+    processor: &ID3D11VideoProcessor,
+) {
+    let color = limited_ycbcr_black();
+    // SAFETY: `processor` belongs to this live video context, and `color`
+    // points to a valid YCbCr background for the duration of the call.
+    unsafe {
+        video_context.VideoProcessorSetOutputBackgroundColor(processor, true, &color);
+    }
+}
+
+fn limited_ycbcr_black() -> D3D11_VIDEO_COLOR {
+    D3D11_VIDEO_COLOR {
+        Anonymous: D3D11_VIDEO_COLOR_0 {
+            YCbCr: D3D11_VIDEO_COLOR_YCbCrA {
+                Y: 16.0 / 255.0,
+                Cb: 0.5,
+                Cr: 0.5,
+                A: 1.0,
+            },
+        },
+    }
+}
+
+fn black_nv12_frame(width: u32, height: u32) -> Vec<u8> {
+    let y_len = width as usize * height as usize;
+    let mut frame = vec![16u8; y_len + y_len / 2];
+    frame[y_len..].fill(128);
+    frame
+}
+
+fn aspect_fit_rect(in_w: u32, in_h: u32, out_w: u32, out_h: u32) -> RECT {
+    let in_w = in_w.max(1) as f64;
+    let in_h = in_h.max(1) as f64;
+    let out_w_f = out_w.max(1) as f64;
+    let out_h_f = out_h.max(1) as f64;
+    let scale = (out_w_f / in_w).min(out_h_f / in_h);
+    let fit_w = (in_w * scale).round().clamp(1.0, out_w_f) as i32;
+    let fit_h = (in_h * scale).round().clamp(1.0, out_h_f) as i32;
+    let left = (out_w as i32 - fit_w) / 2;
+    let top = (out_h as i32 - fit_h) / 2;
+    RECT {
+        left,
+        top,
+        right: left + fit_w,
+        bottom: top + fit_h,
     }
 }
 
@@ -332,6 +429,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn aspect_fit_rect_keeps_same_aspect_full_frame() {
+        let rect = aspect_fit_rect(1920, 1080, 1280, 720);
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (0, 0, 1280, 720)
+        );
+    }
+
+    #[test]
+    fn aspect_fit_rect_pillarboxes_wide_output() {
+        let rect = aspect_fit_rect(4, 3, 1920, 1080);
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (240, 0, 1680, 1080)
+        );
+    }
+
+    #[test]
+    fn aspect_fit_rect_letterboxes_tall_output() {
+        let rect = aspect_fit_rect(16, 9, 1000, 1000);
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (0, 218, 1000, 781)
+        );
+    }
+
+    #[test]
+    fn fit_background_black_uses_limited_range_ycbcr() {
+        let color = limited_ycbcr_black();
+        // SAFETY: limited_ycbcr_black initializes the YCbCr union arm.
+        let ycbcr = unsafe { color.Anonymous.YCbCr };
+
+        assert!((ycbcr.Y - 16.0 / 255.0).abs() < f32::EPSILON);
+        assert_eq!(ycbcr.Cb, 0.5);
+        assert_eq!(ycbcr.Cr, 0.5);
+        assert_eq!(ycbcr.A, 1.0);
+    }
+
+    #[test]
     fn reads_back_converted_nv12_as_contiguous_bytes() {
         // WARP has no ID3D11VideoDevice — needs real hardware; skips on CI.
         let device = match crate::windows::d3d11::create_device() {
@@ -378,6 +514,50 @@ mod tests {
         assert_eq!(
             desc.Format,
             windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12
+        );
+    }
+
+    #[test]
+    fn fit_letterbox_background_initializes_chroma_black() {
+        // WARP has no ID3D11VideoDevice — needs real hardware; skips on CI.
+        let device = match crate::windows::d3d11::create_device() {
+            Ok((device, _ctx)) => device,
+            Err(e) => {
+                eprintln!("SKIP: no hardware D3D11 device: {e}");
+                return;
+            }
+        };
+        let mut conv = match VideoConverter::new_with_crop_and_resize(
+            &device,
+            64,
+            32,
+            64,
+            64,
+            None,
+            ResizeMode::Fit,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("SKIP: video processor unavailable: {e}");
+                return;
+            }
+        };
+        let pixels = vec![0x80; 64 * 32 * 4];
+        let src = crate::windows::d3d11::create_bgra_texture_from_pixels(&device, 64, 32, &pixels)
+            .expect("src");
+        let nv12 = conv.convert(&src).expect("convert");
+        let bytes = read_nv12(&device, &nv12).expect("readback");
+        let y_plane_len = 64 * 64;
+        let top_y = &bytes[..64];
+        let top_uv = &bytes[y_plane_len..y_plane_len + 64];
+
+        assert!(
+            top_y.iter().all(|&y| (12..=20).contains(&y)),
+            "top letterbox Y should be limited black, got {top_y:?}"
+        );
+        assert!(
+            top_uv.iter().all(|&uv| (120..=136).contains(&uv)),
+            "top letterbox UV should be neutral chroma, got {top_uv:?}"
         );
     }
 

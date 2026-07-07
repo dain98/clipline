@@ -25,7 +25,7 @@ use crate::probe::{Codec, EncoderBackend};
 use crate::traits::{EncodeError, EncodedPacket, Encoder, Frame, FrameData};
 
 #[cfg(windows)]
-use crate::windows::nv12::{CropRect, VideoConverter};
+use crate::windows::nv12::{CropRect, ResizeMode, VideoConverter};
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 
@@ -175,8 +175,48 @@ impl FfmpegVideoEncoder {
         fps: u32,
         bitrate_bps: u32,
     ) -> Result<Self, EncodeError> {
-        let converter = VideoConverter::new_with_crop(device, in_w, in_h, out_w, out_h, crop)
-            .map_err(|e| EncodeError::Backend(format!("nv12 converter: {e}")))?;
+        Self::new_on_with_resize(
+            device,
+            ffmpeg,
+            backend,
+            codec,
+            in_w,
+            in_h,
+            crop,
+            out_w,
+            out_h,
+            fps,
+            bitrate_bps,
+            ResizeMode::Stretch,
+        )
+    }
+
+    #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_on_with_resize(
+        device: &ID3D11Device,
+        ffmpeg: &std::path::Path,
+        backend: EncoderBackend,
+        codec: Codec,
+        in_w: u32,
+        in_h: u32,
+        crop: Option<CropRect>,
+        out_w: u32,
+        out_h: u32,
+        fps: u32,
+        bitrate_bps: u32,
+        resize_mode: ResizeMode,
+    ) -> Result<Self, EncodeError> {
+        let converter = VideoConverter::new_with_crop_and_resize(
+            device,
+            in_w,
+            in_h,
+            out_w,
+            out_h,
+            crop,
+            resize_mode,
+        )
+        .map_err(|e| EncodeError::Backend(format!("nv12 converter: {e}")))?;
         let spawned = spawn_process(ffmpeg, backend, codec, out_w, out_h, fps, bitrate_bps)?;
         let mut enc = Self::assemble(spawned, codec, out_w, out_h, fps);
         enc.converter = Some(converter);

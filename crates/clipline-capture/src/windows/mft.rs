@@ -31,7 +31,7 @@ use crate::annexb::{annexb_to_avcc, extract_sps_pps};
 use crate::probe::EncoderBackend;
 use crate::traits::{EncodeError, EncodedPacket, Encoder, Frame, FrameData};
 use crate::windows::mft_probe;
-use crate::windows::nv12::{CropRect, VideoConverter};
+use crate::windows::nv12::{CropRect, ResizeMode, VideoConverter};
 
 /// eAVEncH264VProfile_High (codecapi.h) — windows-rs feature placement of
 /// the enum varies; the wire value is stable.
@@ -49,6 +49,7 @@ pub struct MftConfig {
     pub bitrate_bps: u32,
     /// None means automatic hardware H.264 selection.
     pub encoder_backend: Option<EncoderBackend>,
+    pub resize_mode: ResizeMode,
 }
 
 pub struct MftH264Encoder {
@@ -298,9 +299,16 @@ impl MftH264Encoder {
                 .map_err(backend)?;
         }
 
-        let converter =
-            VideoConverter::new_with_crop(device, in_w, in_h, cfg.width, cfg.height, crop)
-                .map_err(|e| EncodeError::Backend(format!("NV12 converter: {e}")))?;
+        let converter = VideoConverter::new_with_crop_and_resize(
+            device,
+            in_w,
+            in_h,
+            cfg.width,
+            cfg.height,
+            crop,
+            cfg.resize_mode,
+        )
+        .map_err(|e| EncodeError::Backend(format!("NV12 converter: {e}")))?;
 
         Ok(Self {
             transform,
@@ -639,6 +647,7 @@ mod tests {
             fps: 30,
             bitrate_bps: 2_000_000,
             encoder_backend: None,
+            resize_mode: ResizeMode::Stretch,
         };
         let mut enc = match MftH264Encoder::new(&device, 640, 360, cfg) {
             Ok(e) => e,

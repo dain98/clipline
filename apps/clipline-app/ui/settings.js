@@ -172,6 +172,7 @@ function fillSettings(s) {
   captureTargetDirty = false;
   renderCaptureTargetSelect();
   $("set-games-auto-detect").checked = !!games.auto_detect;
+  $("set-games-follow-focused").checked = !!games.follow_focused_windows;
   $("set-output-enabled").checked = !!audio.output_enabled;
   $("set-audio-split-output").checked = audio.split_output_by_process === true;
   $("set-output-volume").value = String(Number.isFinite(audio.output_volume) ? audio.output_volume : 1);
@@ -248,6 +249,7 @@ function readSettings() {
       : capture.capture_region,
     games: {
       auto_detect: $("set-games-auto-detect").checked,
+      follow_focused_windows: $("set-games-follow-focused").checked,
       plugins: readGamePluginSettings(),
       custom_games: customGames.map((game) => ({ ...game })),
     },
@@ -384,6 +386,7 @@ function defaultReplayStorageSettings() {
 function defaultGameSettings() {
   return {
     auto_detect: true,
+    follow_focused_windows: false,
     plugins: {},
     custom_games: [],
   };
@@ -2191,12 +2194,24 @@ async function addCustomGameFromWindow(win) {
 }
 
 function updateGameDetectionStatus() {
+  if (capturePrivacyState.kind === "capture_target" && $("set-games-follow-focused").checked) {
+    $("game-detection-status").textContent = "Capture target active. Focus a saved game to switch back.";
+    return;
+  }
+  if (capturePrivacyState.kind === "slate" && $("set-games-follow-focused").checked) {
+    $("game-detection-status").textContent = "Privacy slate active after a capture failure. Focus a saved game to retry.";
+    return;
+  }
   if (activeDetectedGame && activeDetectedGame.active) {
     $("game-detection-status").textContent =
       `Active: ${activeDetectedGame.name} · ${activeDetectedGame.window_title}`;
   } else {
     if (!$("set-games-auto-detect").checked) {
       $("game-detection-status").textContent = "Game detection is off.";
+      return;
+    }
+    if ($("set-games-follow-focused").checked) {
+      $("game-detection-status").textContent = "Recording the focused saved game; other windows use your Capture target.";
       return;
     }
     const enabledPlugins = gamePlugins.filter((plugin) => gamePluginSetting(plugin).enabled);
