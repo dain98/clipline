@@ -184,9 +184,12 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
     fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError> {
         match self.inner.next_frame_timeout(self.frame_interval) {
             Ok(Some(mut frame)) => {
-                if let Some(last) = self.last_emit_pts_s {
-                    frame.pts_s = frame.pts_s.max(last + 1e-4);
-                }
+                let min_pts = self
+                    .last_emit_pts_s
+                    .map(|last| last + 1e-4)
+                    .unwrap_or(frame.pts_s);
+                let expected_pts = self.next_pts_s.unwrap_or(min_pts);
+                frame.pts_s = frame.pts_s.max(min_pts).max(expected_pts);
                 self.remember(&frame);
                 Ok(Some(frame))
             }
@@ -312,7 +315,7 @@ impl TimedFrameSource for SwitchableLiveCapture {
 }
 
 impl SwitchableCaptureController {
-    fn switch_to(&self, target: SwitchCaptureTarget) -> Result<(), String> {
+    fn switch_to(&self, target: &SwitchCaptureTarget) -> Result<(), String> {
         let next_identity = switch_target_identity(&target);
         let mut state = self
             .state
@@ -332,7 +335,7 @@ impl SwitchableCaptureController {
         drop(old);
         let next = match target {
             SwitchCaptureTarget::Window { hwnd, title, .. } => {
-                let hwnd = window_from_raw_handle(hwnd)
+                let hwnd = window_from_raw_handle(*hwnd)
                     .ok_or_else(|| format!("game window {title:?} is no longer available"))?;
                 let cap = WgcCapture::for_window_client_on(state.device.clone(), hwnd, state.clock)
                     .map_err(|e| e.to_string())?;
@@ -642,6 +645,9 @@ pub enum Event {
         storage_total_bytes: u64,
         storage_quota_bytes: Option<u64>,
         storage_over_quota: bool,
+    },
+    FocusFollowRetry {
+        hwnd: isize,
     },
     Error {
         message: String,
@@ -1185,8 +1191,8 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     return Ok(());
                 }
                 Ok(Cmd::SwitchCapture(target)) => {
-                    if let Err(e) = switch_controller.switch_to(target) {
-                        warn_user(events, format!("switch capture: {e}"));
+                    if let Err(e) = switch_controller.switch_to(&target) {
+                        warn_retryable_switch_failure(events, &target, e);
                     }
                 }
                 Err(TryRecvError::Disconnected) => {
@@ -1374,6 +1380,17 @@ fn audio_track(id: &str, track_index: u32, label: &str, kind: &str) -> ClipAudio
 
 fn warn_user(events: &Sender<Event>, message: String) {
     let _ = events.send(Event::Error { message });
+}
+
+fn warn_retryable_switch_failure(
+    events: &Sender<Event>,
+    target: &SwitchCaptureTarget,
+    error: impl std::fmt::Display,
+) {
+    if let SwitchCaptureTarget::Window { hwnd, .. } = target {
+        let _ = events.send(Event::FocusFollowRetry { hwnd: *hwnd });
+    }
+    warn_user(events, format!("switch capture: {error}"));
 }
 
 /// Combined MFT + FFmpeg capabilities. Probing is hardware-stable per
@@ -2252,6 +2269,8 @@ fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
     use clipline_capture::{MockCapture, MockEncoder};
     use clipline_test_utils::TestDir;
 
@@ -2260,6 +2279,26 @@ mod tests {
     impl TimedFrameSource for TimeoutSource {
         fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
             Err(CaptureError::Timeout(timeout))
+        }
+    }
+
+    struct ScriptedTimedSource {
+        frames: VecDeque<Result<Option<Frame>, CaptureError>>,
+    }
+
+    impl ScriptedTimedSource {
+        fn new(frames: impl IntoIterator<Item = Result<Option<Frame>, CaptureError>>) -> Self {
+            Self {
+                frames: frames.into_iter().collect(),
+            }
+        }
+    }
+
+    impl TimedFrameSource for ScriptedTimedSource {
+        fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+            self.frames
+                .pop_front()
+                .unwrap_or_else(|| Err(CaptureError::Timeout(timeout)))
         }
     }
 
@@ -2760,6 +2799,67 @@ mod tests {
         assert!((second.pts_s - (1.0 + 2.0 / 60.0)).abs() < 1e-9);
         assert!(matches!(first.data, FrameData::Cpu(ref data) if data == &[7, 8, 9]));
         assert!(matches!(second.data, FrameData::Cpu(ref data) if data == &[7, 8, 9]));
+    }
+
+    #[test]
+    fn cadenced_capture_keeps_cadence_when_source_timeline_restarts_mid_run() {
+        let frame_interval_s = 1.0 / 30.0;
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![1]),
+        };
+        let mut cap = CadencedCapture::new(
+            ScriptedTimedSource::new([
+                Ok(Some(Frame {
+                    pts_s: 1.0 + frame_interval_s,
+                    data: FrameData::Cpu(vec![2]),
+                })),
+                Ok(Some(Frame {
+                    pts_s: 0.0,
+                    data: FrameData::Cpu(vec![3]),
+                })),
+                Ok(Some(Frame {
+                    pts_s: frame_interval_s,
+                    data: FrameData::Cpu(vec![4]),
+                })),
+            ]),
+            30,
+            &seed,
+        );
+
+        let first = cap.next_frame().unwrap().unwrap();
+        let second = cap.next_frame().unwrap().unwrap();
+        let third = cap.next_frame().unwrap().unwrap();
+
+        assert!((first.pts_s - (1.0 + frame_interval_s)).abs() < 1e-9);
+        assert!((second.pts_s - (1.0 + 2.0 * frame_interval_s)).abs() < 1e-9);
+        assert!((third.pts_s - (1.0 + 3.0 * frame_interval_s)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn retryable_window_switch_failure_emits_retry_event_before_error() {
+        let (tx, rx) = mpsc::channel();
+        let target = SwitchCaptureTarget::Window {
+            hwnd: 42,
+            title: "Game Window".into(),
+            active_game: Some(ActiveGame {
+                id: "game".into(),
+                name: "Game".into(),
+            }),
+            active_game_plugin_id: None,
+            recording_mode: RecordingMode::ReplaysOnly,
+        };
+
+        warn_retryable_switch_failure(&tx, &target, "window open failed");
+
+        assert!(matches!(
+            rx.recv(),
+            Ok(Event::FocusFollowRetry { hwnd: 42 })
+        ));
+        assert!(matches!(
+            rx.recv(),
+            Ok(Event::Error { message }) if message.contains("switch capture: window open failed")
+        ));
     }
 
     #[test]

@@ -526,6 +526,18 @@ impl RuntimeState {
         true
     }
 
+    fn note_retryable_focus_follow_window_failure(&self, hwnd: isize) {
+        let Ok(mut inner) = self.0.lock() else {
+            return;
+        };
+        if matches!(
+            inner.focus_follow_target,
+            Some(FocusFollowTargetKey::Window { hwnd: active, .. }) if active == hwnd
+        ) {
+            inner.focus_follow_target = None;
+        }
+    }
+
     /// Replace the decodable-codec set from the frontend's canPlayType probe.
     /// Unknown keys are ignored; H.264 is always retained as the safe floor.
     fn set_decodable_codecs(&self, keys: &[String]) {
@@ -2026,6 +2038,12 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
             let _ = match &event {
                 Event::Status { .. } => handle.emit("status", &event),
                 Event::Saved { .. } => handle.emit("saved", &event),
+                Event::FocusFollowRetry { hwnd } => {
+                    handle
+                        .state::<RuntimeState>()
+                        .note_retryable_focus_follow_window_failure(*hwnd);
+                    Ok(())
+                }
                 Event::Error { message } => handle.emit("error", message.clone()),
             };
             if let Event::Saved {
@@ -2209,6 +2227,45 @@ mod tests {
         assert!(!emit);
         assert!(rx.try_recv().is_ok(), "first command exists");
         assert!(rx.try_recv().is_err(), "duplicate command suppressed");
+    }
+
+    #[test]
+    fn focus_follow_retryable_failure_allows_same_window_retry() {
+        let (tx, rx) = mpsc::channel();
+        let mut settings = AppSettings::default();
+        settings.games.follow_focused_windows = true;
+        let state = RuntimeState::with_sender(tx, settings, None);
+        let detected = DetectedGame {
+            id: "custom-game".into(),
+            name: "Game".into(),
+            hwnd: 42,
+            window_title: "Game Window".into(),
+            process_id: 7,
+            exe_name: "game.exe".into(),
+            recording_mode: GameRecordingMode::ReplaysOnly,
+        };
+
+        {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::prepare_focus_follow_update(&mut inner, Some(detected.clone())).unwrap();
+        }
+        assert!(rx.try_recv().is_ok(), "first command exists");
+
+        state.note_retryable_focus_follow_window_failure(42);
+
+        let emit = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::prepare_focus_follow_update(&mut inner, Some(detected)).unwrap()
+        };
+
+        assert!(emit, "retryable failure should clear dedupe state");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Cmd::SwitchCapture(service::SwitchCaptureTarget::Window {
+                hwnd: 42,
+                ..
+            }))
+        ));
     }
 
     #[test]
