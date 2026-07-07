@@ -827,6 +827,8 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 - `ddoc.md` Caveats section lists every externally-verified Windows API claim with nuance —
   check it before trusting API behavior.
 
+35. **Focus-follow capture** — Settings > Games now has an optional Follow focused game windows mode. It records the foreground enabled saved game, switches to a privacy slate with muted audio outside saved games, and keeps the replay buffer alive across focus changes.
+
 ## What's next (rough value order; each gets its own plan)
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
