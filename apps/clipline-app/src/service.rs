@@ -119,6 +119,8 @@ struct SlateCapture {
     frame: FrameData,
     next_pts_s: f64,
     frame_interval_s: f64,
+    frame_interval: Duration,
+    next_frame_at: Option<Instant>,
 }
 
 impl SlateCapture {
@@ -130,6 +132,8 @@ impl SlateCapture {
             frame: FrameData::Gpu(texture),
             next_pts_s: 0.0,
             frame_interval_s: 1.0 / fps.max(1) as f64,
+            frame_interval: Duration::from_secs_f64(1.0 / fps.max(1) as f64),
+            next_frame_at: None,
         })
     }
 }
@@ -145,9 +149,25 @@ impl TimedFrameSource for LiveBackend {
 }
 
 impl TimedFrameSource for SlateCapture {
-    fn next_frame_timeout(&mut self, _timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+    fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+        if let Some(next_frame_at) = self.next_frame_at {
+            let now = Instant::now();
+            if now < next_frame_at {
+                let wait = next_frame_at.duration_since(now);
+                if wait > timeout {
+                    if !timeout.is_zero() {
+                        std::thread::sleep(timeout);
+                    }
+                    return Err(CaptureError::Timeout(timeout));
+                }
+                if !wait.is_zero() {
+                    std::thread::sleep(wait);
+                }
+            }
+        }
         let pts_s = self.next_pts_s;
         self.next_pts_s += self.frame_interval_s;
+        self.next_frame_at = Some(Instant::now() + self.frame_interval);
         Ok(Some(Frame {
             pts_s,
             data: self.frame.clone(),
@@ -889,14 +909,16 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
 enum MarkerSourceKey {
     Plugin(String),
     LegacyLeaguePoller,
+    NoMarkerSource,
 }
 
 fn marker_source_key_for<F>(plugin_id: Option<&str>, has_event_source: F) -> MarkerSourceKey
 where
     F: Fn(Option<&str>) -> bool,
 {
-    match plugin_id.filter(|id| has_event_source(Some(*id))) {
-        Some(id) => MarkerSourceKey::Plugin(id.into()),
+    match plugin_id {
+        Some(id) if has_event_source(Some(id)) => MarkerSourceKey::Plugin(id.into()),
+        Some(_) => MarkerSourceKey::NoMarkerSource,
         None => MarkerSourceKey::LegacyLeaguePoller,
     }
 }
@@ -957,6 +979,10 @@ fn spawn_marker_source(
             .expect("marker source key checked plugin event source"),
         MarkerSourceKey::LegacyLeaguePoller => {
             crate::markers::spawn(context.lol_url, context.recording_t0)
+        }
+        MarkerSourceKey::NoMarkerSource => {
+            let (_tx, rx) = mpsc::channel();
+            rx
         }
     }
 }
@@ -2925,7 +2951,7 @@ mod tests {
     }
 
     #[test]
-    fn marker_source_falls_back_for_unknown_plugin_id() {
+    fn marker_source_disables_unknown_plugin_id() {
         let opts = ServiceOptions {
             active_game_plugin_id: Some("community_game_without_source".into()),
             ..ServiceOptions::default()
@@ -2933,7 +2959,7 @@ mod tests {
 
         assert_eq!(
             marker_source_key(opts.active_game_plugin_id.as_deref()),
-            MarkerSourceKey::LegacyLeaguePoller
+            MarkerSourceKey::NoMarkerSource
         );
     }
 
@@ -2946,6 +2972,16 @@ mod tests {
 
         assert_eq!(startup, MarkerSourceKey::LegacyLeaguePoller);
         assert_eq!(focused, MarkerSourceKey::Plugin("plugin_a".into()));
+        assert_ne!(startup, focused);
+    }
+
+    #[test]
+    fn marker_source_key_switches_from_legacy_to_none_for_unsupported_focus_plugin() {
+        let startup = marker_source_key_for(None, |_| false);
+        let focused = marker_source_key_for(Some("plugin_a"), |_| false);
+
+        assert_eq!(startup, MarkerSourceKey::LegacyLeaguePoller);
+        assert_eq!(focused, MarkerSourceKey::NoMarkerSource);
         assert_ne!(startup, focused);
     }
 
@@ -3362,6 +3398,29 @@ mod tests {
         assert!((first.pts_s - (1.0 + frame_interval_s)).abs() < 1e-9);
         assert!((second.pts_s - (1.0 + 2.0 * frame_interval_s)).abs() < 1e-9);
         assert!((third.pts_s - (1.0 + 3.0 * frame_interval_s)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn slate_capture_zero_timeout_does_not_emit_early_frame() {
+        let mut slate = SlateCapture {
+            frame: FrameData::Cpu(vec![0]),
+            next_pts_s: 0.0,
+            frame_interval_s: 1.0 / 60.0,
+            frame_interval: Duration::from_secs_f64(1.0 / 60.0),
+            next_frame_at: None,
+        };
+
+        let first = slate
+            .next_frame_timeout(Duration::ZERO)
+            .expect("first slate frame should be immediate")
+            .expect("slate source should keep running");
+        assert_eq!(first.pts_s, 0.0);
+
+        let second = slate.next_frame_timeout(Duration::ZERO);
+        assert!(matches!(
+            second,
+            Err(CaptureError::Timeout(timeout)) if timeout.is_zero()
+        ));
     }
 
     #[test]
