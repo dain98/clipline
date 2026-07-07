@@ -827,7 +827,7 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 - `ddoc.md` Caveats section lists every externally-verified Windows API claim with nuance —
   check it before trusting API behavior.
 
-35. **Focus-follow capture** — Settings > Games now has an optional Follow focused game windows mode. It records the foreground enabled saved game, records the configured Capture target with normal audio outside saved games, and keeps the replay buffer alive across focus changes. Privacy slate remains the fallback for capture-switch failures.
+35. **Focus-follow capture** — Settings > Games now has an optional Follow focused game windows mode. It records the foreground enabled saved game, records the configured Capture target with normal audio outside saved games, and keeps the replay buffer alive across focus changes. Privacy slate remains the fallback for capture-switch failures. Focus-follow encoding uses Fit-mode resizing on a fixed MP4 canvas; the NV12 output is initialized to limited black so smaller/different-aspect sources letterbox cleanly instead of encoding green edge bands.
 
 ## What's next (rough value order; each gets its own plan)
 

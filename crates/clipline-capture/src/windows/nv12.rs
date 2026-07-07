@@ -96,6 +96,7 @@ pub struct VideoConverter {
     out_height: u32,
     source_rect: Option<RECT>,
     resize_mode: ResizeMode,
+    black_frame: Option<Vec<u8>>,
 }
 
 impl VideoConverter {
@@ -147,6 +148,7 @@ impl VideoConverter {
             out_height: out_h,
             source_rect: crop.map(CropRect::to_rect),
             resize_mode,
+            black_frame: (resize_mode == ResizeMode::Fit).then(|| black_nv12_frame(out_w, out_h)),
         })
     }
 
@@ -168,7 +170,16 @@ impl VideoConverter {
             self.in_width = in_width;
             self.in_height = in_height;
         }
-        let out = d3d11::create_nv12_texture(&self.device, self.out_width, self.out_height)?;
+        let out = if let Some(black_frame) = &self.black_frame {
+            d3d11::create_nv12_texture_from_bytes(
+                &self.device,
+                self.out_width,
+                self.out_height,
+                black_frame,
+            )?
+        } else {
+            d3d11::create_nv12_texture(&self.device, self.out_width, self.out_height)?
+        };
 
         let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
             FourCC: 0,
@@ -281,6 +292,13 @@ fn limited_ycbcr_black() -> D3D11_VIDEO_COLOR {
             },
         },
     }
+}
+
+fn black_nv12_frame(width: u32, height: u32) -> Vec<u8> {
+    let y_len = width as usize * height as usize;
+    let mut frame = vec![16u8; y_len + y_len / 2];
+    frame[y_len..].fill(128);
+    frame
 }
 
 fn aspect_fit_rect(in_w: u32, in_h: u32, out_w: u32, out_h: u32) -> RECT {
@@ -496,6 +514,50 @@ mod tests {
         assert_eq!(
             desc.Format,
             windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12
+        );
+    }
+
+    #[test]
+    fn fit_letterbox_background_initializes_chroma_black() {
+        // WARP has no ID3D11VideoDevice — needs real hardware; skips on CI.
+        let device = match crate::windows::d3d11::create_device() {
+            Ok((device, _ctx)) => device,
+            Err(e) => {
+                eprintln!("SKIP: no hardware D3D11 device: {e}");
+                return;
+            }
+        };
+        let mut conv = match VideoConverter::new_with_crop_and_resize(
+            &device,
+            64,
+            32,
+            64,
+            64,
+            None,
+            ResizeMode::Fit,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("SKIP: video processor unavailable: {e}");
+                return;
+            }
+        };
+        let pixels = vec![0x80; 64 * 32 * 4];
+        let src = crate::windows::d3d11::create_bgra_texture_from_pixels(&device, 64, 32, &pixels)
+            .expect("src");
+        let nv12 = conv.convert(&src).expect("convert");
+        let bytes = read_nv12(&device, &nv12).expect("readback");
+        let y_plane_len = 64 * 64;
+        let top_y = &bytes[..64];
+        let top_uv = &bytes[y_plane_len..y_plane_len + 64];
+
+        assert!(
+            top_y.iter().all(|&y| (12..=20).contains(&y)),
+            "top letterbox Y should be limited black, got {top_y:?}"
+        );
+        assert!(
+            top_uv.iter().all(|&uv| (120..=136).contains(&uv)),
+            "top letterbox UV should be neutral chroma, got {top_uv:?}"
         );
     }
 

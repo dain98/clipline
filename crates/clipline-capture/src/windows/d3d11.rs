@@ -133,6 +133,30 @@ pub fn create_nv12_texture(
     width: u32,
     height: u32,
 ) -> WinResult<ID3D11Texture2D> {
+    create_nv12_texture_with_data(device, width, height, None)
+}
+
+pub fn create_nv12_texture_from_bytes(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+    nv12: &[u8],
+) -> WinResult<ID3D11Texture2D> {
+    assert_eq!(nv12.len(), width as usize * height as usize * 3 / 2);
+    let data = D3D11_SUBRESOURCE_DATA {
+        pSysMem: nv12.as_ptr().cast(),
+        SysMemPitch: width,
+        SysMemSlicePitch: width * height * 3 / 2,
+    };
+    create_nv12_texture_with_data(device, width, height, Some(&data))
+}
+
+fn create_nv12_texture_with_data(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+    data: Option<&D3D11_SUBRESOURCE_DATA>,
+) -> WinResult<ID3D11Texture2D> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: width,
         Height: height,
@@ -151,7 +175,9 @@ pub fn create_nv12_texture(
     let mut texture = None;
     // SAFETY: desc is fully initialized; out-param receives a valid pointer
     // on success.
-    unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture))? };
+    unsafe {
+        device.CreateTexture2D(&desc, data.map(|data| data as *const _), Some(&mut texture))?
+    };
     Ok(texture.expect("texture out-param set on Ok"))
 }
 
