@@ -80,7 +80,7 @@ enum FocusFollowTargetKey {
         hwnd: isize,
         recording_mode: GameRecordingMode,
     },
-    Desktop,
+    CaptureTarget,
 }
 
 #[derive(serde::Serialize)]
@@ -588,7 +588,7 @@ impl RuntimeState {
                 hwnd: game.hwnd,
                 recording_mode: game.recording_mode,
             },
-            None => FocusFollowTargetKey::Desktop,
+            None => FocusFollowTargetKey::CaptureTarget,
         }
     }
 
@@ -605,7 +605,7 @@ impl RuntimeState {
                     .then(|| game.id.clone()),
                 recording_mode: game.recording_mode.into(),
             }),
-            None => Cmd::SwitchCapture(service::SwitchCaptureTarget::Desktop),
+            None => Cmd::SwitchCapture(service::SwitchCaptureTarget::CaptureTarget),
         }
     }
 
@@ -2230,7 +2230,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_follow_no_focused_game_sends_desktop_fallback() {
+    fn focus_follow_no_focused_game_sends_capture_target_fallback() {
         let (tx, rx) = mpsc::channel();
         let mut settings = AppSettings::default();
         settings.games.follow_focused_windows = true;
@@ -2242,7 +2242,9 @@ mod tests {
         assert!(inner.active_game.is_none());
         assert!(matches!(
             rx.try_recv(),
-            Ok(Cmd::SwitchCapture(service::SwitchCaptureTarget::Desktop))
+            Ok(Cmd::SwitchCapture(
+                service::SwitchCaptureTarget::CaptureTarget
+            ))
         ));
     }
 

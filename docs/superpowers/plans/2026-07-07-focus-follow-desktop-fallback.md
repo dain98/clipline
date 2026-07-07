@@ -1,10 +1,10 @@
-# Focus-Follow Desktop Fallback Implementation Plan
+# Focus-Follow Capture Target Fallback Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Change focus-follow no-game-focused behavior from muted privacy slate to desktop capture with normal audio.
+**Goal:** Change focus-follow no-game-focused behavior from muted privacy slate to configured Capture target capture with normal audio.
 
-**Architecture:** Add a desktop fallback switch target and capture kind. Route focused-game detection misses to desktop fallback, open the primary monitor in the switch controller, keep the audio privacy gate disabled for desktop fallback, and reserve slate/mute for hard failures.
+**Architecture:** Add a Capture target fallback switch target and capture kind. Route focused-game detection misses to the configured Capture target, open `ServiceOptions.capture_source` through the normal screen-capture path, keep the audio privacy gate disabled for Capture target fallback, and reserve slate/mute for hard failures.
 
 **Tech Stack:** Rust Tauri app, Windows Graphics Capture / Desktop Duplication capture primitives, vanilla HTML/CSS/JS UI, Rust UI contract tests.
 
@@ -15,18 +15,19 @@
 - Do not add dependencies.
 - Preserve full-session continuity across focus changes.
 - Preserve marker gating so markers only attach to the active focused game.
+- Preserve the user's configured Capture target, including SET REGION and selected backend.
 
 ---
 
-### Task 1: Route No-Focus To Desktop Fallback
+### Task 1: Route No-Focus To Capture Target Fallback
 
 **Files:**
 - Modify: `apps/clipline-app/src/app.rs`
 - Modify: `apps/clipline-app/src/service.rs`
 
 **Interfaces:**
-- Produces: `SwitchCaptureTarget::Desktop`
-- Produces: `FocusFollowTargetKey::Desktop`
+- Produces: `SwitchCaptureTarget::CaptureTarget`
+- Produces: `FocusFollowTargetKey::CaptureTarget`
 
 - [ ] **Step 1: Write failing app test**
 
@@ -34,7 +35,7 @@ Add a test next to the existing focus-follow update tests:
 
 ```rust
 #[test]
-fn focus_follow_no_focused_game_sends_desktop_fallback() {
+fn focus_follow_no_focused_game_sends_capture_target_fallback() {
     let (tx, rx) = mpsc::channel();
     let mut settings = AppSettings::default();
     settings.games.follow_focused_windows = true;
@@ -46,48 +47,49 @@ fn focus_follow_no_focused_game_sends_desktop_fallback() {
     assert!(inner.active_game.is_none());
     assert!(matches!(
         rx.try_recv(),
-        Ok(Cmd::SwitchCapture(service::SwitchCaptureTarget::Desktop))
+        Ok(Cmd::SwitchCapture(service::SwitchCaptureTarget::CaptureTarget))
     ));
 }
 ```
 
 - [ ] **Step 2: Run failing app test**
 
-Run: `cargo test -p clipline-app focus_follow_no_focused_game_sends_desktop_fallback`
+Run: `cargo test -p clipline-app focus_follow_no_focused_game_sends_capture_target_fallback`
 
-Expected: FAIL because `SwitchCaptureTarget::Desktop` does not exist.
+Expected: FAIL because `SwitchCaptureTarget::CaptureTarget` does not exist or is not routed yet.
 
 - [ ] **Step 3: Implement minimal app/service target**
 
-Add `Desktop` to `SwitchCaptureTarget`, add `Desktop` to `FocusFollowTargetKey`, and make `focus_follow_key(None)` / `focus_follow_command(None)` use desktop fallback.
+Add `CaptureTarget` to `SwitchCaptureTarget`, add `CaptureTarget` to `FocusFollowTargetKey`, and make `focus_follow_key(None)` / `focus_follow_command(None)` use Capture target fallback.
 
 - [ ] **Step 4: Run app test**
 
-Run: `cargo test -p clipline-app focus_follow_no_focused_game_sends_desktop_fallback`
+Run: `cargo test -p clipline-app focus_follow_no_focused_game_sends_capture_target_fallback`
 
 Expected: PASS.
 
-### Task 2: Capture Desktop With Audio On Fallback
+### Task 2: Capture Configured Target With Audio On Fallback
 
 **Files:**
 - Modify: `apps/clipline-app/src/service.rs`
 - Test: `apps/clipline-app/src/service.rs`
 
 **Interfaces:**
-- Consumes: `SwitchCaptureTarget::Desktop`
-- Produces: `CaptureKind::Desktop`
+- Consumes: `SwitchCaptureTarget::CaptureTarget`
+- Produces: `CaptureKind::CaptureTarget`
+- Consumes: `ServiceOptions.capture_source`
 
 - [ ] **Step 1: Write failing service tests**
 
-Add tests proving desktop fallback is a distinct state and keeps audio unmuted:
+Add tests proving Capture target fallback is a distinct state, keeps audio unmuted, and uses the configured source:
 
 ```rust
 #[test]
-fn focus_run_state_desktop_fallback_keeps_audio_public() {
+fn focus_run_state_capture_target_fallback_keeps_audio_public() {
     let mut state = FocusRunState::from_options(&ServiceOptions::default());
-    state.apply_target(&SwitchCaptureTarget::Desktop);
+    state.apply_target(&SwitchCaptureTarget::CaptureTarget);
 
-    assert_eq!(state.capture_kind, CaptureKind::Desktop);
+    assert_eq!(state.capture_kind, CaptureKind::CaptureTarget);
     assert_eq!(state.active_game, None);
     assert_eq!(state.active_game_plugin_id, None);
     assert_eq!(state.recording_mode, RecordingMode::ReplaysOnly);
@@ -96,42 +98,41 @@ fn focus_run_state_desktop_fallback_keeps_audio_public() {
 }
 
 #[test]
-fn full_session_transition_keeps_recording_when_focus_moves_to_desktop() {
-    let old = FocusRunState {
-        capture_kind: CaptureKind::Game,
-        active_game: Some(ActiveGame { id: "a".into(), name: "A".into() }),
-        active_game_plugin_id: None,
-        recording_mode: RecordingMode::FullSession,
-        slate_reason: None,
+fn configured_capture_target_fallback_uses_saved_display_region() {
+    let region = CaptureRegion {
+        display_id: Some("DISPLAY2".into()),
+        x: 10,
+        y: 20,
+        width: 1280,
+        height: 720,
     };
-    let next = FocusRunState {
-        capture_kind: CaptureKind::Desktop,
+    let opts = ServiceOptions {
+        focus_follow_enabled: true,
+        capture_source: CaptureSource::DisplayRegion(region.clone()),
         active_game: None,
-        active_game_plugin_id: None,
-        recording_mode: RecordingMode::ReplaysOnly,
-        slate_reason: None,
+        ..ServiceOptions::default()
     };
 
     assert_eq!(
-        full_session_transition(Some("a"), &old, &next),
-        FullSessionTransition::None
+        configured_capture_target_source(&opts),
+        &CaptureSource::DisplayRegion(region)
     );
 }
 ```
 
 - [ ] **Step 2: Run failing service tests**
 
-Run: `cargo test -p clipline-app focus_run_state_desktop_fallback_keeps_audio_public full_session_transition_keeps_recording_when_focus_moves_to_desktop`
+Run: `cargo test -p clipline-app capture_target`
 
-Expected: FAIL because `CaptureKind::Desktop` and `should_mute_audio` do not exist.
+Expected: FAIL because `CaptureKind::CaptureTarget`, `SwitchCaptureTarget::CaptureTarget`, or `configured_capture_target_source` is missing.
 
-- [ ] **Step 3: Implement desktop capture state**
+- [ ] **Step 3: Implement configured Capture target fallback**
 
-Add `CaptureKind::Desktop`, `SwitchTargetIdentity::Desktop`, and service handling that opens `CaptureSource::PrimaryMonitor` for desktop fallback. Change audio privacy writes to call `focus_state.should_mute_audio()` so only slate mutes audio.
+Add `CaptureKind::CaptureTarget`, `SwitchTargetIdentity::CaptureTarget`, and service handling that opens `ServiceOptions.capture_source` with `open_screen_capture` for Capture target fallback. Change audio privacy writes to call `focus_state.should_mute_audio()` so only slate mutes audio.
 
 - [ ] **Step 4: Run focused service tests**
 
-Run: `cargo test -p clipline-app focus_run_state_desktop_fallback_keeps_audio_public full_session_transition_keeps_recording_when_focus_moves_to_desktop switch_target_identity_dedupes_desktop_slate_and_window`
+Run: `cargo test -p clipline-app capture_target`
 
 Expected: PASS.
 
@@ -144,7 +145,7 @@ Expected: PASS.
 - Modify: `handoff.md`
 
 **Interfaces:**
-- Consumes: `capture_kind: "desktop"`
+- Consumes: `capture_kind: "capture_target"`
 - Produces: truthful Settings > Games status copy.
 
 - [ ] **Step 1: Write failing UI contract expectations**
@@ -152,19 +153,19 @@ Expected: PASS.
 Update the existing focus-follow contract to require:
 
 ```rust
-"Desktop fallback active. Focus a saved game to switch back."
-"Recording the focused saved game; other windows record from the desktop."
+"Capture target active. Focus a saved game to switch back."
+"Recording the focused saved game; other windows use your Capture target."
 ```
 
 - [ ] **Step 2: Run failing UI contract**
 
 Run: `cargo test -p clipline-app --test ui_contract focus_follow_settings_contract`
 
-Expected: FAIL while UI still mentions privacy slate.
+Expected: FAIL while UI still mentions privacy slate or desktop fallback.
 
 - [ ] **Step 3: Update UI copy and handoff**
 
-Change Settings > Games helper text and active status copy from privacy slate wording to desktop fallback wording. Update `handoff.md` to describe desktop fallback with continuing audio.
+Change Settings > Games helper text and active status copy from privacy slate/desktop wording to Capture target wording. Update `handoff.md` to describe Capture target fallback with continuing audio.
 
 - [ ] **Step 4: Run UI contract**
 
@@ -185,7 +186,9 @@ Expected: PASS.
 Run:
 
 ```powershell
-cargo test -p clipline-app focus_follow_no_focused_game_sends_desktop_fallback focus_run_state_desktop_fallback_keeps_audio_public full_session_transition_keeps_recording_when_focus_moves_to_desktop
+cargo test -p clipline-app capture_target
+cargo test -p clipline-app focus_follow
+cargo test -p clipline-app --test ui_contract focus_follow_settings_contract
 ```
 
 Expected: PASS.
@@ -208,7 +211,7 @@ Run:
 
 ```powershell
 git add apps/clipline-app/src/app.rs apps/clipline-app/src/service.rs apps/clipline-app/ui/index.html apps/clipline-app/ui/settings.js apps/clipline-app/tests/ui_contract.rs handoff.md docs/superpowers/plans/2026-07-07-focus-follow-desktop-fallback-design.md docs/superpowers/plans/2026-07-07-focus-follow-desktop-fallback.md
-git commit -m "fix(capture): use desktop fallback for focus-follow gaps"
+git commit -m "fix(capture): use configured target for focus gaps"
 git push
 ```
 
@@ -217,4 +220,3 @@ Expected: branch pushed to PR #82.
 - [ ] **Step 4: Relaunch app**
 
 Stop any existing `clipline-app.exe`, rebuild if needed, and start `target/debug/clipline-app.exe` from this worktree.
-

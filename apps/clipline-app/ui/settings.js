@@ -2194,8 +2194,8 @@ async function addCustomGameFromWindow(win) {
 }
 
 function updateGameDetectionStatus() {
-  if (capturePrivacyState.kind === "desktop" && $("set-games-follow-focused").checked) {
-    $("game-detection-status").textContent = "Desktop fallback active. Focus a saved game to switch back.";
+  if (capturePrivacyState.kind === "capture_target" && $("set-games-follow-focused").checked) {
+    $("game-detection-status").textContent = "Capture target active. Focus a saved game to switch back.";
     return;
   }
   if (capturePrivacyState.kind === "slate" && $("set-games-follow-focused").checked) {
@@ -2211,7 +2211,7 @@ function updateGameDetectionStatus() {
       return;
     }
     if ($("set-games-follow-focused").checked) {
-      $("game-detection-status").textContent = "Recording the focused saved game; other windows record from the desktop.";
+      $("game-detection-status").textContent = "Recording the focused saved game; other windows use your Capture target.";
       return;
     }
     const enabledPlugins = gamePlugins.filter((plugin) => gamePluginSetting(plugin).enabled);
