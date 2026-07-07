@@ -13,8 +13,8 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClientRect, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
-    IsWindowVisible,
+    EnumWindows, GetClientRect, GetForegroundWindow, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible,
 };
 
 use crate::windows::nv12::CropRect;
@@ -82,6 +82,11 @@ pub fn enumerate_capturable_windows() -> Vec<CapturableWindow> {
     windows
 }
 
+pub fn foreground_capturable_window() -> Option<CapturableWindow> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    capturable_window_from_hwnd(hwnd)
+}
+
 pub fn window_client_crop(hwnd: HWND) -> Option<CropRect> {
     match window_client_crop_state(hwnd)? {
         WindowClientCrop::Client(crop) => Some(crop),
@@ -139,16 +144,22 @@ unsafe extern "system" fn enum_capturable_proc(hwnd: HWND, lparam: LPARAM) -> BO
     // SAFETY: lparam is the Vec pointer passed by enumerate_capturable_windows
     // on this same thread, alive for the whole enumeration.
     let windows = unsafe { &mut *(lparam.0 as *mut Vec<CapturableWindow>) };
-    // SAFETY: hwnd comes from the enumeration; these are read-only queries.
+    if let Some(window) = capturable_window_from_hwnd(hwnd) {
+        windows.push(window);
+    }
+    BOOL(1)
+}
+
+fn capturable_window_from_hwnd(hwnd: HWND) -> Option<CapturableWindow> {
+    // SAFETY: hwnd is a borrowed OS handle; these are read-only
+    // window-manager queries used to describe a visible top-level window.
     unsafe {
         if !IsWindowVisible(hwnd).as_bool() {
-            return BOOL(1);
+            return None;
         }
-        let Some(title) = window_title(hwnd) else {
-            return BOOL(1);
-        };
+        let title = window_title(hwnd)?;
         if title.trim().is_empty() {
-            return BOOL(1);
+            return None;
         }
         let mut process_id = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut process_id));
@@ -157,15 +168,14 @@ unsafe extern "system" fn enum_capturable_proc(hwnd: HWND, lparam: LPARAM) -> BO
             .as_deref()
             .and_then(exe_name_from_path)
             .unwrap_or_default();
-        windows.push(CapturableWindow {
+        Some(CapturableWindow {
             handle: hwnd.0 as isize,
             title,
             process_id,
             exe_name,
             exe_path,
-        });
+        })
     }
-    BOOL(1)
 }
 
 unsafe fn window_title(hwnd: HWND) -> Option<String> {

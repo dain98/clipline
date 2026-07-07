@@ -1,7 +1,9 @@
 //! Custom game detection. This layer only consumes visible window/process
 //! metadata exposed by Win32; it never opens game memory or injects code.
 
-use clipline_capture::windows::{enumerate_capturable_windows, CapturableWindow};
+use clipline_capture::windows::{
+    enumerate_capturable_windows, foreground_capturable_window, CapturableWindow,
+};
 
 use crate::game_plugins::{self, GamePluginInfo};
 use crate::settings::{CustomGameSettings, GameRecordingMode, GameSettings};
@@ -61,6 +63,11 @@ pub fn detect_active_game(settings: &GameSettings) -> Option<DetectedGame> {
     detect_active_game_from_windows(settings, enumerate_capturable_windows())
 }
 
+#[allow(dead_code)]
+pub fn detect_focused_game(settings: &GameSettings) -> Option<DetectedGame> {
+    detect_focused_game_from_window(settings, foreground_capturable_window())
+}
+
 pub fn detect_active_game_from_windows(
     settings: &GameSettings,
     windows: Vec<CapturableWindow>,
@@ -85,6 +92,36 @@ pub fn detect_active_game_from_windows(
         }
     }
     None
+}
+
+#[allow(dead_code)]
+pub fn detect_focused_game_from_window(
+    settings: &GameSettings,
+    foreground: Option<CapturableWindow>,
+) -> Option<DetectedGame> {
+    if !settings.auto_detect || !has_enabled_games(settings) {
+        return None;
+    }
+    let window = foreground?;
+    if window.process_id == std::process::id() {
+        return None;
+    }
+    detect_built_in_game_from_windows(settings, std::slice::from_ref(&window)).or_else(|| {
+        settings
+            .custom_games
+            .iter()
+            .filter(|game| game.enabled)
+            .find(|game| match_score(game, &window).is_some())
+            .map(|game| DetectedGame {
+                id: game.id.clone(),
+                name: game.name.clone(),
+                hwnd: window.handle,
+                window_title: window.title.clone(),
+                process_id: window.process_id,
+                exe_name: window.exe_name.clone(),
+                recording_mode: game.recording_mode,
+            })
+    })
 }
 
 pub fn built_in_game_still_configured(settings: &GameSettings, id: &str) -> bool {
@@ -392,6 +429,79 @@ mod tests {
             windows,
         )
         .is_none());
+    }
+
+    #[test]
+    fn focused_detection_ignores_background_saved_games() {
+        let settings = GameSettings {
+            auto_detect: true,
+            custom_games: vec![game()],
+            ..GameSettings::default()
+        };
+
+        let detected = detect_focused_game_from_window(
+            &settings,
+            Some(window(
+                100,
+                "Notepad",
+                "notepad.exe",
+                Some(r"C:\Windows\System32\notepad.exe"),
+            )),
+        );
+
+        assert!(detected.is_none());
+    }
+
+    #[test]
+    fn focused_detection_matches_custom_foreground_game() {
+        let settings = GameSettings {
+            auto_detect: true,
+            custom_games: vec![game()],
+            ..GameSettings::default()
+        };
+
+        let detected = detect_focused_game_from_window(
+            &settings,
+            Some(window(
+                42,
+                "Test Game",
+                "game.exe",
+                Some(r"C:\Games\Test\game.exe"),
+            )),
+        )
+        .expect("focused custom game should match");
+
+        assert_eq!(detected.hwnd, 42);
+        assert_eq!(detected.id, "custom-test");
+    }
+
+    #[test]
+    fn focused_detection_matches_built_in_before_custom_rules() {
+        let settings = GameSettings {
+            auto_detect: true,
+            custom_games: vec![CustomGameSettings {
+                id: "custom-league".into(),
+                name: "Custom League".into(),
+                exe_name: "League of Legends.exe".into(),
+                process_path: None,
+                window_title: String::new(),
+                ..game()
+            }],
+            ..GameSettings::default()
+        };
+
+        let detected = detect_focused_game_from_window(
+            &settings,
+            Some(window(
+                7,
+                "League of Legends (TM) Client",
+                "League of Legends.exe",
+                Some(r"C:\Riot Games\League of Legends\Game\League of Legends.exe"),
+            )),
+        )
+        .expect("focused League game should match");
+
+        assert_eq!(detected.id, crate::game_plugins::LEAGUE_OF_LEGENDS_ID);
     }
 
     #[test]
