@@ -885,10 +885,24 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
     (cmd_tx, event_rx)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MarkerSourceKind {
-    Plugin,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MarkerSourceKey {
+    Plugin(String),
     LegacyLeaguePoller,
+}
+
+fn marker_source_key_for<F>(plugin_id: Option<&str>, has_event_source: F) -> MarkerSourceKey
+where
+    F: Fn(Option<&str>) -> bool,
+{
+    match plugin_id.filter(|id| has_event_source(Some(*id))) {
+        Some(id) => MarkerSourceKey::Plugin(id.into()),
+        None => MarkerSourceKey::LegacyLeaguePoller,
+    }
+}
+
+fn marker_source_key(plugin_id: Option<&str>) -> MarkerSourceKey {
+    marker_source_key_for(plugin_id, crate::game_plugins::has_event_source)
 }
 
 #[derive(Default)]
@@ -928,27 +942,65 @@ impl PlayerSummaryState {
     }
 }
 
-fn marker_source_kind(opts: &ServiceOptions) -> MarkerSourceKind {
-    if crate::game_plugins::has_event_source(opts.active_game_plugin_id.as_deref()) {
-        MarkerSourceKind::Plugin
-    } else {
-        MarkerSourceKind::LegacyLeaguePoller
+fn spawn_marker_source(
+    source_key: &MarkerSourceKey,
+    plugin_id: Option<&str>,
+    lol_url: Option<String>,
+    recording_t0: Instant,
+) -> Receiver<PollerMsg> {
+    let context = crate::game_plugins::GameEventSourceContext {
+        lol_url,
+        recording_t0,
+    };
+    match source_key {
+        MarkerSourceKey::Plugin(_) => crate::game_plugins::spawn_event_source(plugin_id, context)
+            .expect("marker source key checked plugin event source"),
+        MarkerSourceKey::LegacyLeaguePoller => {
+            crate::markers::spawn(context.lol_url, context.recording_t0)
+        }
     }
 }
 
-fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver<PollerMsg> {
-    let context = crate::game_plugins::GameEventSourceContext {
-        lol_url: opts.lol_url.clone(),
-        recording_t0,
-    };
-    match marker_source_kind(opts) {
-        MarkerSourceKind::Plugin => {
-            crate::game_plugins::spawn_event_source(opts.active_game_plugin_id.as_deref(), context)
-                .expect("marker source kind checked plugin event source")
+struct MarkerRuntime {
+    source_key: MarkerSourceKey,
+    marker_rx: Receiver<PollerMsg>,
+    lol_url: Option<String>,
+    recording_t0: Instant,
+}
+
+impl MarkerRuntime {
+    fn new(opts: &ServiceOptions, recording_t0: Instant) -> Self {
+        let source_key = marker_source_key(opts.active_game_plugin_id.as_deref());
+        let marker_rx = spawn_marker_source(
+            &source_key,
+            opts.active_game_plugin_id.as_deref(),
+            opts.lol_url.clone(),
+            recording_t0,
+        );
+        Self {
+            source_key,
+            marker_rx,
+            lol_url: opts.lol_url.clone(),
+            recording_t0,
         }
-        MarkerSourceKind::LegacyLeaguePoller => {
-            crate::markers::spawn(context.lol_url, context.recording_t0)
+    }
+
+    fn sync_to_plugin(&mut self, plugin_id: Option<&str>) {
+        let next_key = marker_source_key(plugin_id);
+        if next_key == self.source_key {
+            return;
         }
+        self.marker_rx = spawn_marker_source(
+            &next_key,
+            plugin_id,
+            self.lol_url.clone(),
+            self.recording_t0,
+        );
+        self.source_key = next_key;
+    }
+
+    fn try_recv(&self) -> Result<PollerMsg, TryRecvError> {
+        self.marker_rx.try_recv()
     }
 }
 
@@ -1098,7 +1150,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     // The wall-clock twin of the capture clock origin (both are QPC under
     // the hood; sampled together they describe one timeline — ddoc §5).
     let recording_t0 = Instant::now();
-    let marker_rx = spawn_marker_source(&opts, recording_t0);
+    let mut marker_runtime = MarkerRuntime::new(&opts, recording_t0);
     let mut marker_log = MarkerLog::new();
     let mut player_summary = PlayerSummaryState::default();
     // Build the capture engine — DXGI Desktop Duplication when the user opted
@@ -1244,7 +1296,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             }
         }
 
-        while let Ok(msg) = marker_rx.try_recv() {
+        while let Ok(msg) = marker_runtime.try_recv() {
             let marker_allowed = focus_state
                 .active_game_plugin_id
                 .as_deref()
@@ -1356,6 +1408,8 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     match switch_controller.switch_to(&target) {
                         Ok(()) => {
                             focus_state.apply_target(&target);
+                            marker_runtime
+                                .sync_to_plugin(focus_state.active_game_plugin_id.as_deref());
                             audio_privacy.set_slate(focus_state.capture_kind == CaptureKind::Slate);
                             if focus_state != old_state {
                                 switch_log.push(last_frame_pts_s, &focus_state);
@@ -1389,6 +1443,8 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                             };
                             let _ = switch_controller.switch_to(&fallback);
                             focus_state.apply_target(&fallback);
+                            marker_runtime
+                                .sync_to_plugin(focus_state.active_game_plugin_id.as_deref());
                             audio_privacy.set_slate(true);
                             if focus_state != old_state {
                                 switch_log.push(last_frame_pts_s, &focus_state);
@@ -2850,8 +2906,8 @@ mod tests {
         let opts = ServiceOptions::default();
 
         assert_eq!(
-            marker_source_kind(&opts),
-            MarkerSourceKind::LegacyLeaguePoller
+            marker_source_key(opts.active_game_plugin_id.as_deref()),
+            MarkerSourceKey::LegacyLeaguePoller
         );
     }
 
@@ -2862,7 +2918,10 @@ mod tests {
             ..ServiceOptions::default()
         };
 
-        assert_eq!(marker_source_kind(&opts), MarkerSourceKind::Plugin);
+        assert_eq!(
+            marker_source_key(opts.active_game_plugin_id.as_deref()),
+            MarkerSourceKey::Plugin(crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into())
+        );
     }
 
     #[test]
@@ -2873,9 +2932,35 @@ mod tests {
         };
 
         assert_eq!(
-            marker_source_kind(&opts),
-            MarkerSourceKind::LegacyLeaguePoller
+            marker_source_key(opts.active_game_plugin_id.as_deref()),
+            MarkerSourceKey::LegacyLeaguePoller
         );
+    }
+
+    #[test]
+    fn marker_source_key_switches_from_slate_to_plugin_when_focus_enters_event_source_game() {
+        let startup = marker_source_key_for(None, |_| false);
+        let focused = marker_source_key_for(Some("plugin_a"), |plugin_id| {
+            matches!(plugin_id, Some("plugin_a"))
+        });
+
+        assert_eq!(startup, MarkerSourceKey::LegacyLeaguePoller);
+        assert_eq!(focused, MarkerSourceKey::Plugin("plugin_a".into()));
+        assert_ne!(startup, focused);
+    }
+
+    #[test]
+    fn marker_source_key_distinguishes_between_plugin_event_sources() {
+        let plugin_a = marker_source_key_for(Some("plugin_a"), |plugin_id| {
+            matches!(plugin_id, Some("plugin_a" | "plugin_b"))
+        });
+        let plugin_b = marker_source_key_for(Some("plugin_b"), |plugin_id| {
+            matches!(plugin_id, Some("plugin_a" | "plugin_b"))
+        });
+
+        assert_eq!(plugin_a, MarkerSourceKey::Plugin("plugin_a".into()));
+        assert_eq!(plugin_b, MarkerSourceKey::Plugin("plugin_b".into()));
+        assert_ne!(plugin_a, plugin_b);
     }
 
     #[test]
@@ -2996,6 +3081,33 @@ mod tests {
             reason: SlateReason::NoEnabledForegroundGame,
         });
         assert!(!state.accepts_plugin_markers(crate::game_plugins::LEAGUE_OF_LEGENDS_ID));
+    }
+
+    #[test]
+    fn focus_run_state_rejects_stale_plugin_markers_after_plugin_switch() {
+        let mut state = FocusRunState::from_options(&ServiceOptions {
+            active_game_plugin_id: Some("plugin_a".into()),
+            active_game: Some(ActiveGame {
+                id: "game-a".into(),
+                name: "Game A".into(),
+            }),
+            ..ServiceOptions::default()
+        });
+        assert!(state.accepts_plugin_markers("plugin_a"));
+
+        state.apply_target(&SwitchCaptureTarget::Window {
+            hwnd: 10,
+            title: "Game B".into(),
+            active_game: Some(ActiveGame {
+                id: "game-b".into(),
+                name: "Game B".into(),
+            }),
+            active_game_plugin_id: Some("plugin_b".into()),
+            recording_mode: RecordingMode::ReplaysOnly,
+        });
+
+        assert!(!state.accepts_plugin_markers("plugin_a"));
+        assert!(state.accepts_plugin_markers("plugin_b"));
     }
 
     #[test]
