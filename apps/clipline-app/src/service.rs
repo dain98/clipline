@@ -882,7 +882,9 @@ fn full_session_transition(
     let next_id = next_state.active_game.as_ref().map(|game| game.id.as_str());
     match (active_recording_game_id, next_full, next_id) {
         (None, true, Some(_)) => FullSessionTransition::Start,
-        (Some(_), false, _) => FullSessionTransition::Finish,
+        (Some(_), false, _) if next_state.capture_kind == CaptureKind::Game => {
+            FullSessionTransition::Finish
+        }
         (Some(current), true, Some(next)) if current != next => {
             FullSessionTransition::FinishThenStart
         }
@@ -3394,7 +3396,7 @@ mod tests {
     }
 
     #[test]
-    fn full_session_transition_finishes_when_focus_moves_to_slate() {
+    fn full_session_transition_keeps_recording_when_focus_moves_to_slate() {
         let old = FocusRunState {
             capture_kind: CaptureKind::Game,
             active_game: Some(ActiveGame {
@@ -3415,7 +3417,7 @@ mod tests {
 
         assert_eq!(
             full_session_transition(Some("a"), &old, &next),
-            FullSessionTransition::Finish
+            FullSessionTransition::None
         );
     }
 
