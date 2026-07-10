@@ -432,6 +432,90 @@ fn rename_clip_title(
     })
 }
 
+fn same_existing_path(first: &Path, second: &Path) -> bool {
+    match (first.canonicalize(), second.canonicalize()) {
+        (Ok(first), Ok(second)) => first == second,
+        _ => first == second,
+    }
+}
+
+struct PreparedOsuSidecarMove {
+    source: PathBuf,
+    target: PathBuf,
+    staged: PathBuf,
+    backup: PathBuf,
+}
+
+impl PreparedOsuSidecarMove {
+    fn stage(source_clip: &Path, target_clip: &Path) -> Result<Option<Self>, String> {
+        let source = crate::osu_enrichment::pending_path(source_clip);
+        if !source.exists() {
+            return Ok(None);
+        }
+        let target = crate::osu_enrichment::pending_path(target_clip);
+        let target_is_source = same_existing_path(&target, &source);
+        if target.exists() && !target_is_source {
+            return Err("an osu! enrichment sidecar with that name already exists".into());
+        }
+        let bytes = std::fs::read(&source)
+            .map_err(|error| format!("read osu! enrichment sidecar {source:?}: {error}"))?;
+        let mut pending: crate::osu_enrichment::OsuPendingEnrichment =
+            serde_json::from_slice(&bytes)
+                .map_err(|error| format!("parse osu! enrichment sidecar {source:?}: {error}"))?;
+        pending.clip_path = target_clip.display().to_string();
+        let staged = target.with_extension("osu-enrichment.rename.tmp");
+        let backup = source.with_extension("osu-enrichment.rename.backup");
+        if staged.exists() {
+            return Err(format!(
+                "staged osu! enrichment path already exists: {staged:?}"
+            ));
+        }
+        if backup.exists() {
+            return Err(format!(
+                "backup osu! enrichment path already exists: {backup:?}"
+            ));
+        }
+        let json = serde_json::to_vec_pretty(&pending)
+            .map_err(|error| format!("serialize osu! enrichment sidecar: {error}"))?;
+        std::fs::write(&staged, json)
+            .map_err(|error| format!("stage osu! enrichment sidecar {staged:?}: {error}"))?;
+        Ok(Some(Self {
+            source,
+            target,
+            staged,
+            backup,
+        }))
+    }
+
+    fn commit(&self) -> Result<(), String> {
+        std::fs::rename(&self.source, &self.backup)
+            .map_err(|error| format!("stage old osu! enrichment sidecar: {error}"))?;
+        std::fs::rename(&self.staged, &self.target).map_err(|error| {
+            let _ = std::fs::rename(&self.backup, &self.source);
+            format!("install renamed osu! enrichment sidecar: {error}")
+        })?;
+        Ok(())
+    }
+
+    fn finish(&self) {
+        let _ = std::fs::remove_file(&self.backup);
+    }
+
+    fn rollback(&self) {
+        let _ = std::fs::remove_file(&self.target);
+        if self.backup.exists() && !self.source.exists() {
+            let _ = std::fs::rename(&self.backup, &self.source);
+        }
+        let _ = std::fs::remove_file(&self.staged);
+    }
+}
+
+impl Drop for PreparedOsuSidecarMove {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.staged);
+    }
+}
+
 fn rename_clip_files(
     source: PathBuf,
     old_path: String,
@@ -447,28 +531,24 @@ fn rename_clip_files(
     let title = clip_title_from_metadata(&metadata);
     let kind = clip_kind_from_metadata(&source, &metadata).to_string();
 
-    let target_is_same_file = target
-        .canonicalize()
-        .is_ok_and(|candidate| candidate == source);
+    let target_is_same_file = same_existing_path(&target, &source);
     if target.exists() && !target_is_same_file {
         return Err("a clip with that name already exists".into());
     }
 
     let source_markers = source.with_extension("markers.json");
     let target_markers = target.with_extension("markers.json");
-    let target_markers_same_file = target_markers
-        .canonicalize()
-        .is_ok_and(|candidate| candidate == source_markers);
+    let target_markers_same_file = same_existing_path(&target_markers, &source_markers);
     if source_markers.exists() && target_markers.exists() && !target_markers_same_file {
         return Err("a marker sidecar with that name already exists".into());
     }
 
-    let target_metadata_same_file = target_metadata
-        .canonicalize()
-        .is_ok_and(|candidate| candidate == source_metadata);
+    let target_metadata_same_file = same_existing_path(&target_metadata, &source_metadata);
     if source_metadata.exists() && target_metadata.exists() && !target_metadata_same_file {
         return Err("a clip metadata sidecar with that name already exists".into());
     }
+
+    let pending_osu_move = PreparedOsuSidecarMove::stage(&source, &target)?;
 
     if source != target {
         std::fs::rename(&source, &target).map_err(|e| format!("rename clip: {e}"))?;
@@ -488,6 +568,39 @@ fn rename_clip_files(
         }
     }
 
+    if let Some(pending) = &pending_osu_move {
+        if let Err(error) = pending.commit() {
+            rollback_renamed_clip_files(
+                &source,
+                &target,
+                &source_markers,
+                &target_markers,
+                moved_metadata.then_some((source_metadata.as_path(), target_metadata.as_path())),
+            );
+            return Err(error);
+        }
+    }
+
+    let mut target_metadata_value = read_clip_metadata(&target).unwrap_or(metadata);
+    target_metadata_value.title = title.clone();
+    target_metadata_value.kind = Some(kind.clone());
+    if let Err(error) = write_clip_metadata(&target, &target_metadata_value) {
+        if let Some(pending) = &pending_osu_move {
+            pending.rollback();
+        }
+        rollback_renamed_clip_files(
+            &source,
+            &target,
+            &source_markers,
+            &target_markers,
+            moved_metadata.then_some((source_metadata.as_path(), target_metadata.as_path())),
+        );
+        return Err(error);
+    }
+    if let Some(pending) = &pending_osu_move {
+        pending.finish();
+    }
+
     // The poster is a regenerable cache, not user data: move it alongside the
     // clip when we can, otherwise drop the stale one so it rebuilds on demand.
     let source_poster = crate::poster::poster_path(&source);
@@ -498,20 +611,6 @@ fn rename_clip_files(
         {
             let _ = std::fs::remove_file(&source_poster);
         }
-    }
-
-    let mut target_metadata_value = read_clip_metadata(&target).unwrap_or(metadata);
-    target_metadata_value.title = title.clone();
-    target_metadata_value.kind = Some(kind.clone());
-    if let Err(error) = write_clip_metadata(&target, &target_metadata_value) {
-        rollback_renamed_clip_files(
-            &source,
-            &target,
-            &source_markers,
-            &target_markers,
-            moved_metadata.then_some((source_metadata.as_path(), target_metadata.as_path())),
-        );
-        return Err(error);
     }
 
     let new_path = display_renamed_clip_path(&old_path, &target_name, parent);
@@ -2482,6 +2581,398 @@ mod tests {
         assert_eq!(clips[0].kind, "session");
     }
 
+    fn pending_osu_enrichment(clip: &Path) -> crate::osu_enrichment::OsuPendingEnrichment {
+        crate::osu_enrichment::OsuPendingEnrichment {
+            schema_version: 1,
+            clip_path: clip.display().to_string(),
+            recording_start_unix: 10,
+            recording_end_unix: 20,
+            clip_duration_s: 10.0,
+            status: crate::osu_enrichment::OsuEnrichmentStatus::Pending,
+            attempts: 0,
+            pagination_ceiling_reached: false,
+            title_events: Vec::new(),
+            message: None,
+        }
+    }
+
+    #[test]
+    fn prepared_osu_sidecar_move_commit_then_rollback_restores_exact_source() {
+        let dir = TestDir::new("clipline-library", "prepared-osu-rollback");
+        let source_clip = dir.path().join("session_1.mp4");
+        let target_clip = dir.path().join("Ranked win.mp4");
+        let source = crate::osu_enrichment::pending_path(&source_clip);
+        let target = crate::osu_enrichment::pending_path(&target_clip);
+        let original = serde_json::to_vec(&pending_osu_enrichment(&source_clip)).unwrap();
+        std::fs::write(&source, &original).unwrap();
+
+        let prepared = PreparedOsuSidecarMove::stage(&source_clip, &target_clip)
+            .unwrap()
+            .expect("source pending sidecar should prepare a move");
+        let staged = prepared.staged.clone();
+        let backup = prepared.backup.clone();
+
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(staged.exists());
+        assert!(!target.exists());
+        assert!(!backup.exists());
+
+        prepared.commit().unwrap();
+
+        assert!(!source.exists());
+        assert!(target.exists());
+        assert!(!staged.exists());
+        assert!(backup.exists());
+        let moved: crate::osu_enrichment::OsuPendingEnrichment =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(moved.clip_path, target_clip.display().to_string());
+
+        prepared.rollback();
+
+        assert!(source.exists());
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(!target.exists());
+        assert!(!staged.exists());
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn prepared_osu_sidecar_move_commit_then_finish_cleans_backup() {
+        let dir = TestDir::new("clipline-library", "prepared-osu-finish");
+        let source_clip = dir.path().join("session_1.mp4");
+        let target_clip = dir.path().join("Ranked win.mp4");
+        let source = crate::osu_enrichment::pending_path(&source_clip);
+        let target = crate::osu_enrichment::pending_path(&target_clip);
+        std::fs::write(
+            &source,
+            serde_json::to_vec_pretty(&pending_osu_enrichment(&source_clip)).unwrap(),
+        )
+        .unwrap();
+
+        let prepared = PreparedOsuSidecarMove::stage(&source_clip, &target_clip)
+            .unwrap()
+            .expect("source pending sidecar should prepare a move");
+        let staged = prepared.staged.clone();
+        let backup = prepared.backup.clone();
+        prepared.commit().unwrap();
+
+        assert!(target.exists());
+        assert!(backup.exists());
+        prepared.finish();
+
+        let moved: crate::osu_enrichment::OsuPendingEnrichment =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(moved.clip_path, target_clip.display().to_string());
+        assert!(!source.exists());
+        assert!(!staged.exists());
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn prepared_osu_sidecar_move_rejects_staging_path_collision_without_mutation() {
+        let dir = TestDir::new("clipline-library", "prepared-osu-staged-collision");
+        let source_clip = dir.path().join("session_1.mp4");
+        let target_clip = dir.path().join("Ranked win.mp4");
+        let source = crate::osu_enrichment::pending_path(&source_clip);
+        let target = crate::osu_enrichment::pending_path(&target_clip);
+        let staged = target.with_extension("osu-enrichment.rename.tmp");
+        let backup = source.with_extension("osu-enrichment.rename.backup");
+        let original = serde_json::to_vec(&pending_osu_enrichment(&source_clip)).unwrap();
+        std::fs::write(&source, &original).unwrap();
+        std::fs::write(&staged, b"occupied staged path").unwrap();
+
+        let error = match PreparedOsuSidecarMove::stage(&source_clip, &target_clip) {
+            Ok(_) => panic!("occupied staging path must stop preparation"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("staged osu! enrichment path"), "{error}");
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert_eq!(std::fs::read(&staged).unwrap(), b"occupied staged path");
+        assert!(!target.exists());
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn prepared_osu_sidecar_move_rejects_backup_path_collision_without_mutation() {
+        let dir = TestDir::new("clipline-library", "prepared-osu-backup-collision");
+        let source_clip = dir.path().join("session_1.mp4");
+        let target_clip = dir.path().join("Ranked win.mp4");
+        let source = crate::osu_enrichment::pending_path(&source_clip);
+        let target = crate::osu_enrichment::pending_path(&target_clip);
+        let staged = target.with_extension("osu-enrichment.rename.tmp");
+        let backup = source.with_extension("osu-enrichment.rename.backup");
+        let original = serde_json::to_vec(&pending_osu_enrichment(&source_clip)).unwrap();
+        std::fs::write(&source, &original).unwrap();
+        std::fs::write(&backup, b"occupied backup path").unwrap();
+
+        let error = match PreparedOsuSidecarMove::stage(&source_clip, &target_clip) {
+            Ok(_) => panic!("occupied backup path must stop preparation"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("backup osu! enrichment path"), "{error}");
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert_eq!(std::fs::read(&backup).unwrap(), b"occupied backup path");
+        assert!(!target.exists());
+        assert!(!staged.exists());
+    }
+
+    #[test]
+    fn prepared_osu_sidecar_move_install_failure_restores_source_and_drop_cleans_stage() {
+        let dir = TestDir::new("clipline-library", "prepared-osu-install-failure");
+        let source_clip = dir.path().join("session_1.mp4");
+        let target_clip = dir.path().join("Ranked win.mp4");
+        let source = crate::osu_enrichment::pending_path(&source_clip);
+        let target = crate::osu_enrichment::pending_path(&target_clip);
+        let original = serde_json::to_vec(&pending_osu_enrichment(&source_clip)).unwrap();
+        std::fs::write(&source, &original).unwrap();
+
+        let prepared = PreparedOsuSidecarMove::stage(&source_clip, &target_clip)
+            .unwrap()
+            .expect("source pending sidecar should prepare a move");
+        let staged = prepared.staged.clone();
+        let backup = prepared.backup.clone();
+        std::fs::create_dir(&target).unwrap();
+
+        let error = prepared.commit().unwrap_err();
+
+        assert!(
+            error.contains("install renamed osu! enrichment sidecar"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(target.is_dir());
+        assert!(staged.exists());
+        assert!(!backup.exists());
+
+        drop(prepared);
+
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(target.is_dir());
+        assert!(!staged.exists());
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn prepared_osu_sidecar_move_backup_rename_failure_preserves_source_and_drop_cleans_stage() {
+        let dir = TestDir::new("clipline-library", "prepared-osu-backup-rename-failure");
+        let source_clip = dir.path().join("session_1.mp4");
+        let target_clip = dir.path().join("Ranked win.mp4");
+        let source = crate::osu_enrichment::pending_path(&source_clip);
+        let target = crate::osu_enrichment::pending_path(&target_clip);
+        let original = serde_json::to_vec(&pending_osu_enrichment(&source_clip)).unwrap();
+        std::fs::write(&source, &original).unwrap();
+
+        let prepared = PreparedOsuSidecarMove::stage(&source_clip, &target_clip)
+            .unwrap()
+            .expect("source pending sidecar should prepare a move");
+        let staged = prepared.staged.clone();
+        let backup = prepared.backup.clone();
+        std::fs::create_dir(&backup).unwrap();
+
+        let error = prepared.commit().unwrap_err();
+
+        assert!(
+            error.contains("stage old osu! enrichment sidecar"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(!target.exists());
+        assert!(staged.exists());
+        assert!(backup.is_dir());
+
+        drop(prepared);
+
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(!target.exists());
+        assert!(!staged.exists());
+        assert!(backup.is_dir());
+        std::fs::remove_dir(&backup).unwrap();
+    }
+
+    #[test]
+    fn prepared_osu_sidecar_move_drop_cleans_uncommitted_stage_without_mutation() {
+        let dir = TestDir::new("clipline-library", "prepared-osu-drop");
+        let source_clip = dir.path().join("session_1.mp4");
+        let target_clip = dir.path().join("Ranked win.mp4");
+        let source = crate::osu_enrichment::pending_path(&source_clip);
+        let target = crate::osu_enrichment::pending_path(&target_clip);
+        let original = serde_json::to_vec(&pending_osu_enrichment(&source_clip)).unwrap();
+        std::fs::write(&source, &original).unwrap();
+
+        let staged;
+        let backup;
+        {
+            let prepared = PreparedOsuSidecarMove::stage(&source_clip, &target_clip)
+                .unwrap()
+                .expect("source pending sidecar should prepare a move");
+            staged = prepared.staged.clone();
+            backup = prepared.backup.clone();
+            assert!(staged.exists());
+            assert_eq!(std::fs::read(&source).unwrap(), original);
+            assert!(!target.exists());
+            assert!(!backup.exists());
+        }
+
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(!target.exists());
+        assert!(!staged.exists());
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn rename_clip_file_moves_pending_osu_sidecar_and_rewrites_clip_path() {
+        let dir = TestDir::new("clipline-library", "rename-osu-pending");
+        let source = dir.path().join("session_1.mp4");
+        let target = dir.path().join("Ranked win.mp4");
+        touch_mp4(&source);
+        std::fs::write(
+            crate::osu_enrichment::pending_path(&source),
+            serde_json::to_vec_pretty(&pending_osu_enrichment(&source)).unwrap(),
+        )
+        .unwrap();
+
+        rename_clip_files(
+            source.clone(),
+            source.display().to_string(),
+            normalized_clip_file_name("Ranked win").unwrap(),
+        )
+        .unwrap();
+
+        assert!(!crate::osu_enrichment::pending_path(&source).exists());
+        let moved: crate::osu_enrichment::OsuPendingEnrichment = serde_json::from_slice(
+            &std::fs::read(crate::osu_enrichment::pending_path(&target)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(moved.clip_path, target.display().to_string());
+    }
+
+    #[test]
+    fn rename_clip_file_rejects_malformed_pending_osu_before_moving_mp4() {
+        let dir = TestDir::new("clipline-library", "rename-osu-malformed");
+        let source = dir.path().join("session_1.mp4");
+        touch_mp4(&source);
+        std::fs::write(crate::osu_enrichment::pending_path(&source), b"not json").unwrap();
+
+        let error = match rename_clip_files(
+            source.clone(),
+            source.display().to_string(),
+            normalized_clip_file_name("Ranked win").unwrap(),
+        ) {
+            Ok(_) => panic!("malformed pending enrichment must stop the rename"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("osu! enrichment"), "{error}");
+        assert!(source.exists());
+        assert!(crate::osu_enrichment::pending_path(&source).exists());
+        assert!(!dir.path().join("Ranked win.mp4").exists());
+    }
+
+    #[test]
+    fn rename_clip_file_rejects_pending_osu_destination_collision() {
+        let dir = TestDir::new("clipline-library", "rename-osu-collision");
+        let source = dir.path().join("session_1.mp4");
+        let target = dir.path().join("Ranked win.mp4");
+        touch_mp4(&source);
+        let source_pending = crate::osu_enrichment::pending_path(&source);
+        let target_pending = crate::osu_enrichment::pending_path(&target);
+        let original = serde_json::to_vec(&pending_osu_enrichment(&source)).unwrap();
+        std::fs::write(&source_pending, &original).unwrap();
+        std::fs::write(&target_pending, b"occupied").unwrap();
+
+        let error = match rename_clip_files(
+            source.clone(),
+            source.display().to_string(),
+            normalized_clip_file_name("Ranked win").unwrap(),
+        ) {
+            Ok(_) => panic!("pending enrichment destination collision must stop the rename"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("osu! enrichment sidecar"), "{error}");
+        assert!(source.exists());
+        assert!(!target.exists());
+        assert_eq!(std::fs::read(&source_pending).unwrap(), original);
+        assert_eq!(std::fs::read(&target_pending).unwrap(), b"occupied");
+        assert!(!target_pending
+            .with_extension("osu-enrichment.rename.tmp")
+            .exists());
+        assert!(!source_pending
+            .with_extension("osu-enrichment.rename.backup")
+            .exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rename_clip_file_case_only_moves_mp4_and_rewrites_pending_osu_path() {
+        let dir = TestDir::new("clipline-library", "rename-osu-case-only");
+        let source = dir.path().join("session_1.mp4");
+        let target = dir.path().join("Session_1.mp4");
+        let source_markers = source.with_extension("markers.json");
+        let target_markers = target.with_extension("markers.json");
+        let source_metadata = clip_metadata_path(&source);
+        let target_metadata = clip_metadata_path(&target);
+        let marker_bytes = br#"{"marker":"case-only-marker"}"#;
+        touch_mp4(&source);
+        std::fs::write(&source_markers, marker_bytes).unwrap();
+        write_clip_metadata(
+            &source,
+            &ClipMetadata {
+                title: Some("Case-only metadata".to_string()),
+                kind: Some("session".to_string()),
+            },
+        )
+        .unwrap();
+        let metadata_bytes = std::fs::read(&source_metadata).unwrap();
+        std::fs::write(
+            crate::osu_enrichment::pending_path(&source),
+            serde_json::to_vec_pretty(&pending_osu_enrichment(&source)).unwrap(),
+        )
+        .unwrap();
+        let result = rename_clip_files(
+            source.clone(),
+            source.display().to_string(),
+            normalized_clip_file_name("Session_1").unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(result.path, target.display().to_string());
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().any(|name| name == "Session_1.mp4"));
+        assert!(!names.iter().any(|name| name == "session_1.mp4"));
+        assert!(names.iter().any(|name| name == "Session_1.markers.json"));
+        assert!(!names.iter().any(|name| name == "session_1.markers.json"));
+        assert!(names.iter().any(|name| name == "Session_1.clipline.json"));
+        assert!(!names.iter().any(|name| name == "session_1.clipline.json"));
+        assert!(names
+            .iter()
+            .any(|name| name == "Session_1.osu-enrichment.json"));
+        assert!(!names
+            .iter()
+            .any(|name| name == "session_1.osu-enrichment.json"));
+        assert_eq!(std::fs::read(&target_markers).unwrap(), marker_bytes);
+        assert_eq!(std::fs::read(&target_metadata).unwrap(), metadata_bytes);
+
+        let moved: crate::osu_enrichment::OsuPendingEnrichment = serde_json::from_slice(
+            &std::fs::read(crate::osu_enrichment::pending_path(&target)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(moved.clip_path, target.display().to_string());
+        assert!(!crate::osu_enrichment::pending_path(&target)
+            .with_extension("osu-enrichment.rename.tmp")
+            .exists());
+        assert!(!crate::osu_enrichment::pending_path(&source)
+            .with_extension("osu-enrichment.rename.backup")
+            .exists());
+        assert!(!target_metadata.with_extension("clipline.json.tmp").exists());
+        assert!(!names.iter().any(|name| name.contains(".rename.")));
+    }
+
     #[test]
     fn rename_clip_file_rolls_back_when_final_metadata_write_fails() {
         let dir = TestDir::new("clipline-library", "rename-file-metadata-rollback");
@@ -2489,6 +2980,12 @@ mod tests {
         let source = root.join("session_123.mp4");
         let target = root.join("Ranked win.mp4");
         touch_mp4(&source);
+        let original_pending = pending_osu_enrichment(&source);
+        std::fs::write(
+            crate::osu_enrichment::pending_path(&source),
+            serde_json::to_vec_pretty(&original_pending).unwrap(),
+        )
+        .unwrap();
         std::fs::write(source.with_extension("markers.json"), b"{}").unwrap();
         std::fs::create_dir_all(clip_metadata_path(&target)).unwrap();
 
@@ -2509,6 +3006,13 @@ mod tests {
         assert!(source.with_extension("markers.json").exists());
         assert!(!target.exists(), "target MP4 should be rolled back");
         assert!(!target.with_extension("markers.json").exists());
+        assert!(crate::osu_enrichment::pending_path(&source).exists());
+        assert!(!crate::osu_enrichment::pending_path(&target).exists());
+        let restored: crate::osu_enrichment::OsuPendingEnrichment = serde_json::from_slice(
+            &std::fs::read(crate::osu_enrichment::pending_path(&source)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.clip_path, source.display().to_string());
     }
 
     fn touch_mp4(path: &Path) {
