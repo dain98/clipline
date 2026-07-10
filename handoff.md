@@ -11,9 +11,9 @@ ShadowPlay-style replay buffer, **no DLL injection ever** (anti-cheat safety is 
 architectural bet), automatic timeline event markers via the League of Legends Live Client
 Data API, Hybrid MP4 output, Rust core + Tauri UI.
 
-## Current state (2026-06-28): a working tray recorder with a first-party review player
+## Current state (2026-07-09): a working tray recorder with a first-party review player
 
-Thirty-four milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
+Thirty-five milestones executed (plans in `docs/superpowers/plans/*.md` — plan docs are kept there, all
 completed task-by-task with strict TDD; read any of them to see the conventions in action):
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
@@ -324,6 +324,21 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
      hover/focus details, seek/highlight behavior, and osu! gallery summaries. A real spike
      confirmed client credentials with `public` scope can fetch Dain's recent osu!standard scores,
      including submitted failed plays, so there is no Clipline Cloud broker dependency.
+35. **Reliability and playback hardening** — Full-session finalization now retains non-empty
+    `.mp4.recording` files for startup recovery when writer finalization or the final rename fails.
+    Settings changes plan recorder options without taking the active command sender and commit the
+    restart only after persistence/tray/hook work succeeds. Cloud-library loads are account-scoped
+    and generation-guarded, forced refreshes supersede in-flight requests, renamed clips carry and
+    rewrite pending osu! enrichment, and all deletion/quota paths include markers, clip metadata,
+    pending enrichment, and posters. Finalized MP4s switch `mvhd`/`tkhd`/`mdhd` to version 1 above
+    `u32::MAX`, with `u128` duration rescaling. Multi-audio preview swaps resolve the playhead after
+    generation completes, consume the latest queued seek, and rapid relative seeks accumulate.
+
+Verification (2026-07-09): formatting, workspace Clippy, and fresh-cache Clippy for the three
+changed crates passed. The first non-CI workspace test run had one transient real-clock device-test
+failure; its exact rerun, a subsequent complete non-CI workspace rerun, and the CI-mode full
+workspace test run passed. App launch and manual playback verification are deferred until this
+branch is integrated.
 
 > Claude handoff: the library clip-icon/labeling thread was paused at the user's request. If you
 > resume it, the user wants no monitor/desktop icon and no tiny checkbox/corner badge. The desired
@@ -728,6 +743,11 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 **Media pipeline**
 - `clipline-mp4` wants **4-byte length-prefixed NALs**; MFTs emit Annex B — `annexb.rs`
   converts (and strips AUD/SPS/PPS). B-frames must stay **disabled** (no ctts in the muxer).
+- **Async audio previews replace the video source:** never restore a playhead captured before the
+  preview await. Resolve and consume `pendingSeek` immediately before `video.src` changes, and base
+  repeated relative seeks on the queued target rather than stale `video.currentTime`.
+- **Long finalized MP4s need version-1 duration boxes:** `mvhd`, `tkhd`, and each `mdhd` must switch
+  independently when its duration exceeds `u32::MAX`; use a `u128` intermediate when rescaling.
 - The MP4 timeline is **duration-cumulative**: video durations are re-derived from capture
   stamps at GOP seal; audio gaps become silence (`pcm.rs`); audio recorded before the first
   video packet is dropped (engine-init lead-in shifted video ~63 ms early before the fix —
