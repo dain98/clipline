@@ -165,7 +165,13 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
       },
     });
     if (seq !== audioPreviewSeq || !currentClip || currentClip.path !== clip.path) return;
-    setReviewVideoSource(path, { resumeTime, shouldResume, rate, trimRange });
+    const latestResumeTime = consumeSourceSwapResumeTime(resumeTime);
+    setReviewVideoSource(path, {
+      resumeTime: latestResumeTime,
+      shouldResume,
+      rate,
+      trimRange,
+    });
     currentReviewAudioKey = selectionKey;
     setDeckStatus(audioSelectionLabel(clip), { transient: true });
   } catch (e) {
@@ -174,7 +180,13 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
     if (message.includes("ffmpeg is not available for audio track mixing")) {
       if (currentClip && currentClip.path === clip.path) {
         if (currentReviewMediaPath !== clip.path) {
-          setReviewVideoSource(clip.path, { resumeTime, shouldResume, rate, trimRange });
+          const latestResumeTime = consumeSourceSwapResumeTime(resumeTime);
+          setReviewVideoSource(clip.path, {
+            resumeTime: latestResumeTime,
+            shouldResume,
+            rate,
+            trimRange,
+          });
         } else if (forceResume) {
           video.play().catch(() => syncPlayState());
         }
@@ -893,6 +905,16 @@ function renderRuler() {
 // at a time and chain the latest target from the `seeked` event.
 var pendingSeek = null;
 
+function consumeSourceSwapResumeTime(fallbackTime) {
+  const resumeTime = PlayerCore.sourceSwapResumeTime(
+    pendingSeek,
+    video.currentTime,
+    fallbackTime,
+  );
+  pendingSeek = null;
+  return resumeTime;
+}
+
 function seekTo(time, options = {}) {
   if (!currentClip) return;
   if (!options.keepGameEventSelection) clearGameEventSelection();
@@ -923,7 +945,12 @@ video.addEventListener("seeked", () => {
 });
 
 function seekBy(delta) {
-  seekTo((video.currentTime || 0) + delta);
+  seekTo(PlayerCore.relativeSeekTarget(
+    video.currentTime,
+    pendingSeek,
+    delta,
+    clipDuration(),
+  ));
 }
 
 function togglePlay() {

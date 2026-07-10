@@ -1648,7 +1648,12 @@ fn default_audio_preview_is_gated_and_degrades_to_source_on_failure() {
         js.contains("setDeckStatus(\"audio mix unavailable; playing source\", { transient: true });")
             && !js.contains("audioPreviewUnavailable = true;")
             && js.contains("if (currentReviewMediaPath !== clip.path) {")
-            && js.contains("setReviewVideoSource(clip.path, { resumeTime, shouldResume, rate, trimRange });"),
+            && js
+                .matches("const latestResumeTime = consumeSourceSwapResumeTime(resumeTime);")
+                .count()
+                == 2
+            && js.contains("setReviewVideoSource(clip.path, {")
+            && js.contains("resumeTime: latestResumeTime"),
         "preview generation failure should fall back to source playback without disabling future preview attempts"
     );
     assert!(
@@ -1665,6 +1670,23 @@ fn default_audio_preview_is_gated_and_degrades_to_source_on_failure() {
             ),
         "cloud open-sync must ignore stale results once a newer upload record exists"
     );
+}
+
+#[test]
+fn audio_preview_resolves_resume_position_after_await() {
+    let review = read_ui_js("review-player.js");
+    let body = js_function_body(&review, "applySelectedAudioTracksToPlayback");
+    let await_preview = body
+        .find("await invoke(\"preview_clip_audio_tracks\"")
+        .unwrap();
+    let consume_latest = body
+        .find("consumeSourceSwapResumeTime(resumeTime)")
+        .unwrap();
+    assert!(await_preview < consume_latest);
+
+    let seek_by = js_function_body(&review, "seekBy");
+    assert!(seek_by.contains("PlayerCore.relativeSeekTarget"));
+    assert!(seek_by.contains("pendingSeek"));
 }
 
 #[test]
