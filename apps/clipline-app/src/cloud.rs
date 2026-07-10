@@ -1519,9 +1519,9 @@ fn delete_uploaded_local_files(target: &Path) {
         eprintln!("delete local clip after upload {target:?}: {e}");
     }
     // Sidecars may not exist — ignore missing-file errors.
-    let _ = std::fs::remove_file(target.with_extension("markers.json"));
-    let _ = std::fs::remove_file(crate::osu_enrichment::pending_path(target));
-    let _ = std::fs::remove_file(crate::poster::poster_path(target));
+    for sidecar in crate::library::clip_sidecar_paths(target) {
+        let _ = std::fs::remove_file(sidecar);
+    }
 }
 
 fn emit_upload_progress<R: Runtime>(
@@ -2068,10 +2068,12 @@ mod tests {
         let dir = test_dir("cloud-delete");
         let clip = dir.join("clip.mp4");
         let markers = clip.with_extension("markers.json");
+        let metadata = clip.with_extension("clipline.json");
         let pending_osu = clip.with_extension("osu-enrichment.json");
         let poster = crate::poster::poster_path(&clip);
         std::fs::write(&clip, b"mp4").unwrap();
         std::fs::write(&markers, b"{}").unwrap();
+        std::fs::write(&metadata, b"{}").unwrap();
         std::fs::write(&pending_osu, b"{}").unwrap();
         std::fs::write(&poster, b"jpg").unwrap();
 
@@ -2079,6 +2081,7 @@ mod tests {
 
         assert!(!clip.exists());
         assert!(!markers.exists());
+        assert!(!metadata.exists());
         assert!(!pending_osu.exists());
         assert!(!poster.exists());
         let _ = std::fs::remove_dir_all(&dir);

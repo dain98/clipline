@@ -316,12 +316,20 @@ pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Res
     remove_clip_files(&target)
 }
 
+pub(crate) fn clip_sidecar_paths(target: &Path) -> [PathBuf; 4] {
+    [
+        target.with_extension("markers.json"),
+        clip_metadata_path(target),
+        crate::osu_enrichment::pending_path(target),
+        crate::poster::poster_path(target),
+    ]
+}
+
 fn remove_clip_files(target: &Path) -> Result<(), String> {
     std::fs::remove_file(target).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(target.with_extension("markers.json"));
-    let _ = std::fs::remove_file(clip_metadata_path(target));
-    let _ = std::fs::remove_file(crate::osu_enrichment::pending_path(target));
-    let _ = std::fs::remove_file(crate::poster::poster_path(target));
+    for sidecar in clip_sidecar_paths(target) {
+        let _ = std::fs::remove_file(sidecar);
+    }
     Ok(())
 }
 
@@ -335,9 +343,9 @@ pub struct DeletedClipsReport {
 }
 
 /// Testable core of [`delete_clips`]: deletes each already-validated clip plus
-/// its `markers.json` sidecar and cached poster (best effort), recording any
-/// removal failures. `failed` carries inputs that already failed validation so
-/// the caller's report stays complete in one place.
+/// its four sidecars (best effort), recording any removal failures. `failed`
+/// carries inputs that already failed validation so the caller's report stays
+/// complete in one place.
 fn delete_clips_impl(
     validated: Vec<(String, PathBuf)>,
     mut failed: Vec<(String, String)>,
@@ -3123,13 +3131,15 @@ mod tests {
         let root = dir.path().join("media");
         std::fs::create_dir_all(&root).unwrap();
 
-        // Two real clips, each with markers, pending osu! enrichment, and poster sidecars.
+        // Two real clips, each with all four sidecars.
         let a = root.join("a.mp4");
         let b = root.join("b.mp4");
         touch_mp4(&a);
         touch_mp4(&b);
         std::fs::write(a.with_extension("markers.json"), b"{}").unwrap();
         std::fs::write(b.with_extension("markers.json"), b"{}").unwrap();
+        std::fs::write(clip_metadata_path(&a), b"{}").unwrap();
+        std::fs::write(clip_metadata_path(&b), b"{}").unwrap();
         std::fs::write(a.with_extension("osu-enrichment.json"), b"{}").unwrap();
         std::fs::write(b.with_extension("osu-enrichment.json"), b"{}").unwrap();
         std::fs::write(crate::poster::poster_path(&a), b"poster").unwrap();
@@ -3139,6 +3149,7 @@ mod tests {
         let c = root.join("c.mp4");
         touch_mp4(&c);
         std::fs::write(c.with_extension("markers.json"), b"{}").unwrap();
+        std::fs::write(clip_metadata_path(&c), b"{}").unwrap();
         std::fs::write(c.with_extension("osu-enrichment.json"), b"{}").unwrap();
 
         let validated = vec![
@@ -3164,6 +3175,14 @@ mod tests {
             "b.mp4 poster should be removed"
         );
         assert!(
+            !clip_metadata_path(&a).exists(),
+            "a.mp4 clip metadata should be removed"
+        );
+        assert!(
+            !clip_metadata_path(&b).exists(),
+            "b.mp4 clip metadata should be removed"
+        );
+        assert!(
             !a.with_extension("osu-enrichment.json").exists(),
             "a.mp4 pending osu! sidecar should be removed"
         );
@@ -3175,6 +3194,10 @@ mod tests {
         assert!(
             c.with_extension("markers.json").exists(),
             "c.mp4 markers sidecar must be left untouched"
+        );
+        assert!(
+            clip_metadata_path(&c).exists(),
+            "c.mp4 clip metadata must be left untouched"
         );
         assert!(
             c.with_extension("osu-enrichment.json").exists(),
