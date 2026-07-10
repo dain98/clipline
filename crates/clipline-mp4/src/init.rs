@@ -150,12 +150,20 @@ fn mvex_multi(track_count: u32) -> Vec<u8> {
 }
 
 pub fn mvhd(duration_movie_ts: u64, next_track_id: u32) -> Vec<u8> {
+    let version = u8::from(duration_movie_ts > u32::MAX as u64);
     let mut p = Payload::new();
-    p.u32(0) // creation_time
-        .u32(0) // modification_time
-        .u32(MOVIE_TIMESCALE)
-        .u32(duration_movie_ts as u32)
-        .u32(0x0001_0000) // rate 1.0
+    if version == 1 {
+        p.u64(0) // creation_time
+            .u64(0) // modification_time
+            .u32(MOVIE_TIMESCALE)
+            .u64(duration_movie_ts);
+    } else {
+        p.u32(0) // creation_time
+            .u32(0) // modification_time
+            .u32(MOVIE_TIMESCALE)
+            .u32(duration_movie_ts as u32);
+    }
+    p.u32(0x0001_0000) // rate 1.0
         .u16(0x0100) // volume 1.0
         .u16(0) // reserved
         .u32(0)
@@ -167,7 +175,7 @@ pub fn mvhd(duration_movie_ts: u64, next_track_id: u32) -> Vec<u8> {
         p.u32(0); // pre_defined
     }
     p.u32(next_track_id);
-    full_box(*b"mvhd", 0, 0, p.into_vec())
+    full_box(*b"mvhd", version, 0, p.into_vec())
 }
 
 /// The whole `trak` with empty sample tables (fragmented init moov).
@@ -234,13 +242,22 @@ pub fn audio_trak_with_tables(
 }
 
 fn tkhd(track_id: u32, duration_movie_ts: u64, volume: u16, width: u16, height: u16) -> Vec<u8> {
+    let version = u8::from(duration_movie_ts > u32::MAX as u64);
     let mut p = Payload::new();
+    if version == 1 {
+        p.u64(0) // creation_time
+            .u64(0) // modification_time
+            .u32(track_id)
+            .u32(0) // reserved
+            .u64(duration_movie_ts);
+    } else {
+        p.u32(0) // creation_time
+            .u32(0) // modification_time
+            .u32(track_id)
+            .u32(0) // reserved
+            .u32(duration_movie_ts as u32);
+    }
     p.u32(0)
-        .u32(0) // creation/modification
-        .u32(track_id)
-        .u32(0) // reserved
-        .u32(duration_movie_ts as u32)
-        .u32(0)
         .u32(0) // reserved
         .u16(0) // layer
         .u16(0) // alternate_group
@@ -250,7 +267,26 @@ fn tkhd(track_id: u32, duration_movie_ts: u64, volume: u16, width: u16, height: 
         p.u32(m);
     }
     p.u32((width as u32) << 16).u32((height as u32) << 16);
-    full_box(*b"tkhd", 0, 0x000003, p.into_vec()) // enabled | in_movie
+    full_box(*b"tkhd", version, 0x000003, p.into_vec()) // enabled | in_movie
+}
+
+fn mdhd(timescale: u32, duration_media_ts: u64) -> Vec<u8> {
+    let version = u8::from(duration_media_ts > u32::MAX as u64);
+    let mut p = Payload::new();
+    if version == 1 {
+        p.u64(0) // creation_time
+            .u64(0) // modification_time
+            .u32(timescale)
+            .u64(duration_media_ts);
+    } else {
+        p.u32(0) // creation_time
+            .u32(0) // modification_time
+            .u32(timescale)
+            .u32(duration_media_ts as u32);
+    }
+    p.u16(0x55C4) // language: und
+        .u16(0);
+    full_box(*b"mdhd", version, 0, p.into_vec())
 }
 
 fn mdia_generic(
@@ -262,14 +298,7 @@ fn mdia_generic(
     stsd_box: Vec<u8>,
     stbl_tail: Vec<u8>,
 ) -> Vec<u8> {
-    let mut p = Payload::new();
-    p.u32(0)
-        .u32(0)
-        .u32(timescale)
-        .u32(duration_media_ts as u32)
-        .u16(0x55C4) // language: und
-        .u16(0);
-    let mdhd = full_box(*b"mdhd", 0, 0, p.into_vec());
+    let mdhd = mdhd(timescale, duration_media_ts);
 
     let mut h = Payload::new();
     h.u32(0)
@@ -444,6 +473,129 @@ mod tests {
             vec![0x67, 0x64, 0x00, 0x28, 0xAA],
             vec![0x68, 0xEE, 0x3C, 0x80],
         )
+    }
+
+    fn box_version(bytes: &[u8], info: &crate::walker::BoxInfo) -> u8 {
+        bytes[info.payload_offset as usize]
+    }
+
+    #[test]
+    fn duration_headers_keep_version_zero_at_u32_max() {
+        let duration = u32::MAX as u64;
+        let movie = mvhd(duration, 2);
+        let movie_box = walk(&movie).remove(0);
+        let movie_payload = movie_box.payload_offset as usize;
+        assert_eq!(box_version(&movie, &movie_box), 0);
+        assert_eq!(movie_box.size, 108);
+        assert_eq!(
+            u32::from_be_bytes(
+                movie[movie_payload + 16..movie_payload + 20]
+                    .try_into()
+                    .unwrap()
+            ),
+            u32::MAX
+        );
+
+        let track = video_trak_with_tables(&cfg(), 1, duration, duration, empty_stbl_tail());
+        let trak = walk(&track).remove(0);
+        let trak_children = children(&track, &trak);
+        let tkhd = find(&trak_children, b"tkhd").unwrap();
+        let tkhd_payload = tkhd.payload_offset as usize;
+        assert_eq!(box_version(&track, tkhd), 0);
+        assert_eq!(tkhd.size, 92);
+        assert_eq!(
+            u32::from_be_bytes(
+                track[tkhd_payload + 20..tkhd_payload + 24]
+                    .try_into()
+                    .unwrap()
+            ),
+            u32::MAX
+        );
+        let mdia = find(&trak_children, b"mdia").unwrap();
+        let mdhd = find(&children(&track, mdia), b"mdhd").unwrap().clone();
+        let mdhd_payload = mdhd.payload_offset as usize;
+        assert_eq!(box_version(&track, &mdhd), 0);
+        assert_eq!(mdhd.size, 32);
+        assert_eq!(
+            u32::from_be_bytes(
+                track[mdhd_payload + 16..mdhd_payload + 20]
+                    .try_into()
+                    .unwrap()
+            ),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn duration_headers_use_version_one_and_preserve_first_u64_value() {
+        let duration = u32::MAX as u64 + 1;
+        let movie = mvhd(duration, 2);
+        let movie_box = walk(&movie).remove(0);
+        let movie_payload = movie_box.payload_offset as usize;
+        assert_eq!(box_version(&movie, &movie_box), 1);
+        assert_eq!(movie_box.size, 120);
+        assert_eq!(
+            u64::from_be_bytes(
+                movie[movie_payload + 24..movie_payload + 32]
+                    .try_into()
+                    .unwrap()
+            ),
+            duration
+        );
+
+        let track = video_trak_with_tables(&cfg(), 1, duration, duration, empty_stbl_tail());
+        let trak = walk(&track).remove(0);
+        let trak_children = children(&track, &trak);
+        let tkhd = find(&trak_children, b"tkhd").unwrap();
+        let tkhd_payload = tkhd.payload_offset as usize;
+        assert_eq!(box_version(&track, tkhd), 1);
+        assert_eq!(tkhd.size, 104);
+        assert_eq!(
+            u64::from_be_bytes(
+                track[tkhd_payload + 28..tkhd_payload + 36]
+                    .try_into()
+                    .unwrap()
+            ),
+            duration
+        );
+        let mdia = find(&trak_children, b"mdia").unwrap();
+        let mdhd = find(&children(&track, mdia), b"mdhd").unwrap().clone();
+        let mdhd_payload = mdhd.payload_offset as usize;
+        assert_eq!(box_version(&track, &mdhd), 1);
+        assert_eq!(mdhd.size, 44);
+        assert_eq!(
+            u64::from_be_bytes(
+                track[mdhd_payload + 24..mdhd_payload + 32]
+                    .try_into()
+                    .unwrap()
+            ),
+            duration
+        );
+    }
+
+    #[test]
+    fn track_duration_headers_select_versions_independently() {
+        let short = u32::MAX as u64;
+        let long = short + 1;
+
+        for (movie_duration, media_duration, expected_tkhd, expected_mdhd) in
+            [(long, short, 1, 0), (short, long, 0, 1)]
+        {
+            let track = video_trak_with_tables(
+                &cfg(),
+                1,
+                movie_duration,
+                media_duration,
+                empty_stbl_tail(),
+            );
+            let trak = walk(&track).remove(0);
+            let trak_children = children(&track, &trak);
+            let tkhd = find(&trak_children, b"tkhd").unwrap();
+            assert_eq!(box_version(&track, tkhd), expected_tkhd);
+            let mdia = find(&trak_children, b"mdia").unwrap();
+            let mdhd = find(&children(&track, mdia), b"mdhd").unwrap().clone();
+            assert_eq!(box_version(&track, &mdhd), expected_mdhd);
+        }
     }
 
     #[test]
