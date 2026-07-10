@@ -254,6 +254,71 @@ const PlayerCore = (() => {
     return Math.max(0, Math.min(max, value));
   };
 
+  const SEEK_CONFIRM_TOLERANCE_S = 0.1;
+
+  const createLogicalSeekState = () => ({
+    targetTime: null,
+    sourceGeneration: 0,
+    metadataGeneration: null,
+  });
+
+  const requestLogicalSeek = (state, time, duration) => {
+    if (!Number.isFinite(time)) return state;
+    return { ...state, targetTime: clampTime(time, duration) };
+  };
+
+  const beginSourceAssignment = (state, sourceGeneration, resumeTime, duration) => {
+    const requested = Number.isFinite(state && state.targetTime)
+      ? state.targetTime
+      : Number.isFinite(resumeTime) ? resumeTime : 0;
+    return {
+      targetTime: clampTime(requested, duration),
+      sourceGeneration,
+      metadataGeneration: null,
+    };
+  };
+
+  const metadataSeekDecision = (state, sourceGeneration, duration) => {
+    if (!state || state.sourceGeneration !== sourceGeneration) {
+      return { state, applyTime: null, confirmed: false };
+    }
+    const targetTime = Number.isFinite(state.targetTime)
+      ? clampTime(state.targetTime, duration)
+      : null;
+    const next = { ...state, targetTime, metadataGeneration: sourceGeneration };
+    return { state: next, applyTime: targetTime, confirmed: false };
+  };
+
+  const seekedDecision = (state, sourceGeneration, currentTime, duration) => {
+    if (!state
+        || state.sourceGeneration !== sourceGeneration
+        || state.metadataGeneration !== sourceGeneration
+        || !Number.isFinite(state.targetTime)
+        || !Number.isFinite(currentTime)) {
+      return { state, applyTime: null, confirmed: false };
+    }
+    const targetTime = clampTime(state.targetTime, duration);
+    if (Math.abs(currentTime - targetTime) <= SEEK_CONFIRM_TOLERANCE_S) {
+      return {
+        state: { ...state, targetTime: null },
+        applyTime: null,
+        confirmed: true,
+      };
+    }
+    return {
+      state: { ...state, targetTime },
+      applyTime: targetTime,
+      confirmed: false,
+    };
+  };
+
+  const logicalPlaybackTime = (state, currentTime, duration) => {
+    const time = Number.isFinite(state && state.targetTime)
+      ? state.targetTime
+      : Number.isFinite(currentTime) ? currentTime : 0;
+    return clampTime(time, duration);
+  };
+
   const sourceSwapResumeTime = (pendingSeek, currentTime, fallbackTime) => {
     if (Number.isFinite(pendingSeek)) return Math.max(0, pendingSeek);
     if (Number.isFinite(currentTime)) return Math.max(0, currentTime);
@@ -1845,6 +1910,12 @@ const PlayerCore = (() => {
     outputResolutionOption,
     captureSourceLabel,
     clampTime,
+    createLogicalSeekState,
+    requestLogicalSeek,
+    beginSourceAssignment,
+    metadataSeekDecision,
+    seekedDecision,
+    logicalPlaybackTime,
     sourceSwapResumeTime,
     sourceRestoreDecision,
     relativeSeekTarget,

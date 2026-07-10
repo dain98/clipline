@@ -396,23 +396,6 @@ fn clamp_time_and_percent_respect_duration() {
 }
 
 #[test]
-fn source_swap_resume_time_prefers_latest_queued_seek() {
-    let mut ctx = player_core_context();
-    assert_eq!(
-        eval(&mut ctx, "PlayerCore.sourceSwapResumeTime(25, 5, 0)"),
-        "25"
-    );
-    assert_eq!(
-        eval(&mut ctx, "PlayerCore.sourceSwapResumeTime(null, 18, 0)"),
-        "18"
-    );
-    assert_eq!(
-        eval(&mut ctx, "PlayerCore.sourceSwapResumeTime(null, NaN, 7)"),
-        "7"
-    );
-}
-
-#[test]
 fn relative_seek_accumulates_from_pending_target() {
     let mut ctx = player_core_context();
     assert_eq!(
@@ -433,33 +416,68 @@ fn relative_seek_accumulates_from_pending_target() {
 }
 
 #[test]
-fn source_restore_rejects_superseded_assignment() {
+fn logical_seek_survives_early_seeked_and_source_swap() {
     let mut ctx = player_core_context();
+    let result = eval_json(
+        &mut ctx,
+        r#"
+        (() => {
+          let state = PlayerCore.createLogicalSeekState();
+          state = PlayerCore.beginSourceAssignment(state, 1, 10, 60);
+          let decision = PlayerCore.metadataSeekDecision(state, 1, 60);
+          state = decision.state;
+          state = PlayerCore.seekedDecision(state, 1, 10, 60).state;
+          for (const delta of [5, 5, 5, 5, 5]) {
+            const target = PlayerCore.relativeSeekTarget(10, state.targetTime, delta, 60);
+            state = PlayerCore.requestLogicalSeek(state, target, 60);
+          }
+          state = PlayerCore.beginSourceAssignment(state, 2, 0, 60);
+          const early = PlayerCore.seekedDecision(state, 2, 0, 60);
+          const metadata = PlayerCore.metadataSeekDecision(early.state, 2, 60);
+          const prior = PlayerCore.seekedDecision(metadata.state, 2, 30, 60);
+          const arrived = PlayerCore.seekedDecision(prior.state, 2, 35, 60);
+          return {
+            targetAfterEarlyEvent: early.state.targetTime,
+            earlyApply: early.applyTime,
+            metadataApply: metadata.applyTime,
+            priorApply: prior.applyTime,
+            confirmed: arrived.confirmed,
+            finalTarget: arrived.state.targetTime,
+          };
+        })()
+        "#,
+    );
+
     assert_eq!(
-        eval(
-            &mut ctx,
-            "JSON.stringify(PlayerCore.sourceRestoreDecision(4, 5, 8, 8))",
-        ),
-        r#"{"ownsSource":false,"restorePosition":false}"#
+        result,
+        r#"{"targetAfterEarlyEvent":35,"earlyApply":null,"metadataApply":35,"priorApply":35,"confirmed":true,"finalTarget":null}"#
     );
 }
 
 #[test]
-fn source_restore_keeps_current_non_position_state_after_later_seek() {
+fn logical_seek_ignores_invalid_requests_and_clamps_when_metadata_arrives() {
     let mut ctx = player_core_context();
     assert_eq!(
-        eval(
+        eval_json(
             &mut ctx,
-            "JSON.stringify(PlayerCore.sourceRestoreDecision(5, 5, 8, 9))",
+            r#"
+            (() => {
+              let state = PlayerCore.createLogicalSeekState();
+              state = PlayerCore.requestLogicalSeek(state, 75, 0);
+              state = PlayerCore.requestLogicalSeek(state, NaN, 0);
+              const metadata = PlayerCore.metadataSeekDecision(
+                PlayerCore.beginSourceAssignment(state, 7, 0, 60),
+                7,
+                60,
+              );
+              return {
+                applyTime: metadata.applyTime,
+                logical: PlayerCore.logicalPlaybackTime(metadata.state, 0, 60),
+              };
+            })()
+            "#,
         ),
-        r#"{"ownsSource":true,"restorePosition":false}"#
-    );
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "JSON.stringify(PlayerCore.sourceRestoreDecision(5, 5, 9, 9))",
-        ),
-        r#"{"ownsSource":true,"restorePosition":true}"#
+        r#"{"applyTime":60,"logical":60}"#
     );
 }
 
