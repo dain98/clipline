@@ -40,18 +40,45 @@ impl LoopbackAssembler {
         self.base_pts_s.get_or_insert(pts_s);
         let expected = self.next_chunk_pts_s.unwrap_or(pts_s);
         let gap = pts_s - expected;
+        let mut samples = interleaved;
         if gap > GAP_TOLERANCE_S {
             let missing_pairs = (gap.min(MAX_GAP_FILL_S) * SAMPLE_RATE).round() as usize;
             self.buffered
                 .extend(std::iter::repeat_n(0.0, missing_pairs * 2));
+        } else if gap < -GAP_TOLERANCE_S {
+            let overlap_pairs = ((expected - pts_s) * SAMPLE_RATE).round() as usize;
+            if overlap_pairs >= interleaved.len() / 2 {
+                return;
+            }
+            samples = &interleaved[overlap_pairs * 2..];
         }
-        self.buffered.extend_from_slice(interleaved);
-        let chunk_duration_s = (interleaved.len() / 2) as f64 / SAMPLE_RATE;
+        self.buffered.extend_from_slice(samples);
+        let chunk_duration_s = (samples.len() / 2) as f64 / SAMPLE_RATE;
         self.next_chunk_pts_s = Some(if gap > GAP_TOLERANCE_S {
             pts_s + chunk_duration_s
         } else {
             expected + chunk_duration_s
         });
+    }
+
+    /// Extend an anchored timeline with stereo silence up to an absolute PTS.
+    /// Non-finite or non-forward targets are ignored. One call is bounded by
+    /// the same limit used for timestamp-discovered gaps.
+    pub fn advance_with_silence(&mut self, target_pts_s: f64) {
+        if !target_pts_s.is_finite() {
+            return;
+        }
+        let Some(expected_pts_s) = self.next_chunk_pts_s else {
+            return;
+        };
+        let gap_s = target_pts_s - expected_pts_s;
+        if gap_s <= 0.0 {
+            return;
+        }
+        let missing_pairs = (gap_s.min(MAX_GAP_FILL_S) * SAMPLE_RATE).round() as usize;
+        self.buffered
+            .extend(std::iter::repeat_n(0.0, missing_pairs * 2));
+        self.next_chunk_pts_s = Some(expected_pts_s + missing_pairs as f64 / SAMPLE_RATE);
     }
 
     /// Append a chunk when the device explicitly marked its timestamp invalid.
@@ -335,6 +362,47 @@ mod tests {
     }
 
     #[test]
+    fn anchored_assembler_advances_through_device_silence() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &[]);
+
+        asm.advance_with_silence(0.5);
+
+        let mut frames = Vec::new();
+        while let Some(frame) = asm.pop_frame() {
+            frames.push(frame);
+        }
+        assert_eq!(frames.len(), 25);
+        for (index, (pts_s, frame)) in frames.iter().enumerate() {
+            assert!((*pts_s - index as f64 * FRAME_DURATION_S).abs() < 1e-9);
+            assert!(frame.iter().all(|&sample| sample == 0.0));
+        }
+    }
+
+    #[test]
+    fn silence_advancement_is_monotonic_and_idempotent() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &[]);
+
+        asm.advance_with_silence(0.04);
+        asm.advance_with_silence(0.02);
+        asm.advance_with_silence(0.04);
+
+        assert_eq!(std::iter::from_fn(|| asm.pop_frame()).count(), 2);
+    }
+
+    #[test]
+    fn non_finite_silence_horizon_does_not_advance() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &[]);
+
+        asm.advance_with_silence(f64::INFINITY);
+        asm.advance_with_silence(f64::NAN);
+
+        assert!(asm.pop_frame().is_none());
+    }
+
+    #[test]
     fn caps_huge_timestamp_gaps() {
         let mut asm = LoopbackAssembler::new();
         asm.push_chunk(0.0, &pairs(960, 1.0));
@@ -382,6 +450,37 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, 2, "no silence frames inserted");
+    }
+
+    #[test]
+    fn late_chunk_keeps_only_suffix_after_synthesized_silence() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &[]);
+        asm.advance_with_silence(0.10);
+
+        asm.push_chunk(0.08, &pairs(1_920, 0.75));
+
+        let mut frames = Vec::new();
+        while let Some(frame) = asm.pop_frame() {
+            frames.push(frame);
+        }
+        assert_eq!(frames.len(), 6);
+        assert!(frames[..5]
+            .iter()
+            .all(|(_, frame)| frame.iter().all(|&sample| sample == 0.0)));
+        assert!((frames[5].0 - 0.10).abs() < 1e-9);
+        assert!(frames[5].1.iter().all(|&sample| sample == 0.75));
+    }
+
+    #[test]
+    fn fully_overlapped_late_chunk_does_not_extend_timeline() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &[]);
+        asm.advance_with_silence(0.10);
+
+        asm.push_chunk(0.04, &pairs(960, 0.75));
+
+        assert_eq!(std::iter::from_fn(|| asm.pop_frame()).count(), 5);
     }
 
     #[test]
