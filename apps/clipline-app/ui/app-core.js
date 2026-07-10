@@ -87,6 +87,7 @@ var cloudClipsCache = [];
 var cloudClipsLoaded = false;
 var cloudClipsLoading = false;
 var cloudClipsError = "";
+var cloudClipsRequestGate = CloudCore.createRequestGate();
 var railProfileAvatarKey = "";
 var railProfileAvatarRequest = 0;
 var galleryFilter = "all";

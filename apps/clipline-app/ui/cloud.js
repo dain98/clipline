@@ -91,11 +91,16 @@ async function refreshRailProfileIdentity(key) {
   try {
     const profile = await invoke("cloud_user_profile");
     if (key !== railProfileAvatarKey || !profile) return;
+    const previousAccountKey = cloudAccountKey();
     const cloud = cloudSettings();
     cloud.connected_user_id = profile.user_id || cloud.connected_user_id;
     cloud.connected_username = profile.username || cloud.connected_username;
     cloud.connected_display_name = profile.display_name || null;
     if (currentSettings) currentSettings.cloud = cloud;
+    if (cloudAccountKey() !== previousAccountKey) {
+      resetCloudClipsCache();
+      if (gallerySource === "cloud") loadCloudClips({ force: true });
+    }
     const name = cloudDisplayName(cloud);
     $("rail-profile").title = `Clipline Cloud: ${name}`;
     $("rail-profile").setAttribute("aria-label", `Open Clipline Cloud profile for ${name}`);
@@ -207,7 +212,12 @@ function cloudClipAssetRequest(entry) {
   };
 }
 
+function cloudAccountKey() {
+  return CloudCore.accountKey(cloudSettings());
+}
+
 function resetCloudClipsCache() {
+  cloudClipsRequestGate.invalidate();
   cloudClipsCache = [];
   cloudClipsLoaded = false;
   cloudClipsLoading = false;
@@ -220,19 +230,26 @@ async function loadCloudClips({ force = false } = {}) {
     if (gallerySource === "cloud") renderCloudClips();
     return;
   }
-  if (cloudClipsLoading) return;
+  if (cloudClipsLoading && !force) return;
   if (cloudClipsError && !force) return;
   if (cloudClipsLoaded && !force) return;
+
+  const accountKey = cloudAccountKey();
+  const request = cloudClipsRequestGate.begin(accountKey);
+  const isCurrent = () => cloudClipsRequestGate.isCurrent(request, cloudAccountKey());
   cloudClipsLoading = true;
   cloudClipsError = "";
   if (gallerySource === "cloud") renderClips();
   try {
     const result = await invoke("list_cloud_clips");
+    if (!isCurrent()) return;
     cloudClipsCache = result && Array.isArray(result.clips) ? result.clips : [];
     cloudClipsLoaded = true;
-  } catch (e) {
-    cloudClipsError = String(e);
+  } catch (error) {
+    if (!isCurrent()) return;
+    cloudClipsError = String(error);
   } finally {
+    if (!isCurrent()) return;
     cloudClipsLoading = false;
     if (gallerySource === "cloud") renderClips();
   }
@@ -464,8 +481,10 @@ function upsertCloudProgress(progress) {
   });
 }
 async function reloadSettings() {
+  const previousAccountKey = cloudAccountKey();
   const settings = await invoke("get_settings");
   fillSettings(settings);
+  if (cloudAccountKey() !== previousAccountKey) resetCloudClipsCache();
   if (clipsCache.length) renderClips();
 }
 

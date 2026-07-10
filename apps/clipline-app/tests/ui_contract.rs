@@ -11,6 +11,7 @@ fn index_html() -> String {
 }
 
 const APP_UI_JS: &[&str] = &[
+    "cloud-core.js",
     "app-core.js",
     "settings.js",
     "library.js",
@@ -136,9 +137,25 @@ fn js_function_body<'a>(source: &'a str, name: &str) -> &'a str {
     let function_start = source
         .find(&signature)
         .unwrap_or_else(|| panic!("missing JavaScript function {name}"));
-    let body_start = source[function_start..]
+    let parameters_start = function_start + signature.len();
+    let mut parameter_depth = 1usize;
+    let parameters_end = source[parameters_start..]
+        .char_indices()
+        .find_map(|(offset, ch)| match ch {
+            '(' => {
+                parameter_depth += 1;
+                None
+            }
+            ')' => {
+                parameter_depth -= 1;
+                (parameter_depth == 0).then_some(parameters_start + offset + 1)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("unterminated JavaScript parameters for {name}"));
+    let body_start = source[parameters_end..]
         .find('{')
-        .map(|offset| function_start + offset + 1)
+        .map(|offset| parameters_end + offset + 1)
         .unwrap_or_else(|| panic!("missing JavaScript function body for {name}"));
     let mut depth = 1usize;
     for (offset, ch) in source[body_start..].char_indices() {
@@ -2384,6 +2401,43 @@ fn library_has_cloud_source_tab() {
         app_rs().contains("crate::cloud::open_cloud_clip_url"),
         "native command registry must expose open_cloud_clip_url for Cloud card links"
     );
+}
+
+#[test]
+fn cloud_library_loader_guards_every_async_result_and_force_supersedes() {
+    let cloud = read_ui_js("cloud.js");
+    let loader = js_function_body(&cloud, "loadCloudClips");
+    assert!(loader.contains("cloudClipsLoading && !force"));
+    assert!(loader.contains("cloudClipsRequestGate.begin(accountKey)"));
+    assert!(loader.contains("cloudClipsRequestGate.isCurrent(request, cloudAccountKey())"));
+    assert!(!loader.contains("if (cloudClipsLoading) return"));
+
+    let html = index_html();
+    let cloud_core = html.find("src=\"cloud-core.js\"").unwrap();
+    let app_core = html.find("src=\"app-core.js\"").unwrap();
+    assert!(cloud_core < app_core);
+}
+
+#[test]
+fn rail_profile_identity_change_resets_and_refetches_cloud_library() {
+    let cloud = read_ui_js("cloud.js");
+    let refresh = js_function_body(&cloud, "refreshRailProfileIdentity");
+    let capture = refresh
+        .find("const previousAccountKey = cloudAccountKey()")
+        .expect("profile refresh must capture the account before mutation");
+    let mutation = refresh
+        .find("cloud.connected_user_id = profile.user_id || cloud.connected_user_id")
+        .expect("profile refresh must update the canonical connected user id");
+    let identity_change = refresh
+        .find(concat!(
+            "if (cloudAccountKey() !== previousAccountKey) {\n",
+            "      resetCloudClipsCache();\n",
+            "      if (gallerySource === \"cloud\") loadCloudClips({ force: true });\n",
+            "    }",
+        ))
+        .expect("identity change must reset and force-refetch the active cloud gallery");
+
+    assert!(capture < mutation && mutation < identity_change);
 }
 
 #[test]
