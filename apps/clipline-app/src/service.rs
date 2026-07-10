@@ -1587,10 +1587,31 @@ fn finish_full_session_recording(
             );
             let _ = std::fs::remove_file(&recording.temp_path);
         }
-        Err(e) => {
-            warn_user(ctx.events, format!("finish full session: {e}"));
-            let _ = std::fs::remove_file(&recording.temp_path);
+        Err(error) => {
+            handle_full_session_finish_error(&recording.temp_path, ctx.events, &error.to_string());
         }
+    }
+}
+
+fn handle_full_session_finish_error(temp_path: &Path, events: &Sender<Event>, error: &str) {
+    match std::fs::metadata(temp_path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {
+            let _ = std::fs::remove_file(temp_path);
+            warn_user(events, format!("finish full session: {error}"));
+        }
+        Ok(_) => warn_user(
+            events,
+            format!("finish full session: {error}; recoverable recording kept at {temp_path:?}"),
+        ),
+        Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
+            warn_user(events, format!("finish full session: {error}"));
+        }
+        Err(metadata_error) => warn_user(
+            events,
+            format!(
+                "finish full session: {error}; could not inspect {temp_path:?} ({metadata_error}), so it was kept for recovery"
+            ),
+        ),
     }
 }
 
@@ -1600,15 +1621,19 @@ fn rename_finalized_session(recording: &FullSessionRecording, events: &Sender<Ev
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && recording.final_path.is_file() => {
             true
         }
-        Err(e) => {
+        Err(error) => {
+            let recovery = if recording.temp_path.is_file() {
+                format!("; recoverable recording kept at {:?}", recording.temp_path)
+            } else {
+                String::new()
+            };
             warn_user(
                 events,
                 format!(
-                    "finalize full session {:?} -> {:?}: {e}",
-                    recording.temp_path, recording.final_path
+                    "finalize full session {:?} -> {:?}: {error}{recovery}",
+                    recording.temp_path, recording.final_path,
                 ),
             );
-            let _ = std::fs::remove_file(&recording.temp_path);
             false
         }
     }
@@ -2535,6 +2560,51 @@ mod tests {
 
         assert!(rename_finalized_session(&recording, &tx));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn finalized_session_rename_preserves_non_empty_temp_on_failure() {
+        let dir = TestDir::new("clipline-service", "session-rename-preserve");
+        let temp_path = dir.path().join("session.mp4.recording");
+        std::fs::write(&temp_path, b"recoverable hybrid mp4").unwrap();
+        let recording = FullSessionRecording {
+            final_path: dir.path().join("missing-parent").join("session.mp4"),
+            temp_path: temp_path.clone(),
+            wall_start_unix: 0,
+            min_duration_s: 0.0,
+        };
+        let (tx, rx) = mpsc::channel();
+
+        assert!(!rename_finalized_session(&recording, &tx));
+        assert_eq!(
+            std::fs::read(&temp_path).unwrap(),
+            b"recoverable hybrid mp4"
+        );
+        let Event::Error { message } = rx.try_recv().unwrap() else {
+            panic!("expected recovery warning");
+        };
+        assert!(message.contains("recoverable"), "{message}");
+        assert!(message.contains("session.mp4.recording"), "{message}");
+    }
+
+    #[test]
+    fn failed_full_session_finish_preserves_non_empty_and_removes_empty_temp() {
+        let dir = TestDir::new("clipline-service", "session-finish-preserve");
+        let recoverable = dir.path().join("recoverable.mp4.recording");
+        let empty = dir.path().join("empty.mp4.recording");
+        std::fs::write(&recoverable, b"hybrid mp4").unwrap();
+        std::fs::write(&empty, b"").unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        handle_full_session_finish_error(&recoverable, &tx, "writer failed");
+        handle_full_session_finish_error(&empty, &tx, "writer failed");
+
+        assert!(recoverable.exists());
+        assert!(!empty.exists());
+        let Event::Error { message } = rx.try_recv().unwrap() else {
+            panic!("expected recovery warning");
+        };
+        assert!(message.contains("recoverable.mp4.recording"), "{message}");
     }
 
     #[test]
