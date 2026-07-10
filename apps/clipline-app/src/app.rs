@@ -465,7 +465,12 @@ struct RuntimeInner {
 
 struct PreparedRuntimeRestart {
     settings: AppSettings,
-    next_options: Option<ServiceOptions>,
+}
+
+#[derive(Debug)]
+struct CommittedRuntimeRestart<T> {
+    old_tx: Option<Sender<Cmd>>,
+    replacement: Option<(T, u64)>,
     cleared_active_game: bool,
 }
 
@@ -596,6 +601,33 @@ impl RuntimeState {
         } else {
             inner.active_game.as_ref()
         };
+        if inner.tx.is_some() {
+            Self::options_for(
+                &settings,
+                inner.lol_url.clone(),
+                active_game,
+                &inner.decodable_codecs,
+            )?;
+        }
+        Ok(PreparedRuntimeRestart { settings })
+    }
+
+    fn commit_prepared_restart_with<T, F>(
+        inner: &mut RuntimeInner,
+        prepared: PreparedRuntimeRestart,
+        spawn: F,
+    ) -> Result<CommittedRuntimeRestart<T>, String>
+    where
+        F: FnOnce(ServiceOptions) -> (Sender<Cmd>, T),
+    {
+        let PreparedRuntimeRestart { settings } = prepared;
+        let cleared_active_game = inner.active_game.is_some()
+            && !active_game_still_configured(&settings, inner.active_game.as_ref());
+        let active_game = if cleared_active_game {
+            None
+        } else {
+            inner.active_game.as_ref()
+        };
         let next_options = if inner.tx.is_some() {
             let mut options = Self::options_for(
                 &settings,
@@ -608,9 +640,23 @@ impl RuntimeState {
         } else {
             None
         };
-        Ok(PreparedRuntimeRestart {
-            settings,
-            next_options,
+
+        inner.settings = settings;
+        if cleared_active_game {
+            inner.active_game = None;
+        }
+        let (old_tx, replacement) = if let Some(options) = next_options {
+            let old_tx = inner.tx.take();
+            let (tx, spawned) = spawn(options);
+            let generation = Self::install_recording_sender(inner, tx);
+            (old_tx, Some((spawned, generation)))
+        } else {
+            (None, None)
+        };
+
+        Ok(CommittedRuntimeRestart {
+            old_tx,
+            replacement,
             cleared_active_game,
         })
     }
@@ -620,37 +666,18 @@ impl RuntimeState {
         app: AppHandle<R>,
         prepared: PreparedRuntimeRestart,
     ) -> Result<(), String> {
-        let PreparedRuntimeRestart {
-            settings,
-            next_options,
+        let CommittedRuntimeRestart {
+            old_tx,
+            replacement,
             cleared_active_game,
-        } = prepared;
-        let (old_tx, next_options) = {
+        } = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            inner.settings = settings;
-            if cleared_active_game {
-                inner.active_game = None;
-            }
-            let old_tx = if next_options.is_some() {
-                inner.tx.take()
-            } else {
-                None
-            };
-            if old_tx.is_some() {
-                inner.last_save_request = None;
-            }
-            let next_options = if old_tx.is_some() { next_options } else { None };
-            (old_tx, next_options)
+            Self::commit_prepared_restart_with(&mut inner, prepared, service::spawn)?
         };
         if let Some(tx) = old_tx {
             let _ = tx.send(Cmd::Stop { announce: false });
         }
-        if let Some(options) = next_options {
-            let (tx, rx) = service::spawn(options);
-            let generation = {
-                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-                Self::install_recording_sender(&mut inner, tx)
-            };
+        if let Some((rx, generation)) = replacement {
             pump_events(app.clone(), rx, generation);
         }
         if cleared_active_game {
@@ -2307,13 +2334,162 @@ mod tests {
         assert_eq!(state.settings().fps, original.fps);
         assert!(state.send(Cmd::Save), "active sender must remain installed");
         assert!(matches!(rx.try_recv(), Ok(Cmd::Save)));
-        assert_eq!(prepared.next_options.as_ref().unwrap().fps, 120);
+        assert_eq!(prepared.settings.fps, 120);
 
         drop(prepared); // Simulates a later tray-label or hook-registration failure.
         assert!(
             state.send(Cmd::Save),
             "dropping a plan must not stop recording"
         );
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Save)));
+    }
+
+    fn detected_game(id: &str, name: &str, hwnd: isize) -> DetectedGame {
+        DetectedGame {
+            id: id.into(),
+            name: name.into(),
+            hwnd,
+            window_title: format!("{name} Window"),
+            process_id: hwnd as u32,
+            exe_name: format!("{name}.exe"),
+            recording_mode: GameRecordingMode::FullSession,
+        }
+    }
+
+    #[test]
+    fn prepared_settings_restart_uses_current_game_and_sender_at_commit() {
+        let (initial_tx, _initial_rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(initial_tx, AppSettings::default(), None);
+        {
+            state.0.lock().unwrap().active_game = Some(detected_game(
+                crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+                "League",
+                41,
+            ));
+        }
+        let changed = AppSettings {
+            fps: 120,
+            ..AppSettings::default()
+        };
+        let prepared = state.prepare_settings_restart(changed).unwrap();
+
+        let (newer_tx, newer_rx) = mpsc::channel();
+        let (replacement_tx, replacement_rx) = mpsc::channel();
+        let mut committed_options = None;
+        let committed = {
+            let mut inner = state.0.lock().unwrap();
+            inner.active_game = Some(detected_game(crate::game_plugins::OSU_ID, "osu!", 84));
+            RuntimeState::install_recording_sender(&mut inner, newer_tx);
+            RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |options| {
+                committed_options = Some(options);
+                (replacement_tx, ())
+            })
+            .unwrap()
+        };
+
+        let options = committed_options.unwrap();
+        assert_eq!(options.fps, 120);
+        assert_eq!(
+            options.capture_source,
+            service::CaptureSource::WindowHandle {
+                hwnd: 84,
+                title: "osu! Window".into(),
+            }
+        );
+        assert_eq!(
+            options.active_game.as_ref().map(|game| game.id.as_str()),
+            Some(crate::game_plugins::OSU_ID)
+        );
+        committed.old_tx.unwrap().send(Cmd::Save).unwrap();
+        assert!(matches!(newer_rx.try_recv(), Ok(Cmd::Save)));
+        assert!(committed.replacement.is_some());
+        assert!(state.send(Cmd::Save));
+        assert!(matches!(replacement_rx.try_recv(), Ok(Cmd::Save)));
+    }
+
+    #[test]
+    fn prepared_settings_restart_restarts_sender_that_started_before_commit() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+        let changed = AppSettings {
+            fps: 120,
+            ..AppSettings::default()
+        };
+        let prepared = state.prepare_settings_restart(changed).unwrap();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (replacement_tx, replacement_rx) = mpsc::channel();
+        let mut committed_options = None;
+        let committed = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::install_recording_sender(&mut inner, started_tx);
+            RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |options| {
+                committed_options = Some(options);
+                (replacement_tx, ())
+            })
+            .unwrap()
+        };
+
+        assert_eq!(committed_options.unwrap().fps, 120);
+        committed.old_tx.unwrap().send(Cmd::Save).unwrap();
+        assert!(matches!(started_rx.try_recv(), Ok(Cmd::Save)));
+        assert!(committed.replacement.is_some());
+        assert!(state.send(Cmd::Save));
+        assert!(matches!(replacement_rx.try_recv(), Ok(Cmd::Save)));
+    }
+
+    #[test]
+    fn prepared_settings_restart_does_not_resurrect_sender_stopped_before_commit() {
+        let (tx, _rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+        let changed = AppSettings {
+            fps: 120,
+            ..AppSettings::default()
+        };
+        let prepared = state.prepare_settings_restart(changed).unwrap();
+
+        let mut spawned = false;
+        let committed = {
+            let mut inner = state.0.lock().unwrap();
+            inner.tx.take();
+            RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+                spawned = true;
+                let (replacement_tx, _replacement_rx) = mpsc::channel();
+                (replacement_tx, ())
+            })
+            .unwrap()
+        };
+
+        assert!(!spawned);
+        assert!(committed.old_tx.is_none());
+        assert!(committed.replacement.is_none());
+        assert!(!state.send(Cmd::Save));
+        assert_eq!(state.settings().fps, 120);
+    }
+
+    #[test]
+    fn commit_time_restart_option_error_keeps_current_sender_and_settings() {
+        let (tx, rx) = mpsc::channel();
+        let original = AppSettings::default();
+        let state = RuntimeState::with_sender(tx, original.clone(), None);
+        let prepared = PreparedRuntimeRestart {
+            settings: invalid_disk_replay_settings(),
+        };
+
+        let mut spawned = false;
+        let error = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+                spawned = true;
+                let (replacement_tx, _replacement_rx) = mpsc::channel();
+                (replacement_tx, ())
+            })
+            .unwrap_err()
+        };
+
+        assert!(error.contains("replay cache folder"), "{error}");
+        assert!(!spawned);
+        assert_eq!(state.settings().replay_storage, original.replay_storage);
+        assert!(state.send(Cmd::Save));
         assert!(matches!(rx.try_recv(), Ok(Cmd::Save)));
     }
 
