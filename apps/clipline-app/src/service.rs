@@ -1484,18 +1484,20 @@ fn begin_full_session_recording(
         return None;
     }
     write_session_game_meta(&session_dir, active_game);
-    let final_path = unique_media_path(&session_dir, "session");
-    let temp_path = final_path.with_extension("mp4.recording");
-    let file = match std::fs::File::create(&temp_path) {
-        Ok(file) => file,
-        Err(e) => {
-            warn_user(
-                events,
-                format!("full-session recording unavailable; create {temp_path:?}: {e}"),
-            );
-            return None;
-        }
-    };
+    let stamp = media_timestamp_seconds();
+    let (final_path, temp_path, file) =
+        match reserve_full_session_path_at(&session_dir, "session", stamp) {
+            Ok(reservation) => reservation,
+            Err(e) => {
+                warn_user(
+                    events,
+                    format!(
+                        "full-session recording unavailable; reserve path in {session_dir:?}: {e}"
+                    ),
+                );
+                return None;
+            }
+        };
     if let Err(e) = rec.start_full_session(file) {
         let _ = std::fs::remove_file(&temp_path);
         warn_user(
@@ -1682,10 +1684,17 @@ fn should_discard_full_session_for_min_duration(min_duration_s: f64, duration_s:
 }
 
 fn unique_media_path(session_dir: &Path, prefix: &str) -> PathBuf {
-    let stamp = SystemTime::now()
+    unique_media_path_at(session_dir, prefix, media_timestamp_seconds())
+}
+
+fn media_timestamp_seconds() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_secs()
+}
+
+fn unique_media_path_at(session_dir: &Path, prefix: &str, stamp: u64) -> PathBuf {
     for attempt in 0u32..1024 {
         let name = if attempt == 0 {
             format!("{prefix}_{stamp}.mp4")
@@ -1702,6 +1711,71 @@ fn unique_media_path(session_dir: &Path, prefix: &str) -> PathBuf {
         .unwrap_or_default()
         .as_nanos();
     session_dir.join(format!("{prefix}_{fallback}.mp4"))
+}
+
+fn reserve_full_session_path_at(
+    session_dir: &Path,
+    prefix: &str,
+    stamp: u64,
+) -> std::io::Result<(PathBuf, PathBuf, std::fs::File)> {
+    reserve_full_session_path_at_with(session_dir, prefix, stamp, |_, temp_path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temp_path)
+    })
+}
+
+fn reserve_full_session_path_at_with<F>(
+    session_dir: &Path,
+    prefix: &str,
+    stamp: u64,
+    mut reserve_temp: F,
+) -> std::io::Result<(PathBuf, PathBuf, std::fs::File)>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<std::fs::File>,
+{
+    for attempt in 0u32..1024 {
+        let name = if attempt == 0 {
+            format!("{prefix}_{stamp}.mp4")
+        } else {
+            format!("{prefix}_{stamp}_{attempt}.mp4")
+        };
+        let final_path = session_dir.join(name);
+        if final_path.try_exists()? {
+            continue;
+        }
+        let temp_path = final_path.with_extension("mp4.recording");
+        match reserve_temp(&final_path, &temp_path) {
+            Ok(file) => match final_path.try_exists() {
+                Ok(false) => return Ok((final_path, temp_path, file)),
+                Ok(true) => {
+                    drop(file);
+                    std::fs::remove_file(&temp_path)?;
+                    continue;
+                }
+                Err(check_error) => {
+                    drop(file);
+                    if let Err(cleanup_error) = std::fs::remove_file(&temp_path) {
+                        return Err(std::io::Error::new(
+                            check_error.kind(),
+                            format!(
+                                "inspect reserved final path {final_path:?}: {check_error}; \
+                                 remove reservation {temp_path:?}: {cleanup_error}"
+                            ),
+                        ));
+                    }
+                    return Err(check_error);
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("no free {prefix}_{stamp} full-session path after 1024 attempts"),
+    ))
 }
 
 fn write_marker_sidecar(
@@ -2543,6 +2617,72 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
 
         assert!(!is_within_temp(&outside, &temp_root));
+    }
+
+    #[test]
+    fn full_session_temp_reservation_skips_existing_temp() {
+        let dir = TestDir::new("clipline-service", "session-temp-reservation");
+        let stamp = 1_725_000_000;
+        let occupied_final = dir.path().join(format!("session_{stamp}.mp4"));
+        let occupied_temp = occupied_final.with_extension("mp4.recording");
+        let sentinel = b"active recorder bytes";
+        std::fs::write(&occupied_temp, sentinel).unwrap();
+        let occupied_suffix_final = dir.path().join(format!("session_{stamp}_1.mp4"));
+        std::fs::write(&occupied_suffix_final, b"finished recording").unwrap();
+
+        let (final_path, temp_path, _file) =
+            reserve_full_session_path_at(dir.path(), "session", stamp).unwrap();
+
+        assert_eq!(std::fs::read(&occupied_temp).unwrap(), sentinel);
+        assert_ne!(temp_path, occupied_temp);
+        assert_eq!(
+            final_path,
+            dir.path().join(format!("session_{stamp}_2.mp4"))
+        );
+        assert_eq!(
+            temp_path,
+            dir.path().join(format!("session_{stamp}_2.mp4.recording"))
+        );
+    }
+
+    #[test]
+    fn full_session_temp_reservation_retries_when_final_appears_during_reservation() {
+        let dir = TestDir::new("clipline-service", "session-finalization-race");
+        let stamp = 1_725_000_001;
+        let raced_final = dir.path().join(format!("session_{stamp}.mp4"));
+        let raced_temp = raced_final.with_extension("mp4.recording");
+        let mut finalize_before_first_reservation = true;
+
+        let (final_path, temp_path, _file) = reserve_full_session_path_at_with(
+            dir.path(),
+            "session",
+            stamp,
+            |candidate_final, candidate_temp| {
+                if finalize_before_first_reservation {
+                    finalize_before_first_reservation = false;
+                    std::fs::write(candidate_final, b"old finalized recording").unwrap();
+                }
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(candidate_temp)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&raced_final).unwrap(),
+            b"old finalized recording"
+        );
+        assert!(!raced_temp.exists());
+        assert_eq!(
+            final_path,
+            dir.path().join(format!("session_{stamp}_1.mp4"))
+        );
+        assert_eq!(
+            temp_path,
+            dir.path().join(format!("session_{stamp}_1.mp4.recording"))
+        );
     }
 
     #[test]
