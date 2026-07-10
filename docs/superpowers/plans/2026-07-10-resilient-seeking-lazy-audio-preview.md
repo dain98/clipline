@@ -481,6 +481,9 @@ fn review_audio_defaults_to_direct_fallback_and_explicit_tracks_need_preview() {
           const restored = PlayerCore.applyReviewAudioTrackToggle(
             tracks, withMic, 'output', true,
           );
+          const muted = PlayerCore.applyReviewAudioTrackToggle(
+            tracks, fallback, 'output', false,
+          );
           return {
             fallback,
             fallbackRow: PlayerCore.reviewAudioTrackRowState(tracks[0], tracks, fallback),
@@ -488,6 +491,7 @@ fn review_audio_defaults_to_direct_fallback_and_explicit_tracks_need_preview() {
             process,
             withMic,
             restored,
+            muted,
             expandedNeedsPreview: PlayerCore.reviewSelectionNeedsPreview(tracks, withMic),
           };
         })()
@@ -496,7 +500,7 @@ fn review_audio_defaults_to_direct_fallback_and_explicit_tracks_need_preview() {
 
     assert_eq!(
         model,
-        r#"{"fallback":["output"],"fallbackRow":{"checked":true,"indeterminate":false},"fallbackNeedsPreview":false,"process":["process:1"],"withMic":["process:1","microphone"],"restored":["output","microphone"],"expandedNeedsPreview":true}"#
+        r#"{"fallback":["output"],"fallbackRow":{"checked":true,"indeterminate":false},"fallbackNeedsPreview":false,"process":["process:1"],"withMic":["process:1","microphone"],"restored":["output","microphone"],"muted":[],"expandedNeedsPreview":true}"#
     );
 }
 ```
@@ -550,8 +554,7 @@ Add beside the existing audio helpers:
   const selectedReviewAudioTrackIds = (tracks, selectedIds) => {
     const selected = audioIdSet(selectedIds);
     const valid = normalizedAudioTracks(tracks).map(audioTrackId).filter(Boolean);
-    const result = valid.filter((id) => selected.has(id));
-    return result.length ? result : directPlaybackAudioTrackIds(tracks);
+    return valid.filter((id) => selected.has(id));
   };
 
   const reviewSelectionNeedsPreview = (tracks, selectedIds) => {
@@ -1299,29 +1302,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Expected: PASS with zero warnings.
 
-- [ ] **Step 5: Update the handoff document**
+- [ ] **Step 5: Stop the existing development app, launch the changed build, and reproduce manually**
 
-Add a dated entry to `handoff.md` containing these facts:
-
-```markdown
-- Rapid relative seeks now retain an authoritative logical target until the current source confirms arrival within 100 ms; early/stale `seeked` events cannot clear it.
-- Multi-track clips open directly with their embedded fallback audio. Audio preview generation begins only after an explicit non-fallback selection and remains serialized/coalesced.
-- Reusable audio previews are LRU-capped at 2 GiB; the active preview is protected and may temporarily exceed the cap when it alone is oversized.
-- Preview jobs already executing in `spawn_blocking` remain non-cancellable, but automatic and concurrent fan-out has been removed.
-```
-
-Include the final workspace test count, clippy result, and manual test outcome after completing Step 7.
-
-- [ ] **Step 6: Commit the handoff update**
-
-```powershell
-git add handoff.md
-git commit -m "docs: update resilient playback handoff"
-```
-
-- [ ] **Step 7: Stop the existing app, launch the changed build, and reproduce manually**
-
-Stop only Clipline processes whose executable path resolves under the active worktree, then run:
+Stop only Clipline processes whose executable path resolves under
+`C:\Users\dain\Projects\clipline` or the active Paseo worktree, then run:
 
 ```powershell
 cargo run -p clipline-app
@@ -1338,6 +1322,26 @@ With a large multi-track clip:
 7. restart once and verify retained preview data is at or below 2 GiB unless one active preview alone is larger.
 
 Expected: all seven observations match the design, and general playback remains responsive when browsing clips.
+
+- [ ] **Step 6: Update the handoff document**
+
+Add a dated entry to `handoff.md` containing these facts:
+
+```markdown
+- Rapid relative seeks now retain an authoritative logical target until the current source confirms arrival within 100 ms; early/stale `seeked` events cannot clear it.
+- Multi-track clips open directly with their embedded fallback audio. Audio preview generation begins only after an explicit non-fallback selection and remains serialized/coalesced.
+- Reusable audio previews are LRU-capped at 2 GiB; the active preview is protected and may temporarily exceed the cap when it alone is oversized.
+- Preview jobs already executing in `spawn_blocking` remain non-cancellable, but automatic and concurrent fan-out has been removed.
+```
+
+Include the final workspace test count, clippy result, and Step 5 manual test outcome.
+
+- [ ] **Step 7: Commit the handoff update**
+
+```powershell
+git add handoff.md
+git commit -m "docs: update resilient playback handoff"
+```
 
 - [ ] **Step 8: Inspect final scope and history**
 
