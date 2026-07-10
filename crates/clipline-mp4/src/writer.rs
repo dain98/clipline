@@ -346,13 +346,22 @@ fn copy_exact<R: Read, W: Write>(
     Ok(())
 }
 
+fn rescale_duration(duration: u64, source_timescale: u32, target_timescale: u32) -> u64 {
+    let scaled = duration as u128 * target_timescale as u128 / source_timescale as u128;
+    scaled.min(u64::MAX as u128) as u64
+}
+
 impl TrackState {
     fn duration_media_ts(&self) -> u64 {
         self.durations.iter().map(|&d| d as u64).sum()
     }
 
     fn duration_movie_ts(&self) -> u64 {
-        self.duration_media_ts() * MOVIE_TIMESCALE as u64 / self.cfg.timescale() as u64
+        rescale_duration(
+            self.duration_media_ts(),
+            self.cfg.timescale(),
+            MOVIE_TIMESCALE,
+        )
     }
 
     fn trak(&self, track_id: u32, duration_movie: u64) -> Vec<u8> {
@@ -682,6 +691,25 @@ mod tests {
             &[(100, 90_000, true)],
         );
         assert_eq!(state.duration_movie_ts(), 1000);
+    }
+
+    #[test]
+    fn duration_rescale_uses_wide_intermediate() {
+        let duration = u64::MAX;
+        let expected = ((duration as u128 * MOVIE_TIMESCALE as u128) / 90_000u128) as u64;
+        assert_eq!(
+            rescale_duration(duration, 90_000, MOVIE_TIMESCALE),
+            expected
+        );
+    }
+
+    #[test]
+    fn duration_rescale_saturates_only_final_overflow() {
+        assert_eq!(rescale_duration(u64::MAX, 1, u32::MAX), u64::MAX);
+        assert_eq!(
+            rescale_duration(u64::MAX, u32::MAX, 1),
+            (u64::MAX as u128 / u32::MAX as u128) as u64
+        );
     }
 
     // --- HybridMp4Writer API tests ---

@@ -254,6 +254,32 @@ const PlayerCore = (() => {
     return Math.max(0, Math.min(max, value));
   };
 
+  const sourceSwapResumeTime = (pendingSeek, currentTime, fallbackTime) => {
+    if (Number.isFinite(pendingSeek)) return Math.max(0, pendingSeek);
+    if (Number.isFinite(currentTime)) return Math.max(0, currentTime);
+    return Number.isFinite(fallbackTime) ? Math.max(0, fallbackTime) : 0;
+  };
+
+  const sourceRestoreDecision = (
+    assignedSourceGeneration,
+    currentSourceGeneration,
+    assignedSeekRevision,
+    currentSeekRevision,
+  ) => {
+    const ownsSource = assignedSourceGeneration === currentSourceGeneration;
+    return {
+      ownsSource,
+      restorePosition: ownsSource && assignedSeekRevision === currentSeekRevision,
+    };
+  };
+
+  const relativeSeekTarget = (currentTime, pendingSeek, delta, duration) => {
+    const base = Number.isFinite(pendingSeek)
+      ? pendingSeek
+      : Number.isFinite(currentTime) ? currentTime : 0;
+    return clampTime(base + (Number.isFinite(delta) ? delta : 0), duration);
+  };
+
   const percentFor = (time, duration) => {
     if (!duration) return 0;
     return Math.max(0, Math.min(100, (time / duration) * 100));
@@ -1819,6 +1845,9 @@ const PlayerCore = (() => {
     outputResolutionOption,
     captureSourceLabel,
     clampTime,
+    sourceSwapResumeTime,
+    sourceRestoreDecision,
+    relativeSeekTarget,
     percentFor,
     timelineTime,
     percentForView,

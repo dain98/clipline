@@ -143,9 +143,10 @@ pub fn enforce_quota(
 #[derive(Debug, Clone)]
 struct ClipFile {
     path: PathBuf,
-    /// Files that live and die with the clip: the markers JSON and the cached
-    /// poster frame. Each is removed alongside the clip during quota GC so a
-    /// leftover never keeps an emptied session folder alive.
+    /// Files that live and die with the clip: markers, clip metadata, pending
+    /// osu! enrichment, and the cached poster frame. Each is removed alongside
+    /// the clip during quota GC so a leftover never keeps an emptied session
+    /// folder alive.
     sidecars: Vec<PathBuf>,
     mp4_bytes: u64,
     sidecar_bytes: u64,
@@ -258,6 +259,10 @@ fn sidecar_path(path: &Path) -> PathBuf {
     path.with_extension("markers.json")
 }
 
+fn clip_metadata_path(path: &Path) -> PathBuf {
+    path.with_extension("clipline.json")
+}
+
 fn poster_path(path: &Path) -> PathBuf {
     path.with_extension("poster.jpg")
 }
@@ -266,16 +271,17 @@ fn osu_pending_path(path: &Path) -> PathBuf {
     path.with_extension("osu-enrichment.json")
 }
 
-/// The sidecar files present beside a clip (markers JSON + cached poster) and
-/// their combined size. A zero-byte sidecar that exists is still tracked so it
-/// gets cleaned up with the clip.
+/// The sidecar files present beside a clip (markers, clip metadata, pending osu!
+/// enrichment, and cached poster) and their combined size. A zero-byte sidecar
+/// that exists is still tracked so it gets cleaned up with the clip.
 fn clip_sidecars(clip: &Path) -> io::Result<(Vec<PathBuf>, u64)> {
     let mut sidecars = Vec::new();
     let mut bytes = 0u64;
     for candidate in [
         sidecar_path(clip),
-        poster_path(clip),
+        clip_metadata_path(clip),
         osu_pending_path(clip),
+        poster_path(clip),
     ] {
         let len = optional_file_len(&candidate)?;
         if len > 0 || candidate.exists() {
@@ -332,16 +338,17 @@ mod tests {
     }
 
     #[test]
-    fn status_counts_mp4_and_marker_sidecars() {
+    fn status_counts_clip_metadata_and_other_sidecars() {
         let dir = TestDir::new("clipline-storage", "status-counts");
         dir.write("a.mp4", 10);
         dir.write("a.markers.json", 3);
+        dir.write("a.clipline.json", 5);
         dir.write("b.mp4", 7);
 
         let status = storage_status(dir.path(), Some(100)).unwrap();
 
         assert_eq!(status.clip_count, 2);
-        assert_eq!(status.total_bytes, 20);
+        assert_eq!(status.total_bytes, 25);
         assert_eq!(status.quota_bytes, Some(100));
         assert!(!status.is_over_quota());
     }
@@ -446,6 +453,24 @@ mod tests {
     }
 
     #[test]
+    fn enforce_quota_deletes_clip_metadata_sidecar_with_clip() {
+        let dir = TestDir::new("clipline-storage", "clip-metadata-delete");
+        let old = dir.write("old.mp4", 10);
+        let metadata = dir.write("old.clipline.json", 6);
+        tick_mtime();
+        let keep = dir.write("keep.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(10), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert_eq!(report.freed_bytes, 16);
+        assert!(!old.exists());
+        assert!(!metadata.exists());
+        assert!(keep.exists());
+        assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
     fn enforce_quota_leaves_library_when_protected_clip_alone_exceeds_budget() {
         let dir = TestDir::new("clipline-storage", "protect-fresh");
         let old = dir.write("old.mp4", 10);
@@ -521,6 +546,7 @@ mod tests {
         let old = dir.write("2026-06-11 09-00/old.mp4", 10);
         let old_sidecar = dir.write("2026-06-11 09-00/old.markers.json", 2);
         let old_poster = dir.write("2026-06-11 09-00/old.poster.jpg", 4);
+        let old_metadata = dir.write("2026-06-11 09-00/old.clipline.json", 0);
         tick_mtime();
         let legacy = dir.write("legacy.mp4", 10);
         tick_mtime();
@@ -533,6 +559,7 @@ mod tests {
         assert!(!old.exists());
         assert!(!old_sidecar.exists());
         assert!(!old_poster.exists());
+        assert!(!old_metadata.exists());
         assert!(
             !old.parent().unwrap().exists(),
             "emptied session folder must be removed even with a poster sidecar"

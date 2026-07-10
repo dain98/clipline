@@ -396,6 +396,74 @@ fn clamp_time_and_percent_respect_duration() {
 }
 
 #[test]
+fn source_swap_resume_time_prefers_latest_queued_seek() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.sourceSwapResumeTime(25, 5, 0)"),
+        "25"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.sourceSwapResumeTime(null, 18, 0)"),
+        "18"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.sourceSwapResumeTime(null, NaN, 7)"),
+        "7"
+    );
+}
+
+#[test]
+fn relative_seek_accumulates_from_pending_target() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.relativeSeekTarget(5, 10, 5, 60)"),
+        "15"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.relativeSeekTarget(58, null, 5, 60)"),
+        "60"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "[5, 5, 5, 5, 5].reduce((target, delta) => PlayerCore.relativeSeekTarget(0, target, delta, 60), null)"
+        ),
+        "25"
+    );
+}
+
+#[test]
+fn source_restore_rejects_superseded_assignment() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "JSON.stringify(PlayerCore.sourceRestoreDecision(4, 5, 8, 8))",
+        ),
+        r#"{"ownsSource":false,"restorePosition":false}"#
+    );
+}
+
+#[test]
+fn source_restore_keeps_current_non_position_state_after_later_seek() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "JSON.stringify(PlayerCore.sourceRestoreDecision(5, 5, 8, 9))",
+        ),
+        r#"{"ownsSource":true,"restorePosition":false}"#
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "JSON.stringify(PlayerCore.sourceRestoreDecision(5, 5, 9, 9))",
+        ),
+        r#"{"ownsSource":true,"restorePosition":true}"#
+    );
+}
+
+#[test]
 fn timeline_time_maps_pointer_x_to_clip_time() {
     let mut ctx = player_core_context();
     assert_eq!(
