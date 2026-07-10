@@ -792,6 +792,54 @@ const PlayerCore = (() => {
       .map(audioTrackId);
   };
 
+  const directPlaybackAudioTrackIds = (tracks) => {
+    const first = normalizedAudioTracks(tracks).map(audioTrackId).find(Boolean);
+    return first ? [first] : [];
+  };
+
+  const selectedReviewAudioTrackIds = (tracks, selectedIds) => {
+    const selected = audioIdSet(selectedIds);
+    const valid = normalizedAudioTracks(tracks).map(audioTrackId).filter(Boolean);
+    return valid.filter((id) => selected.has(id));
+  };
+
+  const reviewSelectionNeedsPreview = (tracks, selectedIds) => {
+    const selected = selectedReviewAudioTrackIds(tracks, selectedIds);
+    const direct = directPlaybackAudioTrackIds(tracks);
+    return selected.length !== direct.length
+      || selected.some((id, index) => id !== direct[index]);
+  };
+
+  const reviewAudioTrackRowState = (track, tracks, selectedIds) => ({
+    checked: selectedReviewAudioTrackIds(tracks, selectedIds).includes(audioTrackId(track)),
+    indeterminate: false,
+  });
+
+  const applyReviewAudioTrackToggle = (tracks, selectedIds, trackId, checked) => {
+    const allTracks = normalizedAudioTracks(tracks);
+    const selected = new Set(selectedReviewAudioTrackIds(allTracks, selectedIds));
+    const track = allTracks.find((candidate) => audioTrackId(candidate) === String(trackId));
+    if (!track) return [...selected];
+    if (checked && isMixedOutputTrack(track) && hasSplitOutputTracks(allTracks)) {
+      for (const processTrack of processOutputTracks(allTracks)) {
+        selected.delete(audioTrackId(processTrack));
+      }
+    }
+    if (checked && isProcessOutputTrack(track) && hasSplitOutputTracks(allTracks)) {
+      for (const candidate of allTracks) {
+        if (isMixedOutputTrack(candidate)) selected.delete(audioTrackId(candidate));
+      }
+    }
+    if (checked) selected.add(audioTrackId(track));
+    else selected.delete(audioTrackId(track));
+    return selectedReviewAudioTrackIds(allTracks, [...selected]);
+  };
+
+  const reviewAudioTrackSelectedRowCount = (tracks, selectedIds) =>
+    normalizedAudioTracks(tracks).filter((track) =>
+      reviewAudioTrackRowState(track, tracks, selectedIds).checked
+    ).length;
+
   const selectionNeedsPreview = (tracks, selectedIds) => {
     const sourceIds = normalizedAudioTracks(tracks).map(audioTrackId).filter(Boolean);
     if (sourceIds.length > 1) return true;
@@ -1928,6 +1976,12 @@ const PlayerCore = (() => {
     playActiveIndex,
     gameEventActiveIndex,
     defaultAudioTrackIds,
+    directPlaybackAudioTrackIds,
+    selectedReviewAudioTrackIds,
+    reviewSelectionNeedsPreview,
+    reviewAudioTrackRowState,
+    applyReviewAudioTrackToggle,
+    reviewAudioTrackSelectedRowCount,
     selectedAudioTrackIds,
     selectionNeedsPreview,
     audioTrackRowState,

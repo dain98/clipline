@@ -1600,72 +1600,48 @@ fn rail_shows_connected_cloud_identity() {
 }
 
 #[test]
-fn default_audio_preview_is_gated_and_degrades_to_source_on_failure() {
-    let js = main_js();
-    let open_clip_start = js.find("function openClip(clip)").unwrap();
-    let close_review_start = js.find("function closeReview()").unwrap();
-    let open_clip = &js[open_clip_start..close_review_start];
+fn opening_multitrack_clip_plays_original_source_without_preview() {
+    let review = read_ui_js("review-player.js");
+    let open_clip = js_function_body(&review, "openClip");
+    assert!(open_clip.contains("resetSelectedAudioTracks(clip);"));
+    assert!(open_clip.contains("assignReviewVideoSource(clip.path, { resumeTime: 0 })"));
+    assert!(open_clip.contains("video.play().catch(() => syncPlayState());"));
+    assert!(!open_clip.contains("applySelectedAudioTracksToPlayback"));
+    assert!(!main_js().contains("function applyDefaultAudioSelectionIfNeeded"));
+}
 
+#[test]
+fn review_and_upload_audio_controls_render_exact_selected_ids() {
+    let app_core = read_ui_js("app-core.js");
+    let review_panel = js_function_body(&app_core, "renderAudioTrackPanel");
+    let upload_panel = js_function_body(&app_core, "renderUploadAudioTracks");
+    assert!(review_panel.contains("PlayerCore.reviewAudioTrackRowState"));
+    assert!(review_panel.contains("PlayerCore.applyReviewAudioTrackToggle"));
+    assert!(upload_panel.contains("PlayerCore.reviewAudioTrackRowState"));
+    assert!(upload_panel.contains("PlayerCore.applyReviewAudioTrackToggle"));
+}
+
+#[test]
+fn review_audio_pruning_preserves_fallback_and_muted_selection() {
+    let app_core = read_ui_js("app-core.js");
+    let prune = js_function_body(&app_core, "pruneSelectedAudioTracks");
+    assert!(prune.contains("PlayerCore.selectedReviewAudioTrackIds"));
+    assert!(!prune.contains("defaultAudioTrackIds"));
+}
+
+#[test]
+fn returning_to_fallback_invalidates_an_inflight_audio_preview() {
+    let review = read_ui_js("review-player.js");
+    let apply = js_function_body(&review, "applySelectedAudioTracksToPlayback");
+    let invalidate = apply
+        .find("const seq = ++audioPreviewSeq;")
+        .expect("audio selection should advance its preview generation");
+    let same_selection = apply
+        .find("currentReviewAudioKey === audioSelectionKey(clip, selected)")
+        .expect("audio selection should retain its same-selection fast path");
     assert!(
-        !open_clip.contains("applySelectedAudioTracksToPlayback()"),
-        "opening a clip must not unconditionally remux or mix a full-session audio preview"
-    );
-    assert!(
-        open_clip.contains("applyDefaultAudioSelectionIfNeeded({ shouldResume: true })"),
-        "opening a clip should apply default audio only when source playback would not match it"
-    );
-    assert!(
-        open_clip.contains("syncCloudClipStatus(clip);"),
-        "opening a clip should refresh its cloud record in the background"
-    );
-    let source_play = open_clip
-        .find("video.play().catch(() => syncPlayState());")
-        .expect("openClip should still start direct source playback when no preview is needed");
-    let default_preview = open_clip
-        .find("applyDefaultAudioSelectionIfNeeded({ shouldResume: true })")
-        .expect("openClip should request a resumed default preview when needed");
-    assert!(
-        default_preview < source_play,
-        "preview-needed clips must not audibly play the unmixed source before the preview source is ready"
-    );
-    assert!(
-        js.contains("function applyDefaultAudioSelectionIfNeeded({ shouldResume = false } = {})")
-            && !js.contains("if (audioPreviewUnavailable && selected.length > 1) return false;")
-            && js.contains("PlayerCore.selectionNeedsPreview")
-            && js.contains("applySelectedAudioTracksToPlayback({ forceResume: shouldResume });"),
-        "default audio application must retry preview generation instead of relying on a stale global failure latch"
-    );
-    assert!(
-        js.contains("currentReviewAudioKey === audioSelectionKey(clip, selected)"),
-        "reapplying the same selected audio tracks should not remux the current review source"
-    );
-    assert!(
-        js.contains("function applyCloudClipSyncResult(")
-            && js.contains("removeCloudUploadRecordForPath(result.path)")
-            && js.contains("upsertCloudUploadRecord(result.record)"),
-        "cloud sync results must update or remove the local cloud record cache"
-    );
-    assert!(
-        js.contains("setDeckStatus(\"audio mix unavailable; playing source\", { transient: true });")
-            && !js.contains("audioPreviewUnavailable = true;")
-            && js.contains("if (currentReviewMediaPath !== clip.path) {")
-            && js.contains("setReviewVideoSource(clip.path, {")
-            && js.contains("resumeTime: latestResumeTime"),
-        "preview generation failure should fall back to source playback without disabling future preview attempts"
-    );
-    assert!(
-        js.contains("function cloudUploadRecordForPath(path)")
-            && js.contains("applyCloudClipSyncResult(result, {")
-            && js.contains("expectedRecord, expectedLocalClipId, expectedUpdatedAtUnix"),
-        "cloud open-sync must capture the record identity it started from"
-    );
-    assert!(
-        js.contains("if (expectedRecord && current !== expectedRecord) return false;")
-            && js.contains("current.local_clip_id !== expectedLocalClipId")
-            && js.contains(
-                "Number(current.updated_at_unix || 0) > Number(expectedUpdatedAtUnix || 0)"
-            ),
-        "cloud open-sync must ignore stale results once a newer upload record exists"
+        invalidate < same_selection,
+        "a fallback selection must invalidate an earlier explicit preview before the fast path returns"
     );
 }
 

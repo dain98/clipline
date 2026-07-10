@@ -181,16 +181,25 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
   const shouldResume = forceResume || (!video.paused && !video.ended);
   const rate = video.playbackRate;
   const trimRange = { start: trimStart, end: trimEnd };
+  const seq = ++audioPreviewSeq;
   if (currentReviewAudioKey === audioSelectionKey(clip, selected)) {
     setDeckStatus(audioSelectionLabel(clip), { transient: true });
     return;
   }
-  if (!PlayerCore.selectionNeedsPreview(tracks, selected) && currentReviewMediaPath === clip.path) {
+  if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {
+    if (currentReviewMediaPath !== clip.path) {
+      setReviewVideoSource(clip.path, {
+        resumeTime,
+        shouldResume,
+        rate,
+        trimRange,
+      });
+    }
     currentReviewAudioKey = selectionKey;
+    currentReviewAudioTrackIds = selected;
     setDeckStatus(audioSelectionLabel(clip), { transient: true });
     return;
   }
-  const seq = ++audioPreviewSeq;
   setDeckStatus("switching audio tracks...");
   $("error").textContent = "";
   try {
@@ -209,6 +218,7 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
       trimRange,
     });
     currentReviewAudioKey = selectionKey;
+    currentReviewAudioTrackIds = selected;
     setDeckStatus(audioSelectionLabel(clip), { transient: true });
   } catch (e) {
     if (seq !== audioPreviewSeq) return;
@@ -254,6 +264,7 @@ function suspendReviewPlayback() {
   currentClip = null;
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
+  currentReviewAudioTrackIds = [];
   selectedAudioTrackIds = new Set();
   resetZoom();
   syncReviewLocalActions();
@@ -422,6 +433,8 @@ function openClip(clip) {
   currentReviewAudioKey = null;
   simpleTrimMode = false;
   resetSelectedAudioTracks(clip);
+  currentReviewAudioTrackIds = selectedAudioTrackIdsForClip(clip);
+  currentReviewAudioKey = audioSelectionKey(clip, currentReviewAudioTrackIds);
   $("error").textContent = "";
   setDeckStatus("");
   $("stage-note").textContent = "loading…";
@@ -446,9 +459,7 @@ function openClip(clip) {
   renderClips();
   noteActivity();
   requestAnimationFrame(updateStageFrame);
-  if (!applyDefaultAudioSelectionIfNeeded({ shouldResume: true })) {
-    video.play().catch(() => syncPlayState());
-  }
+  video.play().catch(() => syncPlayState());
   syncCloudClipStatus(clip);
 }
 
@@ -463,6 +474,7 @@ function closeReview() {
   simpleTrimMode = false;
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
+  currentReviewAudioTrackIds = [];
   syncReviewLocalActions();
   syncUploadClipButton();
   selectedAudioTrackIds = new Set();

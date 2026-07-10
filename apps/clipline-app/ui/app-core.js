@@ -139,6 +139,7 @@ var selectedAudioTrackIds = new Set();
 var uploadSelectedAudioTrackIds = new Set();
 var audioPreviewSeq = 0;
 var currentReviewAudioKey = null;
+var currentReviewAudioTrackIds = [];
 var currentReviewMediaPath = null;
 var renamePending = false;
 var DECK_STATUS_TOAST_MS = 3200;
@@ -264,31 +265,23 @@ function defaultAudioTrackIds(clip = currentClip) {
 }
 
 function resetSelectedAudioTracks(clip = currentClip) {
-  selectedAudioTrackIds = new Set(defaultAudioTrackIds(clip));
+  selectedAudioTrackIds = new Set(
+    PlayerCore.directPlaybackAudioTrackIds(clipAudioTracks(clip)),
+  );
 }
 
 function pruneSelectedAudioTracks(clip = currentClip) {
-  const available = new Set(defaultAudioTrackIds(clip));
-  selectedAudioTrackIds = new Set([...selectedAudioTrackIds].filter((id) => available.has(id)));
+  selectedAudioTrackIds = new Set(
+    PlayerCore.selectedReviewAudioTrackIds(clipAudioTracks(clip), [...selectedAudioTrackIds]),
+  );
 }
 
 function selectedAudioTrackIdsForClip(clip = currentClip, selected = selectedAudioTrackIds) {
-  return PlayerCore.selectedAudioTrackIds(clipAudioTracks(clip), [...selected]);
+  return PlayerCore.selectedReviewAudioTrackIds(clipAudioTracks(clip), [...selected]);
 }
 
 function audioSelectionKey(clip = currentClip, selected = selectedAudioTrackIdsForClip(clip)) {
   return `${clip && clip.path ? clip.path : ""}\n${selected.join("\n")}`;
-}
-
-function applyDefaultAudioSelectionIfNeeded({ shouldResume = false } = {}) {
-  const tracks = clipAudioTracks();
-  const selected = selectedAudioTrackIdsForClip();
-  if (!PlayerCore.selectionNeedsPreview(tracks, selected)) {
-    currentReviewAudioKey = audioSelectionKey(currentClip, selected);
-    return false;
-  }
-  applySelectedAudioTracksToPlayback({ forceResume: shouldResume });
-  return true;
 }
 
 function audioTrackLabel(track) {
@@ -298,7 +291,9 @@ function audioTrackLabel(track) {
   return `Audio ${index}`;
 }
 
-function renderAudioTrackRows(container, clip, selected, onChange) {
+function renderAudioTrackRows(container, clip, selected, onChange, {
+  rowState = PlayerCore.audioTrackRowState,
+} = {}) {
   container.replaceChildren();
   const tracks = clipAudioTracks(clip);
   const selectedIds = [...selected];
@@ -306,7 +301,7 @@ function renderAudioTrackRows(container, clip, selected, onChange) {
     const row = document.createElement("label");
     row.className = "audio-track-row";
     const input = document.createElement("input");
-    const state = PlayerCore.audioTrackRowState(track, tracks, selectedIds);
+    const state = rowState(track, tracks, selectedIds);
     input.type = "checkbox";
     input.checked = state.checked;
     input.indeterminate = state.indeterminate;
@@ -332,15 +327,15 @@ function renderAudioTrackPanel() {
     summary.textContent = "";
     return;
   }
-  summary.textContent = `${PlayerCore.audioTrackSelectedRowCount(tracks, [...selectedAudioTrackIds])}/${tracks.length} selected`;
+  summary.textContent = `${PlayerCore.reviewAudioTrackSelectedRowCount(tracks, [...selectedAudioTrackIds])}/${tracks.length} selected`;
   renderAudioTrackRows(list, currentClip, selectedAudioTrackIds, (track, checked) => {
     if (!track.id) return;
     selectedAudioTrackIds = new Set(
-      PlayerCore.applyAudioTrackToggle(tracks, [...selectedAudioTrackIds], track.id, checked),
+      PlayerCore.applyReviewAudioTrackToggle(tracks, [...selectedAudioTrackIds], track.id, checked),
     );
     renderAudioTrackPanel();
     applySelectedAudioTracksToPlayback();
-  });
+  }, { rowState: PlayerCore.reviewAudioTrackRowState });
 }
 
 function renderUploadAudioTracks(clip = uploadDialogClip) {
@@ -355,16 +350,16 @@ function renderUploadAudioTracks(clip = uploadDialogClip) {
   renderAudioTrackRows(list, clip, uploadSelectedAudioTrackIds, (track, checked) => {
     if (!track.id) return;
     uploadSelectedAudioTrackIds = new Set(
-      PlayerCore.applyAudioTrackToggle(tracks, [...uploadSelectedAudioTrackIds], track.id, checked),
+      PlayerCore.applyReviewAudioTrackToggle(tracks, [...uploadSelectedAudioTrackIds], track.id, checked),
     );
     renderUploadAudioTracks(clip);
-  });
+  }, { rowState: PlayerCore.reviewAudioTrackRowState });
 }
 
 function audioSelectionLabel(clip = currentClip) {
   const tracks = clipAudioTracks(clip);
   if (!tracks.length) return "";
-  const selected = PlayerCore.audioTrackSelectedRowCount(tracks, [...selectedAudioTrackIds]);
+  const selected = PlayerCore.reviewAudioTrackSelectedRowCount(tracks, [...selectedAudioTrackIds]);
   if (selected === tracks.length) return "audio: all tracks";
   if (selected === 0) return "audio: muted";
   return `audio: ${selected}/${tracks.length} tracks`;

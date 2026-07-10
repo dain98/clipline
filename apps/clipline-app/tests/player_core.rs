@@ -1061,6 +1061,51 @@ fn multi_track_default_selection_requires_preview() {
 }
 
 #[test]
+fn review_audio_defaults_to_direct_fallback_and_explicit_tracks_need_preview() {
+    let mut ctx = player_core_context();
+    let model = eval_json(
+        &mut ctx,
+        r#"
+        (() => {
+          const tracks = [
+            { id: 'output', kind: 'output', label: 'Output Audio' },
+            { id: 'process:1', kind: 'process_output', label: 'Game' },
+            { id: 'microphone', kind: 'microphone', label: 'Microphone' },
+          ];
+          const fallback = PlayerCore.directPlaybackAudioTrackIds(tracks);
+          const process = PlayerCore.applyReviewAudioTrackToggle(
+            tracks, fallback, 'process:1', true,
+          );
+          const withMic = PlayerCore.applyReviewAudioTrackToggle(
+            tracks, process, 'microphone', true,
+          );
+          const restored = PlayerCore.applyReviewAudioTrackToggle(
+            tracks, withMic, 'output', true,
+          );
+          const muted = PlayerCore.applyReviewAudioTrackToggle(
+            tracks, fallback, 'output', false,
+          );
+          return {
+            fallback,
+            fallbackRow: PlayerCore.reviewAudioTrackRowState(tracks[0], tracks, fallback),
+            fallbackNeedsPreview: PlayerCore.reviewSelectionNeedsPreview(tracks, fallback),
+            process,
+            withMic,
+            restored,
+            muted,
+            expandedNeedsPreview: PlayerCore.reviewSelectionNeedsPreview(tracks, withMic),
+          };
+        })()
+        "#,
+    );
+
+    assert_eq!(
+        model,
+        r#"{"fallback":["output"],"fallbackRow":{"checked":true,"indeterminate":false},"fallbackNeedsPreview":false,"process":["process:1"],"withMic":["process:1","microphone"],"restored":["output","microphone"],"muted":[],"expandedNeedsPreview":true}"#
+    );
+}
+
+#[test]
 fn key_intents_cover_the_documented_shortcuts() {
     let mut ctx = player_core_context();
     for code in ["Space", "KeyK"] {
