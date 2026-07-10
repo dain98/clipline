@@ -1391,7 +1391,7 @@ fn osu_play_rail_click_holds_selected_play_during_seek() {
             && js.contains("selectGamePlay(index, play.start, play.end);")
             && js.contains("seekTo(play.start, { keepGamePlaySelection: true });")
             && js.contains("if (!options.keepGamePlaySelection) clearGamePlaySelection();")
-            && js.contains("syncGamePlayRail(t, { keepGamePlaySelection: options.keepGamePlaySelection });")
+            && js.contains("syncGamePlayRail(target, { keepGamePlaySelection: options.keepGamePlaySelection });")
             && js.contains("playActiveIndex(clipPlays(), currentTime, selectedIndex)"),
         "Set plays clicks should highlight the clicked play immediately instead of waiting for the video seek to settle"
     );
@@ -1505,7 +1505,8 @@ fn game_event_rail_does_not_run_on_every_animation_frame() {
     );
     assert!(
         js.contains("video.addEventListener(\"timeupdate\"")
-            && js.contains("syncGameEventRail(video.currentTime || 0);"),
+            && js.contains("const current = reviewPlayheadTime();")
+            && js.contains("syncGameEventRail(current);"),
         "timeupdate should keep the event rail following playback without tying it to requestAnimationFrame"
     );
     assert!(
@@ -1669,99 +1670,41 @@ fn default_audio_preview_is_gated_and_degrades_to_source_on_failure() {
 }
 
 #[test]
-fn audio_preview_resolves_resume_position_after_await() {
+fn review_player_applies_logical_seek_only_for_current_metadata() {
     let review = read_ui_js("review-player.js");
-    let body = js_function_body(&review, "applySelectedAudioTracksToPlayback");
-    let await_preview = body
-        .find("await invoke(\"preview_clip_audio_tracks\"")
-        .unwrap();
-    let success_guard = body[await_preview..]
-        .find("if (seq !== audioPreviewSeq || !currentClip || currentClip.path !== clip.path) return;")
-        .map(|offset| await_preview + offset)
-        .unwrap();
-    let success_consume = body[success_guard..]
-        .find("consumeSourceSwapResumeTime(resumeTime)")
-        .map(|offset| success_guard + offset)
-        .unwrap();
-    let success_swap = body[success_consume..]
-        .find("setReviewVideoSource(path, {")
-        .map(|offset| success_consume + offset)
-        .unwrap();
-    let catch_start = body.find("} catch (e) {").unwrap();
-    assert!(await_preview < success_guard);
-    assert!(success_guard < success_consume);
-    assert!(success_consume < success_swap);
-    assert!(success_swap < catch_start);
+    let assign = js_function_body(&review, "assignReviewVideoSource");
+    assert!(assign.contains("PlayerCore.beginSourceAssignment("));
+    assert!(assign.contains("PlayerCore.metadataSeekDecision("));
+    assert!(assign.contains("assignment.sourceGeneration !== reviewSourceGeneration"));
 
-    let fallback_stale_guard = body[catch_start..]
-        .find("if (seq !== audioPreviewSeq) return;")
-        .map(|offset| catch_start + offset)
-        .unwrap();
-    let fallback_branch = body[fallback_stale_guard..]
-        .find("if (currentReviewMediaPath !== clip.path) {")
-        .map(|offset| fallback_stale_guard + offset)
-        .unwrap();
-    let fallback_consume = body[fallback_branch..]
-        .find("consumeSourceSwapResumeTime(resumeTime)")
-        .map(|offset| fallback_branch + offset)
-        .unwrap();
-    let fallback_swap = body[fallback_consume..]
-        .find("setReviewVideoSource(clip.path, {")
-        .map(|offset| fallback_consume + offset)
-        .unwrap();
-    assert!(fallback_stale_guard < fallback_branch);
-    assert!(fallback_branch < fallback_consume);
-    assert!(fallback_consume < fallback_swap);
+    let seek_to = js_function_body(&review, "seekTo");
+    assert!(seek_to.contains("PlayerCore.requestLogicalSeek("));
+    assert!(seek_to.contains("reviewSeekState.metadataGeneration === reviewSourceGeneration"));
 
-    let consume = js_function_body(&review, "consumeSourceSwapResumeTime");
-    let choose_latest = consume.find("PlayerCore.sourceSwapResumeTime(").unwrap();
-    let clear_pending = consume.find("pendingSeek = null;").unwrap();
-    let return_resume = consume.find("return resumeTime;").unwrap();
-    assert!(choose_latest < clear_pending);
-    assert!(clear_pending < return_resume);
-
-    let seek_by = js_function_body(&review, "seekBy");
-    assert!(seek_by.contains("PlayerCore.relativeSeekTarget"));
-    assert!(seek_by.contains("pendingSeek"));
+    assert!(review.contains("PlayerCore.seekedDecision("));
+    assert!(review.contains("function reportReviewSourceError(assignment)"));
+    assert!(assign.contains("video.addEventListener(\"error\""));
+    assert!(review.contains("function reviewPlayheadTime()"));
+    assert!(!review.contains("pendingSeek"));
+    assert!(!review.contains("reviewSeekRevision"));
 }
 
 #[test]
-fn video_source_restore_requires_current_assignment_and_unchanged_seek() {
+fn timeline_and_media_events_render_the_logical_playhead() {
     let review = read_ui_js("review-player.js");
-    let assign = js_function_body(&review, "assignReviewVideoSource");
-    let claim_generation = assign
-        .find("sourceGeneration: ++reviewSourceGeneration")
-        .unwrap();
-    let capture_seek = assign.find("seekRevision: reviewSeekRevision").unwrap();
-    let listen = assign
-        .find("video.addEventListener(\"loadedmetadata\"")
-        .unwrap();
-    let source_swap = assign.find("video.src = convertFileSrc(path);").unwrap();
-    assert!(claim_generation < listen);
-    assert!(capture_seek < listen);
-    assert!(listen < source_swap);
+    let main = read_ui_js("main.js");
+    assert!(js_function_body(&review, "paintTimeline").contains("reviewPlayheadTime()"));
+    assert!(js_function_body(&review, "paintOverview").contains("reviewPlayheadTime()"));
+    assert!(js_function_body(&review, "seekBy").contains("reviewSeekState.targetTime"));
+    assert!(main.contains("const current = reviewPlayheadTime();"));
+}
 
-    let set_source = js_function_body(&review, "setReviewVideoSource");
-    let decision = set_source
-        .find("PlayerCore.sourceRestoreDecision(")
-        .unwrap();
-    let ownership_guard = set_source
-        .find("if (!decision.ownsSource) return;")
-        .unwrap();
-    let trim_restore = set_source.find("if (trimRange) setTrim(").unwrap();
-    let position_guard = set_source
-        .find("if (decision.restorePosition && Number.isFinite(resumeTime))")
-        .unwrap();
-    let play_restore = set_source.find("if (shouldResume) video.play()").unwrap();
-    assert!(decision < ownership_guard);
-    assert!(ownership_guard < trim_restore);
-    assert!(trim_restore < position_guard);
-    assert!(position_guard < play_restore);
-
-    let seek_to = js_function_body(&review, "seekTo");
-    let seek_revision = seek_to.find("reviewSeekRevision += 1;").unwrap();
-    let seek_dispatch = seek_to.find("if (video.seeking)").unwrap();
-    assert!(seek_revision < seek_dispatch);
+#[test]
+fn opening_a_clip_clears_only_the_previous_clips_seek_state() {
+    let review = read_ui_js("review-player.js");
+    let open_clip = js_function_body(&review, "openClip");
+    assert!(open_clip.contains("reviewSeekState = PlayerCore.createLogicalSeekState();"));
+    assert!(open_clip.contains("assignReviewVideoSource(clip.path, { resumeTime: 0 })"));
 }
 
 #[test]
@@ -1777,9 +1720,9 @@ fn every_review_video_source_mutation_uses_generation_helpers() {
     let restore_rename = js_function_body(&review, "restoreVideoAfterRename");
     assert!(restore_rename.contains("setReviewVideoSource(path, {"));
     let set_source = js_function_body(&review, "setReviewVideoSource");
-    assert!(set_source.contains("assignReviewVideoSource(path, restore)"));
+    assert!(set_source.contains("assignReviewVideoSource(path, { resumeTime, onLoadedMetadata: restore })"));
     let open_clip = js_function_body(&review, "openClip");
-    assert!(open_clip.contains("assignReviewVideoSource(clip.path)"));
+    assert!(open_clip.contains("assignReviewVideoSource(clip.path, { resumeTime: 0 })"));
 
     for name in [
         "releaseVideoFileHandle",
@@ -1791,32 +1734,6 @@ fn every_review_video_source_mutation_uses_generation_helpers() {
             "{name} must invalidate source ownership before releasing video.src"
         );
     }
-}
-
-#[test]
-fn open_clip_clears_previous_overlay_timer_and_pending_seek() {
-    let js = main_js();
-    let open_clip_start = js.find("function openClip(clip)").unwrap();
-    let close_review_start = js.find("function closeReview()").unwrap();
-    let open_clip = &js[open_clip_start..close_review_start];
-    let clear_overlay = open_clip
-        .find("clearOverlayIdleCheck();")
-        .expect("openClip clears the previous overlay idle timer");
-    let clear_seek = open_clip
-        .find("pendingSeek = null;")
-        .expect("openClip clears pending seek from previous clip");
-    let assign_clip = open_clip
-        .find("currentClip = clip;")
-        .expect("openClip assigns current clip");
-
-    assert!(
-        clear_overlay < assign_clip,
-        "overlay idle timer must be cleared before switching clips"
-    );
-    assert!(
-        clear_seek < assign_clip,
-        "pending seek must be cleared before switching clips"
-    );
 }
 
 #[test]

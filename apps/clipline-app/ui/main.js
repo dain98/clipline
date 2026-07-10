@@ -297,9 +297,10 @@ $("settings-save").addEventListener("click", async () => {
 
 video.addEventListener("click", togglePlay);
 video.addEventListener("play", () => {
+  const current = reviewPlayheadTime();
   syncPlayState();
-  syncGameEventRail(video.currentTime || 0);
-  syncGamePlayRail(video.currentTime || 0);
+  syncGameEventRail(current);
+  syncGamePlayRail(current);
   paintTimeline();
   scheduleOverlayIdleCheck();
 });
@@ -310,10 +311,11 @@ video.addEventListener("pause", () => {
   updateOverlay();
 });
 video.addEventListener("timeupdate", () => {
-  maybeFollow(video.currentTime || 0);
+  const current = reviewPlayheadTime();
+  maybeFollow(current);
   paintTimeline();
-  syncGameEventRail(video.currentTime || 0);
-  syncGamePlayRail(video.currentTime || 0);
+  syncGameEventRail(current);
+  syncGamePlayRail(current);
 });
 video.addEventListener("volumechange", syncVolume);
 video.addEventListener("loadedmetadata", () => {
@@ -327,11 +329,6 @@ video.addEventListener("loadedmetadata", () => {
     applyView({ start: zoomStart, span: zoomSpan });
   }
 });
-video.addEventListener("error", () => {
-  const e = video.error;
-  $("stage-note").textContent = `load error ${e ? e.code : "?"}`;
-});
-
 $("play-toggle").addEventListener("click", togglePlay);
 $("seek-back").addEventListener("click", () => seekBy(-5));
 $("seek-forward").addEventListener("click", () => seekBy(5));

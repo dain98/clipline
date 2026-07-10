@@ -396,7 +396,7 @@ fn clamp_time_and_percent_respect_duration() {
 }
 
 #[test]
-fn relative_seek_accumulates_from_pending_target() {
+fn relative_seek_accumulates_from_logical_target() {
     let mut ctx = player_core_context();
     assert_eq!(
         eval(&mut ctx, "PlayerCore.relativeSeekTarget(5, 10, 5, 60)"),

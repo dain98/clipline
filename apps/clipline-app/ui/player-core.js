@@ -319,25 +319,6 @@ const PlayerCore = (() => {
     return clampTime(time, duration);
   };
 
-  const sourceSwapResumeTime = (pendingSeek, currentTime, fallbackTime) => {
-    if (Number.isFinite(pendingSeek)) return Math.max(0, pendingSeek);
-    if (Number.isFinite(currentTime)) return Math.max(0, currentTime);
-    return Number.isFinite(fallbackTime) ? Math.max(0, fallbackTime) : 0;
-  };
-
-  const sourceRestoreDecision = (
-    assignedSourceGeneration,
-    currentSourceGeneration,
-    assignedSeekRevision,
-    currentSeekRevision,
-  ) => {
-    const ownsSource = assignedSourceGeneration === currentSourceGeneration;
-    return {
-      ownsSource,
-      restorePosition: ownsSource && assignedSeekRevision === currentSeekRevision,
-    };
-  };
-
   const relativeSeekTarget = (currentTime, pendingSeek, delta, duration) => {
     const base = Number.isFinite(pendingSeek)
       ? pendingSeek
@@ -1916,8 +1897,6 @@ const PlayerCore = (() => {
     metadataSeekDecision,
     seekedDecision,
     logicalPlaybackTime,
-    sourceSwapResumeTime,
-    sourceRestoreDecision,
     relativeSeekTarget,
     percentFor,
     timelineTime,

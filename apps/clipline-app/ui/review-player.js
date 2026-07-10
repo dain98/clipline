@@ -99,23 +99,52 @@ function applyRenamedClip(oldClip, result) {
 }
 
 var reviewSourceGeneration = 0;
-var reviewSeekRevision = 0;
+var reviewSeekState = PlayerCore.createLogicalSeekState();
 
-function assignReviewVideoSource(path, onLoadedMetadata = null) {
-  const assignment = {
-    sourceGeneration: ++reviewSourceGeneration,
-    seekRevision: reviewSeekRevision,
-  };
-  if (typeof onLoadedMetadata === "function") {
-    video.addEventListener("loadedmetadata", () => onLoadedMetadata(assignment), { once: true });
-  }
+function reviewPlayheadTime() {
+  return PlayerCore.logicalPlaybackTime(reviewSeekState, video.currentTime, clipDuration());
+}
+
+function assignReviewVideoSource(path, options = {}) {
+  const { resumeTime = 0, onLoadedMetadata = null } = options;
+  const assignment = { sourceGeneration: ++reviewSourceGeneration };
+  reviewSeekState = PlayerCore.beginSourceAssignment(
+    reviewSeekState,
+    assignment.sourceGeneration,
+    resumeTime,
+    clipDuration(),
+  );
+  video.addEventListener("loadedmetadata", () => {
+    const decision = PlayerCore.metadataSeekDecision(
+      reviewSeekState,
+      assignment.sourceGeneration,
+      video.duration,
+    );
+    reviewSeekState = decision.state;
+    if (assignment.sourceGeneration !== reviewSourceGeneration) return;
+    if (decision.applyTime != null) video.currentTime = decision.applyTime;
+    if (typeof onLoadedMetadata === "function") onLoadedMetadata(assignment);
+  }, { once: true });
+  video.addEventListener("error", () => reportReviewSourceError(assignment), { once: true });
   currentReviewMediaPath = path;
   video.src = convertFileSrc(path);
   return assignment;
 }
 
+function reportReviewSourceError(assignment) {
+  if (assignment.sourceGeneration !== reviewSourceGeneration) return;
+  const error = video.error;
+  $("stage-note").textContent = `load error ${error ? error.code : "?"}`;
+}
+
 function releaseReviewVideoSource() {
-  reviewSourceGeneration += 1;
+  const sourceGeneration = ++reviewSourceGeneration;
+  reviewSeekState = PlayerCore.beginSourceAssignment(
+    reviewSeekState,
+    sourceGeneration,
+    reviewPlayheadTime(),
+    clipDuration(),
+  );
   video.removeAttribute("src");
   video.load();
 }
@@ -132,22 +161,12 @@ function setReviewVideoSource(path, options = {}) {
     trimRange = null,
   } = options;
   const restore = (assignment) => {
-    const decision = PlayerCore.sourceRestoreDecision(
-      assignment.sourceGeneration,
-      reviewSourceGeneration,
-      assignment.seekRevision,
-      reviewSeekRevision,
-    );
-    if (!decision.ownsSource) return;
+    if (assignment.sourceGeneration !== reviewSourceGeneration) return;
     if (trimRange) setTrim(trimRange.start, trimRange.end);
-    if (decision.restorePosition && Number.isFinite(resumeTime)) {
-      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : resumeTime;
-      video.currentTime = Math.max(0, Math.min(resumeTime, duration));
-    }
     if (shouldResume) video.play().catch(() => syncPlayState());
     else syncPlayState();
   };
-  assignReviewVideoSource(path, restore);
+  assignReviewVideoSource(path, { resumeTime, onLoadedMetadata: restore });
   video.playbackRate = rate;
 }
 
@@ -182,7 +201,7 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
       },
     });
     if (seq !== audioPreviewSeq || !currentClip || currentClip.path !== clip.path) return;
-    const latestResumeTime = consumeSourceSwapResumeTime(resumeTime);
+    const latestResumeTime = reviewPlayheadTime();
     setReviewVideoSource(path, {
       resumeTime: latestResumeTime,
       shouldResume,
@@ -197,7 +216,7 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
     if (message.includes("ffmpeg is not available for audio track mixing")) {
       if (currentClip && currentClip.path === clip.path) {
         if (currentReviewMediaPath !== clip.path) {
-          const latestResumeTime = consumeSourceSwapResumeTime(resumeTime);
+          const latestResumeTime = reviewPlayheadTime();
           setReviewVideoSource(clip.path, {
             resumeTime: latestResumeTime,
             shouldResume,
@@ -231,6 +250,7 @@ function suspendReviewPlayback() {
   clearOverlayIdleCheck();
   video.pause();
   releaseReviewVideoSource();
+  reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = null;
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
@@ -271,7 +291,7 @@ async function saveClipRename(ev) {
     return;
   }
 
-  const resumeTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const resumeTime = reviewPlayheadTime();
   const shouldResume = !video.paused && !video.ended;
   const rate = video.playbackRate;
   renamePending = true;
@@ -345,7 +365,7 @@ async function submitRenameFileDialog() {
 
   const oldPath = oldClip.path;
   const isCurrent = currentClip && currentClip.path === oldPath;
-  const resumeTime = isCurrent && Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const resumeTime = isCurrent ? reviewPlayheadTime() : 0;
   const shouldResume = isCurrent && !video.paused && !video.ended;
   const rate = video.playbackRate;
   const trimRange = isCurrent ? { start: trimStart, end: trimEnd } : null;
@@ -397,7 +417,7 @@ function openClip(clip) {
   }
   audioPreviewSeq += 1;
   clearOverlayIdleCheck();
-  pendingSeek = null;
+  reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = clip;
   currentReviewAudioKey = null;
   simpleTrimMode = false;
@@ -412,7 +432,7 @@ function openClip(clip) {
   syncUploadClipButton();
   updateViews();
   updateStageFrame();
-  assignReviewVideoSource(clip.path);
+  assignReviewVideoSource(clip.path, { resumeTime: 0 });
   video.playbackRate = Number($("rate-select").value);
   resetZoom();
   setTrim(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
@@ -438,6 +458,7 @@ function closeReview() {
   clearOverlayIdleCheck();
   video.pause();
   releaseReviewVideoSource();
+  reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = null;
   simpleTrimMode = false;
   currentReviewMediaPath = null;
@@ -681,7 +702,7 @@ function stepFrame(dir) {
 // Jump to the previous/next edit point (clip ends, trim edges, markers).
 function jumpEdit(direction) {
   const points = editPoints(clipMarkers(), trimStart, trimEnd, clipDuration());
-  const current = video.currentTime || 0;
+  const current = reviewPlayheadTime();
   const target = direction > 0 ? nextMarker(points, current) : prevMarker(points, current);
   if (target) seekTo(target.t_s);
 }
@@ -689,7 +710,7 @@ function jumpEdit(direction) {
 function paintTimeline() {
   const dur = clipDuration();
   const view = timelineView();
-  const current = dur ? clampTime(video.currentTime || 0, dur) : 0;
+  const current = dur ? clampTime(reviewPlayheadTime(), dur) : 0;
   // Off-window positions fall outside 0–100% and are clipped by the track; the
   // dimmed trim ends are clamped so they fill the visible side they cover.
   const pct = (t) => percentForView(t, view.start, view.span);
@@ -720,7 +741,7 @@ function paintOverview() {
   if (!win) return;
   const dur = clipDuration();
   const view = timelineView();
-  const current = dur ? clampTime(video.currentTime || 0, dur) : 0;
+  const current = dur ? clampTime(reviewPlayheadTime(), dur) : 0;
   const a = percentFor(trimStart, dur);
   const b = percentFor(trimEnd, dur);
   $("overview-trim").style.left = `${a}%`;
@@ -913,55 +934,41 @@ function renderRuler() {
   });
 }
 
-// Rapid seeks (scrubbing) must not pile up: WebView2 stops painting frames
-// when a new seek lands while the previous one is in flight. Issue one seek
-// at a time and chain the latest target from the `seeked` event.
-var pendingSeek = null;
-
-function consumeSourceSwapResumeTime(fallbackTime) {
-  const resumeTime = PlayerCore.sourceSwapResumeTime(
-    pendingSeek,
-    video.currentTime,
-    fallbackTime,
-  );
-  pendingSeek = null;
-  return resumeTime;
-}
-
 function seekTo(time, options = {}) {
-  if (!currentClip) return;
+  if (!currentClip || !Number.isFinite(time)) return;
   if (!options.keepGameEventSelection) clearGameEventSelection();
   if (!options.keepGamePlaySelection) clearGamePlaySelection();
-  const t = clampTime(time, clipDuration());
-  reviewSeekRevision += 1;
-  if (video.seeking) {
-    pendingSeek = t;
-  } else {
-    pendingSeek = null;
-    video.currentTime = t;
+  reviewSeekState = PlayerCore.requestLogicalSeek(reviewSeekState, time, clipDuration());
+  const target = reviewSeekState.targetTime;
+  if (reviewSeekState.metadataGeneration === reviewSourceGeneration && !video.seeking) {
+    video.currentTime = target;
   }
-  maybeFollow(t);
+  maybeFollow(target);
   paintTimeline();
-  syncGameEventRail(t);
-  syncGamePlayRail(t, { keepGamePlaySelection: options.keepGamePlaySelection });
+  syncGameEventRail(target);
+  syncGamePlayRail(target, { keepGamePlaySelection: options.keepGamePlaySelection });
 }
 
 video.addEventListener("seeked", () => {
-  if (pendingSeek != null) {
-    const t = pendingSeek;
-    pendingSeek = null;
-    video.currentTime = t;
-  }
-  maybeFollow(video.currentTime || 0);
+  const decision = PlayerCore.seekedDecision(
+    reviewSeekState,
+    reviewSourceGeneration,
+    video.currentTime,
+    clipDuration(),
+  );
+  reviewSeekState = decision.state;
+  if (decision.applyTime != null) video.currentTime = decision.applyTime;
+  const current = reviewPlayheadTime();
+  maybeFollow(current);
   paintTimeline();
-  syncGameEventRail(video.currentTime || 0);
-  syncGamePlayRail(video.currentTime || 0);
+  syncGameEventRail(current);
+  syncGamePlayRail(current);
 });
 
 function seekBy(delta) {
   seekTo(PlayerCore.relativeSeekTarget(
     video.currentTime,
-    pendingSeek,
+    reviewSeekState.targetTime,
     delta,
     clipDuration(),
   ));
