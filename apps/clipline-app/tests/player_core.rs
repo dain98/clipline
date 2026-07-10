@@ -433,6 +433,37 @@ fn relative_seek_accumulates_from_pending_target() {
 }
 
 #[test]
+fn source_restore_rejects_superseded_assignment() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "JSON.stringify(PlayerCore.sourceRestoreDecision(4, 5, 8, 8))",
+        ),
+        r#"{"ownsSource":false,"restorePosition":false}"#
+    );
+}
+
+#[test]
+fn source_restore_keeps_current_non_position_state_after_later_seek() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "JSON.stringify(PlayerCore.sourceRestoreDecision(5, 5, 8, 9))",
+        ),
+        r#"{"ownsSource":true,"restorePosition":false}"#
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "JSON.stringify(PlayerCore.sourceRestoreDecision(5, 5, 9, 9))",
+        ),
+        r#"{"ownsSource":true,"restorePosition":true}"#
+    );
+}
+
+#[test]
 fn timeline_time_maps_pointer_x_to_clip_time() {
     let mut ctx = player_core_context();
     assert_eq!(

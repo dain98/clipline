@@ -260,6 +260,19 @@ const PlayerCore = (() => {
     return Number.isFinite(fallbackTime) ? Math.max(0, fallbackTime) : 0;
   };
 
+  const sourceRestoreDecision = (
+    assignedSourceGeneration,
+    currentSourceGeneration,
+    assignedSeekRevision,
+    currentSeekRevision,
+  ) => {
+    const ownsSource = assignedSourceGeneration === currentSourceGeneration;
+    return {
+      ownsSource,
+      restorePosition: ownsSource && assignedSeekRevision === currentSeekRevision,
+    };
+  };
+
   const relativeSeekTarget = (currentTime, pendingSeek, delta, duration) => {
     const base = Number.isFinite(pendingSeek)
       ? pendingSeek
@@ -1833,6 +1846,7 @@ const PlayerCore = (() => {
     captureSourceLabel,
     clampTime,
     sourceSwapResumeTime,
+    sourceRestoreDecision,
     relativeSeekTarget,
     percentFor,
     timelineTime,

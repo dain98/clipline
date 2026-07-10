@@ -1648,10 +1648,6 @@ fn default_audio_preview_is_gated_and_degrades_to_source_on_failure() {
         js.contains("setDeckStatus(\"audio mix unavailable; playing source\", { transient: true });")
             && !js.contains("audioPreviewUnavailable = true;")
             && js.contains("if (currentReviewMediaPath !== clip.path) {")
-            && js
-                .matches("const latestResumeTime = consumeSourceSwapResumeTime(resumeTime);")
-                .count()
-                == 2
             && js.contains("setReviewVideoSource(clip.path, {")
             && js.contains("resumeTime: latestResumeTime"),
         "preview generation failure should fall back to source playback without disabling future preview attempts"
@@ -1679,14 +1675,122 @@ fn audio_preview_resolves_resume_position_after_await() {
     let await_preview = body
         .find("await invoke(\"preview_clip_audio_tracks\"")
         .unwrap();
-    let consume_latest = body
-        .find("consumeSourceSwapResumeTime(resumeTime)")
+    let success_guard = body[await_preview..]
+        .find("if (seq !== audioPreviewSeq || !currentClip || currentClip.path !== clip.path) return;")
+        .map(|offset| await_preview + offset)
         .unwrap();
-    assert!(await_preview < consume_latest);
+    let success_consume = body[success_guard..]
+        .find("consumeSourceSwapResumeTime(resumeTime)")
+        .map(|offset| success_guard + offset)
+        .unwrap();
+    let success_swap = body[success_consume..]
+        .find("setReviewVideoSource(path, {")
+        .map(|offset| success_consume + offset)
+        .unwrap();
+    let catch_start = body.find("} catch (e) {").unwrap();
+    assert!(await_preview < success_guard);
+    assert!(success_guard < success_consume);
+    assert!(success_consume < success_swap);
+    assert!(success_swap < catch_start);
+
+    let fallback_stale_guard = body[catch_start..]
+        .find("if (seq !== audioPreviewSeq) return;")
+        .map(|offset| catch_start + offset)
+        .unwrap();
+    let fallback_branch = body[fallback_stale_guard..]
+        .find("if (currentReviewMediaPath !== clip.path) {")
+        .map(|offset| fallback_stale_guard + offset)
+        .unwrap();
+    let fallback_consume = body[fallback_branch..]
+        .find("consumeSourceSwapResumeTime(resumeTime)")
+        .map(|offset| fallback_branch + offset)
+        .unwrap();
+    let fallback_swap = body[fallback_consume..]
+        .find("setReviewVideoSource(clip.path, {")
+        .map(|offset| fallback_consume + offset)
+        .unwrap();
+    assert!(fallback_stale_guard < fallback_branch);
+    assert!(fallback_branch < fallback_consume);
+    assert!(fallback_consume < fallback_swap);
+
+    let consume = js_function_body(&review, "consumeSourceSwapResumeTime");
+    let choose_latest = consume.find("PlayerCore.sourceSwapResumeTime(").unwrap();
+    let clear_pending = consume.find("pendingSeek = null;").unwrap();
+    let return_resume = consume.find("return resumeTime;").unwrap();
+    assert!(choose_latest < clear_pending);
+    assert!(clear_pending < return_resume);
 
     let seek_by = js_function_body(&review, "seekBy");
     assert!(seek_by.contains("PlayerCore.relativeSeekTarget"));
     assert!(seek_by.contains("pendingSeek"));
+}
+
+#[test]
+fn video_source_restore_requires_current_assignment_and_unchanged_seek() {
+    let review = read_ui_js("review-player.js");
+    let assign = js_function_body(&review, "assignReviewVideoSource");
+    let claim_generation = assign
+        .find("sourceGeneration: ++reviewSourceGeneration")
+        .unwrap();
+    let capture_seek = assign.find("seekRevision: reviewSeekRevision").unwrap();
+    let listen = assign
+        .find("video.addEventListener(\"loadedmetadata\"")
+        .unwrap();
+    let source_swap = assign.find("video.src = convertFileSrc(path);").unwrap();
+    assert!(claim_generation < listen);
+    assert!(capture_seek < listen);
+    assert!(listen < source_swap);
+
+    let set_source = js_function_body(&review, "setReviewVideoSource");
+    let decision = set_source
+        .find("PlayerCore.sourceRestoreDecision(")
+        .unwrap();
+    let ownership_guard = set_source
+        .find("if (!decision.ownsSource) return;")
+        .unwrap();
+    let trim_restore = set_source.find("if (trimRange) setTrim(").unwrap();
+    let position_guard = set_source
+        .find("if (decision.restorePosition && Number.isFinite(resumeTime))")
+        .unwrap();
+    let play_restore = set_source.find("if (shouldResume) video.play()").unwrap();
+    assert!(decision < ownership_guard);
+    assert!(ownership_guard < trim_restore);
+    assert!(trim_restore < position_guard);
+    assert!(position_guard < play_restore);
+
+    let seek_to = js_function_body(&review, "seekTo");
+    let seek_revision = seek_to.find("reviewSeekRevision += 1;").unwrap();
+    let seek_dispatch = seek_to.find("if (video.seeking)").unwrap();
+    assert!(seek_revision < seek_dispatch);
+}
+
+#[test]
+fn every_review_video_source_mutation_uses_generation_helpers() {
+    let review = read_ui_js("review-player.js");
+    assert_eq!(
+        review.matches("video.src = convertFileSrc(path);").count(),
+        1
+    );
+    assert_eq!(review.matches("video.removeAttribute(\"src\");").count(), 1);
+    assert_eq!(review.matches("video.load();").count(), 1);
+
+    let restore_rename = js_function_body(&review, "restoreVideoAfterRename");
+    assert!(restore_rename.contains("setReviewVideoSource(path, {"));
+    let set_source = js_function_body(&review, "setReviewVideoSource");
+    assert!(set_source.contains("assignReviewVideoSource(path, restore)"));
+    let open_clip = js_function_body(&review, "openClip");
+    assert!(open_clip.contains("assignReviewVideoSource(clip.path)"));
+
+    for name in [
+        "releaseVideoFileHandle",
+        "suspendReviewPlayback",
+        "closeReview",
+    ] {
+        assert!(
+            js_function_body(&review, name).contains("releaseReviewVideoSource();"),
+            "{name} must invalidate source ownership before releasing video.src"
+        );
+    }
 }
 
 #[test]
@@ -1745,8 +1849,7 @@ fn close_to_tray_suspends_review_playback() {
         suspend_helper.contains("audioPreviewSeq += 1;")
             && suspend_helper.contains("clearOverlayIdleCheck();")
             && suspend_helper.contains("video.pause();")
-            && suspend_helper.contains("video.removeAttribute(\"src\");")
-            && suspend_helper.contains("video.load();"),
+            && suspend_helper.contains("releaseReviewVideoSource();"),
         "suspending playback must cancel preview work, stop overlay timers, and unload the video"
     );
     assert!(
@@ -2433,6 +2536,42 @@ fn cloud_library_loader_guards_every_async_result_and_force_supersedes() {
     assert!(loader.contains("cloudClipsRequestGate.begin(accountKey)"));
     assert!(loader.contains("cloudClipsRequestGate.isCurrent(request, cloudAccountKey())"));
     assert!(!loader.contains("if (cloudClipsLoading) return"));
+
+    let await_result = loader.find("await invoke(\"list_cloud_clips\")").unwrap();
+    let success_guard = loader[await_result..]
+        .find("if (!isCurrent()) return;")
+        .map(|offset| await_result + offset)
+        .unwrap();
+    let success_publish = loader.find("cloudClipsCache = result").unwrap();
+    let success_loaded = loader.find("cloudClipsLoaded = true;").unwrap();
+    let catch_start = loader.find("} catch (error) {").unwrap();
+    assert!(await_result < success_guard);
+    assert!(success_guard < success_publish);
+    assert!(success_publish < success_loaded);
+    assert!(success_loaded < catch_start);
+
+    let error_guard = loader[catch_start..]
+        .find("if (!isCurrent()) return;")
+        .map(|offset| catch_start + offset)
+        .unwrap();
+    let error_publish = loader.find("cloudClipsError = String(error);").unwrap();
+    let finally_start = loader.find("} finally {").unwrap();
+    assert!(catch_start < error_guard);
+    assert!(error_guard < error_publish);
+    assert!(error_publish < finally_start);
+
+    let finally_guard = loader[finally_start..]
+        .find("if (!isCurrent()) return;")
+        .map(|offset| finally_start + offset)
+        .unwrap();
+    let loading_clear = loader.find("cloudClipsLoading = false;").unwrap();
+    let final_render = loader[loading_clear..]
+        .find("if (gallerySource === \"cloud\") renderClips();")
+        .map(|offset| loading_clear + offset)
+        .unwrap();
+    assert!(finally_start < finally_guard);
+    assert!(finally_guard < loading_clear);
+    assert!(loading_clear < final_render);
 
     let html = index_html();
     let cloud_core = html.find("src=\"cloud-core.js\"").unwrap();

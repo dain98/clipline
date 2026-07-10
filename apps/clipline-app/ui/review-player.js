@@ -98,18 +98,30 @@ function applyRenamedClip(oldClip, result) {
   return renamed;
 }
 
-function restoreVideoAfterRename(path, time, shouldResume, rate) {
-  const restore = () => {
-    if (Number.isFinite(time)) {
-      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : time;
-      video.currentTime = Math.min(time, duration);
-    }
-    if (shouldResume) video.play().catch(() => syncPlayState());
+var reviewSourceGeneration = 0;
+var reviewSeekRevision = 0;
+
+function assignReviewVideoSource(path, onLoadedMetadata = null) {
+  const assignment = {
+    sourceGeneration: ++reviewSourceGeneration,
+    seekRevision: reviewSeekRevision,
   };
-  video.addEventListener("loadedmetadata", restore, { once: true });
+  if (typeof onLoadedMetadata === "function") {
+    video.addEventListener("loadedmetadata", () => onLoadedMetadata(assignment), { once: true });
+  }
   currentReviewMediaPath = path;
   video.src = convertFileSrc(path);
-  video.playbackRate = rate;
+  return assignment;
+}
+
+function releaseReviewVideoSource() {
+  reviewSourceGeneration += 1;
+  video.removeAttribute("src");
+  video.load();
+}
+
+function restoreVideoAfterRename(path, time, shouldResume, rate) {
+  setReviewVideoSource(path, { resumeTime: time, shouldResume, rate });
 }
 
 function setReviewVideoSource(path, options = {}) {
@@ -119,18 +131,23 @@ function setReviewVideoSource(path, options = {}) {
     rate = video.playbackRate,
     trimRange = null,
   } = options;
-  const restore = () => {
+  const restore = (assignment) => {
+    const decision = PlayerCore.sourceRestoreDecision(
+      assignment.sourceGeneration,
+      reviewSourceGeneration,
+      assignment.seekRevision,
+      reviewSeekRevision,
+    );
+    if (!decision.ownsSource) return;
     if (trimRange) setTrim(trimRange.start, trimRange.end);
-    if (Number.isFinite(resumeTime)) {
+    if (decision.restorePosition && Number.isFinite(resumeTime)) {
       const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : resumeTime;
       video.currentTime = Math.max(0, Math.min(resumeTime, duration));
     }
     if (shouldResume) video.play().catch(() => syncPlayState());
     else syncPlayState();
   };
-  video.addEventListener("loadedmetadata", restore, { once: true });
-  currentReviewMediaPath = path;
-  video.src = convertFileSrc(path);
+  assignReviewVideoSource(path, restore);
   video.playbackRate = rate;
 }
 
@@ -204,8 +221,7 @@ async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) 
 
 async function releaseVideoFileHandle() {
   video.pause();
-  video.removeAttribute("src");
-  video.load();
+  releaseReviewVideoSource();
   await afterNextPaint();
 }
 
@@ -214,8 +230,7 @@ function suspendReviewPlayback() {
   audioPreviewSeq += 1;
   clearOverlayIdleCheck();
   video.pause();
-  video.removeAttribute("src");
-  video.load();
+  releaseReviewVideoSource();
   currentClip = null;
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
@@ -384,7 +399,6 @@ function openClip(clip) {
   clearOverlayIdleCheck();
   pendingSeek = null;
   currentClip = clip;
-  currentReviewMediaPath = clip.path;
   currentReviewAudioKey = null;
   simpleTrimMode = false;
   resetSelectedAudioTracks(clip);
@@ -398,7 +412,7 @@ function openClip(clip) {
   syncUploadClipButton();
   updateViews();
   updateStageFrame();
-  video.src = convertFileSrc(clip.path);
+  assignReviewVideoSource(clip.path);
   video.playbackRate = Number($("rate-select").value);
   resetZoom();
   setTrim(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
@@ -423,8 +437,7 @@ function closeReview() {
   audioPreviewSeq += 1;
   clearOverlayIdleCheck();
   video.pause();
-  video.removeAttribute("src");
-  video.load();
+  releaseReviewVideoSource();
   currentClip = null;
   simpleTrimMode = false;
   currentReviewMediaPath = null;
@@ -920,6 +933,7 @@ function seekTo(time, options = {}) {
   if (!options.keepGameEventSelection) clearGameEventSelection();
   if (!options.keepGamePlaySelection) clearGamePlaySelection();
   const t = clampTime(time, clipDuration());
+  reviewSeekRevision += 1;
   if (video.seeking) {
     pendingSeek = t;
   } else {
