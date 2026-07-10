@@ -1685,7 +1685,25 @@ fn review_player_applies_logical_seek_only_for_current_metadata() {
     assert!(review.contains("function reportReviewSourceError(assignment)"));
     assert!(assign.contains("video.addEventListener(\"error\""));
     assert!(review.contains("function reviewPlayheadTime()"));
-    assert!(!review.contains("pendingSeek"));
+    let prohibited_legacy_identifier = ["pending", "Seek"].concat();
+    let player_core = read_ui_js("player-core.js");
+    let main = read_ui_js("main.js");
+    let task_two_scope = [
+        ("tests/player_core.rs", include_str!("player_core.rs")),
+        ("tests/ui_contract.rs", include_str!("ui_contract.rs")),
+        ("ui/player-core.js", player_core.as_str()),
+        ("ui/review-player.js", review.as_str()),
+        ("ui/main.js", main.as_str()),
+    ];
+    let legacy_identifier_files: Vec<_> = task_two_scope
+        .iter()
+        .filter_map(|(path, source)| source.contains(&prohibited_legacy_identifier).then_some(*path))
+        .collect();
+    assert!(
+        legacy_identifier_files.is_empty(),
+        "Task 2 scope must not retain `{prohibited_legacy_identifier}`; found in {}",
+        legacy_identifier_files.join(", "),
+    );
     assert!(!review.contains("reviewSeekRevision"));
 }
 

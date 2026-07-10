@@ -319,9 +319,9 @@ const PlayerCore = (() => {
     return clampTime(time, duration);
   };
 
-  const relativeSeekTarget = (currentTime, pendingSeek, delta, duration) => {
-    const base = Number.isFinite(pendingSeek)
-      ? pendingSeek
+  const relativeSeekTarget = (currentTime, logicalTarget, delta, duration) => {
+    const base = Number.isFinite(logicalTarget)
+      ? logicalTarget
       : Number.isFinite(currentTime) ? currentTime : 0;
     return clampTime(base + (Number.isFinite(delta) ? delta : 0), duration);
   };
