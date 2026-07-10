@@ -30,7 +30,7 @@ The hardware sync failure reports approximately `-0.5s` because the validator me
 Advancement is monotonic:
 
 - A target at or behind the assembler's current end does nothing.
-- A non-finite target does nothing, preserving monitor calls that poll with `f64::MAX` without allocating unbounded silence.
+- A non-finite target does nothing. WASAPI also recognizes the existing `f64::MAX` monitor-drain sentinel and never passes it to timeline advancement.
 - The existing maximum gap-fill bound remains the protection against corrupt timestamps or unreasonable single-call allocation.
 - Generated samples use the same 48 kHz stereo grid as real and gap-filled PCM, so `pop_frame` continues to emit exact 20 ms frames.
 
@@ -47,7 +47,7 @@ This preserves a single monotonic PCM timeline. It intentionally prefers silence
 
 ### WASAPI polling horizon
 
-After draining all currently available device buffers, `WasapiPcmCapture::poll_frames(until_pts_s)` will advance the assembler through `until_pts_s - 0.020` seconds when `until_pts_s` is finite. The 20 ms allowance gives the audio engine one Opus frame to deliver real samples before silence is synthesized.
+After draining all currently available device buffers, `WasapiPcmCapture::poll_frames(until_pts_s)` will advance the assembler through `until_pts_s - 0.020` seconds when `until_pts_s` is finite and is not the `f64::MAX` monitor-drain sentinel. The 20 ms allowance gives the audio engine one Opus frame to deliver real samples before silence is synthesized.
 
 The method then pops complete frames and retains the existing rule that only frames ending at or before the requested horizon are returned. Calls using `f64::MAX`, such as live level monitoring, drain only real buffered data and do not synthesize silence.
 
@@ -65,7 +65,7 @@ This behavior applies uniformly to system output, per-process output, microphone
 ## Error handling and bounds
 
 - No new recoverable error type is required; timeline advancement is deterministic in-memory work.
-- Non-finite poll horizons never synthesize samples.
+- Non-finite poll horizons and the `f64::MAX` monitor-drain sentinel never synthesize samples.
 - Silence generation continues to use the existing five-second maximum single-gap bound.
 - Timestamp discontinuity logging remains unchanged.
 - Device-loss and Opus-encoding errors continue to propagate through the existing `CaptureError` path.
@@ -80,7 +80,7 @@ Platform-neutral tests in `pcm.rs` will establish the core contract:
 - A real chunk entirely covered by synthesized silence is discarded without extending the timeline.
 - A non-finite target does not allocate or emit silence.
 
-Windows-side coverage in `wasapi.rs` will verify the finite polling allowance without requiring hardware. A pure `audio_poll_silence_horizon(until_pts_s: f64) -> Option<f64>` helper will return `Some(max(until_pts_s - 0.020, 0.0))` for finite inputs and `None` for non-finite inputs. The existing `real_engines_on_one_clock_produce_a_synced_timeline` hardware test remains unchanged and must pass on an idle desktop.
+Windows-side coverage in `wasapi.rs` will verify the finite polling allowance without requiring hardware. A pure `audio_poll_silence_horizon(until_pts_s: f64) -> Option<f64>` helper will return `Some(max(until_pts_s - 0.020, 0.0))` for ordinary finite inputs and `None` for non-finite inputs or `f64::MAX`. The existing `real_engines_on_one_clock_produce_a_synced_timeline` hardware test remains unchanged and must pass on an idle desktop.
 
 The final verification remains:
 
