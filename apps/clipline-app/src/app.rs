@@ -1489,6 +1489,15 @@ fn save_hotkey_label(settings: &AppSettings) -> String {
     settings.hotkeys().join(" / ")
 }
 
+fn run_before_releasing_settings_save_lock<T>(
+    save_guard: MutexGuard<'_, ()>,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let result = operation();
+    drop(save_guard);
+    result
+}
+
 #[tauri::command]
 fn save_settings<R: Runtime>(
     app: AppHandle<R>,
@@ -1569,8 +1578,9 @@ fn save_settings<R: Runtime>(
     }
     tray_items.set_hotkey_label(&save_hotkey_label(&settings))?;
     crate::hotkeys::set_save_hotkeys(&settings.hotkeys())?;
-    drop(cloud_save_guard);
-    state.finish_prepared_restart(app, prepared_restart)?;
+    run_before_releasing_settings_save_lock(cloud_save_guard, || {
+        state.finish_prepared_restart(app, prepared_restart)
+    })?;
     storage_settings.set_quota_bytes(quota_bytes);
     storage_settings.set_media_dir(media_dir);
     Ok(settings)
@@ -2342,6 +2352,43 @@ mod tests {
             "dropping a plan must not stop recording"
         );
         assert!(matches!(rx.try_recv(), Ok(Cmd::Save)));
+    }
+
+    #[test]
+    fn settings_save_lock_remains_held_through_runtime_commit() {
+        let save_lock = Mutex::new(());
+        let save_guard = save_lock.lock().unwrap();
+        let original = AppSettings::default();
+        let state = RuntimeState::new(original.clone(), None);
+        let changed = AppSettings {
+            fps: 120,
+            ..original
+        };
+        let prepared = state.prepare_settings_restart(changed).unwrap();
+
+        run_before_releasing_settings_save_lock(save_guard, || {
+            let committed: CommittedRuntimeRestart<()> = {
+                let mut inner = state.0.lock().unwrap();
+                RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+                    unreachable!("inactive runtime must not spawn a replacement")
+                })
+                .unwrap()
+            };
+
+            assert!(committed.old_tx.is_none());
+            assert_eq!(state.settings().fps, 120);
+            assert!(
+                matches!(
+                    save_lock.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ),
+                "settings save lock was released before the runtime commit completed"
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(save_lock.try_lock().is_ok());
     }
 
     fn detected_game(id: &str, name: &str, hwnd: isize) -> DetectedGame {
