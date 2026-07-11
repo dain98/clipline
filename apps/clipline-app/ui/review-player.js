@@ -100,6 +100,7 @@ function applyRenamedClip(oldClip, result) {
 
 var reviewSourceGeneration = 0;
 var reviewSeekState = PlayerCore.createLogicalSeekState();
+var audioPreviewQueue = PlayerCore.emptyAudioPreviewQueue();
 
 function reviewPlayheadTime() {
   return PlayerCore.logicalPlaybackTime(reviewSeekState, video.currentTime, clipDuration());
@@ -170,85 +171,95 @@ function setReviewVideoSource(path, options = {}) {
   video.playbackRate = rate;
 }
 
-async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) {
-  const clip = currentClip;
-  const tracks = clipAudioTracks(clip);
-  if (!clip || !tracks.length) return;
+function cancelDesiredAudioPreview() {
+  audioPreviewQueue = PlayerCore.cancelAudioPreviewRequest(audioPreviewQueue);
+}
 
-  const selected = selectedAudioTrackIdsForClip(clip);
-  const selectionKey = audioSelectionKey(clip, selected);
-  const resumeTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
-  const shouldResume = forceResume || (!video.paused && !video.ended);
-  const rate = video.playbackRate;
-  const trimRange = { start: trimStart, end: trimEnd };
-  const seq = ++audioPreviewSeq;
-  if (currentReviewAudioKey === audioSelectionKey(clip, selected)) {
-    setDeckStatus(audioSelectionLabel(clip), { transient: true });
-    return;
-  }
-  if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {
-    if (currentReviewMediaPath !== clip.path) {
-      setReviewVideoSource(clip.path, {
-        resumeTime,
-        shouldResume,
-        rate,
-        trimRange,
-      });
-    }
-    currentReviewAudioKey = selectionKey;
-    currentReviewAudioTrackIds = selected;
-    setDeckStatus(audioSelectionLabel(clip), { transient: true });
-    return;
-  }
-  setDeckStatus("switching audio tracks...");
-  $("error").textContent = "";
+function restoreAudibleAudioSelection(message) {
+  selectedAudioTrackIds = new Set(currentReviewAudioTrackIds);
+  renderAudioTrackPanel();
+  setDeckStatus(message, { transient: true });
+}
+
+function previewRequestStillCurrent(request) {
+  return Boolean(currentClip)
+    && currentClip.path === request.clipPath
+    && request.selectionKey === audioSelectionKey(currentClip)
+    && request.sourceGeneration === reviewSourceGeneration;
+}
+
+async function runAudioPreviewRequest(request) {
+  let path = null;
+  let error = null;
   try {
-    const path = await invoke("preview_clip_audio_tracks", {
+    path = await invoke("preview_clip_audio_tracks", {
       request: {
-        path: clip.path,
-        audioTrackIds: selected,
+        path: request.clipPath,
+        audioTrackIds: request.trackIds,
+        protectedPreviewPath: currentReviewMediaPath,
       },
     });
-    if (seq !== audioPreviewSeq || !currentClip || currentClip.path !== clip.path) return;
-    const latestResumeTime = reviewPlayheadTime();
-    setReviewVideoSource(path, {
-      resumeTime: latestResumeTime,
-      shouldResume,
-      rate,
-      trimRange,
-    });
-    currentReviewAudioKey = selectionKey;
-    currentReviewAudioTrackIds = selected;
-    setDeckStatus(audioSelectionLabel(clip), { transient: true });
   } catch (e) {
-    if (seq !== audioPreviewSeq) return;
-    const message = String(e);
-    if (message.includes("ffmpeg is not available for audio track mixing")) {
-      if (currentClip && currentClip.path === clip.path) {
-        if (currentReviewMediaPath !== clip.path) {
-          const latestResumeTime = reviewPlayheadTime();
-          setReviewVideoSource(clip.path, {
-            resumeTime: latestResumeTime,
-            shouldResume,
-            rate,
-            trimRange,
-          });
-        } else if (forceResume) {
-          video.play().catch(() => syncPlayState());
-        }
-      }
-      setDeckStatus("audio mix unavailable; playing source", { transient: true });
-    } else {
-      setDeckStatus("");
-      $("error").textContent = message;
-      if (forceResume && currentClip && currentClip.path === clip.path) {
-        video.play().catch(() => syncPlayState());
-      }
-    }
+    error = String(e);
   }
+
+  const transition = PlayerCore.finishAudioPreviewRequest(
+    audioPreviewQueue,
+    request.revision,
+    error == null,
+  );
+  audioPreviewQueue = transition.state;
+
+  if (transition.apply && previewRequestStillCurrent(transition.apply)) {
+    const resumeTime = reviewPlayheadTime();
+    const shouldResume = !video.paused && !video.ended;
+    const rate = video.playbackRate;
+    const trimRange = { start: trimStart, end: trimEnd };
+    setReviewVideoSource(path, { resumeTime, shouldResume, rate, trimRange });
+    currentReviewAudioTrackIds = [...transition.apply.trackIds];
+    currentReviewAudioKey = transition.apply.selectionKey;
+    setDeckStatus(audioSelectionLabel(currentClip), { transient: true });
+  } else if (error && !transition.start && previewRequestStillCurrent(request)) {
+    restoreAudibleAudioSelection(`audio preview failed: ${error}`);
+  }
+
+  if (transition.start) void runAudioPreviewRequest(transition.start);
+}
+
+function requestSelectedAudioPreview() {
+  const clip = currentClip;
+  if (!clip) return;
+  const tracks = clipAudioTracks(clip);
+  const selected = selectedAudioTrackIdsForClip(clip);
+  const selectionKey = audioSelectionKey(clip, selected);
+  if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {
+    cancelDesiredAudioPreview();
+    if (currentReviewMediaPath !== clip.path) {
+      setReviewVideoSource(clip.path, {
+        resumeTime: reviewPlayheadTime(),
+        shouldResume: !video.paused && !video.ended,
+        rate: video.playbackRate,
+        trimRange: { start: trimStart, end: trimEnd },
+      });
+    }
+    currentReviewAudioTrackIds = [...selected];
+    currentReviewAudioKey = selectionKey;
+    return;
+  }
+  if (selectionKey === currentReviewAudioKey) return;
+  const queued = PlayerCore.queueAudioPreviewRequest(audioPreviewQueue, {
+    clipPath: clip.path,
+    trackIds: [...selected],
+    selectionKey,
+    sourceGeneration: reviewSourceGeneration,
+  });
+  audioPreviewQueue = queued.state;
+  setDeckStatus("switching audio tracks...");
+  if (queued.start) void runAudioPreviewRequest(queued.start);
 }
 
 async function releaseVideoFileHandle() {
+  cancelDesiredAudioPreview();
   video.pause();
   releaseReviewVideoSource();
   await afterNextPaint();
@@ -256,7 +267,7 @@ async function releaseVideoFileHandle() {
 
 function suspendReviewPlayback() {
   setClipTitleEditing(false);
-  audioPreviewSeq += 1;
+  cancelDesiredAudioPreview();
   clearOverlayIdleCheck();
   video.pause();
   releaseReviewVideoSource();
@@ -404,7 +415,7 @@ async function submitRenameFileDialog() {
     if (isCurrent && renamed.path !== oldPath) {
       setReviewVideoSource(renamed.path, { resumeTime, shouldResume, rate, trimRange });
       currentReviewAudioKey = null;
-      await applySelectedAudioTracksToPlayback({ forceResume: shouldResume });
+      requestSelectedAudioPreview();
     } else if (mediaReleased) {
       restoreVideoAfterRename(renamed.path, resumeTime, shouldResume, rate);
     }
@@ -426,7 +437,7 @@ function openClip(clip) {
     }
     toggleSettings(false);
   }
-  audioPreviewSeq += 1;
+  cancelDesiredAudioPreview();
   clearOverlayIdleCheck();
   reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = clip;
@@ -465,7 +476,7 @@ function openClip(clip) {
 
 function closeReview() {
   setClipTitleEditing(false);
-  audioPreviewSeq += 1;
+  cancelDesiredAudioPreview();
   clearOverlayIdleCheck();
   video.pause();
   releaseReviewVideoSource();

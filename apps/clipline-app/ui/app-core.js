@@ -137,7 +137,6 @@ var gamePlayContextTarget = null;
 var uploadDialogClip = null;
 var selectedAudioTrackIds = new Set();
 var uploadSelectedAudioTrackIds = new Set();
-var audioPreviewSeq = 0;
 var currentReviewAudioKey = null;
 var currentReviewAudioTrackIds = [];
 var currentReviewMediaPath = null;
@@ -334,7 +333,7 @@ function renderAudioTrackPanel() {
       PlayerCore.applyReviewAudioTrackToggle(tracks, [...selectedAudioTrackIds], track.id, checked),
     );
     renderAudioTrackPanel();
-    applySelectedAudioTracksToPlayback();
+    requestSelectedAudioPreview();
   }, { rowState: PlayerCore.reviewAudioTrackRowState });
 }
 

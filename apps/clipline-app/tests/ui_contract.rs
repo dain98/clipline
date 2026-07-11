@@ -789,7 +789,7 @@ fn review_player_owns_all_controls() {
             && html.contains("id=\"upload-audio-list\"")
             && main_js().contains("function clipAudioTracks(clip = currentClip)")
             && main_js().contains("function renderAudioTrackPanel()")
-            && main_js().contains("function applySelectedAudioTracksToPlayback({ forceResume = false } = {})")
+            && main_js().contains("function requestSelectedAudioPreview()")
             && main_js().contains("preview_clip_audio_tracks")
             && main_js().contains("function renderUploadAudioTracks(clip = uploadDialogClip)")
             && main_js().contains("audioTrackIds: request.audioTrackIds || null")
@@ -1630,22 +1630,6 @@ fn review_audio_pruning_preserves_fallback_and_muted_selection() {
 }
 
 #[test]
-fn returning_to_fallback_invalidates_an_inflight_audio_preview() {
-    let review = read_ui_js("review-player.js");
-    let apply = js_function_body(&review, "applySelectedAudioTracksToPlayback");
-    let invalidate = apply
-        .find("const seq = ++audioPreviewSeq;")
-        .expect("audio selection should advance its preview generation");
-    let same_selection = apply
-        .find("currentReviewAudioKey === audioSelectionKey(clip, selected)")
-        .expect("audio selection should retain its same-selection fast path");
-    assert!(
-        invalidate < same_selection,
-        "a fallback selection must invalidate an earlier explicit preview before the fast path returns"
-    );
-}
-
-#[test]
 fn review_player_applies_logical_seek_only_for_current_metadata() {
     let review = read_ui_js("review-player.js");
     let assign = js_function_body(&review, "assignReviewVideoSource");
@@ -1681,6 +1665,55 @@ fn review_player_applies_logical_seek_only_for_current_metadata() {
         legacy_identifier_files.join(", "),
     );
     assert!(!review.contains("reviewSeekRevision"));
+}
+
+#[test]
+fn explicit_audio_preview_uses_one_pure_coalescing_queue() {
+    let review = read_ui_js("review-player.js");
+    assert!(review.contains("var audioPreviewQueue = PlayerCore.emptyAudioPreviewQueue();"));
+    assert!(review.contains("PlayerCore.queueAudioPreviewRequest("));
+    assert!(review.contains("PlayerCore.finishAudioPreviewRequest("));
+    assert_eq!(review.matches("await invoke(\"preview_clip_audio_tracks\"").count(), 1);
+    assert!(review.contains("protectedPreviewPath: currentReviewMediaPath"));
+    assert!(!review.contains("audioPreviewSeq"));
+}
+
+#[test]
+fn preview_failure_keeps_source_and_reverts_controls_to_audible_selection() {
+    let review = read_ui_js("review-player.js");
+    let restore = js_function_body(&review, "restoreAudibleAudioSelection");
+    assert!(restore.contains("selectedAudioTrackIds = new Set(currentReviewAudioTrackIds);"));
+    assert!(restore.contains("renderAudioTrackPanel();"));
+    assert!(restore.contains("setDeckStatus(message, { transient: true });"));
+    assert!(!restore.contains("setReviewVideoSource"));
+}
+
+#[test]
+fn valid_preview_swap_reads_latest_player_state_after_await() {
+    let review = read_ui_js("review-player.js");
+    let run = js_function_body(&review, "runAudioPreviewRequest");
+    let await_preview = run.find("await invoke(\"preview_clip_audio_tracks\"").unwrap();
+    let latest_time = run[await_preview..].find("reviewPlayheadTime()").unwrap();
+    let latest_pause = run[await_preview..].find("!video.paused && !video.ended").unwrap();
+    let swap = run[await_preview..].find("setReviewVideoSource(path, {").unwrap();
+    assert!(latest_time < swap);
+    assert!(latest_pause < swap);
+}
+
+#[test]
+fn returning_to_fallback_invalidates_an_inflight_audio_preview() {
+    let review = read_ui_js("review-player.js");
+    let request = js_function_body(&review, "requestSelectedAudioPreview");
+    let needs_preview = request
+        .find("if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {")
+        .expect("fallback selection is gated on reviewSelectionNeedsPreview");
+    let cancel = request
+        .find("cancelDesiredAudioPreview();")
+        .expect("returning to fallback playback must cancel queued preview work");
+    assert!(
+        needs_preview < cancel,
+        "a fallback selection must cancel an in-flight/queued preview before falling back to direct playback"
+    );
 }
 
 #[test]
@@ -1757,7 +1790,7 @@ fn close_to_tray_suspends_review_playback() {
         "frontend must listen for the native close-to-tray suspend event"
     );
     assert!(
-        suspend_helper.contains("audioPreviewSeq += 1;")
+        suspend_helper.contains("cancelDesiredAudioPreview();")
             && suspend_helper.contains("clearOverlayIdleCheck();")
             && suspend_helper.contains("video.pause();")
             && suspend_helper.contains("releaseReviewVideoSource();"),
@@ -2588,7 +2621,7 @@ fn deck_status_success_toasts_auto_clear() {
     );
 
     for required in [
-        "setDeckStatus(audioSelectionLabel(clip), { transient: true })",
+        "setDeckStatus(audioSelectionLabel(currentClip), { transient: true })",
         "setDeckStatus(\"clip renamed\", { transient: true })",
         "setDeckStatus(`exported ${exportedLabel} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true })",
         "setDeckStatus(\"clip copied to clipboard\", { transient: true })",
@@ -2643,9 +2676,10 @@ fn clipboard_copy_sends_selected_audio_tracks() {
 #[test]
 fn file_rename_reapplies_selected_audio_preview() {
     let js = main_js();
+    let submit = js_function_body(&js, "submitRenameFileDialog");
 
     assert!(
-        js.contains("await applySelectedAudioTracksToPlayback({ forceResume: shouldResume });"),
+        submit.contains("requestSelectedAudioPreview();"),
         "renaming the open source file should restore the selected audio-track preview"
     );
 }
