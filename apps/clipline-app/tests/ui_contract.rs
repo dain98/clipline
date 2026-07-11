@@ -2948,6 +2948,29 @@ fn gallery_supports_multi_select_bulk_actions() {
 }
 
 #[test]
+fn returning_to_no_preview_selection_clears_stale_audio_status() {
+    let review = read_ui_js("review-player.js");
+    let request = js_function_body(&review, "requestSelectedAudioPreview");
+    // The no-preview branch sits between the reviewSelectionNeedsPreview guard and the
+    // selectionKey == currentReviewAudioKey early-exit that follows it.
+    let no_preview_block = request
+        .split("if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {")
+        .nth(1)
+        .and_then(|rest| rest.split("if (selectionKey === currentReviewAudioKey)").next())
+        .expect("no-preview branch must sit between the two guards in requestSelectedAudioPreview");
+    let key_assign = no_preview_block
+        .find("currentReviewAudioKey = selectionKey;")
+        .expect("no-preview branch must assign currentReviewAudioKey before returning");
+    let status_clear = no_preview_block
+        .find("setDeckStatus(audioSelectionLabel(clip), { transient: true });")
+        .expect("no-preview branch must call setDeckStatus(audioSelectionLabel(clip), { transient: true }) to clear any stale switching-audio-tracks status");
+    assert!(
+        key_assign < status_clear,
+        "setDeckStatus must appear after currentReviewAudioKey is updated so the label reflects the new selection"
+    );
+}
+
+#[test]
 fn gallery_card_hover_keeps_hit_target_stable() {
     let css = styles_css();
     let card_rule = css_rule_body(&css, ".card");

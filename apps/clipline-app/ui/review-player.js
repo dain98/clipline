@@ -244,6 +244,7 @@ function requestSelectedAudioPreview() {
     }
     currentReviewAudioTrackIds = [...selected];
     currentReviewAudioKey = selectionKey;
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
     return;
   }
   if (selectionKey === currentReviewAudioKey) return;
