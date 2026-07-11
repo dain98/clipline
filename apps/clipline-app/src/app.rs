@@ -1767,6 +1767,9 @@ pub fn run() {
                     "could not scope audio preview cache {audio_preview_scope_dir:?} for playback: {e}"
                 );
             }
+            if let Err(e) = crate::library::prune_audio_preview_cache_on_startup() {
+                eprintln!("could not prune audio preview cache on startup: {e}");
+            }
 
             // Keep release builds in sync with the user's setting. Debug builds
             // share settings and registry state with installed builds, so cargo

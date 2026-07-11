@@ -405,6 +405,16 @@ fn audio_preview_command_scopes_generated_preview_files() {
 }
 
 #[test]
+fn audio_preview_command_protects_active_media_and_prunes_cache_on_startup() {
+    let library = library_rs();
+    let app = app_rs();
+    assert!(library.contains("pub protected_preview_path: Option<String>"));
+    assert!(library.contains("prune_audio_preview_cache("));
+    assert!(library.contains("touch_audio_preview(&preview)"));
+    assert!(app.contains("crate::library::prune_audio_preview_cache_on_startup()"));
+}
+
+#[test]
 fn review_player_owns_all_controls() {
     let html = index_html();
 

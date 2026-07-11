@@ -143,11 +143,22 @@ struct ClipMetadata {
     kind: Option<String>,
 }
 
+const AUDIO_PREVIEW_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct AudioPreviewPruneReport {
+    removed_files: usize,
+    removed_bytes: u64,
+    reusable_bytes: u64,
+}
+
 #[derive(serde::Deserialize)]
 pub struct AudioPreviewRequest {
     pub path: String,
     #[serde(default, rename = "audioTrackIds")]
     pub audio_track_ids: Vec<String>,
+    #[serde(default, rename = "protectedPreviewPath")]
+    pub protected_preview_path: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -676,8 +687,14 @@ pub async fn preview_clip_audio_tracks<R: Runtime>(
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<String, String> {
     let source = validate_clip_path(&settings, &request.path)?;
+    let protected_preview_path = request.protected_preview_path.as_deref().map(PathBuf::from);
     let path = tauri::async_runtime::spawn_blocking(move || {
-        preview_clip_audio_tracks_file(source, request.path, request.audio_track_ids)
+        preview_clip_audio_tracks_file(
+            source,
+            request.path,
+            request.audio_track_ids,
+            protected_preview_path,
+        )
     })
     .await
     .map_err(|e| format!("audio preview task: {e}"))??;
@@ -717,20 +734,31 @@ fn preview_clip_audio_tracks_file(
     source: PathBuf,
     display_path: String,
     selected_audio_track_ids: Vec<String>,
+    protected_preview_path: Option<PathBuf>,
 ) -> Result<String, String> {
     preview_clip_audio_tracks_file_with_mixer(
         source,
         display_path,
         selected_audio_track_ids,
+        protected_preview_path,
         crate::settings::audio_preview_cache_dir(),
         mix_audio_tracks_with_ffmpeg,
     )
+}
+
+fn prune_audio_preview_cache_logged(preview_dir: &Path, protected: &[PathBuf]) {
+    if let Err(error) =
+        prune_audio_preview_cache(preview_dir, protected, AUDIO_PREVIEW_CACHE_MAX_BYTES)
+    {
+        eprintln!("could not prune audio preview cache {preview_dir:?}: {error}");
+    }
 }
 
 fn preview_clip_audio_tracks_file_with_mixer(
     source: PathBuf,
     display_path: String,
     selected_audio_track_ids: Vec<String>,
+    protected_preview_path: Option<PathBuf>,
     preview_dir: PathBuf,
     mix_audio_preview: impl FnOnce(&Path, &Path, &[u32]) -> Result<(), String>,
 ) -> Result<String, String> {
@@ -747,35 +775,52 @@ fn preview_clip_audio_tracks_file_with_mixer(
     let meta = std::fs::metadata(&source).map_err(|e| format!("read clip metadata: {e}"))?;
     std::fs::create_dir_all(&preview_dir)
         .map_err(|e| format!("create audio preview cache: {e}"))?;
-    prune_old_audio_previews(&preview_dir);
+
+    let currently_active: Vec<PathBuf> = protected_preview_path.into_iter().collect();
+    prune_audio_preview_cache_logged(&preview_dir, &currently_active);
+
     let preview = audio_preview_path(&preview_dir, &source, &meta, &selected_audio_track_ids);
     if preview.exists() {
+        if let Err(error) = touch_audio_preview(&preview) {
+            eprintln!("{error}");
+        }
+        let protected = [currently_active.as_slice(), std::slice::from_ref(&preview)].concat();
+        prune_audio_preview_cache_logged(&preview_dir, &protected);
         return Ok(preview.display().to_string());
     }
 
     let source_bytes = std::fs::read(&source).map_err(|e| format!("read clip: {e}"))?;
-    if selected_indices.len() > 1 {
+    let result = if selected_indices.len() > 1 {
         match remux_with_mixed_audio_track(&source_bytes, &selected_indices) {
             Ok(preview_bytes) => {
                 write_audio_preview(&preview, preview_bytes)?;
-                return Ok(preview.display().to_string());
+                Ok(preview.display().to_string())
             }
             Err(native_error) => {
                 if let Err(external_error) = mix_audio_preview(&source, &preview, &selected_indices)
                 {
-                    return Err(format!(
+                    Err(format!(
                         "{external_error}; native audio mix failed: {native_error}"
-                    ));
+                    ))
+                } else {
+                    Ok(preview.display().to_string())
                 }
-                return Ok(preview.display().to_string());
             }
         }
-    }
+    } else {
+        remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
+            .map_err(|e| e.to_string())
+            .and_then(|preview_bytes| {
+                write_audio_preview(&preview, preview_bytes)?;
+                Ok(preview.display().to_string())
+            })
+    };
 
-    let preview_bytes = remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
-        .map_err(|e| e.to_string())?;
-    write_audio_preview(&preview, preview_bytes)?;
-    Ok(preview.display().to_string())
+    if result.is_ok() {
+        let protected = [currently_active.as_slice(), std::slice::from_ref(&preview)].concat();
+        prune_audio_preview_cache_logged(&preview_dir, &protected);
+    }
+    result
 }
 
 fn write_audio_preview(preview: &Path, preview_bytes: Vec<u8>) -> Result<(), String> {
@@ -1104,9 +1149,98 @@ fn audio_preview_path(
     preview_dir.join(format!("audio-preview-{:016x}.mp4", hasher.finish()))
 }
 
-fn prune_old_audio_previews(preview_dir: &Path) {
-    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-    prune_cached_mp4_files(preview_dir, MAX_AGE);
+fn is_audio_preview_mp4(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+        name.starts_with("audio-preview-") && name.ends_with(".mp4")
+    })
+}
+
+fn is_audio_preview_partial(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+        name.starts_with("audio-preview-") && name.ends_with(".tmp")
+    })
+}
+
+#[derive(Debug)]
+struct CachedAudioPreview {
+    path: PathBuf,
+    len: u64,
+    modified: std::time::SystemTime,
+}
+
+fn audio_preview_path_is_protected(path: &Path, protected: &[PathBuf]) -> bool {
+    protected.iter().any(|candidate| {
+        path == candidate
+            || std::fs::canonicalize(path).ok().zip(std::fs::canonicalize(candidate).ok())
+                .is_some_and(|(left, right)| left == right)
+    })
+}
+
+fn prune_audio_preview_cache(
+    dir: &Path,
+    protected: &[PathBuf],
+    max_bytes: u64,
+) -> Result<AudioPreviewPruneReport, String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(format!("read audio preview cache {dir:?}: {error}")),
+    };
+    let mut report = AudioPreviewPruneReport::default();
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read audio preview cache entry: {error}"))?;
+        let path = entry.path();
+        if is_audio_preview_partial(&path) {
+            let len = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            if std::fs::remove_file(&path).is_ok() {
+                report.removed_files += 1;
+                report.removed_bytes = report.removed_bytes.saturating_add(len);
+            }
+            continue;
+        }
+        if !is_audio_preview_mp4(&path) || audio_preview_path_is_protected(&path, protected) {
+            continue;
+        }
+        let metadata = entry.metadata()
+            .map_err(|error| format!("read audio preview metadata {path:?}: {error}"))?;
+        let len = metadata.len();
+        report.reusable_bytes = report.reusable_bytes.saturating_add(len);
+        candidates.push(CachedAudioPreview {
+            path,
+            len,
+            modified: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+        });
+    }
+    candidates.sort_by(|left, right| {
+        left.modified.cmp(&right.modified).then_with(|| left.path.cmp(&right.path))
+    });
+    for candidate in candidates {
+        if report.reusable_bytes <= max_bytes {
+            break;
+        }
+        if std::fs::remove_file(&candidate.path).is_ok() {
+            report.removed_files += 1;
+            report.removed_bytes = report.removed_bytes.saturating_add(candidate.len);
+            report.reusable_bytes = report.reusable_bytes.saturating_sub(candidate.len);
+        }
+    }
+    Ok(report)
+}
+
+fn touch_audio_preview(path: &Path) -> Result<(), String> {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+        .map_err(|error| format!("refresh audio preview recency {path:?}: {error}"))
+}
+
+pub(crate) fn prune_audio_preview_cache_on_startup() -> Result<AudioPreviewPruneReport, String> {
+    let dir = crate::settings::audio_preview_cache_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create audio preview cache {dir:?}: {e}"))?;
+    prune_audio_preview_cache(&dir, &[], AUDIO_PREVIEW_CACHE_MAX_BYTES)
 }
 
 #[tauri::command]
@@ -2024,6 +2158,7 @@ mod tests {
             source.clone(),
             source.display().to_string(),
             vec!["output".into(), "process:1".into(), "microphone".into()],
+            None,
             preview_dir.clone(),
             |input, output, selected| {
                 assert_eq!(input, source_for_mixer.as_path());
@@ -2088,6 +2223,7 @@ mod tests {
             source.clone(),
             source.display().to_string(),
             vec!["process:1".into(), "microphone".into()],
+            None,
             dir.path().join("previews"),
             |_, _, _| Err("forced mix failure".into()),
         )
@@ -2134,6 +2270,7 @@ mod tests {
             source,
             display_path,
             vec!["output".into(), "microphone".into()],
+            None,
             preview_dir.clone(),
             |_, _, _| Err("external mixer should not be required".into()),
         )
@@ -2286,6 +2423,60 @@ mod tests {
     }
 
     #[test]
+    fn audio_preview_cache_prunes_lru_and_partials_but_preserves_protected_file() {
+        let dir = TestDir::new("clipline-library", "audio-preview-cache-lru");
+        let oldest = dir.path().join("audio-preview-0001.mp4");
+        let newest = dir.path().join("audio-preview-0002.mp4");
+        let protected = dir.path().join("audio-preview-0003.mp4");
+        let partial = dir.path().join("audio-preview-0004.mp4.1.2.tmp");
+        std::fs::write(&oldest, [0_u8; 6]).unwrap();
+        std::fs::write(&newest, [0_u8; 6]).unwrap();
+        std::fs::write(&protected, [0_u8; 20]).unwrap();
+        std::fs::write(&partial, [0_u8; 3]).unwrap();
+        std::fs::File::options().write(true).open(&oldest).unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)).unwrap();
+        std::fs::File::options().write(true).open(&newest).unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2)).unwrap();
+
+        let report = prune_audio_preview_cache(
+            dir.path(),
+            std::slice::from_ref(&protected),
+            6,
+        ).unwrap();
+
+        assert!(!oldest.exists());
+        assert!(newest.exists());
+        assert!(protected.exists());
+        assert!(!partial.exists());
+        assert_eq!(report.reusable_bytes, 6);
+    }
+
+    #[test]
+    fn audio_preview_write_is_atomic_and_leaves_no_partial() {
+        let dir = TestDir::new("clipline-library", "audio-preview-atomic");
+        let target = dir.path().join("audio-preview-abcd.mp4");
+        write_audio_preview(&target, vec![1, 2, 3, 4]).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), vec![1, 2, 3, 4]);
+        assert!(std::fs::read_dir(dir.path()).unwrap().flatten().all(|entry| {
+            !entry.file_name().to_string_lossy().ends_with(".tmp")
+        }));
+    }
+
+    #[test]
+    fn audio_preview_cache_hit_refreshes_recency() {
+        let dir = TestDir::new("clipline-library", "audio-preview-cache-touch");
+        let preview = dir.path().join("audio-preview-abcd.mp4");
+        std::fs::write(&preview, b"preview").unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        std::fs::File::options().write(true).open(&preview).unwrap()
+            .set_modified(old).unwrap();
+
+        touch_audio_preview(&preview).unwrap();
+
+        assert!(std::fs::metadata(&preview).unwrap().modified().unwrap() > old);
+    }
+
+    #[test]
     fn unique_export_path_appends_suffix_when_needed() {
         let dir = TestDir::new("clipline-library", "export-name");
         let source = dir.path().join("clip_1.mp4");
@@ -2409,6 +2600,7 @@ mod tests {
             source,
             display_path,
             vec!["audio:0".into(), "audio:1".into()],
+            None,
             preview_dir.clone(),
             |_, _, _| Err("external mixer should not be required".into()),
         )
