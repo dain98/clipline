@@ -1890,6 +1890,43 @@ const PlayerCore = (() => {
     return next;
   };
 
+  // --- Audio preview queue ---
+  // Serializes async preview renders: at most one in flight (active), with the
+  // latest pending request coalesced into desired. Callers never mutate requests.
+
+  const emptyAudioPreviewQueue = () => ({ active: null, desired: null, revision: 0 });
+
+  const queueAudioPreviewRequest = (state, request) => {
+    const revision = Number(state && state.revision || 0) + 1;
+    const next = { ...request, revision };
+    const active = state && state.active ? state.active : null;
+    return {
+      state: { active: active || next, desired: next, revision },
+      start: active ? null : next,
+      apply: null,
+    };
+  };
+
+  const cancelAudioPreviewRequest = (state) => ({
+    active: state && state.active ? state.active : null,
+    desired: null,
+    revision: Number(state && state.revision || 0) + 1,
+  });
+
+  const finishAudioPreviewRequest = (state, revision, succeeded) => {
+    if (!state || !state.active || state.active.revision !== revision) {
+      return { state, start: null, apply: null };
+    }
+    const desired = state.desired;
+    const apply = succeeded && desired && desired.revision === revision ? state.active : null;
+    const start = !apply && desired && desired.revision !== revision ? desired : null;
+    return {
+      state: { active: start, desired: start, revision: state.revision },
+      start,
+      apply,
+    };
+  };
+
   // --- Encoder codec playback support (Settings) ---
   // Codecs the in-app review player may need an OS extension to decode.
   // H.264 always plays in WebView2; HEVC/AV1 are probed at runtime via
@@ -2010,6 +2047,10 @@ const PlayerCore = (() => {
     regionForDisplay,
     clampRegionToDisplay,
     alignRegion,
+    emptyAudioPreviewQueue,
+    queueAudioPreviewRequest,
+    cancelAudioPreviewRequest,
+    finishAudioPreviewRequest,
   };
 })();
 

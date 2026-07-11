@@ -2566,6 +2566,63 @@ fn display_map_height_scales_with_virtual_desktop_shape() {
 }
 
 #[test]
+fn audio_preview_queue_serializes_and_coalesces_to_latest_request() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            r#"
+            (() => {
+              const one = { clipPath: 'a.mp4', trackIds: ['mic'], selectionKey: 'one', sourceGeneration: 4 };
+              const two = { clipPath: 'a.mp4', trackIds: ['game'], selectionKey: 'two', sourceGeneration: 4 };
+              const three = { clipPath: 'b.mp4', trackIds: ['output'], selectionKey: 'three', sourceGeneration: 5 };
+              let state = PlayerCore.emptyAudioPreviewQueue();
+              const first = PlayerCore.queueAudioPreviewRequest(state, one);
+              state = first.state;
+              state = PlayerCore.queueAudioPreviewRequest(state, two).state;
+              state = PlayerCore.queueAudioPreviewRequest(state, three).state;
+              const finished = PlayerCore.finishAudioPreviewRequest(state, first.start.revision, true);
+              return {
+                firstStart: first.start.selectionKey,
+                firstApply: finished.apply,
+                nextStart: finished.start.selectionKey,
+                active: finished.state.active.selectionKey,
+              };
+            })()
+            "#,
+        ),
+        r#"{"firstStart":"one","firstApply":null,"nextStart":"three","active":"three"}"#
+    );
+}
+
+#[test]
+fn audio_preview_queue_applies_only_current_success_and_cancel_keeps_worker_slot() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            r#"
+            (() => {
+              const request = { clipPath: 'a.mp4', trackIds: ['mic'], selectionKey: 'mic', sourceGeneration: 2 };
+              const queued = PlayerCore.queueAudioPreviewRequest(PlayerCore.emptyAudioPreviewQueue(), request);
+              const applied = PlayerCore.finishAudioPreviewRequest(queued.state, queued.start.revision, true);
+              const second = PlayerCore.queueAudioPreviewRequest(PlayerCore.emptyAudioPreviewQueue(), request);
+              const cancelled = PlayerCore.cancelAudioPreviewRequest(second.state);
+              const ignored = PlayerCore.finishAudioPreviewRequest(cancelled, second.start.revision, true);
+              return {
+                apply: applied.apply.selectionKey,
+                activeAfterApply: applied.state.active,
+                cancelledStillActive: cancelled.active.selectionKey,
+                applyAfterCancel: ignored.apply,
+              };
+            })()
+            "#,
+        ),
+        r#"{"apply":"mic","activeAfterApply":null,"cancelledStillActive":"mic","applyAfterCancel":null}"#
+    );
+}
+
+#[test]
 fn region_helpers_set_align_and_clamp_to_display() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(
