@@ -823,9 +823,37 @@ fn preview_clip_audio_tracks_file_with_mixer(
     result
 }
 
+/// Best-effort removes a sibling `.tmp` file on drop. Covers early-error paths
+/// (a partial write, or ffmpeg leaving the tmp behind before its `Result` is
+/// checked) that occur before the normal rename-or-cleanup handling runs. A
+/// harmless no-op once the tmp has already been renamed away or removed.
+struct SiblingTmpGuard {
+    path: PathBuf,
+}
+
+impl SiblingTmpGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for SiblingTmpGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 fn write_audio_preview(preview: &Path, preview_bytes: Vec<u8>) -> Result<(), String> {
+    write_audio_preview_with_writer(preview, |tmp| std::fs::write(tmp, &preview_bytes))
+}
+
+fn write_audio_preview_with_writer(
+    preview: &Path,
+    write_tmp: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     let tmp = cached_export_tmp_path(preview)?;
-    std::fs::write(&tmp, preview_bytes).map_err(|e| format!("write audio preview: {e}"))?;
+    let _tmp_guard = SiblingTmpGuard::new(tmp.clone());
+    write_tmp(&tmp).map_err(|e| format!("write audio preview: {e}"))?;
     match std::fs::rename(&tmp, preview) {
         Ok(()) => {}
         Err(_) if preview.exists() => {
@@ -1003,6 +1031,7 @@ pub(crate) fn mix_audio_tracks_with_ffmpeg(
     let filter = ffmpeg_audio_mix_filter(selected_audio_track_indices)?;
     let tmp = cached_export_tmp_path(output_path)?;
     let _ = std::fs::remove_file(&tmp);
+    let _tmp_guard = SiblingTmpGuard::new(tmp.clone());
 
     let mut cmd = Command::new(ffmpeg);
     suppress_console(&mut cmd);
@@ -2457,6 +2486,23 @@ mod tests {
         let target = dir.path().join("audio-preview-abcd.mp4");
         write_audio_preview(&target, vec![1, 2, 3, 4]).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), vec![1, 2, 3, 4]);
+        assert!(std::fs::read_dir(dir.path()).unwrap().flatten().all(|entry| {
+            !entry.file_name().to_string_lossy().ends_with(".tmp")
+        }));
+    }
+
+    #[test]
+    fn audio_preview_write_failure_removes_partial() {
+        let dir = TestDir::new("clipline-library", "audio-preview-write-failure");
+        let target = dir.path().join("audio-preview-abcd.mp4");
+
+        let result = write_audio_preview_with_writer(&target, |tmp| {
+            std::fs::write(tmp, b"partial")?;
+            Err(std::io::Error::other("disk full"))
+        });
+
+        assert!(result.is_err());
+        assert!(!target.exists());
         assert!(std::fs::read_dir(dir.path()).unwrap().flatten().all(|entry| {
             !entry.file_name().to_string_lossy().ends_with(".tmp")
         }));
