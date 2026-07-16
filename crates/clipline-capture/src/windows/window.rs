@@ -34,7 +34,7 @@ pub struct CapturableWindow {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowClientCrop {
+pub(super) enum WindowClientCrop {
     Client(CropRect),
     FullFrame,
 }
@@ -82,14 +82,7 @@ pub fn enumerate_capturable_windows() -> Vec<CapturableWindow> {
     windows
 }
 
-pub fn window_client_crop(hwnd: HWND) -> Option<CropRect> {
-    match window_client_crop_state(hwnd)? {
-        WindowClientCrop::Client(crop) => Some(crop),
-        WindowClientCrop::FullFrame => None,
-    }
-}
-
-pub fn window_client_crop_state(hwnd: HWND) -> Option<WindowClientCrop> {
+pub(super) fn window_client_crop_state(hwnd: HWND) -> Option<WindowClientCrop> {
     // SAFETY: `hwnd` is a borrowed OS handle. The calls below are read-only
     // window-manager queries used to describe the visible client area.
     unsafe {

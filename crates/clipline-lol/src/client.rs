@@ -9,7 +9,7 @@ use crate::normalize::player_name_key;
 use crate::raw::{EventData, PlayerItemEntry, PlayerListEntry, PlayerSummonerSpellEntry};
 
 /// Riot's local Live Client Data endpoint (ddoc §5a).
-pub const DEFAULT_BASE: &str = "https://127.0.0.1:2999";
+const DEFAULT_BASE: &str = "https://127.0.0.1:2999";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -122,13 +122,6 @@ fn is_loopback_url(base: &str) -> Option<bool> {
         }
     }
     Some(false)
-}
-
-pub fn player_summary_from_list(
-    players: &[PlayerListEntry],
-    local_player: &str,
-) -> Option<PlayerSummary> {
-    player_summary_from_list_with_game_time(players, local_player, None)
 }
 
 fn normalized_game_time_s(game_time_s: Option<f64>) -> Option<u32> {
@@ -325,14 +318,16 @@ mod tests {
             player("dain", Some("Dain#NA1"), "Nautilus", 3, 4, 23),
         ];
 
-        let by_riot_id = player_summary_from_list(&players, "dain#NA1").unwrap();
+        let by_riot_id =
+            player_summary_from_list_with_game_time(&players, "dain#NA1", None).unwrap();
         assert_eq!(by_riot_id.champion_name, "Nautilus");
         assert_eq!(
             (by_riot_id.kills, by_riot_id.deaths, by_riot_id.assists),
             (3, 4, 23)
         );
 
-        let by_summoner = player_summary_from_list(&players, " DAIN ").unwrap();
+        let by_summoner =
+            player_summary_from_list_with_game_time(&players, " DAIN ", None).unwrap();
         assert_eq!(by_summoner.champion_name, "Nautilus");
     }
 
@@ -404,7 +399,7 @@ mod tests {
         )
         .unwrap();
 
-        let summary = player_summary_from_list(&players, "dain#NA1").unwrap();
+        let summary = player_summary_from_list_with_game_time(&players, "dain#NA1", None).unwrap();
         let value = serde_json::to_value(summary).unwrap();
 
         assert_eq!(value["summoner_spells"][0]["name"], "Ignite");
@@ -421,7 +416,7 @@ mod tests {
     fn player_summary_ignores_missing_local_player_or_champion() {
         let players = [player("dain", Some("Dain#NA1"), "", 3, 4, 23)];
 
-        assert!(player_summary_from_list(&players, "other").is_none());
-        assert!(player_summary_from_list(&players, "dain").is_none());
+        assert!(player_summary_from_list_with_game_time(&players, "other", None).is_none());
+        assert!(player_summary_from_list_with_game_time(&players, "dain", None).is_none());
     }
 }

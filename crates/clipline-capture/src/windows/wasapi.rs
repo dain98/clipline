@@ -47,8 +47,7 @@ use clipline_mp4::AudioTrackConfig;
 use crate::clock::RelativeClock;
 use crate::opus::{OpusFrameEncoder, FRAME_DURATION_S};
 use crate::pcm::{
-    apply_gain, extract_mono_centered, extract_stereo, LoopbackAssembler, PcmFrame, PcmFrameMixer,
-    StereoResampler,
+    apply_gain, extract_mono_centered, extract_stereo, LoopbackAssembler, PcmFrame, StereoResampler,
 };
 use crate::traits::{AudioPacket, AudioSource, CaptureError};
 
@@ -184,13 +183,6 @@ struct WasapiPcmCapture {
 
 pub struct WasapiLoopback {
     pcm: WasapiPcmCapture,
-    opus: OpusFrameEncoder,
-    queue: Vec<AudioPacket>,
-}
-
-pub struct WasapiMixedLoopback {
-    sources: Vec<WasapiPcmCapture>,
-    mixer: PcmFrameMixer,
     opus: OpusFrameEncoder,
     queue: Vec<AudioPacket>,
 }
@@ -547,71 +539,6 @@ impl WasapiLoopback {
     }
 }
 
-impl WasapiMixedLoopback {
-    pub fn start(
-        clock: RelativeClock,
-        output: Option<(Option<&str>, f64)>,
-        microphone: Option<(Option<&str>, f64, WasapiChannelMode)>,
-    ) -> Result<Self, CaptureError> {
-        let mut sources = Vec::new();
-        if let Some((device_id, volume)) = output {
-            sources.push(WasapiPcmCapture::start_output(clock, device_id, volume)?);
-        }
-        if let Some((device_id, volume, channels)) = microphone {
-            sources.push(WasapiPcmCapture::start_microphone(
-                clock, device_id, volume, channels,
-            )?);
-        }
-        if sources.is_empty() {
-            return Err(CaptureError::Init(
-                "mixed WASAPI source needs at least one input".into(),
-            ));
-        }
-        let mixer = PcmFrameMixer::new(sources.len());
-        Ok(Self {
-            sources,
-            mixer,
-            opus: OpusFrameEncoder::new().map_err(|e| CaptureError::Init(format!("opus: {e}")))?,
-            queue: Vec::new(),
-        })
-    }
-
-    fn push_mixed_packets(&mut self, until_pts_s: f64) -> Result<(), CaptureError> {
-        for (pts_s, frame) in self.mixer.pop_mixed_frames(until_pts_s) {
-            let data = self
-                .opus
-                .encode_frame(&frame)
-                .map_err(|e| CaptureError::DeviceLost(format!("opus encode: {e}")))?;
-            self.queue.push(AudioPacket {
-                data,
-                pts_s,
-                duration_s: FRAME_DURATION_S,
-            });
-        }
-        Ok(())
-    }
-}
-
-impl AudioSource for WasapiMixedLoopback {
-    fn poll_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
-        for (source_index, source) in self.sources.iter_mut().enumerate() {
-            let frames = source.poll_frames(until_pts_s)?;
-            self.mixer.push_source_frames(source_index, frames);
-        }
-        self.push_mixed_packets(until_pts_s)?;
-        let split = self
-            .queue
-            .iter()
-            .position(|p| p.pts_s + p.duration_s > until_pts_s + 1e-9)
-            .unwrap_or(self.queue.len());
-        Ok(self.queue.drain(..split).collect())
-    }
-
-    fn track_config(&self) -> AudioTrackConfig {
-        self.opus.track_config()
-    }
-}
-
 pub fn enumerate_audio_devices() -> Result<AudioDeviceList, CaptureError> {
     init_com()?;
     // SAFETY: standard MMDevice enumeration; all COM results are checked.
@@ -733,23 +660,6 @@ fn windows_build_number() -> Option<u32> {
     // the call returns STATUS_SUCCESS on all supported systems.
     let status = unsafe { RtlGetVersion(&mut info) };
     status.is_ok().then_some(info.dwBuildNumber)
-}
-
-pub fn test_microphone_level(
-    device_id: Option<&str>,
-    volume: f64,
-    channels: WasapiChannelMode,
-    duration: Duration,
-) -> Result<AudioLevel, CaptureError> {
-    let clock = RelativeClock::new(super::qpc_now_ticks_100ns().map_err(init)?);
-    let mut source = WasapiLoopback::start_microphone(clock, device_id, volume, channels)?;
-    let deadline = Instant::now() + duration;
-    while Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-        let _ = source.poll_packets(f64::MAX)?;
-    }
-    let _ = source.poll_packets(f64::MAX)?;
-    Ok(source.take_level())
 }
 
 fn endpoint_device(
@@ -1570,26 +1480,5 @@ mod tests {
             assert!(!device.id.is_empty());
             assert!(!device.name.is_empty());
         }
-    }
-
-    #[test]
-    fn tests_default_microphone_level_when_available() {
-        if std::env::var_os("CI").is_some() {
-            eprintln!("SKIP: audio endpoint test");
-            return;
-        }
-        let level = match test_microphone_level(
-            None,
-            1.0,
-            WasapiChannelMode::Mono,
-            std::time::Duration::from_millis(300),
-        ) {
-            Ok(level) => level,
-            Err(e) => {
-                eprintln!("SKIP: microphone unavailable: {e}");
-                return;
-            }
-        };
-        assert!(level.sample_count > 0, "microphone delivered samples");
     }
 }

@@ -178,21 +178,6 @@ pub fn mvhd(duration_movie_ts: u64, next_track_id: u32) -> Vec<u8> {
     full_box(*b"mvhd", version, 0, p.into_vec())
 }
 
-/// The whole `trak` with empty sample tables (fragmented init moov).
-pub fn trak(cfg: &VideoTrackConfig, duration_movie_ts: u64, duration_media_ts: u64) -> Vec<u8> {
-    trak_with_tables(cfg, duration_movie_ts, duration_media_ts, empty_stbl_tail())
-}
-
-/// Video trak (track 1) with populated sample tables — original API.
-pub fn trak_with_tables(
-    cfg: &VideoTrackConfig,
-    duration_movie_ts: u64,
-    duration_media_ts: u64,
-    stbl_tail: Vec<u8>,
-) -> Vec<u8> {
-    video_trak_with_tables(cfg, 1, duration_movie_ts, duration_media_ts, stbl_tail)
-}
-
 pub fn video_trak_with_tables(
     cfg: &VideoTrackConfig,
     track_id: u32,
