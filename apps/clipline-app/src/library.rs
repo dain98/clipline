@@ -154,15 +154,6 @@ pub(crate) struct AudioPreviewPruneReport {
 }
 
 #[derive(serde::Deserialize)]
-pub struct AudioPreviewRequest {
-    pub path: String,
-    #[serde(default, rename = "audioTrackIds")]
-    pub audio_track_ids: Vec<String>,
-    #[serde(default, rename = "protectedPreviewPath")]
-    pub protected_preview_path: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
 pub struct PrepareClipAudioSidecarsRequest {
     pub path: String,
     #[serde(default, rename = "audioTrackIds")]
@@ -743,28 +734,6 @@ pub async fn export_clip(
 }
 
 #[tauri::command]
-pub async fn preview_clip_audio_tracks<R: Runtime>(
-    app: AppHandle<R>,
-    request: AudioPreviewRequest,
-    settings: tauri::State<'_, StorageSettings>,
-) -> Result<String, String> {
-    let source = validate_clip_path(&settings, &request.path)?;
-    let protected_preview_path = request.protected_preview_path.as_deref().map(PathBuf::from);
-    let path = tauri::async_runtime::spawn_blocking(move || {
-        preview_clip_audio_tracks_file(
-            source,
-            request.path,
-            request.audio_track_ids,
-            protected_preview_path,
-        )
-    })
-    .await
-    .map_err(|e| format!("audio preview task: {e}"))??;
-    allow_audio_preview_asset(&app, Path::new(&path))?;
-    Ok(path)
-}
-
-#[tauri::command]
 pub async fn prepare_clip_audio_sidecars<R: Runtime>(
     app: AppHandle<R>,
     request: PrepareClipAudioSidecarsRequest,
@@ -812,30 +781,6 @@ fn allow_audio_preview_asset<R: Runtime>(app: &AppHandle<R>, preview: &Path) -> 
     app.asset_protocol_scope()
         .allow_file(preview)
         .map_err(|e| format!("scope audio preview {canonical_preview:?} for playback: {e}"))
-}
-
-fn preview_clip_audio_tracks_file(
-    source: PathBuf,
-    display_path: String,
-    selected_audio_track_ids: Vec<String>,
-    protected_preview_path: Option<PathBuf>,
-) -> Result<String, String> {
-    preview_clip_audio_tracks_file_with_mixer(
-        source,
-        display_path,
-        selected_audio_track_ids,
-        protected_preview_path,
-        crate::settings::audio_preview_cache_dir(),
-        mix_audio_tracks_with_ffmpeg,
-    )
-}
-
-fn prune_audio_preview_cache_logged(preview_dir: &Path, protected: &[PathBuf]) {
-    if let Err(error) =
-        prune_audio_preview_cache(preview_dir, protected, AUDIO_PREVIEW_CACHE_MAX_BYTES)
-    {
-        eprintln!("could not prune audio preview cache {preview_dir:?}: {error}");
-    }
 }
 
 fn prepare_clip_audio_sidecars_file(
@@ -1123,119 +1068,6 @@ fn cleanup_created_audio_sidecar_finals(paths: &[PathBuf]) {
     }
 }
 
-fn preview_clip_audio_tracks_file_with_mixer(
-    source: PathBuf,
-    display_path: String,
-    selected_audio_track_ids: Vec<String>,
-    protected_preview_path: Option<PathBuf>,
-    preview_dir: PathBuf,
-    mix_audio_preview: impl FnOnce(&Path, &Path, &[u32]) -> Result<(), String>,
-) -> Result<String, String> {
-    let Some(markers) =
-        util::markers_with_inferred_audio_tracks(&source, util::read_markers_raw(&source))
-    else {
-        return Ok(display_path);
-    };
-    let selected_indices = util::selected_audio_track_indices(&markers, &selected_audio_track_ids)?;
-    if selected_indices.len() == markers.audio_tracks.len() && selected_indices.len() <= 1 {
-        return Ok(display_path);
-    }
-
-    let meta = std::fs::metadata(&source).map_err(|e| format!("read clip metadata: {e}"))?;
-    std::fs::create_dir_all(&preview_dir)
-        .map_err(|e| format!("create audio preview cache: {e}"))?;
-
-    let currently_active: Vec<PathBuf> = protected_preview_path.into_iter().collect();
-    prune_audio_preview_cache_logged(&preview_dir, &currently_active);
-
-    let preview = audio_preview_path(&preview_dir, &source, &meta, &selected_audio_track_ids);
-    if preview.exists() {
-        if let Err(error) = touch_audio_preview(&preview) {
-            eprintln!("{error}");
-        }
-        let protected = [currently_active.as_slice(), std::slice::from_ref(&preview)].concat();
-        prune_audio_preview_cache_logged(&preview_dir, &protected);
-        return Ok(preview.display().to_string());
-    }
-
-    let source_bytes = std::fs::read(&source).map_err(|e| format!("read clip: {e}"))?;
-    let result = if selected_indices.len() > 1 {
-        match remux_with_mixed_audio_track(&source_bytes, &selected_indices) {
-            Ok(preview_bytes) => {
-                write_audio_preview(&preview, preview_bytes)?;
-                Ok(preview.display().to_string())
-            }
-            Err(native_error) => {
-                if let Err(external_error) = mix_audio_preview(&source, &preview, &selected_indices)
-                {
-                    Err(format!(
-                        "{external_error}; native audio mix failed: {native_error}"
-                    ))
-                } else {
-                    Ok(preview.display().to_string())
-                }
-            }
-        }
-    } else {
-        remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
-            .map_err(|e| e.to_string())
-            .and_then(|preview_bytes| {
-                write_audio_preview(&preview, preview_bytes)?;
-                Ok(preview.display().to_string())
-            })
-    };
-
-    if result.is_ok() {
-        let protected = [currently_active.as_slice(), std::slice::from_ref(&preview)].concat();
-        prune_audio_preview_cache_logged(&preview_dir, &protected);
-    }
-    result
-}
-
-/// Best-effort removes a sibling `.tmp` file on drop. Covers early-error paths
-/// (a partial write, or ffmpeg leaving the tmp behind before its `Result` is
-/// checked) that occur before the normal rename-or-cleanup handling runs. A
-/// harmless no-op once the tmp has already been renamed away or removed.
-struct SiblingTmpGuard {
-    path: PathBuf,
-}
-
-impl SiblingTmpGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-}
-
-impl Drop for SiblingTmpGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-fn write_audio_preview(preview: &Path, preview_bytes: Vec<u8>) -> Result<(), String> {
-    write_audio_preview_with_writer(preview, |tmp| std::fs::write(tmp, &preview_bytes))
-}
-
-fn write_audio_preview_with_writer(
-    preview: &Path,
-    write_tmp: impl FnOnce(&Path) -> std::io::Result<()>,
-) -> Result<(), String> {
-    let tmp = cached_export_tmp_path(preview)?;
-    let _tmp_guard = SiblingTmpGuard::new(tmp.clone());
-    write_tmp(&tmp).map_err(|e| format!("write audio preview: {e}"))?;
-    match std::fs::rename(&tmp, preview) {
-        Ok(()) => {}
-        Err(_) if preview.exists() => {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!("finalize audio preview: {e}"));
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ShareAudioExportMode {
     Remux(Vec<u32>),
@@ -1390,76 +1222,6 @@ fn is_cached_mp4_file(path: &Path) -> bool {
             .is_some_and(|name| name.ends_with(".mp4.tmp"))
 }
 
-pub(crate) fn mix_audio_tracks_with_ffmpeg(
-    source: &Path,
-    output_path: &Path,
-    selected_audio_track_indices: &[u32],
-) -> Result<(), String> {
-    let ffmpeg = clipline_capture::ffmpeg::locate()
-        .ok_or_else(|| "ffmpeg is not available for audio track mixing".to_string())?;
-    let filter = ffmpeg_audio_mix_filter(selected_audio_track_indices)?;
-    let tmp = cached_export_tmp_path(output_path)?;
-    let _ = std::fs::remove_file(&tmp);
-    let _tmp_guard = SiblingTmpGuard::new(tmp.clone());
-
-    let mut cmd = Command::new(ffmpeg);
-    suppress_console(&mut cmd);
-    let output = cmd
-        .args([
-            "-hide_banner",
-            "-nostdin",
-            "-y",
-            "-fflags",
-            "+bitexact",
-            "-i",
-        ])
-        .arg(source)
-        .args(["-filter_complex", &filter])
-        .args([
-            "-map",
-            "0:v:0",
-            "-map",
-            "[aout]",
-            "-map_metadata",
-            "-1",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "libopus",
-            "-b:a",
-            "160k",
-            "-fflags",
-            "+bitexact",
-            "-flags",
-            "+bitexact",
-            "-bitexact",
-            "-f",
-            "mp4",
-        ])
-        .arg(&tmp)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("spawn ffmpeg audio mix: {e}"))?;
-    if !output.status.success() {
-        let _ = std::fs::remove_file(&tmp);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffmpeg audio mix failed: {stderr}"));
-    }
-    match std::fs::rename(&tmp, output_path) {
-        Ok(()) => Ok(()),
-        Err(_) if output_path.exists() => {
-            let _ = std::fs::remove_file(&tmp);
-            Ok(())
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(format!("finalize audio mix: {e}"))
-        }
-    }
-}
-
 fn extract_audio_sidecars_with_ffmpeg(
     source: &Path,
     outputs: &[AudioTrackSidecarOutput],
@@ -1506,21 +1268,6 @@ fn ffmpeg_audio_sidecar_args(source: &Path, outputs: &[AudioTrackSidecarOutput])
         ]);
     }
     args
-}
-
-fn ffmpeg_audio_mix_filter(selected_audio_track_indices: &[u32]) -> Result<String, String> {
-    if selected_audio_track_indices.is_empty() {
-        return Err("audio mix requires at least one audio stream".into());
-    }
-    let mut filter = String::new();
-    for index in selected_audio_track_indices {
-        filter.push_str(&format!("[0:a:{index}]"));
-    }
-    filter.push_str(&format!(
-        "amix=inputs={}:duration=longest:normalize=0[aout]",
-        selected_audio_track_indices.len()
-    ));
-    Ok(filter)
 }
 
 pub(crate) use clipline_capture::ffmpeg::suppress_console;
@@ -1576,23 +1323,6 @@ fn export_clip_file(
         duration_s: info.duration_s,
         markers: exported_markers,
     })
-}
-
-fn audio_preview_path(
-    preview_dir: &Path,
-    source: &Path,
-    meta: &std::fs::Metadata,
-    selected_audio_track_ids: &[String],
-) -> PathBuf {
-    let mut hasher = DefaultHasher::new();
-    "audio-preview-mix-v4".hash(&mut hasher);
-    source.display().to_string().hash(&mut hasher);
-    meta.len().hash(&mut hasher);
-    meta.modified().ok().hash(&mut hasher);
-    for id in selected_audio_track_ids {
-        id.hash(&mut hasher);
-    }
-    preview_dir.join(format!("audio-preview-{:016x}.mp4", hasher.finish()))
 }
 
 fn is_audio_preview_mp4(path: &Path) -> bool {
@@ -2539,214 +2269,6 @@ mod tests {
     }
 
     #[test]
-    fn ffmpeg_audio_mix_filter_targets_selected_audio_streams() {
-        let filter = ffmpeg_audio_mix_filter(&[0, 2, 5]).unwrap();
-
-        assert_eq!(
-            filter,
-            "[0:a:0][0:a:2][0:a:5]amix=inputs=3:duration=longest:normalize=0[aout]"
-        );
-    }
-
-    #[test]
-    fn ffmpeg_audio_mix_filter_requires_at_least_one_stream() {
-        let err = ffmpeg_audio_mix_filter(&[]).expect_err("empty selection is invalid");
-
-        assert!(err.contains("at least one"), "{err}");
-    }
-
-    #[test]
-    fn audio_mix_ffmpeg_command_requests_deterministic_mp4_output() {
-        let source = include_str!("library.rs");
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source before tests");
-
-        assert!(production_source.contains("\"-fflags\""));
-        assert!(production_source.contains("\"+bitexact\""));
-        assert!(production_source.contains("\"-map_metadata\""));
-        assert!(production_source.contains("\"-flags\""));
-        assert!(production_source.contains("\"-bitexact\""));
-    }
-
-    #[test]
-    fn all_audio_tracks_selected_mixes_preview_when_source_has_multiple_tracks() {
-        let dir = TestDir::new("clipline-library", "audio-preview-all-mixed");
-        let source = dir.path().join("clip.mp4");
-        std::fs::write(&source, b"not an mp4").unwrap();
-        let markers = ClipMarkers {
-            recording_start_s: 0.0,
-            duration_s: 10.0,
-            player_summary: None,
-            audio_tracks: vec![
-                ClipAudioTrack {
-                    id: "output".into(),
-                    track_index: 0,
-                    label: "Output Audio".into(),
-                    kind: Some("output".into()),
-                },
-                ClipAudioTrack {
-                    id: "process:1".into(),
-                    track_index: 1,
-                    label: "Game".into(),
-                    kind: Some("process_output".into()),
-                },
-                ClipAudioTrack {
-                    id: "microphone".into(),
-                    track_index: 2,
-                    label: "Microphone".into(),
-                    kind: Some("microphone".into()),
-                },
-            ],
-            plays: Vec::new(),
-            markers: Vec::new(),
-        };
-        std::fs::write(
-            source.with_extension("markers.json"),
-            serde_json::to_string(&markers).unwrap(),
-        )
-        .unwrap();
-
-        let preview_dir = dir.path().join("previews");
-        let mixed_preview = std::cell::RefCell::new(None);
-        let source_for_mixer = source.clone();
-        let path = preview_clip_audio_tracks_file_with_mixer(
-            source.clone(),
-            source.display().to_string(),
-            vec!["output".into(), "process:1".into(), "microphone".into()],
-            None,
-            preview_dir.clone(),
-            |input, output, selected| {
-                assert_eq!(input, source_for_mixer.as_path());
-                assert_eq!(selected, &[0, 1, 2]);
-                assert_eq!(output.parent(), Some(preview_dir.as_path()));
-                mixed_preview.replace(Some(output.to_path_buf()));
-                Ok(())
-            },
-        )
-        .expect("all selected should get an audible preview mix");
-
-        assert_eq!(
-            path,
-            mixed_preview
-                .borrow()
-                .as_ref()
-                .expect("mixer output path captured")
-                .display()
-                .to_string()
-        );
-    }
-
-    #[test]
-    fn partial_multi_track_preview_returns_mix_failure_instead_of_unmixed_mp4() {
-        let dir = TestDir::new("clipline-library", "audio-preview-mix-failure");
-        let source = dir.path().join("clip.mp4");
-        std::fs::write(&source, b"not an mp4").unwrap();
-        let markers = ClipMarkers {
-            recording_start_s: 0.0,
-            duration_s: 10.0,
-            player_summary: None,
-            audio_tracks: vec![
-                ClipAudioTrack {
-                    id: "output".into(),
-                    track_index: 0,
-                    label: "Output Audio".into(),
-                    kind: Some("output".into()),
-                },
-                ClipAudioTrack {
-                    id: "process:1".into(),
-                    track_index: 1,
-                    label: "Game".into(),
-                    kind: Some("process_output".into()),
-                },
-                ClipAudioTrack {
-                    id: "microphone".into(),
-                    track_index: 2,
-                    label: "Microphone".into(),
-                    kind: Some("microphone".into()),
-                },
-            ],
-            plays: Vec::new(),
-            markers: Vec::new(),
-        };
-        std::fs::write(
-            source.with_extension("markers.json"),
-            serde_json::to_string(&markers).unwrap(),
-        )
-        .unwrap();
-
-        let err = preview_clip_audio_tracks_file_with_mixer(
-            source.clone(),
-            source.display().to_string(),
-            vec!["process:1".into(), "microphone".into()],
-            None,
-            dir.path().join("previews"),
-            |_, _, _| Err("forced mix failure".into()),
-        )
-        .expect_err("multi-track preview must require a mixed preview");
-
-        assert!(err.contains("forced mix failure"), "{err}");
-    }
-
-    #[test]
-    fn multi_track_review_preview_uses_native_mixer_without_ffmpeg() {
-        let dir = TestDir::new("clipline-library", "audio-preview-native-mix");
-        let source = dir.path().join("clip.mp4");
-        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
-        let markers = ClipMarkers {
-            recording_start_s: 0.0,
-            duration_s: 1.0,
-            player_summary: None,
-            audio_tracks: vec![
-                ClipAudioTrack {
-                    id: "output".into(),
-                    track_index: 0,
-                    label: "Output Audio".into(),
-                    kind: Some("output".into()),
-                },
-                ClipAudioTrack {
-                    id: "microphone".into(),
-                    track_index: 1,
-                    label: "Microphone".into(),
-                    kind: Some("microphone".into()),
-                },
-            ],
-            plays: Vec::new(),
-            markers: Vec::new(),
-        };
-        std::fs::write(
-            source.with_extension("markers.json"),
-            serde_json::to_string(&markers).unwrap(),
-        )
-        .unwrap();
-
-        let preview_dir = dir.path().join("previews");
-        let display_path = source.display().to_string();
-        let path = preview_clip_audio_tracks_file_with_mixer(
-            source,
-            display_path,
-            vec!["output".into(), "microphone".into()],
-            None,
-            preview_dir.clone(),
-            |_, _, _| Err("external mixer should not be required".into()),
-        )
-        .expect("Clipline-authored output+mic preview should use the native mixer");
-        let preview = PathBuf::from(path);
-
-        assert_eq!(preview.parent(), Some(preview_dir.as_path()));
-        let preview_bytes = std::fs::read(preview).unwrap();
-        remux_with_selected_audio_tracks(&preview_bytes, &[0]).expect("mixed audio track exists");
-        let err = remux_with_selected_audio_tracks(&preview_bytes, &[1])
-            .expect_err("mixed preview should have exactly one audio track");
-        assert!(
-            err.to_string()
-                .contains("outside the clip's 1 audio tracks"),
-            "{err}"
-        );
-    }
-
-    #[test]
     fn selected_audio_track_indices_follow_sidecar_order_and_reject_unknown_ids() {
         let markers = ClipMarkers {
             recording_start_s: 0.0,
@@ -2945,36 +2467,6 @@ mod tests {
         assert!(!newest.exists());
         assert!(protected.exists());
         assert_eq!(report.reusable_bytes, 0);
-    }
-
-    #[test]
-    fn audio_preview_write_is_atomic_and_leaves_no_partial() {
-        let dir = TestDir::new("clipline-library", "audio-preview-atomic");
-        let target = dir.path().join("audio-preview-abcd.mp4");
-        write_audio_preview(&target, vec![1, 2, 3, 4]).unwrap();
-        assert_eq!(std::fs::read(&target).unwrap(), vec![1, 2, 3, 4]);
-        assert!(std::fs::read_dir(dir.path())
-            .unwrap()
-            .flatten()
-            .all(|entry| { !entry.file_name().to_string_lossy().ends_with(".tmp") }));
-    }
-
-    #[test]
-    fn audio_preview_write_failure_removes_partial() {
-        let dir = TestDir::new("clipline-library", "audio-preview-write-failure");
-        let target = dir.path().join("audio-preview-abcd.mp4");
-
-        let result = write_audio_preview_with_writer(&target, |tmp| {
-            std::fs::write(tmp, b"partial")?;
-            Err(std::io::Error::other("disk full"))
-        });
-
-        assert!(result.is_err());
-        assert!(!target.exists());
-        assert!(std::fs::read_dir(dir.path())
-            .unwrap()
-            .flatten()
-            .all(|entry| { !entry.file_name().to_string_lossy().ends_with(".tmp") }));
     }
 
     #[test]
@@ -3647,37 +3139,6 @@ mod tests {
         assert_eq!(tracks[1].id, "audio:1");
         assert_eq!(tracks[1].track_index, 1);
         assert_eq!(tracks[1].label, "Audio Track 2");
-    }
-
-    #[test]
-    fn legacy_multitrack_review_preview_mixes_inferred_audio_tracks() {
-        let dir = TestDir::new("clipline-library", "audio-preview-legacy-inferred");
-        let source = dir.path().join("legacy.mp4");
-        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
-
-        let preview_dir = dir.path().join("previews");
-        let display_path = source.display().to_string();
-        let path = preview_clip_audio_tracks_file_with_mixer(
-            source,
-            display_path,
-            vec!["audio:0".into(), "audio:1".into()],
-            None,
-            preview_dir.clone(),
-            |_, _, _| Err("external mixer should not be required".into()),
-        )
-        .expect("legacy multi-audio preview should mix inferred tracks");
-        let preview = PathBuf::from(path);
-
-        assert_eq!(preview.parent(), Some(preview_dir.as_path()));
-        let preview_bytes = std::fs::read(preview).unwrap();
-        remux_with_selected_audio_tracks(&preview_bytes, &[0]).expect("mixed audio track exists");
-        let err = remux_with_selected_audio_tracks(&preview_bytes, &[1])
-            .expect_err("mixed preview should have exactly one audio track");
-        assert!(
-            err.to_string()
-                .contains("outside the clip's 1 audio tracks"),
-            "{err}"
-        );
     }
 
     #[test]

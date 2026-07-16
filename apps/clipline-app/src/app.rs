@@ -1715,7 +1715,6 @@ pub fn run() {
             crate::library::rename_clip,
             crate::library::rename_clip_file,
             crate::library::export_clip,
-            crate::library::preview_clip_audio_tracks,
             crate::library::prepare_clip_audio_sidecars,
             crate::library::reveal_clip,
             crate::library::copy_clip_to_clipboard,

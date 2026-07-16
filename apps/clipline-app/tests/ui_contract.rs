@@ -405,17 +405,17 @@ fn audio_preview_command_scopes_generated_preview_files() {
 }
 
 #[test]
-fn audio_preview_command_protects_active_media_and_prunes_cache_on_startup() {
+fn audio_sidecar_command_protects_active_media_and_prunes_cache_on_startup() {
     let library = library_rs();
     let app = app_rs();
-    assert!(library.contains("pub protected_preview_path: Option<String>"));
+    assert!(library.contains("pub protected_preview_paths: Vec<String>"));
     assert!(library.contains("prune_audio_preview_cache("));
-    assert!(library.contains("touch_audio_preview(&preview)"));
+    assert!(library.contains("touch_audio_preview(final_path)"));
     assert!(app.contains("crate::library::prune_audio_preview_cache_on_startup()"));
 }
 
 #[test]
-fn audio_sidecar_command_registers_parallel_contract_without_removing_legacy_preview() {
+fn audio_sidecar_command_is_the_only_review_audio_generation_contract() {
     let library = library_rs();
     let app = app_rs();
     assert!(library.contains("pub struct PrepareClipAudioSidecarsRequest"));
@@ -424,7 +424,33 @@ fn audio_sidecar_command_registers_parallel_contract_without_removing_legacy_pre
     assert!(library.contains("pub audio_track_id: String"));
     assert!(library.contains("pub async fn prepare_clip_audio_sidecars"));
     assert!(app.contains("crate::library::prepare_clip_audio_sidecars"));
-    assert!(app.contains("crate::library::preview_clip_audio_tracks"));
+}
+
+#[test]
+fn legacy_audio_preview_code_is_absent() {
+    let library = library_rs();
+    let app = app_rs();
+    let review = read_ui_js("review-player.js");
+    for legacy in [
+        "pub struct AudioPreviewRequest",
+        "pub protected_preview_path: Option<String>",
+        "pub async fn preview_clip_audio_tracks",
+        "fn preview_clip_audio_tracks_file",
+        "fn preview_clip_audio_tracks_file_with_mixer",
+        "fn write_audio_preview",
+        "fn audio_preview_path(",
+        "audio-preview-mix-v4",
+        "fn mix_audio_tracks_with_ffmpeg",
+    ] {
+        assert!(
+            !library.contains(legacy),
+            "legacy preview code remains: `{legacy}`"
+        );
+    }
+    assert!(!app.contains("crate::library::preview_clip_audio_tracks"));
+    assert!(!review.contains("invoke(\"preview_clip_audio_tracks\""));
+    assert!(!library.contains("amix=inputs="));
+    assert!(library.contains("remux_with_mixed_audio_track"));
 }
 
 #[test]
@@ -1724,7 +1750,10 @@ fn audio_sidecar_transport_prepares_and_releases_hidden_media() {
         "var reviewAudioSidecarGeneration = 0;",
         "var reviewAudioDriftTimer = 0;",
     ] {
-        assert!(app_core.contains(state), "missing sidecar transport state `{state}`");
+        assert!(
+            app_core.contains(state),
+            "missing sidecar transport state `{state}`"
+        );
     }
 
     let prepare = js_function_body(&review, "prepareReviewAudioSidecars");
@@ -1861,7 +1890,12 @@ fn audio_sidecar_activation_is_generation_gated_and_disposes_stale_sets() {
     assert!(current.contains("request.sourceGeneration === reviewSourceGeneration"));
     assert!(current.contains("request.sidecarGeneration === reviewAudioSidecarGeneration"));
     let activate = js_function_body(&review, "activatePreparedReviewAudioSidecars");
-    assert!(activate.matches("previewRequestStillCurrent(request)").count() >= 2);
+    assert!(
+        activate
+            .matches("previewRequestStillCurrent(request)")
+            .count()
+            >= 2
+    );
 }
 
 #[test]
@@ -1883,8 +1917,7 @@ fn returning_to_fallback_invalidates_an_inflight_audio_preview() {
     let needs_preview = request
         .find("if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {")
         .expect("fallback selection is gated on reviewSelectionNeedsPreview");
-    let cancel = request
-        [needs_preview..]
+    let cancel = request[needs_preview..]
         .find("cancelDesiredAudioPreview();")
         .map(|offset| needs_preview + offset)
         .expect("returning to fallback playback must cancel queued preview work");
