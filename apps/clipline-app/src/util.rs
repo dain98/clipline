@@ -48,8 +48,9 @@ pub(crate) fn markers_with_inferred_audio_tracks(
 }
 
 fn infer_audio_tracks_from_file(path: &Path) -> Result<Vec<ClipAudioTrack>, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read clip audio metadata: {e}"))?;
-    let count = clipline_mp4::audio_track_count(&bytes).map_err(|e| e.to_string())?;
+    let count = clipline_mp4::media_track_counts_file(path)
+        .map_err(|e| e.to_string())?
+        .audio;
     Ok((0..count)
         .map(|index| ClipAudioTrack {
             id: format!("audio:{index}"),
@@ -108,4 +109,102 @@ pub(crate) fn selected_audio_track_indices(
         .filter(|track| selected_ids.contains(track.id.as_str()))
         .map(|track| track.track_index)
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clipline_mp4::{
+        AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
+    };
+    use std::io::Cursor;
+
+    fn two_audio_fixture() -> Vec<u8> {
+        let tracks = vec![
+            TrackConfig::Video(VideoTrackConfig::h264(
+                128,
+                72,
+                90_000,
+                vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+                vec![0x68, 0xEE, 0x38, 0x80],
+            )),
+            TrackConfig::Audio(AudioTrackConfig {
+                channels: 2,
+                sample_rate: 48_000,
+                pre_skip: 312,
+            }),
+            TrackConfig::Audio(AudioTrackConfig {
+                channels: 2,
+                sample_rate: 48_000,
+                pre_skip: 312,
+            }),
+        ];
+        let mut writer = HybridMp4Writer::new_multi(Cursor::new(Vec::new()), tracks).unwrap();
+        let video: Vec<_> = (0..10)
+            .map(|i| FragSample {
+                data: format!("V{i:05}").into_bytes(),
+                duration: 9_000,
+                is_sync: i == 0,
+            })
+            .collect();
+        let audio = |prefix: &str| {
+            (0..50)
+                .map(|i| FragSample {
+                    data: format!("{prefix}{i:05}").into_bytes(),
+                    duration: 960,
+                    is_sync: true,
+                })
+                .collect::<Vec<_>>()
+        };
+        writer
+            .write_fragment_multi(&[&video, &audio("A"), &audio("B")])
+            .unwrap();
+        writer.finalize().unwrap().into_inner()
+    }
+
+    #[test]
+    fn infer_audio_tracks_uses_file_track_counts_and_preserves_legacy_order() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/util.rs"),
+        )
+        .unwrap();
+        let start = source
+            .find("fn infer_audio_tracks_from_file")
+            .expect("inference helper exists");
+        let end = source[start..]
+            .find("\n/// Encode an OS string")
+            .map(|offset| start + offset)
+            .expect("inference helper end marker exists");
+        let body = &source[start..end];
+        assert!(
+            body.contains("media_track_counts_file"),
+            "legacy inference must use bounded file metadata counts"
+        );
+        assert!(
+            !body.contains("std::fs::read(path)"),
+            "legacy inference must not read the full source file"
+        );
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-util-infer-audio-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("legacy.mp4");
+        std::fs::write(&clip, two_audio_fixture()).unwrap();
+
+        let inferred = markers_with_inferred_audio_tracks(&clip, None)
+            .expect("legacy multitrack clip should gain inferred audio metadata");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(inferred.audio_tracks.len(), 2);
+        assert_eq!(inferred.audio_tracks[0].id, "audio:0");
+        assert_eq!(inferred.audio_tracks[0].track_index, 0);
+        assert_eq!(inferred.audio_tracks[1].id, "audio:1");
+        assert_eq!(inferred.audio_tracks[1].track_index, 1);
+    }
 }

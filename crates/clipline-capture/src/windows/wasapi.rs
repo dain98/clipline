@@ -162,6 +162,11 @@ impl AudioLevelAccumulator {
     }
 }
 
+fn audio_poll_silence_horizon(until_pts_s: f64) -> Option<f64> {
+    (until_pts_s.is_finite() && until_pts_s != f64::MAX)
+        .then(|| (until_pts_s - FRAME_DURATION_S).max(0.0))
+}
+
 struct WasapiPcmCapture {
     client: IAudioClient,
     capture: IAudioCaptureClient,
@@ -456,6 +461,9 @@ impl WasapiPcmCapture {
 
     fn poll_frames(&mut self, until_pts_s: f64) -> Result<Vec<PcmFrame>, CaptureError> {
         self.drain_device()?;
+        if let Some(horizon_pts_s) = audio_poll_silence_horizon(until_pts_s) {
+            self.assembler.advance_with_silence(horizon_pts_s);
+        }
         while let Some(frame) = self.assembler.pop_frame() {
             self.queue.push_back(frame);
         }
@@ -1312,6 +1320,19 @@ mod tests {
     use super::*;
     use crate::clock::RelativeClock;
     use crate::traits::AudioSource;
+
+    #[test]
+    fn audio_poll_horizon_leaves_one_opus_frame_for_delivery() {
+        assert_eq!(audio_poll_silence_horizon(0.5), Some(0.48));
+        assert_eq!(audio_poll_silence_horizon(0.01), Some(0.0));
+    }
+
+    #[test]
+    fn audio_poll_horizon_does_not_synthesize_for_monitor_drains() {
+        assert_eq!(audio_poll_silence_horizon(f64::MAX), None);
+        assert_eq!(audio_poll_silence_horizon(f64::INFINITY), None);
+        assert_eq!(audio_poll_silence_horizon(f64::NAN), None);
+    }
 
     #[test]
     fn process_name_from_path_uses_executable_stem() {

@@ -1,4 +1,5 @@
 /target
+.worktrees/
 **/*.rs.bk
 *.mp4
 .local-secrets/

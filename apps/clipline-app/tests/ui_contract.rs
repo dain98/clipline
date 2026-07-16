@@ -405,6 +405,55 @@ fn audio_preview_command_scopes_generated_preview_files() {
 }
 
 #[test]
+fn audio_sidecar_command_protects_active_media_and_prunes_cache_on_startup() {
+    let library = library_rs();
+    let app = app_rs();
+    assert!(library.contains("pub protected_preview_paths: Vec<String>"));
+    assert!(library.contains("prune_audio_preview_cache("));
+    assert!(library.contains("touch_audio_preview(final_path)"));
+    assert!(app.contains("crate::library::prune_audio_preview_cache_on_startup()"));
+}
+
+#[test]
+fn audio_sidecar_command_is_the_only_review_audio_generation_contract() {
+    let library = library_rs();
+    let app = app_rs();
+    assert!(library.contains("pub struct PrepareClipAudioSidecarsRequest"));
+    assert!(library.contains("pub protected_preview_paths: Vec<String>"));
+    assert!(library.contains("pub struct PreparedClipAudioSidecar"));
+    assert!(library.contains("pub audio_track_id: String"));
+    assert!(library.contains("pub async fn prepare_clip_audio_sidecars"));
+    assert!(app.contains("crate::library::prepare_clip_audio_sidecars"));
+}
+
+#[test]
+fn legacy_audio_preview_code_is_absent() {
+    let library = library_rs();
+    let app = app_rs();
+    let review = read_ui_js("review-player.js");
+    for legacy in [
+        "pub struct AudioPreviewRequest",
+        "pub protected_preview_path: Option<String>",
+        "pub async fn preview_clip_audio_tracks",
+        "fn preview_clip_audio_tracks_file",
+        "fn preview_clip_audio_tracks_file_with_mixer",
+        "fn write_audio_preview",
+        "fn audio_preview_path(",
+        "audio-preview-mix-v4",
+        "fn mix_audio_tracks_with_ffmpeg",
+    ] {
+        assert!(
+            !library.contains(legacy),
+            "legacy preview code remains: `{legacy}`"
+        );
+    }
+    assert!(!app.contains("crate::library::preview_clip_audio_tracks"));
+    assert!(!review.contains("invoke(\"preview_clip_audio_tracks\""));
+    assert!(!library.contains("amix=inputs="));
+    assert!(library.contains("remux_with_mixed_audio_track"));
+}
+
+#[test]
 fn review_player_owns_all_controls() {
     let html = index_html();
 
@@ -789,8 +838,8 @@ fn review_player_owns_all_controls() {
             && html.contains("id=\"upload-audio-list\"")
             && main_js().contains("function clipAudioTracks(clip = currentClip)")
             && main_js().contains("function renderAudioTrackPanel()")
-            && main_js().contains("function applySelectedAudioTracksToPlayback({ forceResume = false } = {})")
-            && main_js().contains("preview_clip_audio_tracks")
+            && main_js().contains("function requestSelectedAudioPreview()")
+            && main_js().contains("prepare_clip_audio_sidecars")
             && main_js().contains("function renderUploadAudioTracks(clip = uploadDialogClip)")
             && main_js().contains("audioTrackIds: request.audioTrackIds || null")
             && !main_js().contains("video.audioTracks")
@@ -811,7 +860,7 @@ fn review_player_owns_all_controls() {
             && app_rs().contains("crate::cloud::cloud_connect")
             && app_rs().contains("crate::cloud::upload_clip_to_cloud")
             && app_rs().contains("crate::cloud::sync_cloud_clip_status")
-            && app_rs().contains("crate::library::preview_clip_audio_tracks")
+            && app_rs().contains("crate::library::prepare_clip_audio_sidecars")
             && main_js().contains("sync_cloud_clip_status")
             && styles_css().contains(".cloud-connect-grid")
             && styles_css().contains(".cloud-connect-fields")
@@ -1391,7 +1440,7 @@ fn osu_play_rail_click_holds_selected_play_during_seek() {
             && js.contains("selectGamePlay(index, play.start, play.end);")
             && js.contains("seekTo(play.start, { keepGamePlaySelection: true });")
             && js.contains("if (!options.keepGamePlaySelection) clearGamePlaySelection();")
-            && js.contains("syncGamePlayRail(t, { keepGamePlaySelection: options.keepGamePlaySelection });")
+            && js.contains("syncGamePlayRail(target, { keepGamePlaySelection: options.keepGamePlaySelection });")
             && js.contains("playActiveIndex(clipPlays(), currentTime, selectedIndex)"),
         "Set plays clicks should highlight the clicked play immediately instead of waiting for the video seek to settle"
     );
@@ -1505,7 +1554,8 @@ fn game_event_rail_does_not_run_on_every_animation_frame() {
     );
     assert!(
         js.contains("video.addEventListener(\"timeupdate\"")
-            && js.contains("syncGameEventRail(video.currentTime || 0);"),
+            && js.contains("const current = reviewPlayheadTime();")
+            && js.contains("syncGameEventRail(current);"),
         "timeupdate should keep the event rail following playback without tying it to requestAnimationFrame"
     );
     assert!(
@@ -1599,169 +1649,334 @@ fn rail_shows_connected_cloud_identity() {
 }
 
 #[test]
-fn default_audio_preview_is_gated_and_degrades_to_source_on_failure() {
-    let js = main_js();
-    let open_clip_start = js.find("function openClip(clip)").unwrap();
-    let close_review_start = js.find("function closeReview()").unwrap();
-    let open_clip = &js[open_clip_start..close_review_start];
-
-    assert!(
-        !open_clip.contains("applySelectedAudioTracksToPlayback()"),
-        "opening a clip must not unconditionally remux or mix a full-session audio preview"
-    );
-    assert!(
-        open_clip.contains("applyDefaultAudioSelectionIfNeeded({ shouldResume: true })"),
-        "opening a clip should apply default audio only when source playback would not match it"
-    );
-    assert!(
-        open_clip.contains("syncCloudClipStatus(clip);"),
-        "opening a clip should refresh its cloud record in the background"
-    );
-    let source_play = open_clip
-        .find("video.play().catch(() => syncPlayState());")
-        .expect("openClip should still start direct source playback when no preview is needed");
-    let default_preview = open_clip
-        .find("applyDefaultAudioSelectionIfNeeded({ shouldResume: true })")
-        .expect("openClip should request a resumed default preview when needed");
-    assert!(
-        default_preview < source_play,
-        "preview-needed clips must not audibly play the unmixed source before the preview source is ready"
-    );
-    assert!(
-        js.contains("function applyDefaultAudioSelectionIfNeeded({ shouldResume = false } = {})")
-            && !js.contains("if (audioPreviewUnavailable && selected.length > 1) return false;")
-            && js.contains("PlayerCore.selectionNeedsPreview")
-            && js.contains("applySelectedAudioTracksToPlayback({ forceResume: shouldResume });"),
-        "default audio application must retry preview generation instead of relying on a stale global failure latch"
-    );
-    assert!(
-        js.contains("currentReviewAudioKey === audioSelectionKey(clip, selected)"),
-        "reapplying the same selected audio tracks should not remux the current review source"
-    );
-    assert!(
-        js.contains("function applyCloudClipSyncResult(")
-            && js.contains("removeCloudUploadRecordForPath(result.path)")
-            && js.contains("upsertCloudUploadRecord(result.record)"),
-        "cloud sync results must update or remove the local cloud record cache"
-    );
-    assert!(
-        js.contains("setDeckStatus(\"audio mix unavailable; playing source\", { transient: true });")
-            && !js.contains("audioPreviewUnavailable = true;")
-            && js.contains("if (currentReviewMediaPath !== clip.path) {")
-            && js.contains("setReviewVideoSource(clip.path, {")
-            && js.contains("resumeTime: latestResumeTime"),
-        "preview generation failure should fall back to source playback without disabling future preview attempts"
-    );
-    assert!(
-        js.contains("function cloudUploadRecordForPath(path)")
-            && js.contains("applyCloudClipSyncResult(result, {")
-            && js.contains("expectedRecord, expectedLocalClipId, expectedUpdatedAtUnix"),
-        "cloud open-sync must capture the record identity it started from"
-    );
-    assert!(
-        js.contains("if (expectedRecord && current !== expectedRecord) return false;")
-            && js.contains("current.local_clip_id !== expectedLocalClipId")
-            && js.contains(
-                "Number(current.updated_at_unix || 0) > Number(expectedUpdatedAtUnix || 0)"
-            ),
-        "cloud open-sync must ignore stale results once a newer upload record exists"
-    );
-}
-
-#[test]
-fn audio_preview_resolves_resume_position_after_await() {
+fn opening_multitrack_clip_starts_direct_and_prepares_default_sidecars() {
+    let app_core = read_ui_js("app-core.js");
+    let reset_selection = js_function_body(&app_core, "resetSelectedAudioTracks");
     let review = read_ui_js("review-player.js");
-    let body = js_function_body(&review, "applySelectedAudioTracksToPlayback");
-    let await_preview = body
-        .find("await invoke(\"preview_clip_audio_tracks\"")
-        .unwrap();
-    let success_guard = body[await_preview..]
-        .find("if (seq !== audioPreviewSeq || !currentClip || currentClip.path !== clip.path) return;")
-        .map(|offset| await_preview + offset)
-        .unwrap();
-    let success_consume = body[success_guard..]
-        .find("consumeSourceSwapResumeTime(resumeTime)")
-        .map(|offset| success_guard + offset)
-        .unwrap();
-    let success_swap = body[success_consume..]
-        .find("setReviewVideoSource(path, {")
-        .map(|offset| success_consume + offset)
-        .unwrap();
-    let catch_start = body.find("} catch (e) {").unwrap();
-    assert!(await_preview < success_guard);
-    assert!(success_guard < success_consume);
-    assert!(success_consume < success_swap);
-    assert!(success_swap < catch_start);
+    let open_clip = js_function_body(&review, "openClip");
 
-    let fallback_stale_guard = body[catch_start..]
-        .find("if (seq !== audioPreviewSeq) return;")
-        .map(|offset| catch_start + offset)
-        .unwrap();
-    let fallback_branch = body[fallback_stale_guard..]
-        .find("if (currentReviewMediaPath !== clip.path) {")
-        .map(|offset| fallback_stale_guard + offset)
-        .unwrap();
-    let fallback_consume = body[fallback_branch..]
-        .find("consumeSourceSwapResumeTime(resumeTime)")
-        .map(|offset| fallback_branch + offset)
-        .unwrap();
-    let fallback_swap = body[fallback_consume..]
-        .find("setReviewVideoSource(clip.path, {")
-        .map(|offset| fallback_consume + offset)
-        .unwrap();
-    assert!(fallback_stale_guard < fallback_branch);
-    assert!(fallback_branch < fallback_consume);
-    assert!(fallback_consume < fallback_swap);
-
-    let consume = js_function_body(&review, "consumeSourceSwapResumeTime");
-    let choose_latest = consume.find("PlayerCore.sourceSwapResumeTime(").unwrap();
-    let clear_pending = consume.find("pendingSeek = null;").unwrap();
-    let return_resume = consume.find("return resumeTime;").unwrap();
-    assert!(choose_latest < clear_pending);
-    assert!(clear_pending < return_resume);
-
-    let seek_by = js_function_body(&review, "seekBy");
-    assert!(seek_by.contains("PlayerCore.relativeSeekTarget"));
-    assert!(seek_by.contains("pendingSeek"));
+    assert!(reset_selection.contains("defaultAudioTrackIds(clip)"));
+    assert!(!reset_selection.contains("directPlaybackAudioTrackIds"));
+    assert!(open_clip.contains("resetSelectedAudioTracks(clip);"));
+    assert!(open_clip.contains(
+        "currentReviewAudioTrackIds = PlayerCore.directPlaybackAudioTrackIds(clipAudioTracks(clip));"
+    ));
+    assert!(open_clip.contains("assignReviewVideoSource(clip.path, { resumeTime: 0 })"));
+    assert!(open_clip.contains("video.play().catch(() => syncPlayState());"));
+    assert!(open_clip.contains("requestSelectedAudioPreview();"));
+    assert!(
+        open_clip.find("video.play().catch(() => syncPlayState());")
+            < open_clip.find("requestSelectedAudioPreview();"),
+        "direct playback should start before the selected sidecars are prepared"
+    );
+    assert!(!open_clip.contains("applySelectedAudioTracksToPlayback"));
+    assert!(!main_js().contains("function applyDefaultAudioSelectionIfNeeded"));
 }
 
 #[test]
-fn video_source_restore_requires_current_assignment_and_unchanged_seek() {
+fn review_and_upload_audio_controls_render_exact_selected_ids() {
+    let app_core = read_ui_js("app-core.js");
+    let review_panel = js_function_body(&app_core, "renderAudioTrackPanel");
+    let upload_panel = js_function_body(&app_core, "renderUploadAudioTracks");
+    assert!(review_panel.contains("PlayerCore.reviewAudioTrackRowState"));
+    assert!(review_panel.contains("PlayerCore.applyReviewAudioTrackToggle"));
+    assert!(upload_panel.contains("PlayerCore.reviewAudioTrackRowState"));
+    assert!(upload_panel.contains("PlayerCore.applyReviewAudioTrackToggle"));
+}
+
+#[test]
+fn review_audio_pruning_preserves_fallback_and_muted_selection() {
+    let app_core = read_ui_js("app-core.js");
+    let prune = js_function_body(&app_core, "pruneSelectedAudioTracks");
+    assert!(prune.contains("PlayerCore.selectedReviewAudioTrackIds"));
+    assert!(!prune.contains("defaultAudioTrackIds"));
+}
+
+#[test]
+fn review_player_applies_logical_seek_only_for_current_metadata() {
     let review = read_ui_js("review-player.js");
     let assign = js_function_body(&review, "assignReviewVideoSource");
-    let claim_generation = assign
-        .find("sourceGeneration: ++reviewSourceGeneration")
-        .unwrap();
-    let capture_seek = assign.find("seekRevision: reviewSeekRevision").unwrap();
-    let listen = assign
-        .find("video.addEventListener(\"loadedmetadata\"")
-        .unwrap();
-    let source_swap = assign.find("video.src = convertFileSrc(path);").unwrap();
-    assert!(claim_generation < listen);
-    assert!(capture_seek < listen);
-    assert!(listen < source_swap);
-
-    let set_source = js_function_body(&review, "setReviewVideoSource");
-    let decision = set_source
-        .find("PlayerCore.sourceRestoreDecision(")
-        .unwrap();
-    let ownership_guard = set_source
-        .find("if (!decision.ownsSource) return;")
-        .unwrap();
-    let trim_restore = set_source.find("if (trimRange) setTrim(").unwrap();
-    let position_guard = set_source
-        .find("if (decision.restorePosition && Number.isFinite(resumeTime))")
-        .unwrap();
-    let play_restore = set_source.find("if (shouldResume) video.play()").unwrap();
-    assert!(decision < ownership_guard);
-    assert!(ownership_guard < trim_restore);
-    assert!(trim_restore < position_guard);
-    assert!(position_guard < play_restore);
+    let clear_error_handler = js_function_body(&review, "clearReviewSourceErrorHandler");
+    let release = js_function_body(&review, "releaseReviewVideoSource");
+    assert!(assign.contains("PlayerCore.beginSourceAssignment("));
+    assert!(assign.contains("PlayerCore.metadataSeekDecision("));
+    assert!(assign.contains("assignment.sourceGeneration !== reviewSourceGeneration"));
+    assert!(assign.contains("clearReviewSourceErrorHandler();"));
+    assert!(
+        assign.contains("reviewSourceErrorHandler = () => reportReviewSourceError(assignment);")
+    );
+    assert!(assign.contains("video.addEventListener(\"error\", reviewSourceErrorHandler);"));
+    assert!(!assign.contains("video.addEventListener(\"error\", () => reportReviewSourceError(assignment), { once: true })"));
+    assert!(clear_error_handler
+        .contains("video.removeEventListener(\"error\", reviewSourceErrorHandler);"));
+    assert!(release.contains("clearReviewSourceErrorHandler();"));
 
     let seek_to = js_function_body(&review, "seekTo");
-    let seek_revision = seek_to.find("reviewSeekRevision += 1;").unwrap();
-    let seek_dispatch = seek_to.find("if (video.seeking)").unwrap();
-    assert!(seek_revision < seek_dispatch);
+    assert!(seek_to.contains("PlayerCore.requestLogicalSeek("));
+    assert!(seek_to.contains("reviewSeekState.metadataGeneration === reviewSourceGeneration"));
+
+    assert!(review.contains("PlayerCore.seekedDecision("));
+    assert!(review.contains("function reportReviewSourceError(assignment)"));
+    assert!(assign.contains("video.addEventListener(\"error\""));
+    assert!(review.contains("function reviewPlayheadTime()"));
+    let prohibited_legacy_identifier = ["pending", "Seek"].concat();
+    let player_core = read_ui_js("player-core.js");
+    let main = read_ui_js("main.js");
+    let task_two_scope = [
+        ("tests/player_core.rs", include_str!("player_core.rs")),
+        ("tests/ui_contract.rs", include_str!("ui_contract.rs")),
+        ("ui/player-core.js", player_core.as_str()),
+        ("ui/review-player.js", review.as_str()),
+        ("ui/main.js", main.as_str()),
+    ];
+    let legacy_identifier_files: Vec<_> = task_two_scope
+        .iter()
+        .filter_map(|(path, source)| {
+            source
+                .contains(&prohibited_legacy_identifier)
+                .then_some(*path)
+        })
+        .collect();
+    assert!(
+        legacy_identifier_files.is_empty(),
+        "Task 2 scope must not retain `{prohibited_legacy_identifier}`; found in {}",
+        legacy_identifier_files.join(", "),
+    );
+    assert!(!review.contains("reviewSeekRevision"));
+}
+
+#[test]
+fn audio_sidecar_preparation_consumes_validated_hits_once() {
+    let library = library_rs();
+    assert!(
+        !library.contains("ordered_hits"),
+        "validated cache hits must be retained in the ordered result instead of rebuilt"
+    );
+}
+
+#[test]
+fn explicit_audio_preview_uses_one_pure_coalescing_queue() {
+    let review = read_ui_js("review-player.js");
+    assert!(review.contains("var audioPreviewQueue = PlayerCore.emptyAudioPreviewQueue();"));
+    assert!(review.contains("PlayerCore.queueAudioPreviewRequest("));
+    assert!(review.contains("PlayerCore.finishAudioPreviewRequest("));
+    assert_eq!(
+        review
+            .matches("await invoke(\"prepare_clip_audio_sidecars\"")
+            .count(),
+        1
+    );
+    assert!(!review.contains("invoke(\"preview_clip_audio_tracks\""));
+    assert!(review.contains("protectedPreviewPaths"));
+    assert!(review.contains("activeReviewAudioSidecars.map((sidecar) => sidecar.path)"));
+    assert!(!review.contains("audioPreviewSeq"));
+}
+
+#[test]
+fn audio_sidecar_transport_prepares_and_releases_hidden_media() {
+    let app_core = read_ui_js("app-core.js");
+    let review = read_ui_js("review-player.js");
+    for state in [
+        "var reviewAudioMode = \"direct\";",
+        "var reviewAudioMuted = false;",
+        "var reviewAudioVolume = 1;",
+        "var activeReviewAudioSidecars = [];",
+        "var reviewAudioSidecarGeneration = 0;",
+        "var reviewAudioDriftTimer = 0;",
+    ] {
+        assert!(
+            app_core.contains(state),
+            "missing sidecar transport state `{state}`"
+        );
+    }
+
+    let prepare = js_function_body(&review, "prepareReviewAudioSidecars");
+    assert!(prepare.contains("new Audio()"));
+    assert!(prepare.contains("audio.preload = \"auto\";"));
+    assert!(prepare.contains("audio.muted = true;"));
+    assert!(prepare.contains("audio.src = convertFileSrc(sidecar.path);"));
+    assert!(prepare.contains("audio.addEventListener(\"canplay\""));
+    assert!(prepare.contains("audio.addEventListener(\"error\""));
+
+    let dispose = js_function_body(&review, "disposeReviewAudioSidecarSet");
+    assert!(dispose.contains("audio.pause();"));
+    assert!(dispose.contains("audio.removeAttribute(\"src\");"));
+    assert!(dispose.contains("audio.load();"));
+    let clear = js_function_body(&review, "clearReviewAudioSidecars");
+    assert!(clear.contains("reviewAudioSidecarGeneration += 1;"));
+    assert!(clear.contains("activeReviewAudioSidecars = [];"));
+    assert!(clear.contains("clearReviewAudioDriftTimer();"));
+}
+
+#[test]
+fn audio_sidecar_transport_follows_only_the_video_clock() {
+    let review = read_ui_js("review-player.js");
+    let main = read_ui_js("main.js");
+    let sync = js_function_body(&review, "syncReviewAudioSidecarSet");
+    assert!(sync.contains("PlayerCore.audioSidecarSyncDecision("));
+    assert!(sync.contains("audio.currentTime = decision.seekTime;"));
+    assert!(sync.contains("audio.playbackRate = decision.playbackRate;"));
+    assert!(!sync.contains("video.currentTime ="));
+
+    for event in ["play", "pause", "timeupdate", "ratechange"] {
+        assert!(
+            main.contains(&format!("video.addEventListener(\"{event}\"")),
+            "video {event} must synchronize sidecars"
+        );
+    }
+    assert!(main.contains("syncReviewAudioSidecars();"));
+    let seeked = review
+        .split("video.addEventListener(\"seeked\"")
+        .nth(1)
+        .and_then(|tail| tail.split("function seekBy").next())
+        .expect("seeked handler");
+    assert!(seeked.contains("syncReviewAudioSidecars({ forceSeek: true });"));
+    assert!(review.contains("window.setInterval(() => syncReviewAudioSidecars(), 500)"));
+}
+
+#[test]
+fn audio_sidecar_transport_owns_logical_mute_volume_and_lifecycle() {
+    let review = read_ui_js("review-player.js");
+    let main = read_ui_js("main.js");
+    let output = js_function_body(&review, "applyReviewAudioOutput");
+    assert!(output.contains("PlayerCore.reviewAudioOutputDecision("));
+    assert!(output.contains("video.muted = decision.videoMuted;"));
+    assert!(output.contains("audio.muted = decision.sidecarMuted;"));
+
+    let sync_volume = js_function_body(&review, "syncVolume");
+    assert!(sync_volume.contains("reviewAudioMuted"));
+    assert!(sync_volume.contains("reviewAudioVolume"));
+    let toggle_mute = js_function_body(&review, "toggleMute");
+    assert!(toggle_mute.contains("reviewAudioMuted"));
+    assert!(!toggle_mute.contains("video.muted"));
+    assert!(main.contains("reviewAudioVolume = Number($(\"volume-slider\").value);"));
+    assert!(main.contains("applyReviewAudioOutput();"));
+
+    for lifecycle in [
+        "assignReviewVideoSource",
+        "releaseReviewVideoSource",
+        "releaseVideoFileHandle",
+        "suspendReviewPlayback",
+        "openClip",
+        "closeReview",
+    ] {
+        assert!(
+            js_function_body(&review, lifecycle).contains("clearReviewAudioSidecars("),
+            "{lifecycle} must clear sidecar file handles and callbacks"
+        );
+    }
+}
+
+#[test]
+fn preview_failure_keeps_source_and_reverts_controls_to_audible_selection() {
+    let review = read_ui_js("review-player.js");
+    let restore = js_function_body(&review, "restoreAudibleAudioSelection");
+    assert!(restore.contains("selectedAudioTrackIds = new Set(currentReviewAudioTrackIds);"));
+    assert!(restore.contains("renderAudioTrackPanel();"));
+    assert!(restore.contains("setDeckStatus(message, { transient: true });"));
+    assert!(!restore.contains("setReviewVideoSource"));
+}
+
+#[test]
+fn valid_sidecar_activation_reads_latest_player_state_without_swapping_video() {
+    let review = read_ui_js("review-player.js");
+    let run = js_function_body(&review, "runAudioPreviewRequest");
+    let await_preview = run
+        .find("await invoke(\"prepare_clip_audio_sidecars\"")
+        .unwrap();
+    let prepare = run[await_preview..]
+        .find("await prepareReviewAudioSidecars(")
+        .unwrap();
+    assert!(await_preview < prepare);
+    assert!(!run.contains("setReviewVideoSource"));
+    assert!(!run.contains("assignReviewVideoSource"));
+    assert!(!run.contains("video.src"));
+
+    let activate = js_function_body(&review, "activatePreparedReviewAudioSidecars");
+    assert!(activate.contains("currentTime: reviewPlayheadTime()"));
+    assert!(activate.contains("playbackRate: video.playbackRate"));
+    assert!(activate.contains("paused: video.paused"));
+    assert!(activate.contains("ended: video.ended"));
+    let await_play = activate
+        .find("await syncReviewAudioSidecarSet(")
+        .expect("activation waits for every muted sidecar play promise");
+    let install = activate
+        .find("activeReviewAudioSidecars = prepared;")
+        .expect("complete prepared set is installed atomically");
+    let switch_output = activate
+        .find("reviewAudioMode = \"sidecars\";")
+        .expect("sidecar output becomes audible only after readiness/play succeeds");
+    assert!(await_play < install && install < switch_output);
+    assert!(activate[install..].contains("applyReviewAudioOutput();"));
+}
+
+#[test]
+fn audio_sidecar_activation_is_generation_gated_and_disposes_stale_sets() {
+    let review = read_ui_js("review-player.js");
+    let run = js_function_body(&review, "runAudioPreviewRequest");
+    assert!(run.contains("previewRequestStillCurrent(request)"));
+    assert!(run.contains("PlayerCore.finishAudioPreviewRequest("));
+    assert!(run.contains("transition.apply"));
+    assert!(run.contains("disposeReviewAudioSidecarSet(prepared);"));
+    assert!(run.contains("if (transition.start) void runAudioPreviewRequest(transition.start);"));
+
+    let current = js_function_body(&review, "previewRequestStillCurrent");
+    assert!(current.contains("request.sourceGeneration === reviewSourceGeneration"));
+    assert!(current.contains("request.sidecarGeneration === reviewAudioSidecarGeneration"));
+    let activate = js_function_body(&review, "activatePreparedReviewAudioSidecars");
+    assert!(
+        activate
+            .matches("previewRequestStillCurrent(request)")
+            .count()
+            >= 2
+    );
+}
+
+#[test]
+fn direct_and_muted_audio_selections_clear_sidecars_without_changing_video_source() {
+    let review = read_ui_js("review-player.js");
+    let request = js_function_body(&review, "requestSelectedAudioPreview");
+    assert!(request.contains("if (selected.length === 0)"));
+    assert!(request.contains("clearReviewAudioSidecars(\"muted\");"));
+    assert!(request.contains("clearReviewAudioSidecars(\"direct\");"));
+    assert!(!request.contains("setReviewVideoSource"));
+    assert!(!request.contains("assignReviewVideoSource"));
+    assert!(!request.contains("video.src"));
+}
+
+#[test]
+fn returning_to_fallback_invalidates_an_inflight_audio_preview() {
+    let review = read_ui_js("review-player.js");
+    let request = js_function_body(&review, "requestSelectedAudioPreview");
+    let needs_preview = request
+        .find("if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {")
+        .expect("fallback selection is gated on reviewSelectionNeedsPreview");
+    let cancel = request[needs_preview..]
+        .find("cancelDesiredAudioPreview();")
+        .map(|offset| needs_preview + offset)
+        .expect("returning to fallback playback must cancel queued preview work");
+    assert!(
+        needs_preview < cancel,
+        "a fallback selection must cancel an in-flight/queued preview before falling back to direct playback"
+    );
+}
+
+#[test]
+fn timeline_and_media_events_render_the_logical_playhead() {
+    let review = read_ui_js("review-player.js");
+    let main = read_ui_js("main.js");
+    assert!(js_function_body(&review, "paintTimeline").contains("reviewPlayheadTime()"));
+    assert!(js_function_body(&review, "paintOverview").contains("reviewPlayheadTime()"));
+    assert!(js_function_body(&review, "seekBy").contains("reviewSeekState.targetTime"));
+    assert!(main.contains("const current = reviewPlayheadTime();"));
+}
+
+#[test]
+fn opening_a_clip_clears_only_the_previous_clips_seek_state() {
+    let review = read_ui_js("review-player.js");
+    let open_clip = js_function_body(&review, "openClip");
+    assert!(open_clip.contains("reviewSeekState = PlayerCore.createLogicalSeekState();"));
+    assert!(open_clip.contains("assignReviewVideoSource(clip.path, { resumeTime: 0 })"));
 }
 
 #[test]
@@ -1777,9 +1992,10 @@ fn every_review_video_source_mutation_uses_generation_helpers() {
     let restore_rename = js_function_body(&review, "restoreVideoAfterRename");
     assert!(restore_rename.contains("setReviewVideoSource(path, {"));
     let set_source = js_function_body(&review, "setReviewVideoSource");
-    assert!(set_source.contains("assignReviewVideoSource(path, restore)"));
+    assert!(set_source
+        .contains("assignReviewVideoSource(path, { resumeTime, onLoadedMetadata: restore })"));
     let open_clip = js_function_body(&review, "openClip");
-    assert!(open_clip.contains("assignReviewVideoSource(clip.path)"));
+    assert!(open_clip.contains("assignReviewVideoSource(clip.path, { resumeTime: 0 })"));
 
     for name in [
         "releaseVideoFileHandle",
@@ -1791,32 +2007,6 @@ fn every_review_video_source_mutation_uses_generation_helpers() {
             "{name} must invalidate source ownership before releasing video.src"
         );
     }
-}
-
-#[test]
-fn open_clip_clears_previous_overlay_timer_and_pending_seek() {
-    let js = main_js();
-    let open_clip_start = js.find("function openClip(clip)").unwrap();
-    let close_review_start = js.find("function closeReview()").unwrap();
-    let open_clip = &js[open_clip_start..close_review_start];
-    let clear_overlay = open_clip
-        .find("clearOverlayIdleCheck();")
-        .expect("openClip clears the previous overlay idle timer");
-    let clear_seek = open_clip
-        .find("pendingSeek = null;")
-        .expect("openClip clears pending seek from previous clip");
-    let assign_clip = open_clip
-        .find("currentClip = clip;")
-        .expect("openClip assigns current clip");
-
-    assert!(
-        clear_overlay < assign_clip,
-        "overlay idle timer must be cleared before switching clips"
-    );
-    assert!(
-        clear_seek < assign_clip,
-        "pending seek must be cleared before switching clips"
-    );
 }
 
 #[test]
@@ -1846,7 +2036,7 @@ fn close_to_tray_suspends_review_playback() {
         "frontend must listen for the native close-to-tray suspend event"
     );
     assert!(
-        suspend_helper.contains("audioPreviewSeq += 1;")
+        suspend_helper.contains("cancelDesiredAudioPreview();")
             && suspend_helper.contains("clearOverlayIdleCheck();")
             && suspend_helper.contains("video.pause();")
             && suspend_helper.contains("releaseReviewVideoSource();"),
@@ -2677,7 +2867,7 @@ fn deck_status_success_toasts_auto_clear() {
     );
 
     for required in [
-        "setDeckStatus(audioSelectionLabel(clip), { transient: true })",
+        "setDeckStatus(audioSelectionLabel(currentClip), { transient: true })",
         "setDeckStatus(\"clip renamed\", { transient: true })",
         "setDeckStatus(`exported ${exportedLabel} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true })",
         "setDeckStatus(\"clip copied to clipboard\", { transient: true })",
@@ -2732,9 +2922,10 @@ fn clipboard_copy_sends_selected_audio_tracks() {
 #[test]
 fn file_rename_reapplies_selected_audio_preview() {
     let js = main_js();
+    let submit = js_function_body(&js, "submitRenameFileDialog");
 
     assert!(
-        js.contains("await applySelectedAudioTracksToPlayback({ forceResume: shouldResume });"),
+        submit.contains("requestSelectedAudioPreview();"),
         "renaming the open source file should restore the selected audio-track preview"
     );
 }
@@ -2989,6 +3180,32 @@ fn gallery_supports_multi_select_bulk_actions() {
     assert!(
         delete_clips_impl_rs.contains("remove_clip_files(&target)"),
         "bulk delete should call the shared file-removal helper"
+    );
+}
+
+#[test]
+fn returning_to_no_preview_selection_clears_stale_audio_status() {
+    let review = read_ui_js("review-player.js");
+    let request = js_function_body(&review, "requestSelectedAudioPreview");
+    // The no-preview branch sits between the reviewSelectionNeedsPreview guard and the
+    // selectionKey == currentReviewAudioKey early-exit that follows it.
+    let no_preview_block = request
+        .split("if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split("if (selectionKey === currentReviewAudioKey)")
+                .next()
+        })
+        .expect("no-preview branch must sit between the two guards in requestSelectedAudioPreview");
+    let key_assign = no_preview_block
+        .find("currentReviewAudioKey = selectionKey;")
+        .expect("no-preview branch must assign currentReviewAudioKey before returning");
+    let status_clear = no_preview_block
+        .find("setDeckStatus(audioSelectionLabel(clip), { transient: true });")
+        .expect("no-preview branch must call setDeckStatus(audioSelectionLabel(clip), { transient: true }) to clear any stale switching-audio-tracks status");
+    assert!(
+        key_assign < status_clear,
+        "setDeckStatus must appear after currentReviewAudioKey is updated so the label reflects the new selection"
     );
 }
 

@@ -396,24 +396,7 @@ fn clamp_time_and_percent_respect_duration() {
 }
 
 #[test]
-fn source_swap_resume_time_prefers_latest_queued_seek() {
-    let mut ctx = player_core_context();
-    assert_eq!(
-        eval(&mut ctx, "PlayerCore.sourceSwapResumeTime(25, 5, 0)"),
-        "25"
-    );
-    assert_eq!(
-        eval(&mut ctx, "PlayerCore.sourceSwapResumeTime(null, 18, 0)"),
-        "18"
-    );
-    assert_eq!(
-        eval(&mut ctx, "PlayerCore.sourceSwapResumeTime(null, NaN, 7)"),
-        "7"
-    );
-}
-
-#[test]
-fn relative_seek_accumulates_from_pending_target() {
+fn relative_seek_accumulates_from_logical_target() {
     let mut ctx = player_core_context();
     assert_eq!(
         eval(&mut ctx, "PlayerCore.relativeSeekTarget(5, 10, 5, 60)"),
@@ -433,33 +416,68 @@ fn relative_seek_accumulates_from_pending_target() {
 }
 
 #[test]
-fn source_restore_rejects_superseded_assignment() {
+fn logical_seek_survives_early_seeked_and_source_swap() {
     let mut ctx = player_core_context();
+    let result = eval_json(
+        &mut ctx,
+        r#"
+        (() => {
+          let state = PlayerCore.createLogicalSeekState();
+          state = PlayerCore.beginSourceAssignment(state, 1, 10, 60);
+          let decision = PlayerCore.metadataSeekDecision(state, 1, 60);
+          state = decision.state;
+          state = PlayerCore.seekedDecision(state, 1, 10, 60).state;
+          for (const delta of [5, 5, 5, 5, 5]) {
+            const target = PlayerCore.relativeSeekTarget(10, state.targetTime, delta, 60);
+            state = PlayerCore.requestLogicalSeek(state, target, 60);
+          }
+          state = PlayerCore.beginSourceAssignment(state, 2, 0, 60);
+          const early = PlayerCore.seekedDecision(state, 2, 0, 60);
+          const metadata = PlayerCore.metadataSeekDecision(early.state, 2, 60);
+          const prior = PlayerCore.seekedDecision(metadata.state, 2, 30, 60);
+          const arrived = PlayerCore.seekedDecision(prior.state, 2, 35, 60);
+          return {
+            targetAfterEarlyEvent: early.state.targetTime,
+            earlyApply: early.applyTime,
+            metadataApply: metadata.applyTime,
+            priorApply: prior.applyTime,
+            confirmed: arrived.confirmed,
+            finalTarget: arrived.state.targetTime,
+          };
+        })()
+        "#,
+    );
+
     assert_eq!(
-        eval(
-            &mut ctx,
-            "JSON.stringify(PlayerCore.sourceRestoreDecision(4, 5, 8, 8))",
-        ),
-        r#"{"ownsSource":false,"restorePosition":false}"#
+        result,
+        r#"{"targetAfterEarlyEvent":35,"earlyApply":null,"metadataApply":35,"priorApply":35,"confirmed":true,"finalTarget":null}"#
     );
 }
 
 #[test]
-fn source_restore_keeps_current_non_position_state_after_later_seek() {
+fn logical_seek_ignores_invalid_requests_and_clamps_when_metadata_arrives() {
     let mut ctx = player_core_context();
     assert_eq!(
-        eval(
+        eval_json(
             &mut ctx,
-            "JSON.stringify(PlayerCore.sourceRestoreDecision(5, 5, 8, 9))",
+            r#"
+            (() => {
+              let state = PlayerCore.createLogicalSeekState();
+              state = PlayerCore.requestLogicalSeek(state, 75, 0);
+              state = PlayerCore.requestLogicalSeek(state, NaN, 0);
+              const metadata = PlayerCore.metadataSeekDecision(
+                PlayerCore.beginSourceAssignment(state, 7, 0, 60),
+                7,
+                60,
+              );
+              return {
+                applyTime: metadata.applyTime,
+                logical: PlayerCore.logicalPlaybackTime(metadata.state, 0, 60),
+              };
+            })()
+            "#,
         ),
-        r#"{"ownsSource":true,"restorePosition":false}"#
-    );
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "JSON.stringify(PlayerCore.sourceRestoreDecision(5, 5, 9, 9))",
-        ),
-        r#"{"ownsSource":true,"restorePosition":true}"#
+        r#"{"applyTime":60,"logical":60}"#
     );
 }
 
@@ -1039,6 +1057,84 @@ fn multi_track_default_selection_requires_preview() {
     assert_eq!(
         model,
         r#"{"splitDefault":true,"normalDefault":true,"normalPartial":true,"singleDefault":false}"#
+    );
+}
+
+#[test]
+fn review_audio_defaults_to_direct_fallback_and_explicit_tracks_need_preview() {
+    let mut ctx = player_core_context();
+    let model = eval_json(
+        &mut ctx,
+        r#"
+        (() => {
+          const tracks = [
+            { id: 'output', kind: 'output', label: 'Output Audio' },
+            { id: 'process:1', kind: 'process_output', label: 'Game' },
+            { id: 'microphone', kind: 'microphone', label: 'Microphone' },
+          ];
+          const fallback = PlayerCore.directPlaybackAudioTrackIds(tracks);
+          const process = PlayerCore.applyReviewAudioTrackToggle(
+            tracks, fallback, 'process:1', true,
+          );
+          const withMic = PlayerCore.applyReviewAudioTrackToggle(
+            tracks, process, 'microphone', true,
+          );
+          const restored = PlayerCore.applyReviewAudioTrackToggle(
+            tracks, withMic, 'output', true,
+          );
+          const muted = PlayerCore.applyReviewAudioTrackToggle(
+            tracks, fallback, 'output', false,
+          );
+          return {
+            fallback,
+            fallbackRow: PlayerCore.reviewAudioTrackRowState(tracks[0], tracks, fallback),
+            fallbackNeedsPreview: PlayerCore.reviewSelectionNeedsPreview(tracks, fallback),
+            process,
+            withMic,
+            restored,
+            muted,
+            expandedNeedsPreview: PlayerCore.reviewSelectionNeedsPreview(tracks, withMic),
+          };
+        })()
+        "#,
+    );
+
+    assert_eq!(
+        model,
+        r#"{"fallback":["output"],"fallbackRow":{"checked":true,"indeterminate":false},"fallbackNeedsPreview":false,"process":["process:1"],"withMic":["process:1","microphone"],"restored":["output","microphone"],"muted":[],"expandedNeedsPreview":true}"#
+    );
+}
+
+#[test]
+fn review_direct_audio_fallback_uses_stream_zero_not_marker_order() {
+    let mut ctx = player_core_context();
+    let model = eval_json(
+        &mut ctx,
+        r#"
+        (() => {
+          const reordered = [
+            { id: 'microphone', kind: 'microphone', track_index: 1 },
+            { id: 'output', kind: 'output', track_index: 0 },
+          ];
+          const legacy = [
+            { id: 'legacy-output', kind: 'output' },
+            { id: 'legacy-microphone', kind: 'microphone' },
+          ];
+          return {
+            reordered: PlayerCore.directPlaybackAudioTrackIds(reordered),
+            reorderedMicNeedsPreview: PlayerCore.reviewSelectionNeedsPreview(
+              reordered,
+              ['microphone'],
+            ),
+            legacy: PlayerCore.directPlaybackAudioTrackIds(legacy),
+          };
+        })()
+        "#,
+    );
+
+    assert_eq!(
+        model,
+        r#"{"reordered":["output"],"reorderedMicNeedsPreview":true,"legacy":["legacy-output"]}"#
     );
 }
 
@@ -2499,6 +2595,129 @@ fn display_map_height_scales_with_virtual_desktop_shape() {
             "Math.round(PlayerCore.displayMapHeight(WIDE_STACK, 620))"
         ),
         "315"
+    );
+}
+
+#[test]
+fn audio_preview_queue_serializes_and_coalesces_to_latest_request() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            r#"
+            (() => {
+              const one = { clipPath: 'a.mp4', trackIds: ['mic'], selectionKey: 'one', sourceGeneration: 4 };
+              const two = { clipPath: 'a.mp4', trackIds: ['game'], selectionKey: 'two', sourceGeneration: 4 };
+              const three = { clipPath: 'b.mp4', trackIds: ['output'], selectionKey: 'three', sourceGeneration: 5 };
+              let state = PlayerCore.emptyAudioPreviewQueue();
+              const first = PlayerCore.queueAudioPreviewRequest(state, one);
+              state = first.state;
+              state = PlayerCore.queueAudioPreviewRequest(state, two).state;
+              state = PlayerCore.queueAudioPreviewRequest(state, three).state;
+              const finished = PlayerCore.finishAudioPreviewRequest(state, first.start.revision, true);
+              return {
+                firstStart: first.start.selectionKey,
+                firstApply: finished.apply,
+                nextStart: finished.start.selectionKey,
+                active: finished.state.active.selectionKey,
+              };
+            })()
+            "#,
+        ),
+        r#"{"firstStart":"one","firstApply":null,"nextStart":"three","active":"three"}"#
+    );
+}
+
+#[test]
+fn audio_preview_queue_applies_only_current_success_and_cancel_keeps_worker_slot() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            r#"
+            (() => {
+              const request = { clipPath: 'a.mp4', trackIds: ['mic'], selectionKey: 'mic', sourceGeneration: 2 };
+              const queued = PlayerCore.queueAudioPreviewRequest(PlayerCore.emptyAudioPreviewQueue(), request);
+              const applied = PlayerCore.finishAudioPreviewRequest(queued.state, queued.start.revision, true);
+              const second = PlayerCore.queueAudioPreviewRequest(PlayerCore.emptyAudioPreviewQueue(), request);
+              const cancelled = PlayerCore.cancelAudioPreviewRequest(second.state);
+              const ignored = PlayerCore.finishAudioPreviewRequest(cancelled, second.start.revision, true);
+              return {
+                apply: applied.apply.selectionKey,
+                activeAfterApply: applied.state.active,
+                cancelledStillActive: cancelled.active.selectionKey,
+                applyAfterCancel: ignored.apply,
+              };
+            })()
+            "#,
+        ),
+        r#"{"apply":"mic","activeAfterApply":null,"cancelledStillActive":"mic","applyAfterCancel":null}"#
+    );
+}
+
+#[test]
+fn audio_sidecar_sync_uses_video_as_the_authoritative_transport() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            r#"
+            (() => ({
+              forced: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 12.5, playbackRate: 1.5, paused: false, ended: false },
+                { currentTime: 12.49 },
+                { forceSeek: true },
+              ),
+              exactTolerance: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 10, playbackRate: 1, paused: false, ended: false },
+                { currentTime: 9.9 },
+              ),
+              belowTolerance: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 10, playbackRate: 1, paused: false, ended: false },
+                { currentTime: 9.901 },
+              ),
+              aboveTolerance: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 10, playbackRate: 1, paused: false, ended: false },
+                { currentTime: 9.899 },
+              ),
+              invalidSidecar: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 4, playbackRate: 0, paused: true, ended: false },
+                { currentTime: NaN },
+              ),
+              invalidVideo: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: Infinity, playbackRate: NaN, paused: false, ended: false },
+                { currentTime: 3 },
+                { forceSeek: true },
+              ),
+              ended: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 8, playbackRate: 2, paused: false, ended: true },
+                { currentTime: 8 },
+              ),
+            }))()
+            "#,
+        ),
+        r#"{"forced":{"seekTime":12.5,"playbackRate":1.5,"shouldPlay":true},"exactTolerance":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"belowTolerance":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"aboveTolerance":{"seekTime":10,"playbackRate":1,"shouldPlay":true},"invalidSidecar":{"seekTime":4,"playbackRate":1,"shouldPlay":false},"invalidVideo":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"ended":{"seekTime":null,"playbackRate":2,"shouldPlay":false}}"#
+    );
+}
+
+#[test]
+fn audio_sidecar_output_routes_only_the_selected_logical_source() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            r#"
+            (() => ({
+              direct: PlayerCore.reviewAudioOutputDecision('direct', false, 0.6),
+              sidecars: PlayerCore.reviewAudioOutputDecision('sidecars', false, 1.4),
+              muted: PlayerCore.reviewAudioOutputDecision('muted', false, -0.2),
+              userMuted: PlayerCore.reviewAudioOutputDecision('direct', true, 0.8),
+              zeroVolume: PlayerCore.reviewAudioOutputDecision('sidecars', false, 0),
+              unknown: PlayerCore.reviewAudioOutputDecision('other', false, 0.5),
+            }))()
+            "#,
+        ),
+        r#"{"direct":{"videoMuted":false,"sidecarMuted":true,"volume":0.6},"sidecars":{"videoMuted":true,"sidecarMuted":false,"volume":1},"muted":{"videoMuted":true,"sidecarMuted":true,"volume":0},"userMuted":{"videoMuted":true,"sidecarMuted":true,"volume":0.8},"zeroVolume":{"videoMuted":true,"sidecarMuted":true,"volume":0},"unknown":{"videoMuted":true,"sidecarMuted":true,"volume":0.5}}"#
     );
 }
 

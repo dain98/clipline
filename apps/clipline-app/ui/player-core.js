@@ -16,6 +16,7 @@ const PlayerCore = (() => {
   // Fine-step fallback when the clip's true frame rate is unknown.
   const DEFAULT_FINE_STEP_S = 1 / 60;
   const QUICK_TRIM_WINDOW_S = 30;
+  const AUDIO_SIDECAR_DRIFT_TOLERANCE_S = 0.1;
 
   // YouTube grammar: controls pin while paused, fade when playing and idle.
   const overlayVisible = (paused, idleMs) => paused || idleMs < OVERLAY_HIDE_MS;
@@ -254,28 +255,74 @@ const PlayerCore = (() => {
     return Math.max(0, Math.min(max, value));
   };
 
-  const sourceSwapResumeTime = (pendingSeek, currentTime, fallbackTime) => {
-    if (Number.isFinite(pendingSeek)) return Math.max(0, pendingSeek);
-    if (Number.isFinite(currentTime)) return Math.max(0, currentTime);
-    return Number.isFinite(fallbackTime) ? Math.max(0, fallbackTime) : 0;
+  const SEEK_CONFIRM_TOLERANCE_S = 0.1;
+
+  const createLogicalSeekState = () => ({
+    targetTime: null,
+    sourceGeneration: 0,
+    metadataGeneration: null,
+  });
+
+  const requestLogicalSeek = (state, time, duration) => {
+    if (!Number.isFinite(time)) return state;
+    return { ...state, targetTime: clampTime(time, duration) };
   };
 
-  const sourceRestoreDecision = (
-    assignedSourceGeneration,
-    currentSourceGeneration,
-    assignedSeekRevision,
-    currentSeekRevision,
-  ) => {
-    const ownsSource = assignedSourceGeneration === currentSourceGeneration;
+  const beginSourceAssignment = (state, sourceGeneration, resumeTime, duration) => {
+    const requested = Number.isFinite(state && state.targetTime)
+      ? state.targetTime
+      : Number.isFinite(resumeTime) ? resumeTime : 0;
     return {
-      ownsSource,
-      restorePosition: ownsSource && assignedSeekRevision === currentSeekRevision,
+      targetTime: clampTime(requested, duration),
+      sourceGeneration,
+      metadataGeneration: null,
     };
   };
 
-  const relativeSeekTarget = (currentTime, pendingSeek, delta, duration) => {
-    const base = Number.isFinite(pendingSeek)
-      ? pendingSeek
+  const metadataSeekDecision = (state, sourceGeneration, duration) => {
+    if (!state || state.sourceGeneration !== sourceGeneration) {
+      return { state, applyTime: null, confirmed: false };
+    }
+    const targetTime = Number.isFinite(state.targetTime)
+      ? clampTime(state.targetTime, duration)
+      : null;
+    const next = { ...state, targetTime, metadataGeneration: sourceGeneration };
+    return { state: next, applyTime: targetTime, confirmed: false };
+  };
+
+  const seekedDecision = (state, sourceGeneration, currentTime, duration) => {
+    if (!state
+        || state.sourceGeneration !== sourceGeneration
+        || state.metadataGeneration !== sourceGeneration
+        || !Number.isFinite(state.targetTime)
+        || !Number.isFinite(currentTime)) {
+      return { state, applyTime: null, confirmed: false };
+    }
+    const targetTime = clampTime(state.targetTime, duration);
+    if (Math.abs(currentTime - targetTime) <= SEEK_CONFIRM_TOLERANCE_S) {
+      return {
+        state: { ...state, targetTime: null },
+        applyTime: null,
+        confirmed: true,
+      };
+    }
+    return {
+      state: { ...state, targetTime },
+      applyTime: targetTime,
+      confirmed: false,
+    };
+  };
+
+  const logicalPlaybackTime = (state, currentTime, duration) => {
+    const time = Number.isFinite(state && state.targetTime)
+      ? state.targetTime
+      : Number.isFinite(currentTime) ? currentTime : 0;
+    return clampTime(time, duration);
+  };
+
+  const relativeSeekTarget = (currentTime, logicalTarget, delta, duration) => {
+    const base = Number.isFinite(logicalTarget)
+      ? logicalTarget
       : Number.isFinite(currentTime) ? currentTime : 0;
     return clampTime(base + (Number.isFinite(delta) ? delta : 0), duration);
   };
@@ -745,6 +792,57 @@ const PlayerCore = (() => {
       .filter((track) => audioTrackId(track) && !(splitOutput && isMixedOutputTrack(track)))
       .map(audioTrackId);
   };
+
+  const directPlaybackAudioTrackIds = (tracks) => {
+    const normalized = normalizedAudioTracks(tracks);
+    const streamZero = normalized.find((track) =>
+      track && track.track_index === 0 && audioTrackId(track));
+    const direct = streamZero || normalized.find((track) => audioTrackId(track));
+    return direct ? [audioTrackId(direct)] : [];
+  };
+
+  const selectedReviewAudioTrackIds = (tracks, selectedIds) => {
+    const selected = audioIdSet(selectedIds);
+    const valid = normalizedAudioTracks(tracks).map(audioTrackId).filter(Boolean);
+    return valid.filter((id) => selected.has(id));
+  };
+
+  const reviewSelectionNeedsPreview = (tracks, selectedIds) => {
+    const selected = selectedReviewAudioTrackIds(tracks, selectedIds);
+    const direct = directPlaybackAudioTrackIds(tracks);
+    return selected.length !== direct.length
+      || selected.some((id, index) => id !== direct[index]);
+  };
+
+  const reviewAudioTrackRowState = (track, tracks, selectedIds) => ({
+    checked: selectedReviewAudioTrackIds(tracks, selectedIds).includes(audioTrackId(track)),
+    indeterminate: false,
+  });
+
+  const applyReviewAudioTrackToggle = (tracks, selectedIds, trackId, checked) => {
+    const allTracks = normalizedAudioTracks(tracks);
+    const selected = new Set(selectedReviewAudioTrackIds(allTracks, selectedIds));
+    const track = allTracks.find((candidate) => audioTrackId(candidate) === String(trackId));
+    if (!track) return [...selected];
+    if (checked && isMixedOutputTrack(track) && hasSplitOutputTracks(allTracks)) {
+      for (const processTrack of processOutputTracks(allTracks)) {
+        selected.delete(audioTrackId(processTrack));
+      }
+    }
+    if (checked && isProcessOutputTrack(track) && hasSplitOutputTracks(allTracks)) {
+      for (const candidate of allTracks) {
+        if (isMixedOutputTrack(candidate)) selected.delete(audioTrackId(candidate));
+      }
+    }
+    if (checked) selected.add(audioTrackId(track));
+    else selected.delete(audioTrackId(track));
+    return selectedReviewAudioTrackIds(allTracks, [...selected]);
+  };
+
+  const reviewAudioTrackSelectedRowCount = (tracks, selectedIds) =>
+    normalizedAudioTracks(tracks).filter((track) =>
+      reviewAudioTrackRowState(track, tracks, selectedIds).checked
+    ).length;
 
   const selectionNeedsPreview = (tracks, selectedIds) => {
     const sourceIds = normalizedAudioTracks(tracks).map(audioTrackId).filter(Boolean);
@@ -1796,6 +1894,70 @@ const PlayerCore = (() => {
     return next;
   };
 
+  // --- Audio preview queue ---
+  // Serializes async preview renders: at most one in flight (active), with the
+  // latest pending request coalesced into desired. Callers never mutate requests.
+
+  const emptyAudioPreviewQueue = () => ({ active: null, desired: null, revision: 0 });
+
+  const queueAudioPreviewRequest = (state, request) => {
+    const revision = Number(state && state.revision || 0) + 1;
+    const next = { ...request, revision };
+    const active = state && state.active ? state.active : null;
+    return {
+      state: { active: active || next, desired: next, revision },
+      start: active ? null : next,
+      apply: null,
+    };
+  };
+
+  const cancelAudioPreviewRequest = (state) => ({
+    active: state && state.active ? state.active : null,
+    desired: null,
+    revision: Number(state && state.revision || 0) + 1,
+  });
+
+  const finishAudioPreviewRequest = (state, revision, succeeded) => {
+    if (!state || !state.active || state.active.revision !== revision) {
+      return { state, start: null, apply: null };
+    }
+    const desired = state.desired;
+    const apply = succeeded && desired && desired.revision === revision ? state.active : null;
+    const start = !apply && desired && desired.revision !== revision ? desired : null;
+    return {
+      state: { active: start, desired: start, revision: state.revision },
+      start,
+      apply,
+    };
+  };
+
+  const audioSidecarSyncDecision = (videoState, sidecarState, options = {}) => {
+    const videoTime = Number(videoState && videoState.currentTime);
+    const sidecarTime = Number(sidecarState && sidecarState.currentTime);
+    const validVideoTime = Number.isFinite(videoTime) && videoTime >= 0;
+    const driftRequiresSeek = !Number.isFinite(sidecarTime)
+      || Math.abs(videoTime - sidecarTime) > AUDIO_SIDECAR_DRIFT_TOLERANCE_S;
+    const rate = Number(videoState && videoState.playbackRate);
+    return {
+      seekTime: validVideoTime && (options.forceSeek === true || driftRequiresSeek)
+        ? videoTime
+        : null,
+      playbackRate: Number.isFinite(rate) && rate > 0 ? rate : 1,
+      shouldPlay: !(videoState && videoState.paused) && !(videoState && videoState.ended),
+    };
+  };
+
+  const reviewAudioOutputDecision = (mode, muted, volume) => {
+    const value = Number(volume);
+    const normalizedVolume = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 1;
+    const silenceAll = Boolean(muted) || normalizedVolume === 0;
+    return {
+      videoMuted: silenceAll || mode !== "direct",
+      sidecarMuted: silenceAll || mode !== "sidecars",
+      volume: normalizedVolume,
+    };
+  };
+
   // --- Encoder codec playback support (Settings) ---
   // Codecs the in-app review player may need an OS extension to decode.
   // H.264 always plays in WebView2; HEVC/AV1 are probed at runtime via
@@ -1845,8 +2007,12 @@ const PlayerCore = (() => {
     outputResolutionOption,
     captureSourceLabel,
     clampTime,
-    sourceSwapResumeTime,
-    sourceRestoreDecision,
+    createLogicalSeekState,
+    requestLogicalSeek,
+    beginSourceAssignment,
+    metadataSeekDecision,
+    seekedDecision,
+    logicalPlaybackTime,
     relativeSeekTarget,
     percentFor,
     timelineTime,
@@ -1878,6 +2044,12 @@ const PlayerCore = (() => {
     playActiveIndex,
     gameEventActiveIndex,
     defaultAudioTrackIds,
+    directPlaybackAudioTrackIds,
+    selectedReviewAudioTrackIds,
+    reviewSelectionNeedsPreview,
+    reviewAudioTrackRowState,
+    applyReviewAudioTrackToggle,
+    reviewAudioTrackSelectedRowCount,
     selectedAudioTrackIds,
     selectionNeedsPreview,
     audioTrackRowState,
@@ -1906,6 +2078,12 @@ const PlayerCore = (() => {
     regionForDisplay,
     clampRegionToDisplay,
     alignRegion,
+    emptyAudioPreviewQueue,
+    queueAudioPreviewRequest,
+    cancelAudioPreviewRequest,
+    finishAudioPreviewRequest,
+    audioSidecarSyncDecision,
+    reviewAudioOutputDecision,
   };
 })();
 

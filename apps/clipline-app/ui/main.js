@@ -297,24 +297,33 @@ $("settings-save").addEventListener("click", async () => {
 
 video.addEventListener("click", togglePlay);
 video.addEventListener("play", () => {
+  const current = reviewPlayheadTime();
   syncPlayState();
-  syncGameEventRail(video.currentTime || 0);
-  syncGamePlayRail(video.currentTime || 0);
+  syncGameEventRail(current);
+  syncGamePlayRail(current);
   paintTimeline();
+  syncReviewAudioSidecars();
+  refreshReviewAudioDriftTimer();
   scheduleOverlayIdleCheck();
 });
 video.addEventListener("pause", () => {
+  syncReviewAudioSidecars();
+  refreshReviewAudioDriftTimer();
   syncPlayState();
   clearOverlayIdleCheck();
   paintTimeline();
   updateOverlay();
 });
 video.addEventListener("timeupdate", () => {
-  maybeFollow(video.currentTime || 0);
+  const current = reviewPlayheadTime();
+  maybeFollow(current);
   paintTimeline();
-  syncGameEventRail(video.currentTime || 0);
-  syncGamePlayRail(video.currentTime || 0);
+  syncGameEventRail(current);
+  syncGamePlayRail(current);
+  syncReviewAudioSidecars();
 });
+video.addEventListener("seeking", () => syncReviewAudioSidecars({ forceSeek: true }));
+video.addEventListener("ratechange", () => syncReviewAudioSidecars());
 video.addEventListener("volumechange", syncVolume);
 video.addEventListener("loadedmetadata", () => {
   $("stage-note").textContent = `${video.videoWidth}x${video.videoHeight} · ${fmtDur(video.duration)}`;
@@ -327,11 +336,6 @@ video.addEventListener("loadedmetadata", () => {
     applyView({ start: zoomStart, span: zoomSpan });
   }
 });
-video.addEventListener("error", () => {
-  const e = video.error;
-  $("stage-note").textContent = `load error ${e ? e.code : "?"}`;
-});
-
 $("play-toggle").addEventListener("click", togglePlay);
 $("seek-back").addEventListener("click", () => seekBy(-5));
 $("seek-forward").addEventListener("click", () => seekBy(5));
@@ -346,8 +350,9 @@ $("rate-select").addEventListener("change", () => {
 });
 $("volume-slider").addEventListener("input", () => {
   syncRangeProgress($("volume-slider"));
-  video.volume = Number($("volume-slider").value);
-  video.muted = video.volume === 0;
+  reviewAudioVolume = Number($("volume-slider").value);
+  reviewAudioMuted = reviewAudioVolume === 0;
+  applyReviewAudioOutput();
 });
 
 $("export-clip").addEventListener("click", exportTrim);

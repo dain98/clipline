@@ -99,29 +99,242 @@ function applyRenamedClip(oldClip, result) {
 }
 
 var reviewSourceGeneration = 0;
-var reviewSeekRevision = 0;
+var reviewSourceErrorHandler = null;
+var reviewSeekState = PlayerCore.createLogicalSeekState();
+var audioPreviewQueue = PlayerCore.emptyAudioPreviewQueue();
 
-function assignReviewVideoSource(path, onLoadedMetadata = null) {
-  const assignment = {
-    sourceGeneration: ++reviewSourceGeneration,
-    seekRevision: reviewSeekRevision,
+function reviewPlayheadTime() {
+  return PlayerCore.logicalPlaybackTime(reviewSeekState, video.currentTime, clipDuration());
+}
+
+function reviewAudioTransportState() {
+  return {
+    currentTime: reviewPlayheadTime(),
+    playbackRate: video.playbackRate,
+    paused: video.paused,
+    ended: video.ended,
   };
-  if (typeof onLoadedMetadata === "function") {
-    video.addEventListener("loadedmetadata", () => onLoadedMetadata(assignment), { once: true });
+}
+
+function disposeReviewAudioSidecarSet(sidecars) {
+  for (const sidecar of sidecars || []) {
+    const audio = sidecar.element;
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
   }
+}
+
+function clearReviewAudioDriftTimer() {
+  if (!reviewAudioDriftTimer) return;
+  window.clearInterval(reviewAudioDriftTimer);
+  reviewAudioDriftTimer = 0;
+}
+
+function applyReviewAudioOutput() {
+  const decision = PlayerCore.reviewAudioOutputDecision(
+    reviewAudioMode,
+    reviewAudioMuted,
+    reviewAudioVolume,
+  );
+  video.volume = decision.volume;
+  video.muted = decision.videoMuted;
+  for (const { element: audio } of activeReviewAudioSidecars) {
+    audio.volume = decision.volume;
+    audio.muted = decision.sidecarMuted;
+  }
+}
+
+function clearReviewAudioSidecars(mode = "direct") {
+  const stale = activeReviewAudioSidecars;
+  reviewAudioSidecarGeneration += 1;
+  clearReviewAudioDriftTimer();
+  activeReviewAudioSidecars = [];
+  disposeReviewAudioSidecarSet(stale);
+  reviewAudioMode = mode;
+  applyReviewAudioOutput();
+}
+
+async function syncReviewAudioSidecarSet(sidecars, options = {}) {
+  const videoState = options.videoState || reviewAudioTransportState();
+  const playPromises = [];
+  for (const { element: audio } of sidecars || []) {
+    const decision = PlayerCore.audioSidecarSyncDecision(
+      videoState,
+      { currentTime: audio.currentTime },
+      { forceSeek: options.forceSeek === true },
+    );
+    if (decision.seekTime != null) audio.currentTime = decision.seekTime;
+    audio.playbackRate = decision.playbackRate;
+    if (decision.shouldPlay && options.allowPlayback !== false) {
+      if (audio.paused) playPromises.push(Promise.resolve(audio.play()));
+    } else if (!audio.paused) {
+      audio.pause();
+    }
+  }
+  await Promise.all(playPromises);
+}
+
+function handleReviewAudioSidecarFailure(generation, error) {
+  if (generation !== reviewAudioSidecarGeneration) return;
+  clearReviewAudioSidecars("direct");
+  if (currentClip) {
+    currentReviewAudioTrackIds = PlayerCore.directPlaybackAudioTrackIds(clipAudioTracks(currentClip));
+    currentReviewAudioKey = audioSelectionKey(currentClip, currentReviewAudioTrackIds);
+    restoreAudibleAudioSelection(`audio playback failed: ${String(error)}`);
+  }
+}
+
+function syncReviewAudioSidecars(options = {}) {
+  if (reviewAudioMode !== "sidecars" || activeReviewAudioSidecars.length === 0) return;
+  const generation = reviewAudioSidecarGeneration;
+  void syncReviewAudioSidecarSet(activeReviewAudioSidecars, options)
+    .catch((error) => handleReviewAudioSidecarFailure(generation, error));
+}
+
+function refreshReviewAudioDriftTimer() {
+  const shouldRun = reviewAudioMode === "sidecars"
+    && activeReviewAudioSidecars.length > 0
+    && !video.paused
+    && !video.ended;
+  if (!shouldRun) {
+    clearReviewAudioDriftTimer();
+    return;
+  }
+  if (!reviewAudioDriftTimer) {
+    reviewAudioDriftTimer = window.setInterval(() => syncReviewAudioSidecars(), 500);
+  }
+}
+
+async function prepareReviewAudioSidecars(sidecars, generation) {
+  const prepared = (sidecars || []).map((sidecar) => {
+    const audio = new Audio();
+    audio.preload = "auto";
+    audio.muted = true;
+    audio.volume = reviewAudioVolume;
+    audio.src = convertFileSrc(sidecar.path);
+    return {
+      audioTrackId: sidecar.audioTrackId,
+      path: sidecar.path,
+      element: audio,
+      generation,
+    };
+  });
+
+  try {
+    await Promise.all(prepared.map((sidecar) => new Promise((resolve, reject) => {
+      const { element: audio } = sidecar;
+      const stale = () => generation !== reviewAudioSidecarGeneration;
+      const ready = () => stale() ? reject(new Error("stale audio sidecar")) : resolve();
+      const failed = () => reject(new Error(`could not load audio track ${sidecar.audioTrackId}`));
+      audio.addEventListener("canplay", ready, { once: true });
+      audio.addEventListener("error", failed, { once: true });
+      audio.load();
+      if (audio.readyState >= 3) ready();
+    })));
+    if (generation !== reviewAudioSidecarGeneration) throw new Error("stale audio sidecar");
+    await syncReviewAudioSidecarSet(prepared, { forceSeek: true, allowPlayback: false });
+    return prepared;
+  } catch (error) {
+    disposeReviewAudioSidecarSet(prepared);
+    throw error;
+  }
+}
+
+async function activatePreparedReviewAudioSidecars(prepared, request) {
+  if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
+  const activationState = {
+    currentTime: reviewPlayheadTime(),
+    playbackRate: video.playbackRate,
+    paused: video.paused,
+    ended: video.ended,
+  };
+  await syncReviewAudioSidecarSet(prepared, {
+    forceSeek: true,
+    videoState: activationState,
+  });
+  if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
+
+  const finalState = {
+    currentTime: reviewPlayheadTime(),
+    playbackRate: video.playbackRate,
+    paused: video.paused,
+    ended: video.ended,
+  };
+  await syncReviewAudioSidecarSet(prepared, {
+    forceSeek: true,
+    videoState: finalState,
+  });
+  if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
+
+  const previous = activeReviewAudioSidecars;
+  for (const { element: audio } of previous) audio.muted = true;
+  activeReviewAudioSidecars = prepared;
+  reviewAudioMode = "sidecars";
+  applyReviewAudioOutput();
+  disposeReviewAudioSidecarSet(previous);
+  refreshReviewAudioDriftTimer();
+}
+
+function assignReviewVideoSource(path, options = {}) {
+  clearReviewAudioSidecars("direct");
+  clearReviewSourceErrorHandler();
+  const { resumeTime = 0, onLoadedMetadata = null } = options;
+  const assignment = { sourceGeneration: ++reviewSourceGeneration };
+  reviewSeekState = PlayerCore.beginSourceAssignment(
+    reviewSeekState,
+    assignment.sourceGeneration,
+    resumeTime,
+    clipDuration(),
+  );
+  video.addEventListener("loadedmetadata", () => {
+    const decision = PlayerCore.metadataSeekDecision(
+      reviewSeekState,
+      assignment.sourceGeneration,
+      video.duration,
+    );
+    reviewSeekState = decision.state;
+    if (assignment.sourceGeneration !== reviewSourceGeneration) return;
+    if (decision.applyTime != null) video.currentTime = decision.applyTime;
+    if (typeof onLoadedMetadata === "function") onLoadedMetadata(assignment);
+  }, { once: true });
+  reviewSourceErrorHandler = () => reportReviewSourceError(assignment);
+  video.addEventListener("error", reviewSourceErrorHandler);
   currentReviewMediaPath = path;
   video.src = convertFileSrc(path);
   return assignment;
 }
 
+function reportReviewSourceError(assignment) {
+  if (assignment.sourceGeneration !== reviewSourceGeneration) return;
+  const error = video.error;
+  $("stage-note").textContent = `load error ${error ? error.code : "?"}`;
+}
+
+function clearReviewSourceErrorHandler() {
+  if (!reviewSourceErrorHandler) return;
+  video.removeEventListener("error", reviewSourceErrorHandler);
+  reviewSourceErrorHandler = null;
+}
+
 function releaseReviewVideoSource() {
-  reviewSourceGeneration += 1;
+  clearReviewAudioSidecars("direct");
+  clearReviewSourceErrorHandler();
+  const sourceGeneration = ++reviewSourceGeneration;
+  reviewSeekState = PlayerCore.beginSourceAssignment(
+    reviewSeekState,
+    sourceGeneration,
+    reviewPlayheadTime(),
+    clipDuration(),
+  );
   video.removeAttribute("src");
   video.load();
 }
 
 function restoreVideoAfterRename(path, time, shouldResume, rate) {
   setReviewVideoSource(path, { resumeTime: time, shouldResume, rate });
+  currentReviewAudioKey = null;
+  requestSelectedAudioPreview();
 }
 
 function setReviewVideoSource(path, options = {}) {
@@ -132,94 +345,125 @@ function setReviewVideoSource(path, options = {}) {
     trimRange = null,
   } = options;
   const restore = (assignment) => {
-    const decision = PlayerCore.sourceRestoreDecision(
-      assignment.sourceGeneration,
-      reviewSourceGeneration,
-      assignment.seekRevision,
-      reviewSeekRevision,
-    );
-    if (!decision.ownsSource) return;
+    if (assignment.sourceGeneration !== reviewSourceGeneration) return;
     if (trimRange) setTrim(trimRange.start, trimRange.end);
-    if (decision.restorePosition && Number.isFinite(resumeTime)) {
-      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : resumeTime;
-      video.currentTime = Math.max(0, Math.min(resumeTime, duration));
-    }
     if (shouldResume) video.play().catch(() => syncPlayState());
     else syncPlayState();
   };
-  assignReviewVideoSource(path, restore);
+  assignReviewVideoSource(path, { resumeTime, onLoadedMetadata: restore });
   video.playbackRate = rate;
 }
 
-async function applySelectedAudioTracksToPlayback({ forceResume = false } = {}) {
-  const clip = currentClip;
-  const tracks = clipAudioTracks(clip);
-  if (!clip || !tracks.length) return;
+function cancelDesiredAudioPreview() {
+  audioPreviewQueue = PlayerCore.cancelAudioPreviewRequest(audioPreviewQueue);
+  reviewAudioSidecarGeneration += 1;
+}
 
-  const selected = selectedAudioTrackIdsForClip(clip);
-  const selectionKey = audioSelectionKey(clip, selected);
-  const resumeTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
-  const shouldResume = forceResume || (!video.paused && !video.ended);
-  const rate = video.playbackRate;
-  const trimRange = { start: trimStart, end: trimEnd };
-  if (currentReviewAudioKey === audioSelectionKey(clip, selected)) {
-    setDeckStatus(audioSelectionLabel(clip), { transient: true });
-    return;
-  }
-  if (!PlayerCore.selectionNeedsPreview(tracks, selected) && currentReviewMediaPath === clip.path) {
-    currentReviewAudioKey = selectionKey;
-    setDeckStatus(audioSelectionLabel(clip), { transient: true });
-    return;
-  }
-  const seq = ++audioPreviewSeq;
-  setDeckStatus("switching audio tracks...");
-  $("error").textContent = "";
+function restoreAudibleAudioSelection(message) {
+  selectedAudioTrackIds = new Set(currentReviewAudioTrackIds);
+  renderAudioTrackPanel();
+  setDeckStatus(message, { transient: true });
+}
+
+function previewRequestStillCurrent(request) {
+  return Boolean(currentClip)
+    && currentClip.path === request.clipPath
+    && request.selectionKey === audioSelectionKey(currentClip)
+    && request.sourceGeneration === reviewSourceGeneration
+    && request.sidecarGeneration === reviewAudioSidecarGeneration;
+}
+
+async function runAudioPreviewRequest(request) {
+  let prepared = null;
+  let error = null;
   try {
-    const path = await invoke("preview_clip_audio_tracks", {
+    const protectedPreviewPaths = activeReviewAudioSidecars.map((sidecar) => sidecar.path);
+    const sidecars = await invoke("prepare_clip_audio_sidecars", {
       request: {
-        path: clip.path,
-        audioTrackIds: selected,
+        path: request.clipPath,
+        audioTrackIds: request.trackIds,
+        protectedPreviewPaths,
       },
     });
-    if (seq !== audioPreviewSeq || !currentClip || currentClip.path !== clip.path) return;
-    const latestResumeTime = consumeSourceSwapResumeTime(resumeTime);
-    setReviewVideoSource(path, {
-      resumeTime: latestResumeTime,
-      shouldResume,
-      rate,
-      trimRange,
-    });
-    currentReviewAudioKey = selectionKey;
-    setDeckStatus(audioSelectionLabel(clip), { transient: true });
+    if (previewRequestStillCurrent(request)) {
+      prepared = await prepareReviewAudioSidecars(sidecars, request.sidecarGeneration);
+    }
   } catch (e) {
-    if (seq !== audioPreviewSeq) return;
-    const message = String(e);
-    if (message.includes("ffmpeg is not available for audio track mixing")) {
-      if (currentClip && currentClip.path === clip.path) {
-        if (currentReviewMediaPath !== clip.path) {
-          const latestResumeTime = consumeSourceSwapResumeTime(resumeTime);
-          setReviewVideoSource(clip.path, {
-            resumeTime: latestResumeTime,
-            shouldResume,
-            rate,
-            trimRange,
-          });
-        } else if (forceResume) {
-          video.play().catch(() => syncPlayState());
-        }
-      }
-      setDeckStatus("audio mix unavailable; playing source", { transient: true });
-    } else {
-      setDeckStatus("");
-      $("error").textContent = message;
-      if (forceResume && currentClip && currentClip.path === clip.path) {
-        video.play().catch(() => syncPlayState());
-      }
+    error = String(e);
+  }
+
+  const transition = PlayerCore.finishAudioPreviewRequest(
+    audioPreviewQueue,
+    request.revision,
+    error == null,
+  );
+  audioPreviewQueue = transition.state;
+
+  if (transition.apply && prepared && previewRequestStillCurrent(transition.apply)) {
+    try {
+      await activatePreparedReviewAudioSidecars(prepared, transition.apply);
+      prepared = null;
+      currentReviewAudioTrackIds = [...transition.apply.trackIds];
+      currentReviewAudioKey = transition.apply.selectionKey;
+      setDeckStatus(audioSelectionLabel(currentClip), { transient: true });
+    } catch (e) {
+      error = String(e);
     }
   }
+  if (prepared) {
+    disposeReviewAudioSidecarSet(prepared);
+    prepared = null;
+  }
+  if (error && !transition.start && previewRequestStillCurrent(request)) {
+    restoreAudibleAudioSelection(`audio preview failed: ${error}`);
+  }
+
+  if (transition.start) void runAudioPreviewRequest(transition.start);
+}
+
+function requestSelectedAudioPreview() {
+  const clip = currentClip;
+  if (!clip) return;
+  const tracks = clipAudioTracks(clip);
+  const selected = selectedAudioTrackIdsForClip(clip);
+  const selectionKey = audioSelectionKey(clip, selected);
+  if (selected.length === 0) {
+    cancelDesiredAudioPreview();
+    clearReviewAudioSidecars("muted");
+    currentReviewAudioTrackIds = [];
+    currentReviewAudioKey = selectionKey;
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
+    return;
+  }
+  if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {
+    cancelDesiredAudioPreview();
+    clearReviewAudioSidecars("direct");
+    currentReviewAudioTrackIds = [...selected];
+    currentReviewAudioKey = selectionKey;
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
+    return;
+  }
+  if (selectionKey === currentReviewAudioKey) {
+    cancelDesiredAudioPreview();
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
+    return;
+  }
+  const sidecarGeneration = ++reviewAudioSidecarGeneration;
+  const queued = PlayerCore.queueAudioPreviewRequest(audioPreviewQueue, {
+    clipPath: clip.path,
+    trackIds: [...selected],
+    selectionKey,
+    sourceGeneration: reviewSourceGeneration,
+    sidecarGeneration,
+  });
+  audioPreviewQueue = queued.state;
+  setDeckStatus("switching audio tracks...");
+  if (queued.start) void runAudioPreviewRequest(queued.start);
 }
 
 async function releaseVideoFileHandle() {
+  cancelDesiredAudioPreview();
+  clearReviewAudioSidecars("direct");
   video.pause();
   releaseReviewVideoSource();
   await afterNextPaint();
@@ -227,13 +471,16 @@ async function releaseVideoFileHandle() {
 
 function suspendReviewPlayback() {
   setClipTitleEditing(false);
-  audioPreviewSeq += 1;
+  cancelDesiredAudioPreview();
+  clearReviewAudioSidecars("direct");
   clearOverlayIdleCheck();
   video.pause();
   releaseReviewVideoSource();
+  reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = null;
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
+  currentReviewAudioTrackIds = [];
   selectedAudioTrackIds = new Set();
   resetZoom();
   syncReviewLocalActions();
@@ -271,7 +518,7 @@ async function saveClipRename(ev) {
     return;
   }
 
-  const resumeTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const resumeTime = reviewPlayheadTime();
   const shouldResume = !video.paused && !video.ended;
   const rate = video.playbackRate;
   renamePending = true;
@@ -345,7 +592,7 @@ async function submitRenameFileDialog() {
 
   const oldPath = oldClip.path;
   const isCurrent = currentClip && currentClip.path === oldPath;
-  const resumeTime = isCurrent && Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const resumeTime = isCurrent ? reviewPlayheadTime() : 0;
   const shouldResume = isCurrent && !video.paused && !video.ended;
   const rate = video.playbackRate;
   const trimRange = isCurrent ? { start: trimStart, end: trimEnd } : null;
@@ -373,7 +620,7 @@ async function submitRenameFileDialog() {
     if (isCurrent && renamed.path !== oldPath) {
       setReviewVideoSource(renamed.path, { resumeTime, shouldResume, rate, trimRange });
       currentReviewAudioKey = null;
-      await applySelectedAudioTracksToPlayback({ forceResume: shouldResume });
+      requestSelectedAudioPreview();
     } else if (mediaReleased) {
       restoreVideoAfterRename(renamed.path, resumeTime, shouldResume, rate);
     }
@@ -395,13 +642,16 @@ function openClip(clip) {
     }
     toggleSettings(false);
   }
-  audioPreviewSeq += 1;
+  cancelDesiredAudioPreview();
+  clearReviewAudioSidecars("direct");
   clearOverlayIdleCheck();
-  pendingSeek = null;
+  reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = clip;
   currentReviewAudioKey = null;
   simpleTrimMode = false;
   resetSelectedAudioTracks(clip);
+  currentReviewAudioTrackIds = PlayerCore.directPlaybackAudioTrackIds(clipAudioTracks(clip));
+  currentReviewAudioKey = audioSelectionKey(clip, currentReviewAudioTrackIds);
   $("error").textContent = "";
   setDeckStatus("");
   $("stage-note").textContent = "loading…";
@@ -412,7 +662,7 @@ function openClip(clip) {
   syncUploadClipButton();
   updateViews();
   updateStageFrame();
-  assignReviewVideoSource(clip.path);
+  assignReviewVideoSource(clip.path, { resumeTime: 0 });
   video.playbackRate = Number($("rate-select").value);
   resetZoom();
   setTrim(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
@@ -426,22 +676,26 @@ function openClip(clip) {
   renderClips();
   noteActivity();
   requestAnimationFrame(updateStageFrame);
-  if (!applyDefaultAudioSelectionIfNeeded({ shouldResume: true })) {
-    video.play().catch(() => syncPlayState());
+  video.play().catch(() => syncPlayState());
+  if (clipAudioTracks(clip).length > 0) {
+    requestSelectedAudioPreview();
   }
   syncCloudClipStatus(clip);
 }
 
 function closeReview() {
   setClipTitleEditing(false);
-  audioPreviewSeq += 1;
+  cancelDesiredAudioPreview();
+  clearReviewAudioSidecars("direct");
   clearOverlayIdleCheck();
   video.pause();
   releaseReviewVideoSource();
+  reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = null;
   simpleTrimMode = false;
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
+  currentReviewAudioTrackIds = [];
   syncReviewLocalActions();
   syncUploadClipButton();
   selectedAudioTrackIds = new Set();
@@ -681,7 +935,7 @@ function stepFrame(dir) {
 // Jump to the previous/next edit point (clip ends, trim edges, markers).
 function jumpEdit(direction) {
   const points = editPoints(clipMarkers(), trimStart, trimEnd, clipDuration());
-  const current = video.currentTime || 0;
+  const current = reviewPlayheadTime();
   const target = direction > 0 ? nextMarker(points, current) : prevMarker(points, current);
   if (target) seekTo(target.t_s);
 }
@@ -689,7 +943,7 @@ function jumpEdit(direction) {
 function paintTimeline() {
   const dur = clipDuration();
   const view = timelineView();
-  const current = dur ? clampTime(video.currentTime || 0, dur) : 0;
+  const current = dur ? clampTime(reviewPlayheadTime(), dur) : 0;
   // Off-window positions fall outside 0–100% and are clipped by the track; the
   // dimmed trim ends are clamped so they fill the visible side they cover.
   const pct = (t) => percentForView(t, view.start, view.span);
@@ -720,7 +974,7 @@ function paintOverview() {
   if (!win) return;
   const dur = clipDuration();
   const view = timelineView();
-  const current = dur ? clampTime(video.currentTime || 0, dur) : 0;
+  const current = dur ? clampTime(reviewPlayheadTime(), dur) : 0;
   const a = percentFor(trimStart, dur);
   const b = percentFor(trimEnd, dur);
   $("overview-trim").style.left = `${a}%`;
@@ -913,55 +1167,42 @@ function renderRuler() {
   });
 }
 
-// Rapid seeks (scrubbing) must not pile up: WebView2 stops painting frames
-// when a new seek lands while the previous one is in flight. Issue one seek
-// at a time and chain the latest target from the `seeked` event.
-var pendingSeek = null;
-
-function consumeSourceSwapResumeTime(fallbackTime) {
-  const resumeTime = PlayerCore.sourceSwapResumeTime(
-    pendingSeek,
-    video.currentTime,
-    fallbackTime,
-  );
-  pendingSeek = null;
-  return resumeTime;
-}
-
 function seekTo(time, options = {}) {
-  if (!currentClip) return;
+  if (!currentClip || !Number.isFinite(time)) return;
   if (!options.keepGameEventSelection) clearGameEventSelection();
   if (!options.keepGamePlaySelection) clearGamePlaySelection();
-  const t = clampTime(time, clipDuration());
-  reviewSeekRevision += 1;
-  if (video.seeking) {
-    pendingSeek = t;
-  } else {
-    pendingSeek = null;
-    video.currentTime = t;
+  reviewSeekState = PlayerCore.requestLogicalSeek(reviewSeekState, time, clipDuration());
+  const target = reviewSeekState.targetTime;
+  if (reviewSeekState.metadataGeneration === reviewSourceGeneration && !video.seeking) {
+    video.currentTime = target;
   }
-  maybeFollow(t);
+  maybeFollow(target);
   paintTimeline();
-  syncGameEventRail(t);
-  syncGamePlayRail(t, { keepGamePlaySelection: options.keepGamePlaySelection });
+  syncGameEventRail(target);
+  syncGamePlayRail(target, { keepGamePlaySelection: options.keepGamePlaySelection });
 }
 
 video.addEventListener("seeked", () => {
-  if (pendingSeek != null) {
-    const t = pendingSeek;
-    pendingSeek = null;
-    video.currentTime = t;
-  }
-  maybeFollow(video.currentTime || 0);
+  const decision = PlayerCore.seekedDecision(
+    reviewSeekState,
+    reviewSourceGeneration,
+    video.currentTime,
+    clipDuration(),
+  );
+  reviewSeekState = decision.state;
+  if (decision.applyTime != null) video.currentTime = decision.applyTime;
+  const current = reviewPlayheadTime();
+  maybeFollow(current);
   paintTimeline();
-  syncGameEventRail(video.currentTime || 0);
-  syncGamePlayRail(video.currentTime || 0);
+  syncGameEventRail(current);
+  syncGamePlayRail(current);
+  syncReviewAudioSidecars({ forceSeek: true });
 });
 
 function seekBy(delta) {
   seekTo(PlayerCore.relativeSeekTarget(
     video.currentTime,
-    pendingSeek,
+    reviewSeekState.targetTime,
     delta,
     clipDuration(),
   ));
@@ -980,8 +1221,8 @@ function syncPlayState() {
 }
 
 function syncVolume() {
-  $("mute-toggle").classList.toggle("muted", video.muted || video.volume === 0);
-  $("volume-slider").value = String(video.muted ? 0 : video.volume);
+  $("mute-toggle").classList.toggle("muted", reviewAudioMuted || reviewAudioVolume === 0);
+  $("volume-slider").value = String(reviewAudioMuted ? 0 : reviewAudioVolume);
   syncRangeProgress($("volume-slider"));
 }
 
@@ -1020,12 +1261,13 @@ function scheduleOverlayIdleCheck() {
 }
 
 function toggleMute() {
-  if (video.muted || video.volume === 0) {
-    video.muted = false;
-    if (video.volume === 0) video.volume = 1;
+  if (reviewAudioMuted || reviewAudioVolume === 0) {
+    reviewAudioMuted = false;
+    if (reviewAudioVolume === 0) reviewAudioVolume = 1;
   } else {
-    video.muted = true;
+    reviewAudioMuted = true;
   }
+  applyReviewAudioOutput();
   syncVolume();
 }
 

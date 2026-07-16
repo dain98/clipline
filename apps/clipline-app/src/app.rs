@@ -1715,7 +1715,7 @@ pub fn run() {
             crate::library::rename_clip,
             crate::library::rename_clip_file,
             crate::library::export_clip,
-            crate::library::preview_clip_audio_tracks,
+            crate::library::prepare_clip_audio_sidecars,
             crate::library::reveal_clip,
             crate::library::copy_clip_to_clipboard,
             crate::library::open_media_folder,
@@ -1766,6 +1766,9 @@ pub fn run() {
                 eprintln!(
                     "could not scope audio preview cache {audio_preview_scope_dir:?} for playback: {e}"
                 );
+            }
+            if let Err(e) = crate::library::prune_audio_preview_cache_on_startup() {
+                eprintln!("could not prune audio preview cache on startup: {e}");
             }
 
             // Keep release builds in sync with the user's setting. Debug builds

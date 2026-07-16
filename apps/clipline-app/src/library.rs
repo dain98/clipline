@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use clipline_events::{is_review_event, ClipMarker, ClipMarkers, ClipPlay};
 use clipline_mp4::{
     remux_with_mixed_audio_track, remux_with_selected_audio_tracks, trim_keyframe_aligned_file,
+    MediaTrackCounts,
 };
 use clipline_storage::storage_status as read_storage_status;
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
@@ -143,11 +144,74 @@ struct ClipMetadata {
     kind: Option<String>,
 }
 
+const AUDIO_PREVIEW_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct AudioPreviewPruneReport {
+    removed_files: usize,
+    removed_bytes: u64,
+    reusable_bytes: u64,
+}
+
 #[derive(serde::Deserialize)]
-pub struct AudioPreviewRequest {
+pub struct PrepareClipAudioSidecarsRequest {
     pub path: String,
     #[serde(default, rename = "audioTrackIds")]
     pub audio_track_ids: Vec<String>,
+    #[serde(default, rename = "protectedPreviewPaths")]
+    pub protected_preview_paths: Vec<String>,
+}
+
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct PreparedClipAudioSidecar {
+    #[serde(rename = "audioTrackId")]
+    pub audio_track_id: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedAudioTrackSidecar {
+    audio_track_id: String,
+    audio_stream_index: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AudioTrackSidecarOutput {
+    audio_track_id: String,
+    audio_stream_index: u32,
+    final_path: PathBuf,
+    tmp_path: PathBuf,
+}
+
+#[derive(Debug, Default)]
+struct PublishedAudioSidecars {
+    created_finals: Vec<PathBuf>,
+    committed: bool,
+}
+
+impl PublishedAudioSidecars {
+    fn record_created(&mut self, path: PathBuf) {
+        self.created_finals.push(path);
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PublishedAudioSidecars {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        cleanup_created_audio_sidecar_finals(&self.created_finals);
+    }
+}
+
+#[derive(Debug)]
+struct PreparedAudioSidecarBatch {
+    sidecars: Vec<PreparedClipAudioSidecar>,
+    publication: Option<PublishedAudioSidecars>,
 }
 
 #[derive(serde::Deserialize)]
@@ -670,19 +734,25 @@ pub async fn export_clip(
 }
 
 #[tauri::command]
-pub async fn preview_clip_audio_tracks<R: Runtime>(
+pub async fn prepare_clip_audio_sidecars<R: Runtime>(
     app: AppHandle<R>,
-    request: AudioPreviewRequest,
+    request: PrepareClipAudioSidecarsRequest,
     settings: tauri::State<'_, StorageSettings>,
-) -> Result<String, String> {
+) -> Result<Vec<PreparedClipAudioSidecar>, String> {
     let source = validate_clip_path(&settings, &request.path)?;
-    let path = tauri::async_runtime::spawn_blocking(move || {
-        preview_clip_audio_tracks_file(source, request.path, request.audio_track_ids)
+    let protected_preview_paths: Vec<PathBuf> = request
+        .protected_preview_paths
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let sidecars = tauri::async_runtime::spawn_blocking(move || {
+        prepare_clip_audio_sidecars_file(source, request.audio_track_ids, protected_preview_paths)
     })
     .await
-    .map_err(|e| format!("audio preview task: {e}"))??;
-    allow_audio_preview_asset(&app, Path::new(&path))?;
-    Ok(path)
+    .map_err(|e| format!("audio sidecar task: {e}"))??;
+    finalize_prepared_audio_sidecars(sidecars, |sidecar| {
+        allow_audio_preview_asset(&app, Path::new(&sidecar.path))
+    })
 }
 
 fn allow_audio_preview_asset<R: Runtime>(app: &AppHandle<R>, preview: &Path) -> Result<(), String> {
@@ -713,85 +783,295 @@ fn allow_audio_preview_asset<R: Runtime>(app: &AppHandle<R>, preview: &Path) -> 
         .map_err(|e| format!("scope audio preview {canonical_preview:?} for playback: {e}"))
 }
 
-fn preview_clip_audio_tracks_file(
+fn prepare_clip_audio_sidecars_file(
     source: PathBuf,
-    display_path: String,
     selected_audio_track_ids: Vec<String>,
-) -> Result<String, String> {
-    preview_clip_audio_tracks_file_with_mixer(
+    protected_preview_paths: Vec<PathBuf>,
+) -> Result<PreparedAudioSidecarBatch, String> {
+    prepare_clip_audio_sidecars_file_with_extractor(
         source,
-        display_path,
         selected_audio_track_ids,
+        protected_preview_paths
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect(),
         crate::settings::audio_preview_cache_dir(),
-        mix_audio_tracks_with_ffmpeg,
+        extract_audio_sidecars_with_ffmpeg,
     )
 }
 
-fn preview_clip_audio_tracks_file_with_mixer(
+fn prepare_clip_audio_sidecars_file_with_extractor(
     source: PathBuf,
-    display_path: String,
     selected_audio_track_ids: Vec<String>,
+    protected_preview_paths: Vec<String>,
     preview_dir: PathBuf,
-    mix_audio_preview: impl FnOnce(&Path, &Path, &[u32]) -> Result<(), String>,
-) -> Result<String, String> {
-    let Some(markers) =
-        util::markers_with_inferred_audio_tracks(&source, util::read_markers_raw(&source))
-    else {
-        return Ok(display_path);
-    };
-    let selected_indices = util::selected_audio_track_indices(&markers, &selected_audio_track_ids)?;
-    if selected_indices.len() == markers.audio_tracks.len() && selected_indices.len() <= 1 {
-        return Ok(display_path);
-    }
-
-    let meta = std::fs::metadata(&source).map_err(|e| format!("read clip metadata: {e}"))?;
-    std::fs::create_dir_all(&preview_dir)
-        .map_err(|e| format!("create audio preview cache: {e}"))?;
-    prune_old_audio_previews(&preview_dir);
-    let preview = audio_preview_path(&preview_dir, &source, &meta, &selected_audio_track_ids);
-    if preview.exists() {
-        return Ok(preview.display().to_string());
-    }
-
-    let source_bytes = std::fs::read(&source).map_err(|e| format!("read clip: {e}"))?;
-    if selected_indices.len() > 1 {
-        match remux_with_mixed_audio_track(&source_bytes, &selected_indices) {
-            Ok(preview_bytes) => {
-                write_audio_preview(&preview, preview_bytes)?;
-                return Ok(preview.display().to_string());
-            }
-            Err(native_error) => {
-                if let Err(external_error) = mix_audio_preview(&source, &preview, &selected_indices)
-                {
-                    return Err(format!(
-                        "{external_error}; native audio mix failed: {native_error}"
-                    ));
-                }
-                return Ok(preview.display().to_string());
-            }
-        }
-    }
-
-    let preview_bytes = remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
-        .map_err(|e| e.to_string())?;
-    write_audio_preview(&preview, preview_bytes)?;
-    Ok(preview.display().to_string())
+    extract_audio_sidecars: impl FnMut(&Path, &[AudioTrackSidecarOutput]) -> Result<(), String>,
+) -> Result<PreparedAudioSidecarBatch, String> {
+    prepare_clip_audio_sidecars_file_with_extractor_and_limits(
+        source,
+        selected_audio_track_ids,
+        protected_preview_paths,
+        preview_dir,
+        AUDIO_PREVIEW_CACHE_MAX_BYTES,
+        extract_audio_sidecars,
+    )
 }
 
-fn write_audio_preview(preview: &Path, preview_bytes: Vec<u8>) -> Result<(), String> {
-    let tmp = cached_export_tmp_path(preview)?;
-    std::fs::write(&tmp, preview_bytes).map_err(|e| format!("write audio preview: {e}"))?;
-    match std::fs::rename(&tmp, preview) {
-        Ok(()) => {}
-        Err(_) if preview.exists() => {
-            let _ = std::fs::remove_file(&tmp);
+fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
+    source: PathBuf,
+    selected_audio_track_ids: Vec<String>,
+    protected_preview_paths: Vec<String>,
+    preview_dir: PathBuf,
+    max_cache_bytes: u64,
+    mut extract_audio_sidecars: impl FnMut(&Path, &[AudioTrackSidecarOutput]) -> Result<(), String>,
+) -> Result<PreparedAudioSidecarBatch, String> {
+    let resolved_tracks = resolve_audio_sidecar_tracks(&source, &selected_audio_track_ids)?;
+    let source_meta = std::fs::metadata(&source).map_err(|e| format!("read clip metadata: {e}"))?;
+    std::fs::create_dir_all(&preview_dir)
+        .map_err(|e| format!("create audio preview cache: {e}"))?;
+
+    let currently_active: Vec<PathBuf> = protected_preview_paths
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let requested_final_paths: Vec<PathBuf> = resolved_tracks
+        .iter()
+        .map(|track| {
+            audio_track_sidecar_path(&preview_dir, &source, &source_meta, &track.audio_track_id)
+        })
+        .collect();
+    let protected_before_lookup = [
+        currently_active.as_slice(),
+        requested_final_paths.as_slice(),
+    ]
+    .concat();
+    prune_audio_preview_cache_logged_with_limit(
+        &preview_dir,
+        &protected_before_lookup,
+        max_cache_bytes,
+    );
+
+    let mut ordered = Vec::with_capacity(resolved_tracks.len());
+    let mut missing_outputs = Vec::new();
+    for (track, final_path) in resolved_tracks.iter().zip(requested_final_paths.iter()) {
+        if final_path.exists() {
+            match validate_audio_sidecar_file(final_path) {
+                Ok(()) => {
+                    if let Err(error) = touch_audio_preview(final_path) {
+                        eprintln!("{error}");
+                    }
+                    ordered.push(Some(PreparedClipAudioSidecar {
+                        audio_track_id: track.audio_track_id.clone(),
+                        path: final_path.display().to_string(),
+                    }));
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    let _ = std::fs::remove_file(final_path);
+                }
+            }
         }
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!("finalize audio preview: {e}"));
+
+        missing_outputs.push(AudioTrackSidecarOutput {
+            audio_track_id: track.audio_track_id.clone(),
+            audio_stream_index: track.audio_stream_index,
+            final_path: final_path.clone(),
+            tmp_path: cached_export_tmp_path(final_path)?,
+        });
+        ordered.push(None);
+    }
+
+    let mut publication = None;
+
+    if !missing_outputs.is_empty() {
+        for output in &missing_outputs {
+            let _ = std::fs::remove_file(&output.tmp_path);
         }
+        if let Err(error) = extract_audio_sidecars(&source, &missing_outputs) {
+            cleanup_audio_sidecar_temps(&missing_outputs);
+            return Err(error);
+        }
+        publication = Some(validate_and_publish_audio_sidecars(&missing_outputs)?);
+    }
+
+    for ((prepared, track), final_path) in ordered
+        .iter_mut()
+        .zip(resolved_tracks.iter())
+        .zip(requested_final_paths.iter())
+    {
+        if prepared.is_some() {
+            continue;
+        }
+        validate_audio_sidecar_file(final_path)?;
+        *prepared = Some(PreparedClipAudioSidecar {
+            audio_track_id: track.audio_track_id.clone(),
+            path: final_path.display().to_string(),
+        });
+    }
+    let ordered = ordered
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "audio sidecar preparation left an unresolved track".to_string())?;
+    let protected_after: Vec<PathBuf> = ordered
+        .iter()
+        .map(|sidecar| PathBuf::from(&sidecar.path))
+        .collect();
+    let protected = [currently_active.as_slice(), protected_after.as_slice()].concat();
+    prune_audio_preview_cache_logged_with_limit(&preview_dir, &protected, max_cache_bytes);
+    Ok(PreparedAudioSidecarBatch {
+        sidecars: ordered,
+        publication,
+    })
+}
+
+fn finalize_prepared_audio_sidecars(
+    mut batch: PreparedAudioSidecarBatch,
+    mut allow_audio_sidecar: impl FnMut(&PreparedClipAudioSidecar) -> Result<(), String>,
+) -> Result<Vec<PreparedClipAudioSidecar>, String> {
+    for sidecar in &batch.sidecars {
+        allow_audio_sidecar(sidecar)?;
+    }
+    if let Some(publication) = batch.publication.take() {
+        publication.commit();
+    }
+    Ok(batch.sidecars)
+}
+
+fn prune_audio_preview_cache_logged_with_limit(
+    preview_dir: &Path,
+    protected: &[PathBuf],
+    max_cache_bytes: u64,
+) {
+    if let Err(error) = prune_audio_preview_cache(preview_dir, protected, max_cache_bytes) {
+        eprintln!("could not prune audio preview cache {preview_dir:?}: {error}");
+    }
+}
+
+fn resolve_audio_sidecar_tracks(
+    source: &Path,
+    selected_audio_track_ids: &[String],
+) -> Result<Vec<ResolvedAudioTrackSidecar>, String> {
+    if selected_audio_track_ids.is_empty() {
+        return Err("audio track selection must not be empty".into());
+    }
+    let Some(markers) =
+        util::markers_with_inferred_audio_tracks(source, util::read_markers_raw(source))
+    else {
+        return Err("this clip has no selectable audio track metadata".into());
+    };
+    if markers.audio_tracks.is_empty() {
+        return Err("this clip has no selectable audio track metadata".into());
+    }
+    let _ = util::selected_audio_track_indices(&markers, selected_audio_track_ids)?;
+    let selected_id_set: std::collections::BTreeSet<&str> = selected_audio_track_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    Ok(markers
+        .audio_tracks
+        .iter()
+        .filter(|track| selected_id_set.contains(track.id.as_str()))
+        .map(|track| ResolvedAudioTrackSidecar {
+            audio_track_id: track.id.clone(),
+            audio_stream_index: track.track_index,
+        })
+        .collect())
+}
+
+fn audio_track_sidecar_path(
+    preview_dir: &Path,
+    source: &Path,
+    meta: &std::fs::Metadata,
+    audio_track_id: &str,
+) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    "audio-track-sidecar-v1".hash(&mut hasher);
+    source.display().to_string().hash(&mut hasher);
+    meta.len().hash(&mut hasher);
+    meta.modified().ok().hash(&mut hasher);
+    audio_track_id.hash(&mut hasher);
+    preview_dir.join(format!("audio-preview-{:016x}.mp4", hasher.finish()))
+}
+
+fn validate_audio_sidecar_file(path: &Path) -> Result<(), String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("read audio sidecar metadata {path:?}: {error}"))?;
+    if metadata.len() == 0 {
+        return Err(format!("audio sidecar {path:?} was empty"));
+    }
+    let counts = clipline_mp4::media_track_counts_file(path)
+        .map_err(|error| format!("inspect audio sidecar {path:?}: {error}"))?;
+    if counts != (MediaTrackCounts { video: 0, audio: 1 }) {
+        return Err(format!(
+            "audio sidecar {path:?} had unexpected tracks: video={}, audio={}",
+            counts.video, counts.audio
+        ));
     }
     Ok(())
+}
+
+fn validate_and_publish_audio_sidecars(
+    outputs: &[AudioTrackSidecarOutput],
+) -> Result<PublishedAudioSidecars, String> {
+    let result = (|| {
+        for output in outputs {
+            validate_audio_sidecar_file(&output.tmp_path)?;
+        }
+
+        let mut published = PublishedAudioSidecars::default();
+        for output in outputs {
+            if output.final_path.exists() {
+                if let Err(error) = validate_audio_sidecar_file(&output.final_path) {
+                    return Err(format!(
+                        "finalize audio sidecar collision winner {path:?}: {error}",
+                        path = output.final_path
+                    ));
+                }
+                let _ = std::fs::remove_file(&output.tmp_path);
+                continue;
+            }
+
+            match std::fs::rename(&output.tmp_path, &output.final_path) {
+                Ok(()) => {
+                    published.record_created(output.final_path.clone());
+                }
+                Err(_) if output.final_path.exists() => {
+                    if let Err(error) = validate_audio_sidecar_file(&output.final_path) {
+                        return Err(format!(
+                            "finalize audio sidecar collision winner {path:?}: {error}",
+                            path = output.final_path
+                        ));
+                    }
+                    let _ = std::fs::remove_file(&output.tmp_path);
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "finalize audio sidecar {tmp:?} -> {final_path:?}: {error}",
+                        tmp = output.tmp_path,
+                        final_path = output.final_path
+                    ));
+                }
+            }
+        }
+        Ok(published)
+    })();
+    if result.is_err() {
+        cleanup_audio_sidecar_temps(outputs);
+    }
+    result
+}
+
+fn cleanup_audio_sidecar_temps(outputs: &[AudioTrackSidecarOutput]) {
+    for output in outputs {
+        let _ = std::fs::remove_file(&output.tmp_path);
+    }
+}
+
+fn cleanup_created_audio_sidecar_finals(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -948,88 +1228,52 @@ fn is_cached_mp4_file(path: &Path) -> bool {
             .is_some_and(|name| name.ends_with(".mp4.tmp"))
 }
 
-pub(crate) fn mix_audio_tracks_with_ffmpeg(
+fn extract_audio_sidecars_with_ffmpeg(
     source: &Path,
-    output_path: &Path,
-    selected_audio_track_indices: &[u32],
+    outputs: &[AudioTrackSidecarOutput],
 ) -> Result<(), String> {
     let ffmpeg = clipline_capture::ffmpeg::locate()
-        .ok_or_else(|| "ffmpeg is not available for audio track mixing".to_string())?;
-    let filter = ffmpeg_audio_mix_filter(selected_audio_track_indices)?;
-    let tmp = cached_export_tmp_path(output_path)?;
-    let _ = std::fs::remove_file(&tmp);
-
+        .ok_or_else(|| "ffmpeg is not available for audio sidecar extraction".to_string())?;
     let mut cmd = Command::new(ffmpeg);
     suppress_console(&mut cmd);
     let output = cmd
-        .args([
-            "-hide_banner",
-            "-nostdin",
-            "-y",
-            "-fflags",
-            "+bitexact",
-            "-i",
-        ])
-        .arg(source)
-        .args(["-filter_complex", &filter])
-        .args([
-            "-map",
-            "0:v:0",
-            "-map",
-            "[aout]",
-            "-map_metadata",
-            "-1",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "libopus",
-            "-b:a",
-            "160k",
-            "-fflags",
-            "+bitexact",
-            "-flags",
-            "+bitexact",
-            "-bitexact",
-            "-f",
-            "mp4",
-        ])
-        .arg(&tmp)
+        .args(ffmpeg_audio_sidecar_args(source, outputs))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| format!("spawn ffmpeg audio mix: {e}"))?;
+        .map_err(|e| format!("spawn ffmpeg audio sidecar extraction: {e}"))?;
     if !output.status.success() {
-        let _ = std::fs::remove_file(&tmp);
+        cleanup_audio_sidecar_temps(outputs);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffmpeg audio mix failed: {stderr}"));
+        return Err(format!("ffmpeg audio sidecar extraction failed: {stderr}"));
     }
-    match std::fs::rename(&tmp, output_path) {
-        Ok(()) => Ok(()),
-        Err(_) if output_path.exists() => {
-            let _ = std::fs::remove_file(&tmp);
-            Ok(())
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(format!("finalize audio mix: {e}"))
-        }
-    }
+    Ok(())
 }
 
-fn ffmpeg_audio_mix_filter(selected_audio_track_indices: &[u32]) -> Result<String, String> {
-    if selected_audio_track_indices.is_empty() {
-        return Err("audio mix requires at least one audio stream".into());
+fn ffmpeg_audio_sidecar_args(source: &Path, outputs: &[AudioTrackSidecarOutput]) -> Vec<String> {
+    let mut args = vec![
+        "-hide_banner".to_string(),
+        "-nostdin".to_string(),
+        "-y".to_string(),
+        "-i".to_string(),
+        source.display().to_string(),
+    ];
+    for output in outputs {
+        args.extend([
+            "-map".to_string(),
+            format!("0:a:{}", output.audio_stream_index),
+            "-vn".to_string(),
+            "-map_metadata".to_string(),
+            "-1".to_string(),
+            "-c:a".to_string(),
+            "copy".to_string(),
+            "-f".to_string(),
+            "mp4".to_string(),
+            output.tmp_path.display().to_string(),
+        ]);
     }
-    let mut filter = String::new();
-    for index in selected_audio_track_indices {
-        filter.push_str(&format!("[0:a:{index}]"));
-    }
-    filter.push_str(&format!(
-        "amix=inputs={}:duration=longest:normalize=0[aout]",
-        selected_audio_track_indices.len()
-    ));
-    Ok(filter)
+    args
 }
 
 pub(crate) use clipline_capture::ffmpeg::suppress_console;
@@ -1087,26 +1331,109 @@ fn export_clip_file(
     })
 }
 
-fn audio_preview_path(
-    preview_dir: &Path,
-    source: &Path,
-    meta: &std::fs::Metadata,
-    selected_audio_track_ids: &[String],
-) -> PathBuf {
-    let mut hasher = DefaultHasher::new();
-    "audio-preview-mix-v4".hash(&mut hasher);
-    source.display().to_string().hash(&mut hasher);
-    meta.len().hash(&mut hasher);
-    meta.modified().ok().hash(&mut hasher);
-    for id in selected_audio_track_ids {
-        id.hash(&mut hasher);
-    }
-    preview_dir.join(format!("audio-preview-{:016x}.mp4", hasher.finish()))
+fn is_audio_preview_mp4(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("audio-preview-") && name.ends_with(".mp4"))
 }
 
-fn prune_old_audio_previews(preview_dir: &Path) {
-    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-    prune_cached_mp4_files(preview_dir, MAX_AGE);
+fn is_audio_preview_partial(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("audio-preview-") && name.ends_with(".tmp"))
+}
+
+#[derive(Debug)]
+struct CachedAudioPreview {
+    path: PathBuf,
+    len: u64,
+    modified: std::time::SystemTime,
+}
+
+fn audio_preview_path_is_protected(path: &Path, protected: &[PathBuf]) -> bool {
+    protected.iter().any(|candidate| {
+        path == candidate
+            || std::fs::canonicalize(path)
+                .ok()
+                .zip(std::fs::canonicalize(candidate).ok())
+                .is_some_and(|(left, right)| left == right)
+    })
+}
+
+fn prune_audio_preview_cache(
+    dir: &Path,
+    protected: &[PathBuf],
+    max_bytes: u64,
+) -> Result<AudioPreviewPruneReport, String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(format!("read audio preview cache {dir:?}: {error}")),
+    };
+    let mut report = AudioPreviewPruneReport::default();
+    let mut total_bytes = 0_u64;
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read audio preview cache entry: {error}"))?;
+        let path = entry.path();
+        if is_audio_preview_partial(&path) {
+            let len = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            if std::fs::remove_file(&path).is_ok() {
+                report.removed_files += 1;
+                report.removed_bytes = report.removed_bytes.saturating_add(len);
+            }
+            continue;
+        }
+        if !is_audio_preview_mp4(&path) {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("read audio preview metadata {path:?}: {error}"))?;
+        let len = metadata.len();
+        total_bytes = total_bytes.saturating_add(len);
+        if audio_preview_path_is_protected(&path, protected) {
+            continue;
+        }
+        report.reusable_bytes = report.reusable_bytes.saturating_add(len);
+        candidates.push(CachedAudioPreview {
+            path,
+            len,
+            modified: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+        });
+    }
+    candidates.sort_by(|left, right| {
+        left.modified
+            .cmp(&right.modified)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    for candidate in candidates {
+        if total_bytes <= max_bytes {
+            break;
+        }
+        if std::fs::remove_file(&candidate.path).is_ok() {
+            report.removed_files += 1;
+            report.removed_bytes = report.removed_bytes.saturating_add(candidate.len);
+            report.reusable_bytes = report.reusable_bytes.saturating_sub(candidate.len);
+            total_bytes = total_bytes.saturating_sub(candidate.len);
+        }
+    }
+    Ok(report)
+}
+
+fn touch_audio_preview(path: &Path) -> Result<(), String> {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+        .map_err(|error| format!("refresh audio preview recency {path:?}: {error}"))
+}
+
+pub(crate) fn prune_audio_preview_cache_on_startup() -> Result<AudioPreviewPruneReport, String> {
+    let dir = crate::settings::audio_preview_cache_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create audio preview cache {dir:?}: {e}"))?;
+    prune_audio_preview_cache(&dir, &[], AUDIO_PREVIEW_CACHE_MAX_BYTES)
 }
 
 #[tauri::command]
@@ -1948,211 +2275,6 @@ mod tests {
     }
 
     #[test]
-    fn ffmpeg_audio_mix_filter_targets_selected_audio_streams() {
-        let filter = ffmpeg_audio_mix_filter(&[0, 2, 5]).unwrap();
-
-        assert_eq!(
-            filter,
-            "[0:a:0][0:a:2][0:a:5]amix=inputs=3:duration=longest:normalize=0[aout]"
-        );
-    }
-
-    #[test]
-    fn ffmpeg_audio_mix_filter_requires_at_least_one_stream() {
-        let err = ffmpeg_audio_mix_filter(&[]).expect_err("empty selection is invalid");
-
-        assert!(err.contains("at least one"), "{err}");
-    }
-
-    #[test]
-    fn audio_mix_ffmpeg_command_requests_deterministic_mp4_output() {
-        let source = include_str!("library.rs");
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source before tests");
-
-        assert!(production_source.contains("\"-fflags\""));
-        assert!(production_source.contains("\"+bitexact\""));
-        assert!(production_source.contains("\"-map_metadata\""));
-        assert!(production_source.contains("\"-flags\""));
-        assert!(production_source.contains("\"-bitexact\""));
-    }
-
-    #[test]
-    fn all_audio_tracks_selected_mixes_preview_when_source_has_multiple_tracks() {
-        let dir = TestDir::new("clipline-library", "audio-preview-all-mixed");
-        let source = dir.path().join("clip.mp4");
-        std::fs::write(&source, b"not an mp4").unwrap();
-        let markers = ClipMarkers {
-            recording_start_s: 0.0,
-            duration_s: 10.0,
-            player_summary: None,
-            audio_tracks: vec![
-                ClipAudioTrack {
-                    id: "output".into(),
-                    track_index: 0,
-                    label: "Output Audio".into(),
-                    kind: Some("output".into()),
-                },
-                ClipAudioTrack {
-                    id: "process:1".into(),
-                    track_index: 1,
-                    label: "Game".into(),
-                    kind: Some("process_output".into()),
-                },
-                ClipAudioTrack {
-                    id: "microphone".into(),
-                    track_index: 2,
-                    label: "Microphone".into(),
-                    kind: Some("microphone".into()),
-                },
-            ],
-            plays: Vec::new(),
-            markers: Vec::new(),
-        };
-        std::fs::write(
-            source.with_extension("markers.json"),
-            serde_json::to_string(&markers).unwrap(),
-        )
-        .unwrap();
-
-        let preview_dir = dir.path().join("previews");
-        let mixed_preview = std::cell::RefCell::new(None);
-        let source_for_mixer = source.clone();
-        let path = preview_clip_audio_tracks_file_with_mixer(
-            source.clone(),
-            source.display().to_string(),
-            vec!["output".into(), "process:1".into(), "microphone".into()],
-            preview_dir.clone(),
-            |input, output, selected| {
-                assert_eq!(input, source_for_mixer.as_path());
-                assert_eq!(selected, &[0, 1, 2]);
-                assert_eq!(output.parent(), Some(preview_dir.as_path()));
-                mixed_preview.replace(Some(output.to_path_buf()));
-                Ok(())
-            },
-        )
-        .expect("all selected should get an audible preview mix");
-
-        assert_eq!(
-            path,
-            mixed_preview
-                .borrow()
-                .as_ref()
-                .expect("mixer output path captured")
-                .display()
-                .to_string()
-        );
-    }
-
-    #[test]
-    fn partial_multi_track_preview_returns_mix_failure_instead_of_unmixed_mp4() {
-        let dir = TestDir::new("clipline-library", "audio-preview-mix-failure");
-        let source = dir.path().join("clip.mp4");
-        std::fs::write(&source, b"not an mp4").unwrap();
-        let markers = ClipMarkers {
-            recording_start_s: 0.0,
-            duration_s: 10.0,
-            player_summary: None,
-            audio_tracks: vec![
-                ClipAudioTrack {
-                    id: "output".into(),
-                    track_index: 0,
-                    label: "Output Audio".into(),
-                    kind: Some("output".into()),
-                },
-                ClipAudioTrack {
-                    id: "process:1".into(),
-                    track_index: 1,
-                    label: "Game".into(),
-                    kind: Some("process_output".into()),
-                },
-                ClipAudioTrack {
-                    id: "microphone".into(),
-                    track_index: 2,
-                    label: "Microphone".into(),
-                    kind: Some("microphone".into()),
-                },
-            ],
-            plays: Vec::new(),
-            markers: Vec::new(),
-        };
-        std::fs::write(
-            source.with_extension("markers.json"),
-            serde_json::to_string(&markers).unwrap(),
-        )
-        .unwrap();
-
-        let err = preview_clip_audio_tracks_file_with_mixer(
-            source.clone(),
-            source.display().to_string(),
-            vec!["process:1".into(), "microphone".into()],
-            dir.path().join("previews"),
-            |_, _, _| Err("forced mix failure".into()),
-        )
-        .expect_err("multi-track preview must require a mixed preview");
-
-        assert!(err.contains("forced mix failure"), "{err}");
-    }
-
-    #[test]
-    fn multi_track_review_preview_uses_native_mixer_without_ffmpeg() {
-        let dir = TestDir::new("clipline-library", "audio-preview-native-mix");
-        let source = dir.path().join("clip.mp4");
-        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
-        let markers = ClipMarkers {
-            recording_start_s: 0.0,
-            duration_s: 1.0,
-            player_summary: None,
-            audio_tracks: vec![
-                ClipAudioTrack {
-                    id: "output".into(),
-                    track_index: 0,
-                    label: "Output Audio".into(),
-                    kind: Some("output".into()),
-                },
-                ClipAudioTrack {
-                    id: "microphone".into(),
-                    track_index: 1,
-                    label: "Microphone".into(),
-                    kind: Some("microphone".into()),
-                },
-            ],
-            plays: Vec::new(),
-            markers: Vec::new(),
-        };
-        std::fs::write(
-            source.with_extension("markers.json"),
-            serde_json::to_string(&markers).unwrap(),
-        )
-        .unwrap();
-
-        let preview_dir = dir.path().join("previews");
-        let display_path = source.display().to_string();
-        let path = preview_clip_audio_tracks_file_with_mixer(
-            source,
-            display_path,
-            vec!["output".into(), "microphone".into()],
-            preview_dir.clone(),
-            |_, _, _| Err("external mixer should not be required".into()),
-        )
-        .expect("Clipline-authored output+mic preview should use the native mixer");
-        let preview = PathBuf::from(path);
-
-        assert_eq!(preview.parent(), Some(preview_dir.as_path()));
-        let preview_bytes = std::fs::read(preview).unwrap();
-        remux_with_selected_audio_tracks(&preview_bytes, &[0]).expect("mixed audio track exists");
-        let err = remux_with_selected_audio_tracks(&preview_bytes, &[1])
-            .expect_err("mixed preview should have exactly one audio track");
-        assert!(
-            err.to_string()
-                .contains("outside the clip's 1 audio tracks"),
-            "{err}"
-        );
-    }
-
-    #[test]
     fn selected_audio_track_indices_follow_sidecar_order_and_reject_unknown_ids() {
         let markers = ClipMarkers {
             recording_start_s: 0.0,
@@ -2286,6 +2408,669 @@ mod tests {
     }
 
     #[test]
+    fn audio_preview_cache_prunes_lru_and_partials_but_preserves_protected_file() {
+        let dir = TestDir::new("clipline-library", "audio-preview-cache-lru");
+        let oldest = dir.path().join("audio-preview-0001.mp4");
+        let newest = dir.path().join("audio-preview-0002.mp4");
+        let protected = dir.path().join("audio-preview-0003.mp4");
+        let partial = dir.path().join("audio-preview-0004.mp4.1.2.tmp");
+        std::fs::write(&oldest, [0_u8; 6]).unwrap();
+        std::fs::write(&newest, [0_u8; 6]).unwrap();
+        std::fs::write(&protected, [0_u8; 20]).unwrap();
+        std::fs::write(&partial, [0_u8; 3]).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&oldest)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&newest)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2))
+            .unwrap();
+
+        let report =
+            prune_audio_preview_cache(dir.path(), std::slice::from_ref(&protected), 26).unwrap();
+
+        assert!(!oldest.exists());
+        assert!(newest.exists());
+        assert!(protected.exists());
+        assert!(!partial.exists());
+        assert_eq!(report.reusable_bytes, 6);
+    }
+
+    #[test]
+    fn audio_preview_cache_keeps_oversized_protected_and_evicts_all_reusable() {
+        let dir = TestDir::new(
+            "clipline-library",
+            "audio-preview-cache-oversized-protected",
+        );
+        let oldest = dir.path().join("audio-preview-0001.mp4");
+        let newest = dir.path().join("audio-preview-0002.mp4");
+        let protected = dir.path().join("audio-preview-0003.mp4");
+        std::fs::write(&oldest, [0_u8; 6]).unwrap();
+        std::fs::write(&newest, [0_u8; 6]).unwrap();
+        std::fs::write(&protected, [0_u8; 20]).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&oldest)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&newest)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2))
+            .unwrap();
+
+        let report =
+            prune_audio_preview_cache(dir.path(), std::slice::from_ref(&protected), 10).unwrap();
+
+        assert!(!oldest.exists());
+        assert!(!newest.exists());
+        assert!(protected.exists());
+        assert_eq!(report.reusable_bytes, 0);
+    }
+
+    #[test]
+    fn audio_preview_cache_hit_refreshes_recency() {
+        let dir = TestDir::new("clipline-library", "audio-preview-cache-touch");
+        let preview = dir.path().join("audio-preview-abcd.mp4");
+        std::fs::write(&preview, b"preview").unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(&preview)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        touch_audio_preview(&preview).unwrap();
+
+        assert!(std::fs::metadata(&preview).unwrap().modified().unwrap() > old);
+    }
+
+    #[test]
+    fn audio_sidecar_uncached_tracks_extract_once_and_return_marker_ordered_paths() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-ordered");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
+        write_audio_track_markers(
+            &source,
+            vec![
+                ("microphone", 1, "Microphone"),
+                ("output", 0, "Output Audio"),
+            ],
+        );
+        let preview_dir = dir.path().join("previews");
+        let calls = std::cell::RefCell::new(Vec::<Vec<(u32, PathBuf, PathBuf)>>::new());
+
+        let sidecars = finalize_prepared_audio_sidecars(
+            prepare_clip_audio_sidecars_file_with_extractor(
+                source.clone(),
+                vec!["output".into(), "microphone".into()],
+                Vec::new(),
+                preview_dir.clone(),
+                |input, outputs| {
+                    assert_eq!(input, source.as_path());
+                    calls.borrow_mut().push(
+                        outputs
+                            .iter()
+                            .map(|output| {
+                                (
+                                    output.audio_stream_index,
+                                    output.final_path.clone(),
+                                    output.tmp_path.clone(),
+                                )
+                            })
+                            .collect(),
+                    );
+                    for output in outputs {
+                        let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
+                        std::fs::write(&output.tmp_path, bytes).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+            .expect("uncached sidecars should succeed"),
+            |_| Ok(()),
+        )
+        .expect("successful sidecars should commit");
+
+        assert_eq!(calls.borrow().len(), 1);
+        assert_eq!(sidecars.len(), 2);
+        assert_eq!(sidecars[0].audio_track_id, "microphone");
+        assert_eq!(sidecars[1].audio_track_id, "output");
+        assert_eq!(
+            calls.borrow()[0]
+                .iter()
+                .map(|(index, _, _)| *index)
+                .collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+        assert!(Path::new(&sidecars[0].path).exists());
+        assert!(Path::new(&sidecars[1].path).exists());
+    }
+
+    #[test]
+    fn audio_sidecar_outputs_validate_as_audio_only_and_smaller_than_source() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-audio-only");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
+        write_audio_track_markers(
+            &source,
+            vec![
+                ("output", 0, "Output Audio"),
+                ("microphone", 1, "Microphone"),
+            ],
+        );
+
+        let sidecars = finalize_prepared_audio_sidecars(
+            prepare_clip_audio_sidecars_file_with_extractor(
+                source.clone(),
+                vec!["output".into(), "microphone".into()],
+                Vec::new(),
+                dir.path().join("previews"),
+                |_, outputs| {
+                    for output in outputs {
+                        let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
+                        std::fs::write(&output.tmp_path, bytes).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap(),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        let source_len = std::fs::metadata(&source).unwrap().len();
+        for sidecar in sidecars {
+            let bytes = std::fs::read(&sidecar.path).unwrap();
+            assert_eq!(
+                clipline_mp4::media_track_counts(&bytes).unwrap(),
+                clipline_mp4::MediaTrackCounts { video: 0, audio: 1 }
+            );
+            assert!(std::fs::metadata(&sidecar.path).unwrap().len() < source_len);
+        }
+    }
+
+    #[test]
+    fn audio_sidecar_reuses_existing_tracks_and_extracts_only_missing_track() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-reuse");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
+        write_audio_track_markers(
+            &source,
+            vec![
+                ("output", 0, "Output Audio"),
+                ("microphone", 1, "Microphone"),
+                ("discord", 1, "Discord"),
+            ],
+        );
+        let preview_dir = dir.path().join("previews");
+        let calls = std::cell::RefCell::new(Vec::<Vec<u32>>::new());
+
+        let first = finalize_prepared_audio_sidecars(
+            prepare_clip_audio_sidecars_file_with_extractor(
+                source.clone(),
+                vec!["output".into()],
+                Vec::new(),
+                preview_dir.clone(),
+                |_, outputs| {
+                    calls.borrow_mut().push(
+                        outputs
+                            .iter()
+                            .map(|output| output.audio_stream_index)
+                            .collect(),
+                    );
+                    for output in outputs {
+                        let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
+                        std::fs::write(&output.tmp_path, bytes).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap(),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        let second = finalize_prepared_audio_sidecars(
+            prepare_clip_audio_sidecars_file_with_extractor(
+                source,
+                vec!["output".into(), "microphone".into()],
+                Vec::new(),
+                preview_dir,
+                |_, outputs| {
+                    calls.borrow_mut().push(
+                        outputs
+                            .iter()
+                            .map(|output| output.audio_stream_index)
+                            .collect(),
+                    );
+                    for output in outputs {
+                        let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
+                        std::fs::write(&output.tmp_path, bytes).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap(),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(&*calls.borrow(), &[vec![0], vec![1]]);
+        assert_eq!(first[0].path, second[0].path);
+    }
+
+    #[test]
+    fn audio_sidecar_key_is_per_track_not_selection_combination() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-key");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
+        write_audio_track_markers(
+            &source,
+            vec![
+                ("output", 0, "Output Audio"),
+                ("microphone", 1, "Microphone"),
+            ],
+        );
+        let preview_dir = dir.path().join("previews");
+        let meta = std::fs::metadata(&source).unwrap();
+
+        let output_only = audio_track_sidecar_path(&preview_dir, &source, &meta, "output");
+        let output_with_other = audio_track_sidecar_path(&preview_dir, &source, &meta, "output");
+        let mic = audio_track_sidecar_path(&preview_dir, &source, &meta, "microphone");
+
+        assert_eq!(output_only, output_with_other);
+        assert_ne!(output_only, mic);
+    }
+
+    #[test]
+    fn audio_sidecar_prune_protects_active_and_returned_paths() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-prune-protect");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
+        write_audio_track_markers(
+            &source,
+            vec![
+                ("output", 0, "Output Audio"),
+                ("microphone", 1, "Microphone"),
+            ],
+        );
+        let preview_dir = dir.path().join("previews");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        let active = preview_dir.join("audio-preview-active.mp4");
+        let stale = preview_dir.join("audio-preview-stale.mp4");
+        std::fs::write(&active, [0_u8; 40]).unwrap();
+        std::fs::write(&stale, [0_u8; 40]).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH)
+            .unwrap();
+
+        let sidecars = finalize_prepared_audio_sidecars(
+            prepare_clip_audio_sidecars_file_with_extractor_and_limits(
+                source,
+                vec!["output".into(), "microphone".into()],
+                vec![active.display().to_string()],
+                preview_dir.clone(),
+                120,
+                |_, outputs| {
+                    for output in outputs {
+                        let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
+                        std::fs::write(&output.tmp_path, bytes).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap(),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert!(
+            active.exists(),
+            "frontend-protected active sidecar must survive"
+        );
+        assert!(
+            !stale.exists(),
+            "unprotected stale cache entry should be pruned"
+        );
+        for sidecar in sidecars {
+            assert!(
+                Path::new(&sidecar.path).exists(),
+                "returned sidecar must survive prune"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_sidecar_requested_cache_hit_survives_initial_prune_without_extraction() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-requested-hit");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
+        write_audio_track_markers(&source, vec![("output", 0, "Output Audio")]);
+
+        let preview_dir = dir.path().join("previews");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        let meta = std::fs::metadata(&source).unwrap();
+        let requested_hit = audio_track_sidecar_path(&preview_dir, &source, &meta, "output");
+        std::fs::write(&requested_hit, audio_only_opus_mp4_for_stream(0)).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&requested_hit)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+
+        let stale = preview_dir.join("audio-preview-stale.mp4");
+        std::fs::write(&stale, [0_u8; 40]).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2))
+            .unwrap();
+
+        let sidecars = finalize_prepared_audio_sidecars(
+            prepare_clip_audio_sidecars_file_with_extractor_and_limits(
+                source,
+                vec!["output".into()],
+                Vec::new(),
+                preview_dir,
+                std::fs::metadata(&requested_hit).unwrap().len() + 39,
+                |_, _| panic!("extractor must not run for a valid requested cache hit"),
+            )
+            .unwrap(),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert!(
+            requested_hit.exists(),
+            "requested hit must survive initial prune"
+        );
+        assert!(!stale.exists(), "stale unrequested entry should be evicted");
+        assert_eq!(sidecars.len(), 1);
+        assert_eq!(sidecars[0].path, requested_hit.display().to_string());
+    }
+
+    #[test]
+    fn audio_sidecar_failure_cleans_temps_and_publishes_nothing() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-cleanup");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
+        write_audio_track_markers(
+            &source,
+            vec![
+                ("output", 0, "Output Audio"),
+                ("microphone", 1, "Microphone"),
+            ],
+        );
+        let preview_dir = dir.path().join("previews");
+
+        let err = prepare_clip_audio_sidecars_file_with_extractor(
+            source,
+            vec!["output".into(), "microphone".into()],
+            Vec::new(),
+            preview_dir.clone(),
+            |_, outputs| {
+                std::fs::write(&outputs[0].tmp_path, b"invalid").unwrap();
+                Err("forced extractor failure".into())
+            },
+        )
+        .expect_err("extractor failure should bubble up");
+
+        assert!(err.contains("forced extractor failure"), "{err}");
+        assert!(
+            preview_dir
+                .read_dir()
+                .unwrap_or_else(|_| panic!("preview dir should exist"))
+                .flatten()
+                .all(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    !name.ends_with(".tmp") && !name.ends_with(".mp4")
+                }),
+            "failure must not leave temp or final sidecars behind"
+        );
+    }
+
+    #[test]
+    fn audio_sidecar_ffmpeg_args_use_one_input_and_one_audio_only_output_per_missing_stream() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-ffmpeg-args");
+        let source = dir.path().join("clip.mp4");
+        let outputs = vec![
+            AudioTrackSidecarOutput {
+                audio_track_id: "output".into(),
+                audio_stream_index: 0,
+                final_path: dir.path().join("audio-preview-1.mp4"),
+                tmp_path: dir.path().join("audio-preview-1.mp4.tmp"),
+            },
+            AudioTrackSidecarOutput {
+                audio_track_id: "microphone".into(),
+                audio_stream_index: 2,
+                final_path: dir.path().join("audio-preview-2.mp4"),
+                tmp_path: dir.path().join("audio-preview-2.mp4.tmp"),
+            },
+        ];
+
+        let args = ffmpeg_audio_sidecar_args(&source, &outputs);
+
+        assert_eq!(args.iter().filter(|arg| **arg == "-i").count(), 1);
+        assert!(args.windows(2).any(|pair| pair == ["-map", "0:a:0"]));
+        assert!(args.windows(2).any(|pair| pair == ["-map", "0:a:2"]));
+        assert_eq!(args.iter().filter(|arg| **arg == "-vn").count(), 2);
+        assert_eq!(args.iter().filter(|arg| **arg == "-c:a").count(), 2);
+        assert_eq!(args.iter().filter(|arg| **arg == "copy").count(), 2);
+        assert_eq!(
+            args.iter().filter(|arg| **arg == "-map_metadata").count(),
+            2
+        );
+        assert_eq!(args.iter().filter(|arg| **arg == "-1").count(), 2);
+        assert!(!args.windows(2).any(|pair| pair == ["-map", "0:v:0"]));
+        assert!(!args.iter().any(|arg| *arg == "libopus"));
+        assert!(!args.iter().any(|arg| arg.contains("amix")));
+    }
+
+    #[test]
+    fn audio_sidecar_publication_guard_removes_owned_finals_but_keeps_collision_winner() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-publication-guard");
+        let owned_final = dir.path().join("audio-preview-owned.mp4");
+        let owned_tmp = dir.path().join("audio-preview-owned.mp4.tmp");
+        let collision_final = dir.path().join("audio-preview-collision.mp4");
+        let collision_tmp = dir.path().join("audio-preview-collision.mp4.tmp");
+        std::fs::write(&owned_tmp, audio_only_opus_mp4_for_stream(0)).unwrap();
+        std::fs::write(&collision_tmp, audio_only_opus_mp4_for_stream(1)).unwrap();
+        std::fs::write(&collision_final, audio_only_opus_mp4_for_stream(1)).unwrap();
+
+        let outputs = vec![
+            AudioTrackSidecarOutput {
+                audio_track_id: "owned".into(),
+                audio_stream_index: 0,
+                final_path: owned_final.clone(),
+                tmp_path: owned_tmp.clone(),
+            },
+            AudioTrackSidecarOutput {
+                audio_track_id: "collision".into(),
+                audio_stream_index: 1,
+                final_path: collision_final.clone(),
+                tmp_path: collision_tmp.clone(),
+            },
+        ];
+
+        let guard = validate_and_publish_audio_sidecars(&outputs).unwrap();
+        assert!(
+            owned_final.exists(),
+            "successful rename should publish owned final"
+        );
+        assert!(
+            collision_final.exists(),
+            "existing collision winner must remain"
+        );
+        assert!(!owned_tmp.exists(), "owned temp should be consumed");
+        assert!(!collision_tmp.exists(), "collision temp should be removed");
+        drop(guard);
+
+        assert!(
+            !owned_final.exists(),
+            "dropping uncommitted guard should remove invocation-owned finals"
+        );
+        assert!(
+            collision_final.exists(),
+            "dropping uncommitted guard must not delete collision winners"
+        );
+    }
+
+    #[test]
+    fn audio_sidecar_validation_failure_owns_temp_cleanup() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-validation-cleanup");
+        let valid_tmp = dir.path().join("audio-preview-valid.mp4.tmp");
+        let invalid_tmp = dir.path().join("audio-preview-invalid.mp4.tmp");
+        std::fs::write(&valid_tmp, audio_only_opus_mp4_for_stream(0)).unwrap();
+        std::fs::write(&invalid_tmp, b"invalid").unwrap();
+        let outputs = vec![
+            AudioTrackSidecarOutput {
+                audio_track_id: "valid".into(),
+                audio_stream_index: 0,
+                final_path: dir.path().join("audio-preview-valid.mp4"),
+                tmp_path: valid_tmp.clone(),
+            },
+            AudioTrackSidecarOutput {
+                audio_track_id: "invalid".into(),
+                audio_stream_index: 1,
+                final_path: dir.path().join("audio-preview-invalid.mp4"),
+                tmp_path: invalid_tmp.clone(),
+            },
+        ];
+
+        validate_and_publish_audio_sidecars(&outputs)
+            .expect_err("invalid extracted sidecar should fail validation");
+
+        assert!(
+            !valid_tmp.exists(),
+            "validation failure must remove sibling temps"
+        );
+        assert!(
+            !invalid_tmp.exists(),
+            "validation failure must remove invalid temp"
+        );
+    }
+
+    #[test]
+    fn audio_sidecar_scope_failure_rolls_back_all_invocation_owned_finals() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-scope-rollback");
+        let source = dir.path().join("clip.mp4");
+        touch_mp4(&source);
+        write_audio_track_markers(
+            &source,
+            vec![
+                ("output", 0, "Output Audio"),
+                ("microphone", 1, "Microphone"),
+                ("discord", 2, "Discord"),
+            ],
+        );
+        let preview_dir = dir.path().join("previews");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+
+        let winner_path = audio_track_sidecar_path(
+            &preview_dir,
+            &source,
+            &std::fs::metadata(&source).unwrap(),
+            "output",
+        );
+        std::fs::write(&winner_path, audio_only_opus_mp4_for_stream(0)).unwrap();
+        let winner_bytes = std::fs::read(&winner_path).unwrap();
+
+        let batch = prepare_clip_audio_sidecars_file_with_extractor_and_limits(
+            source,
+            vec!["output".into(), "microphone".into(), "discord".into()],
+            Vec::new(),
+            preview_dir.clone(),
+            AUDIO_PREVIEW_CACHE_MAX_BYTES,
+            |_, outputs| {
+                for output in outputs {
+                    let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
+                    std::fs::write(&output.tmp_path, bytes).unwrap();
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let err = finalize_prepared_audio_sidecars(batch, |prepared| {
+            if prepared.audio_track_id == "microphone" {
+                return Err("forced scope failure".into());
+            }
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(err.contains("forced scope failure"), "{err}");
+        assert!(
+            winner_path.exists(),
+            "pre-existing collision winner must survive rollback"
+        );
+        assert_eq!(
+            std::fs::read(&winner_path).unwrap(),
+            winner_bytes,
+            "collision winner contents must remain untouched"
+        );
+
+        let microphone_path = audio_track_sidecar_path(
+            &preview_dir,
+            &dir.path().join("clip.mp4"),
+            &std::fs::metadata(dir.path().join("clip.mp4")).unwrap(),
+            "microphone",
+        );
+        let discord_path = audio_track_sidecar_path(
+            &preview_dir,
+            &dir.path().join("clip.mp4"),
+            &std::fs::metadata(dir.path().join("clip.mp4")).unwrap(),
+            "discord",
+        );
+        assert!(
+            !microphone_path.exists(),
+            "scope failure must roll back invocation-owned finals"
+        );
+        assert!(
+            !discord_path.exists(),
+            "scope failure must remove every invocation-owned final"
+        );
+    }
+
+    fn write_audio_track_markers(source: &Path, tracks: Vec<(&str, u32, &str)>) {
+        let markers = ClipMarkers {
+            recording_start_s: 0.0,
+            duration_s: 1.0,
+            player_summary: None,
+            audio_tracks: tracks
+                .into_iter()
+                .map(|(id, track_index, label)| ClipAudioTrack {
+                    id: id.into(),
+                    track_index,
+                    label: label.into(),
+                    kind: Some("test".into()),
+                })
+                .collect(),
+            plays: Vec::new(),
+            markers: Vec::new(),
+        };
+        std::fs::write(
+            source.with_extension("markers.json"),
+            serde_json::to_string(&markers).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn unique_export_path_appends_suffix_when_needed() {
         let dir = TestDir::new("clipline-library", "export-name");
         let source = dir.path().join("clip_1.mp4");
@@ -2395,36 +3180,6 @@ mod tests {
         assert_eq!(tracks[1].id, "audio:1");
         assert_eq!(tracks[1].track_index, 1);
         assert_eq!(tracks[1].label, "Audio Track 2");
-    }
-
-    #[test]
-    fn legacy_multitrack_review_preview_mixes_inferred_audio_tracks() {
-        let dir = TestDir::new("clipline-library", "audio-preview-legacy-inferred");
-        let source = dir.path().join("legacy.mp4");
-        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
-
-        let preview_dir = dir.path().join("previews");
-        let display_path = source.display().to_string();
-        let path = preview_clip_audio_tracks_file_with_mixer(
-            source,
-            display_path,
-            vec!["audio:0".into(), "audio:1".into()],
-            preview_dir.clone(),
-            |_, _, _| Err("external mixer should not be required".into()),
-        )
-        .expect("legacy multi-audio preview should mix inferred tracks");
-        let preview = PathBuf::from(path);
-
-        assert_eq!(preview.parent(), Some(preview_dir.as_path()));
-        let preview_bytes = std::fs::read(preview).unwrap();
-        remux_with_selected_audio_tracks(&preview_bytes, &[0]).expect("mixed audio track exists");
-        let err = remux_with_selected_audio_tracks(&preview_bytes, &[1])
-            .expect_err("mixed preview should have exactly one audio track");
-        assert!(
-            err.to_string()
-                .contains("outside the clip's 1 audio tracks"),
-            "{err}"
-        );
     }
 
     #[test]
@@ -3061,6 +3816,19 @@ mod tests {
         writer
             .write_fragment_multi(&[&video, &opus_audio_packets(0.20), &opus_audio_packets(0.25)])
             .unwrap();
+        writer.finalize().unwrap().into_inner()
+    }
+
+    fn audio_only_opus_mp4_for_stream(audio_stream_index: u32) -> Vec<u8> {
+        let amplitude = 0.20 + 0.05 * audio_stream_index as f32;
+        let tracks = vec![TrackConfig::Audio(AudioTrackConfig {
+            channels: 2,
+            sample_rate: 48_000,
+            pre_skip: 312,
+        })];
+        let mut writer = HybridMp4Writer::new_multi(Cursor::new(Vec::new()), tracks).unwrap();
+        let packets = opus_audio_packets(amplitude);
+        writer.write_fragment_multi(&[&packets]).unwrap();
         writer.finalize().unwrap().into_inner()
     }
 

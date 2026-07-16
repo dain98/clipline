@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{Cursor, Seek, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use audiopus::coder::Encoder;
@@ -14,6 +14,11 @@ use crate::{
     VideoTrackConfig,
 };
 
+/// Conservative upper bound for a finalized `moov` box that this metadata
+/// reader will load into memory. Real Clipline sample tables are far smaller;
+/// this rejects corrupt or hostile declarations before allocation.
+const MAX_FINALIZED_MOOV_BYTES: u64 = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrimInfo {
     pub requested_start_s: f64,
@@ -21,6 +26,12 @@ pub struct TrimInfo {
     pub aligned_start_s: f64,
     pub aligned_end_s: f64,
     pub duration_s: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaTrackCounts {
+    pub video: usize,
+    pub audio: usize,
 }
 
 #[derive(Debug)]
@@ -183,12 +194,48 @@ pub fn remux_with_selected_audio_tracks(
 }
 
 pub fn audio_track_count(input: &[u8]) -> Result<usize, TrimError> {
-    let movie = parse_movie(input)?;
-    Ok(movie
-        .tracks
-        .iter()
-        .filter(|track| matches!(track.cfg, TrackConfig::Audio(_)))
-        .count())
+    Ok(media_track_counts(input)?.audio)
+}
+
+pub fn media_track_counts(input: &[u8]) -> Result<MediaTrackCounts, TrimError> {
+    finalized_movie_track_counts(input)
+}
+
+pub fn media_track_counts_file(path: &Path) -> Result<MediaTrackCounts, TrimError> {
+    let mut file = File::open(path)?;
+    media_track_counts_reader(&mut file)
+}
+
+fn media_track_counts_reader<R: Read + Seek>(
+    reader: &mut R,
+) -> Result<MediaTrackCounts, TrimError> {
+    let moov = read_finalized_moov_bytes(reader)?;
+    finalized_movie_track_counts(&moov)
+}
+
+fn finalized_movie_track_counts(input: &[u8]) -> Result<MediaTrackCounts, TrimError> {
+    let top = walk(input);
+    let moov = find(&top, b"moov")
+        .ok_or_else(|| TrimError::Unsupported("missing finalized moov".into()))?
+        .clone();
+    let moov_children = children(input, &moov);
+    if find(&moov_children, b"mvex").is_some() {
+        return Err(TrimError::Unsupported(
+            "fragmented/unfinalized files are not trim-ready".into(),
+        ));
+    }
+
+    let mut counts = MediaTrackCounts { video: 0, audio: 0 };
+    for trak in moov_children.iter().filter(|b| &b.fourcc == b"trak") {
+        match parse_track_cfg(input, trak)? {
+            TrackConfig::Video(_) => counts.video += 1,
+            TrackConfig::Audio(_) => counts.audio += 1,
+        }
+    }
+    if counts.video == 0 && counts.audio == 0 {
+        return Err(TrimError::Unsupported("no tracks found".into()));
+    }
+    Ok(counts)
 }
 
 pub fn remux_with_mixed_audio_track(
@@ -623,15 +670,12 @@ fn parse_movie(input: &[u8]) -> Result<ParsedMovie, TrimError> {
 }
 
 fn parse_track(input: &[u8], trak: &BoxInfo) -> Result<ParsedTrack, TrimError> {
+    let cfg = parse_track_cfg(input, trak)?;
     let mdia = require_child(input, trak, b"mdia")?;
     let mdhd = require_child(input, &mdia, b"mdhd")?;
     let timescale = parse_mdhd_timescale(input, &mdhd)?;
-    let hdlr = require_child(input, &mdia, b"hdlr")?;
-    let handler = parse_hdlr(input, &hdlr)?;
     let minf = require_child(input, &mdia, b"minf")?;
     let stbl = require_child(input, &minf, b"stbl")?;
-    let stsd = require_child(input, &stbl, b"stsd")?;
-    let cfg = parse_stsd(input, &stsd, handler, timescale)?;
     let samples = parse_sample_table(input, &stbl)?;
     if samples.is_empty() {
         return Err(TrimError::Unsupported("track has no samples".into()));
@@ -641,6 +685,18 @@ fn parse_track(input: &[u8], trak: &BoxInfo) -> Result<ParsedTrack, TrimError> {
         timescale,
         samples,
     })
+}
+
+fn parse_track_cfg(input: &[u8], trak: &BoxInfo) -> Result<TrackConfig, TrimError> {
+    let mdia = require_child(input, trak, b"mdia")?;
+    let mdhd = require_child(input, &mdia, b"mdhd")?;
+    let timescale = parse_mdhd_timescale(input, &mdhd)?;
+    let hdlr = require_child(input, &mdia, b"hdlr")?;
+    let handler = parse_hdlr(input, &hdlr)?;
+    let minf = require_child(input, &mdia, b"minf")?;
+    let stbl = require_child(input, &minf, b"stbl")?;
+    let stsd = require_child(input, &stbl, b"stsd")?;
+    parse_stsd(input, &stsd, handler, timescale)
 }
 
 fn validate_range(start_s: f64, end_s: f64) -> Result<(), TrimError> {
@@ -1151,6 +1207,92 @@ fn read_box_at(input: &[u8], offset: usize, limit: usize) -> Result<BoxInfo, Tri
     })
 }
 
+fn read_finalized_moov_bytes<R: Read + Seek>(reader: &mut R) -> Result<Vec<u8>, TrimError> {
+    let file_len = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(0))?;
+
+    let mut offset = 0_u64;
+    while offset < file_len {
+        let top = read_top_level_box(reader, offset, file_len)?;
+        if &top.fourcc == b"moov" {
+            return read_box_bytes(reader, &top);
+        }
+        let next = top
+            .offset
+            .checked_add(top.size)
+            .ok_or_else(|| TrimError::Corrupt("top-level box offset overflow".into()))?;
+        if next <= offset {
+            return Err(TrimError::Corrupt(
+                "top-level box parser made no progress".into(),
+            ));
+        }
+        offset = next;
+    }
+
+    Err(TrimError::Unsupported("missing finalized moov".into()))
+}
+
+fn read_top_level_box<R: Read + Seek>(
+    reader: &mut R,
+    offset: u64,
+    limit: u64,
+) -> Result<BoxInfo, TrimError> {
+    if offset.checked_add(8).is_none_or(|end| end > limit) {
+        return Err(TrimError::Corrupt("truncated box header".into()));
+    }
+
+    reader.seek(SeekFrom::Start(offset))?;
+    let mut header = [0_u8; 8];
+    reader.read_exact(&mut header)?;
+    let size32 = u32::from_be_bytes(header[..4].try_into().unwrap());
+    let fourcc = header[4..8].try_into().unwrap();
+
+    let (size, header_len) = if size32 == 1 {
+        if offset.checked_add(16).is_none_or(|end| end > limit) {
+            return Err(TrimError::Corrupt("truncated largesize box header".into()));
+        }
+        let mut large = [0_u8; 8];
+        reader.read_exact(&mut large)?;
+        (u64::from_be_bytes(large), 16_u64)
+    } else if size32 == 0 {
+        (limit - offset, 8_u64)
+    } else {
+        (u64::from(size32), 8_u64)
+    };
+
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| TrimError::Corrupt("box size overflow".into()))?;
+    if size < header_len || end > limit {
+        return Err(TrimError::Corrupt(format!(
+            "invalid {} box size",
+            fourcc_str(&fourcc)
+        )));
+    }
+
+    Ok(BoxInfo {
+        fourcc,
+        offset,
+        size,
+        payload_offset: offset + header_len,
+    })
+}
+
+fn read_box_bytes<R: Read + Seek>(reader: &mut R, b: &BoxInfo) -> Result<Vec<u8>, TrimError> {
+    if b.size > MAX_FINALIZED_MOOV_BYTES {
+        return Err(TrimError::Unsupported(format!(
+            "moov box is too large to inspect ({} bytes > {} byte limit)",
+            b.size, MAX_FINALIZED_MOOV_BYTES
+        )));
+    }
+    let size = usize::try_from(b.size)
+        .map_err(|_| TrimError::Unsupported("moov box is too large to inspect".into()))?;
+    reader.seek(SeekFrom::Start(b.offset))?;
+    let mut bytes = vec![0_u8; size];
+    reader.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
 fn box_end(b: &BoxInfo) -> Result<usize, TrimError> {
     usize::try_from(b.offset + b.size)
         .map_err(|_| TrimError::Corrupt("box end offset too large".into()))
@@ -1220,22 +1362,28 @@ mod tests {
     use crate::{AudioTrackConfig, VideoTrackConfig};
     use audiopus::coder::{Decoder, Encoder};
     use audiopus::{Application, Channels, SampleRate};
+    use std::io::{Read, Seek, SeekFrom};
+
+    fn video_track() -> TrackConfig {
+        TrackConfig::Video(VideoTrackConfig::h264(
+            128,
+            72,
+            90_000,
+            vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+            vec![0x68, 0xEE, 0x38, 0x80],
+        ))
+    }
+
+    fn audio_track() -> TrackConfig {
+        TrackConfig::Audio(AudioTrackConfig {
+            channels: 2,
+            sample_rate: 48_000,
+            pre_skip: 312,
+        })
+    }
 
     fn tracks() -> Vec<TrackConfig> {
-        vec![
-            TrackConfig::Video(VideoTrackConfig::h264(
-                128,
-                72,
-                90_000,
-                vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
-                vec![0x68, 0xEE, 0x38, 0x80],
-            )),
-            TrackConfig::Audio(AudioTrackConfig {
-                channels: 2,
-                sample_rate: 48_000,
-                pre_skip: 312,
-            }),
-        ]
+        vec![video_track(), audio_track()]
     }
 
     fn video_gop(start: u32) -> Vec<FragSample> {
@@ -1355,13 +1503,11 @@ mod tests {
     }
 
     fn tracks_two_audio() -> Vec<TrackConfig> {
-        let mut tracks = tracks();
-        tracks.push(TrackConfig::Audio(AudioTrackConfig {
-            channels: 2,
-            sample_rate: 48_000,
-            pre_skip: 312,
-        }));
-        tracks
+        vec![video_track(), audio_track(), audio_track()]
+    }
+
+    fn audio_only_tracks() -> Vec<TrackConfig> {
+        vec![audio_track()]
     }
 
     fn clipline_two_audio_fixture() -> Vec<u8> {
@@ -1372,6 +1518,16 @@ mod tests {
             let output = audio_packets_with("A", second * 50);
             let mic = audio_packets_with("B", second * 50);
             w.write_fragment_multi(&[&v, &output, &mic]).unwrap();
+        }
+        w.finalize().unwrap().into_inner()
+    }
+
+    fn clipline_audio_only_fixture() -> Vec<u8> {
+        let mut w =
+            HybridMp4Writer::new_multi(Cursor::new(Vec::new()), audio_only_tracks()).unwrap();
+        for second in 0..2 {
+            let audio = audio_packets(second * 50);
+            w.write_fragment_multi(&[&audio]).unwrap();
         }
         w.finalize().unwrap().into_inner()
     }
@@ -1585,6 +1741,288 @@ mod tests {
     fn audio_track_count_reports_finalized_audio_tracks() {
         assert_eq!(audio_track_count(&clipline_fixture()).unwrap(), 1);
         assert_eq!(audio_track_count(&clipline_two_audio_fixture()).unwrap(), 2);
+    }
+
+    #[test]
+    fn media_track_counts_reports_video_and_audio_tracks() {
+        assert_eq!(
+            media_track_counts(&clipline_two_audio_fixture()).unwrap(),
+            MediaTrackCounts { video: 1, audio: 2 }
+        );
+        assert_eq!(
+            media_track_counts(&clipline_audio_only_fixture()).unwrap(),
+            MediaTrackCounts { video: 0, audio: 1 }
+        );
+    }
+
+    struct TrackingCursor {
+        inner: Cursor<Vec<u8>>,
+        mdat_range: std::ops::Range<u64>,
+        bytes_read: usize,
+        seeks: Vec<u64>,
+    }
+
+    impl TrackingCursor {
+        fn new(bytes: Vec<u8>, mdat_range: std::ops::Range<u64>) -> Self {
+            Self {
+                inner: Cursor::new(bytes),
+                mdat_range,
+                bytes_read: 0,
+                seeks: Vec::new(),
+            }
+        }
+    }
+
+    impl Read for TrackingCursor {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let position = self.inner.position();
+            if position >= self.mdat_range.start && position < self.mdat_range.end {
+                return Err(std::io::Error::other(format!(
+                    "reader touched skipped mdat payload at {position}"
+                )));
+            }
+            let read = self.inner.read(buf)?;
+            self.bytes_read += read;
+            Ok(read)
+        }
+    }
+
+    impl Seek for TrackingCursor {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            let next = self.inner.seek(pos)?;
+            self.seeks.push(next);
+            Ok(next)
+        }
+    }
+
+    #[test]
+    fn media_track_counts_reader_skips_top_level_mdat_and_reads_only_headers_plus_moov() {
+        let fixture = clipline_two_audio_fixture();
+        let top = walk(&fixture);
+        let mdat = find(&top, b"mdat").expect("fixture has top-level mdat");
+        let moov = find(&top, b"moov").expect("fixture has finalized moov");
+        let moov_size = usize::try_from(moov.size).unwrap();
+        let mut reader =
+            TrackingCursor::new(fixture, mdat.payload_offset..(mdat.offset + mdat.size));
+
+        let counts = media_track_counts_reader(&mut reader).unwrap();
+
+        assert_eq!(counts, MediaTrackCounts { video: 1, audio: 2 });
+        assert!(
+            reader
+                .seeks
+                .iter()
+                .any(|offset| *offset >= mdat.offset + mdat.size),
+            "expected seek past mdat payload, got {:?}",
+            reader.seeks
+        );
+        assert!(
+            reader.bytes_read <= moov_size + 128,
+            "expected bounded reads, got {} bytes for moov size {moov_size}",
+            reader.bytes_read
+        );
+    }
+
+    #[test]
+    fn media_track_counts_file_reports_audio_only_fixture() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-track-count-file-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audio-only.mp4");
+        std::fs::write(&path, clipline_audio_only_fixture()).unwrap();
+
+        let counts = media_track_counts_file(&path).unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(counts, MediaTrackCounts { video: 0, audio: 1 });
+    }
+
+    #[test]
+    fn media_track_counts_reader_rejects_oversized_declared_moov_before_allocation() {
+        struct LargeMoovReader {
+            pos: u64,
+            len: u64,
+        }
+
+        impl Read for LargeMoovReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                const HEADER: [u8; 8] = [0, 0, 0, 0, b'm', b'o', b'o', b'v'];
+                if self.pos >= self.len {
+                    return Ok(0);
+                }
+                let mut read = 0usize;
+                while read < buf.len() && self.pos < self.len {
+                    buf[read] = if self.pos < HEADER.len() as u64 {
+                        HEADER[self.pos as usize]
+                    } else {
+                        0
+                    };
+                    self.pos += 1;
+                    read += 1;
+                }
+                Ok(read)
+            }
+        }
+
+        impl Seek for LargeMoovReader {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                let next = match pos {
+                    SeekFrom::Start(offset) => offset,
+                    SeekFrom::End(offset) => self
+                        .len
+                        .checked_add_signed(offset)
+                        .ok_or_else(|| std::io::Error::other("seek overflow"))?,
+                    SeekFrom::Current(offset) => self
+                        .pos
+                        .checked_add_signed(offset)
+                        .ok_or_else(|| std::io::Error::other("seek overflow"))?,
+                };
+                self.pos = next;
+                Ok(self.pos)
+            }
+        }
+
+        let mut reader = LargeMoovReader {
+            pos: 0,
+            len: MAX_FINALIZED_MOOV_BYTES + 1,
+        };
+
+        let err = media_track_counts_reader(&mut reader).unwrap_err();
+
+        assert!(
+            err.to_string().contains("moov box is too large to inspect"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn read_top_level_box_supports_extended_size_boxes() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(b"moov");
+        bytes.extend_from_slice(&24u64.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 8]);
+        let limit = bytes.len() as u64;
+        let mut reader = Cursor::new(bytes);
+
+        let b = read_top_level_box(&mut reader, 0, limit).unwrap();
+
+        assert_eq!(b.fourcc, *b"moov");
+        assert_eq!(b.size, 24);
+        assert_eq!(b.payload_offset, 16);
+    }
+
+    #[test]
+    fn read_top_level_box_treats_size_zero_as_terminal_box() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&8u32.to_be_bytes());
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(b"mdat");
+        bytes.extend_from_slice(&[0u8; 5]);
+        let bytes_len = bytes.len();
+        let limit = bytes.len() as u64;
+        let mut reader = Cursor::new(bytes);
+
+        let b = read_top_level_box(&mut reader, 8, limit).unwrap();
+
+        assert_eq!(b.fourcc, *b"mdat");
+        assert_eq!(b.size, (bytes_len - 8) as u64);
+        assert_eq!(b.payload_offset, 16);
+    }
+
+    #[test]
+    fn read_top_level_box_rejects_truncated_header() {
+        let mut reader = Cursor::new(vec![0, 0, 0, 8, b'm', b'o', b'o']);
+
+        let err = read_top_level_box(&mut reader, 0, 7).unwrap_err();
+
+        assert!(err.to_string().contains("truncated box header"), "{err}");
+    }
+
+    #[test]
+    fn read_top_level_box_rejects_truncated_extended_header() {
+        let mut reader = Cursor::new({
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&1u32.to_be_bytes());
+            bytes.extend_from_slice(b"moov");
+            bytes.extend_from_slice(&[0u8; 4]);
+            bytes
+        });
+
+        let err = read_top_level_box(&mut reader, 0, 12).unwrap_err();
+
+        assert!(
+            err.to_string().contains("truncated largesize box header"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn read_box_bytes_rejects_truncated_payload() {
+        let mut reader = Cursor::new(vec![0u8; 12]);
+        let b = BoxInfo {
+            fourcc: *b"moov",
+            offset: 0,
+            size: 16,
+            payload_offset: 8,
+        };
+
+        let err = read_box_bytes(&mut reader, &b).unwrap_err();
+
+        assert!(matches!(err, TrimError::Io(_)), "{err}");
+    }
+
+    #[test]
+    fn read_top_level_box_rejects_too_small_box_size() {
+        let mut reader = Cursor::new({
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&4u32.to_be_bytes());
+            bytes.extend_from_slice(b"moov");
+            bytes
+        });
+
+        let err = read_top_level_box(&mut reader, 0, 8).unwrap_err();
+
+        assert!(err.to_string().contains("invalid moov box size"), "{err}");
+    }
+
+    #[test]
+    fn read_top_level_box_rejects_box_extent_past_file() {
+        let mut reader = Cursor::new({
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&32u32.to_be_bytes());
+            bytes.extend_from_slice(b"moov");
+            bytes.extend_from_slice(&[0u8; 8]);
+            bytes
+        });
+
+        let err = read_top_level_box(&mut reader, 0, 16).unwrap_err();
+
+        assert!(err.to_string().contains("invalid moov box size"), "{err}");
+    }
+
+    #[test]
+    fn read_finalized_moov_bytes_reports_missing_moov_at_eof_without_looping() {
+        let mut reader = Cursor::new({
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&8u32.to_be_bytes());
+            bytes.extend_from_slice(b"ftyp");
+            bytes.extend_from_slice(&0u32.to_be_bytes());
+            bytes.extend_from_slice(b"mdat");
+            bytes.extend_from_slice(&[0u8; 3]);
+            bytes
+        });
+
+        let err = read_finalized_moov_bytes(&mut reader).unwrap_err();
+
+        assert!(err.to_string().contains("missing finalized moov"), "{err}");
     }
 
     #[test]
