@@ -154,8 +154,8 @@ function clearReviewAudioSidecars(mode = "direct") {
   applyReviewAudioOutput();
 }
 
-function syncReviewAudioSidecarSet(sidecars, options = {}) {
-  const videoState = reviewAudioTransportState();
+async function syncReviewAudioSidecarSet(sidecars, options = {}) {
+  const videoState = options.videoState || reviewAudioTransportState();
   const playPromises = [];
   for (const { element: audio } of sidecars || []) {
     const decision = PlayerCore.audioSidecarSyncDecision(
@@ -171,7 +171,7 @@ function syncReviewAudioSidecarSet(sidecars, options = {}) {
       audio.pause();
     }
   }
-  return Promise.all(playPromises);
+  await Promise.all(playPromises);
 }
 
 function handleReviewAudioSidecarFailure(generation, error) {
@@ -240,6 +240,41 @@ async function prepareReviewAudioSidecars(sidecars, generation) {
   }
 }
 
+async function activatePreparedReviewAudioSidecars(prepared, request) {
+  if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
+  const activationState = {
+    currentTime: reviewPlayheadTime(),
+    playbackRate: video.playbackRate,
+    paused: video.paused,
+    ended: video.ended,
+  };
+  await syncReviewAudioSidecarSet(prepared, {
+    forceSeek: true,
+    videoState: activationState,
+  });
+  if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
+
+  const finalState = {
+    currentTime: reviewPlayheadTime(),
+    playbackRate: video.playbackRate,
+    paused: video.paused,
+    ended: video.ended,
+  };
+  await syncReviewAudioSidecarSet(prepared, {
+    forceSeek: true,
+    videoState: finalState,
+  });
+  if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
+
+  const previous = activeReviewAudioSidecars;
+  for (const { element: audio } of previous) audio.muted = true;
+  activeReviewAudioSidecars = prepared;
+  reviewAudioMode = "sidecars";
+  applyReviewAudioOutput();
+  disposeReviewAudioSidecarSet(previous);
+  refreshReviewAudioDriftTimer();
+}
+
 function assignReviewVideoSource(path, options = {}) {
   clearReviewAudioSidecars("direct");
   const { resumeTime = 0, onLoadedMetadata = null } = options;
@@ -288,6 +323,8 @@ function releaseReviewVideoSource() {
 
 function restoreVideoAfterRename(path, time, shouldResume, rate) {
   setReviewVideoSource(path, { resumeTime: time, shouldResume, rate });
+  currentReviewAudioKey = null;
+  requestSelectedAudioPreview();
 }
 
 function setReviewVideoSource(path, options = {}) {
@@ -309,6 +346,7 @@ function setReviewVideoSource(path, options = {}) {
 
 function cancelDesiredAudioPreview() {
   audioPreviewQueue = PlayerCore.cancelAudioPreviewRequest(audioPreviewQueue);
+  reviewAudioSidecarGeneration += 1;
 }
 
 function restoreAudibleAudioSelection(message) {
@@ -321,20 +359,25 @@ function previewRequestStillCurrent(request) {
   return Boolean(currentClip)
     && currentClip.path === request.clipPath
     && request.selectionKey === audioSelectionKey(currentClip)
-    && request.sourceGeneration === reviewSourceGeneration;
+    && request.sourceGeneration === reviewSourceGeneration
+    && request.sidecarGeneration === reviewAudioSidecarGeneration;
 }
 
 async function runAudioPreviewRequest(request) {
-  let path = null;
+  let prepared = null;
   let error = null;
   try {
-    path = await invoke("preview_clip_audio_tracks", {
+    const protectedPreviewPaths = activeReviewAudioSidecars.map((sidecar) => sidecar.path);
+    const sidecars = await invoke("prepare_clip_audio_sidecars", {
       request: {
         path: request.clipPath,
         audioTrackIds: request.trackIds,
-        protectedPreviewPath: currentReviewMediaPath,
+        protectedPreviewPaths,
       },
     });
+    if (previewRequestStillCurrent(request)) {
+      prepared = await prepareReviewAudioSidecars(sidecars, request.sidecarGeneration);
+    }
   } catch (e) {
     error = String(e);
   }
@@ -346,16 +389,22 @@ async function runAudioPreviewRequest(request) {
   );
   audioPreviewQueue = transition.state;
 
-  if (transition.apply && previewRequestStillCurrent(transition.apply)) {
-    const resumeTime = reviewPlayheadTime();
-    const shouldResume = !video.paused && !video.ended;
-    const rate = video.playbackRate;
-    const trimRange = { start: trimStart, end: trimEnd };
-    setReviewVideoSource(path, { resumeTime, shouldResume, rate, trimRange });
-    currentReviewAudioTrackIds = [...transition.apply.trackIds];
-    currentReviewAudioKey = transition.apply.selectionKey;
-    setDeckStatus(audioSelectionLabel(currentClip), { transient: true });
-  } else if (error && !transition.start && previewRequestStillCurrent(request)) {
+  if (transition.apply && prepared && previewRequestStillCurrent(transition.apply)) {
+    try {
+      await activatePreparedReviewAudioSidecars(prepared, transition.apply);
+      prepared = null;
+      currentReviewAudioTrackIds = [...transition.apply.trackIds];
+      currentReviewAudioKey = transition.apply.selectionKey;
+      setDeckStatus(audioSelectionLabel(currentClip), { transient: true });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  if (prepared) {
+    disposeReviewAudioSidecarSet(prepared);
+    prepared = null;
+  }
+  if (error && !transition.start && previewRequestStillCurrent(request)) {
     restoreAudibleAudioSelection(`audio preview failed: ${error}`);
   }
 
@@ -368,27 +417,34 @@ function requestSelectedAudioPreview() {
   const tracks = clipAudioTracks(clip);
   const selected = selectedAudioTrackIdsForClip(clip);
   const selectionKey = audioSelectionKey(clip, selected);
+  if (selected.length === 0) {
+    cancelDesiredAudioPreview();
+    clearReviewAudioSidecars("muted");
+    currentReviewAudioTrackIds = [];
+    currentReviewAudioKey = selectionKey;
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
+    return;
+  }
   if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {
     cancelDesiredAudioPreview();
-    if (currentReviewMediaPath !== clip.path) {
-      setReviewVideoSource(clip.path, {
-        resumeTime: reviewPlayheadTime(),
-        shouldResume: !video.paused && !video.ended,
-        rate: video.playbackRate,
-        trimRange: { start: trimStart, end: trimEnd },
-      });
-    }
+    clearReviewAudioSidecars("direct");
     currentReviewAudioTrackIds = [...selected];
     currentReviewAudioKey = selectionKey;
     setDeckStatus(audioSelectionLabel(clip), { transient: true });
     return;
   }
-  if (selectionKey === currentReviewAudioKey) return;
+  if (selectionKey === currentReviewAudioKey) {
+    cancelDesiredAudioPreview();
+    setDeckStatus(audioSelectionLabel(clip), { transient: true });
+    return;
+  }
+  const sidecarGeneration = ++reviewAudioSidecarGeneration;
   const queued = PlayerCore.queueAudioPreviewRequest(audioPreviewQueue, {
     clipPath: clip.path,
     trackIds: [...selected],
     selectionKey,
     sourceGeneration: reviewSourceGeneration,
+    sidecarGeneration,
   });
   audioPreviewQueue = queued.state;
   setDeckStatus("switching audio tracks...");

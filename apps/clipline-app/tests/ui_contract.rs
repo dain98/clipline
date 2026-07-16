@@ -813,7 +813,7 @@ fn review_player_owns_all_controls() {
             && main_js().contains("function clipAudioTracks(clip = currentClip)")
             && main_js().contains("function renderAudioTrackPanel()")
             && main_js().contains("function requestSelectedAudioPreview()")
-            && main_js().contains("preview_clip_audio_tracks")
+            && main_js().contains("prepare_clip_audio_sidecars")
             && main_js().contains("function renderUploadAudioTracks(clip = uploadDialogClip)")
             && main_js().contains("audioTrackIds: request.audioTrackIds || null")
             && !main_js().contains("video.audioTracks")
@@ -834,7 +834,7 @@ fn review_player_owns_all_controls() {
             && app_rs().contains("crate::cloud::cloud_connect")
             && app_rs().contains("crate::cloud::upload_clip_to_cloud")
             && app_rs().contains("crate::cloud::sync_cloud_clip_status")
-            && app_rs().contains("crate::library::preview_clip_audio_tracks")
+            && app_rs().contains("crate::library::prepare_clip_audio_sidecars")
             && main_js().contains("sync_cloud_clip_status")
             && styles_css().contains(".cloud-connect-grid")
             && styles_css().contains(".cloud-connect-fields")
@@ -1702,11 +1702,13 @@ fn explicit_audio_preview_uses_one_pure_coalescing_queue() {
     assert!(review.contains("PlayerCore.finishAudioPreviewRequest("));
     assert_eq!(
         review
-            .matches("await invoke(\"preview_clip_audio_tracks\"")
+            .matches("await invoke(\"prepare_clip_audio_sidecars\"")
             .count(),
         1
     );
-    assert!(review.contains("protectedPreviewPath: currentReviewMediaPath"));
+    assert!(!review.contains("invoke(\"preview_clip_audio_tracks\""));
+    assert!(review.contains("protectedPreviewPaths"));
+    assert!(review.contains("activeReviewAudioSidecars.map((sidecar) => sidecar.path)"));
     assert!(!review.contains("audioPreviewSeq"));
 }
 
@@ -1813,21 +1815,65 @@ fn preview_failure_keeps_source_and_reverts_controls_to_audible_selection() {
 }
 
 #[test]
-fn valid_preview_swap_reads_latest_player_state_after_await() {
+fn valid_sidecar_activation_reads_latest_player_state_without_swapping_video() {
     let review = read_ui_js("review-player.js");
     let run = js_function_body(&review, "runAudioPreviewRequest");
     let await_preview = run
-        .find("await invoke(\"preview_clip_audio_tracks\"")
+        .find("await invoke(\"prepare_clip_audio_sidecars\"")
         .unwrap();
-    let latest_time = run[await_preview..].find("reviewPlayheadTime()").unwrap();
-    let latest_pause = run[await_preview..]
-        .find("!video.paused && !video.ended")
+    let prepare = run[await_preview..]
+        .find("await prepareReviewAudioSidecars(")
         .unwrap();
-    let swap = run[await_preview..]
-        .find("setReviewVideoSource(path, {")
-        .unwrap();
-    assert!(latest_time < swap);
-    assert!(latest_pause < swap);
+    assert!(await_preview < prepare);
+    assert!(!run.contains("setReviewVideoSource"));
+    assert!(!run.contains("assignReviewVideoSource"));
+    assert!(!run.contains("video.src"));
+
+    let activate = js_function_body(&review, "activatePreparedReviewAudioSidecars");
+    assert!(activate.contains("currentTime: reviewPlayheadTime()"));
+    assert!(activate.contains("playbackRate: video.playbackRate"));
+    assert!(activate.contains("paused: video.paused"));
+    assert!(activate.contains("ended: video.ended"));
+    let await_play = activate
+        .find("await syncReviewAudioSidecarSet(")
+        .expect("activation waits for every muted sidecar play promise");
+    let install = activate
+        .find("activeReviewAudioSidecars = prepared;")
+        .expect("complete prepared set is installed atomically");
+    let switch_output = activate
+        .find("reviewAudioMode = \"sidecars\";")
+        .expect("sidecar output becomes audible only after readiness/play succeeds");
+    assert!(await_play < install && install < switch_output);
+    assert!(activate[install..].contains("applyReviewAudioOutput();"));
+}
+
+#[test]
+fn audio_sidecar_activation_is_generation_gated_and_disposes_stale_sets() {
+    let review = read_ui_js("review-player.js");
+    let run = js_function_body(&review, "runAudioPreviewRequest");
+    assert!(run.contains("previewRequestStillCurrent(request)"));
+    assert!(run.contains("PlayerCore.finishAudioPreviewRequest("));
+    assert!(run.contains("transition.apply"));
+    assert!(run.contains("disposeReviewAudioSidecarSet(prepared);"));
+    assert!(run.contains("if (transition.start) void runAudioPreviewRequest(transition.start);"));
+
+    let current = js_function_body(&review, "previewRequestStillCurrent");
+    assert!(current.contains("request.sourceGeneration === reviewSourceGeneration"));
+    assert!(current.contains("request.sidecarGeneration === reviewAudioSidecarGeneration"));
+    let activate = js_function_body(&review, "activatePreparedReviewAudioSidecars");
+    assert!(activate.matches("previewRequestStillCurrent(request)").count() >= 2);
+}
+
+#[test]
+fn direct_and_muted_audio_selections_clear_sidecars_without_changing_video_source() {
+    let review = read_ui_js("review-player.js");
+    let request = js_function_body(&review, "requestSelectedAudioPreview");
+    assert!(request.contains("if (selected.length === 0)"));
+    assert!(request.contains("clearReviewAudioSidecars(\"muted\");"));
+    assert!(request.contains("clearReviewAudioSidecars(\"direct\");"));
+    assert!(!request.contains("setReviewVideoSource"));
+    assert!(!request.contains("assignReviewVideoSource"));
+    assert!(!request.contains("video.src"));
 }
 
 #[test]
@@ -1838,7 +1884,9 @@ fn returning_to_fallback_invalidates_an_inflight_audio_preview() {
         .find("if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {")
         .expect("fallback selection is gated on reviewSelectionNeedsPreview");
     let cancel = request
+        [needs_preview..]
         .find("cancelDesiredAudioPreview();")
+        .map(|offset| needs_preview + offset)
         .expect("returning to fallback playback must cancel queued preview work");
     assert!(
         needs_preview < cancel,
