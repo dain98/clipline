@@ -1147,14 +1147,14 @@ fn key_intents_cover_the_documented_shortcuts() {
             r#"{"kind":"toggle-play"}"#
         );
     }
-    // Arrows step one frame; Shift+arrow nudges a second; J/L jump 5s (Shift 1s).
+    // Arrows jump 5s (Shift 1s); J/L step frames.
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowLeft', false)"),
-        r#"{"kind":"step-frame","dir":-1}"#
+        r#"{"kind":"seek-by","seconds":-5}"#
     );
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowRight', false)"),
-        r#"{"kind":"step-frame","dir":1}"#
+        r#"{"kind":"seek-by","seconds":5}"#
     );
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowLeft', true)"),
@@ -1166,13 +1166,21 @@ fn key_intents_cover_the_documented_shortcuts() {
     );
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('KeyJ', false)"),
-        r#"{"kind":"seek-by","seconds":-5}"#
+        r#"{"kind":"step-frame","dir":-1}"#
     );
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('KeyL', false)"),
-        r#"{"kind":"seek-by","seconds":5}"#
+        r#"{"kind":"step-frame","dir":1}"#
     );
-    // ,/. are a fixed 0.1s nudge regardless of Shift (arrows own per-frame now).
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('KeyJ', true)"),
+        r#"{"kind":"step-frame","dir":-1}"#
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.keyIntent('KeyL', true)"),
+        r#"{"kind":"step-frame","dir":1}"#
+    );
+    // ,/. are a fixed 0.1s nudge regardless of Shift.
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('Comma', false)"),
         r#"{"kind":"seek-by","seconds":-0.1}"#
@@ -1205,13 +1213,13 @@ fn key_intents_cover_the_documented_shortcuts() {
         eval_json(&mut ctx, "PlayerCore.keyIntent('KeyZ', false)"),
         "null"
     );
-    // Per-frame stepping lives on the arrow keys.
+    // Per-frame stepping lives on J/L.
     assert_eq!(
-        eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowLeft', false)"),
+        eval_json(&mut ctx, "PlayerCore.keyIntent('KeyJ', false)"),
         r#"{"kind":"step-frame","dir":-1}"#
     );
     assert_eq!(
-        eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowRight', false)"),
+        eval_json(&mut ctx, "PlayerCore.keyIntent('KeyL', false)"),
         r#"{"kind":"step-frame","dir":1}"#
     );
     // Zoom controls.

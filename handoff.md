@@ -4,6 +4,20 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-16): repository simplification pass
+
+The primary checkout is on `main` at the same commit as `origin/main`. A conservative cleanup
+removed unused preview readback, mixed-loopback audio, PCM mixing, MP4/buffer wrappers, generated
+browser snapshots, and completed scratch notes. Internal buffer, event, League, and storage crates
+now expose one root API instead of duplicate public module paths. No runtime behavior, dependency,
+configuration, or persistence changes are intended.
+
+Review-player navigation now uses left/right arrows for five-second seeks (Shift for one second)
+and J/L for frame-aligned ten-frame steps. Automated contracts and manual acceptance pass. Local
+capture data under `.gsi-spike/` remains untracked and must not be cleaned. `cargo test
+--workspace`, fresh-cache workspace clippy with warnings denied, formatting, and diff validation
+all pass on Windows.
+
 ## Checkpoint (2026-07-15): fast audio sidecar switching implemented
 
 The whole-video review preview path has been replaced end to end. The original `<video>` now stays

@@ -1223,6 +1223,20 @@ fn review_player_owns_all_controls() {
 }
 
 #[test]
+fn keyboard_shortcuts_document_j_l_frame_step_and_arrows_seek() {
+    let html = index_html();
+
+    assert!(
+        html.contains("<div><dt><kbd>J</kbd> <kbd>L</kbd></dt><dd>Step 10 frames</dd></div>"),
+        "shortcut help must document J/L as the frame-step controls"
+    );
+    assert!(
+        html.contains("<div><dt><kbd>&larr;</kbd> <kbd>&rarr;</kbd></dt><dd>Back / forward 5s (<kbd>&#8679;</kbd> 1s)</dd></div>"),
+        "shortcut help must document arrow keys as the coarse seek controls"
+    );
+}
+
+#[test]
 fn settings_opens_as_popup_and_guards_unsaved_discard() {
     let html = index_html();
     let js = main_js();
