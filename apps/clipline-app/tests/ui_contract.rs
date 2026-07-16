@@ -1711,6 +1711,98 @@ fn explicit_audio_preview_uses_one_pure_coalescing_queue() {
 }
 
 #[test]
+fn audio_sidecar_transport_prepares_and_releases_hidden_media() {
+    let app_core = read_ui_js("app-core.js");
+    let review = read_ui_js("review-player.js");
+    for state in [
+        "var reviewAudioMode = \"direct\";",
+        "var reviewAudioMuted = false;",
+        "var reviewAudioVolume = 1;",
+        "var activeReviewAudioSidecars = [];",
+        "var reviewAudioSidecarGeneration = 0;",
+        "var reviewAudioDriftTimer = 0;",
+    ] {
+        assert!(app_core.contains(state), "missing sidecar transport state `{state}`");
+    }
+
+    let prepare = js_function_body(&review, "prepareReviewAudioSidecars");
+    assert!(prepare.contains("new Audio()"));
+    assert!(prepare.contains("audio.preload = \"auto\";"));
+    assert!(prepare.contains("audio.muted = true;"));
+    assert!(prepare.contains("audio.src = convertFileSrc(sidecar.path);"));
+    assert!(prepare.contains("audio.addEventListener(\"canplay\""));
+    assert!(prepare.contains("audio.addEventListener(\"error\""));
+
+    let dispose = js_function_body(&review, "disposeReviewAudioSidecarSet");
+    assert!(dispose.contains("audio.pause();"));
+    assert!(dispose.contains("audio.removeAttribute(\"src\");"));
+    assert!(dispose.contains("audio.load();"));
+    let clear = js_function_body(&review, "clearReviewAudioSidecars");
+    assert!(clear.contains("reviewAudioSidecarGeneration += 1;"));
+    assert!(clear.contains("activeReviewAudioSidecars = [];"));
+    assert!(clear.contains("clearReviewAudioDriftTimer();"));
+}
+
+#[test]
+fn audio_sidecar_transport_follows_only_the_video_clock() {
+    let review = read_ui_js("review-player.js");
+    let main = read_ui_js("main.js");
+    let sync = js_function_body(&review, "syncReviewAudioSidecarSet");
+    assert!(sync.contains("PlayerCore.audioSidecarSyncDecision("));
+    assert!(sync.contains("audio.currentTime = decision.seekTime;"));
+    assert!(sync.contains("audio.playbackRate = decision.playbackRate;"));
+    assert!(!sync.contains("video.currentTime ="));
+
+    for event in ["play", "pause", "timeupdate", "ratechange"] {
+        assert!(
+            main.contains(&format!("video.addEventListener(\"{event}\"")),
+            "video {event} must synchronize sidecars"
+        );
+    }
+    assert!(main.contains("syncReviewAudioSidecars();"));
+    let seeked = review
+        .split("video.addEventListener(\"seeked\"")
+        .nth(1)
+        .and_then(|tail| tail.split("function seekBy").next())
+        .expect("seeked handler");
+    assert!(seeked.contains("syncReviewAudioSidecars({ forceSeek: true });"));
+    assert!(review.contains("window.setInterval(() => syncReviewAudioSidecars(), 500)"));
+}
+
+#[test]
+fn audio_sidecar_transport_owns_logical_mute_volume_and_lifecycle() {
+    let review = read_ui_js("review-player.js");
+    let main = read_ui_js("main.js");
+    let output = js_function_body(&review, "applyReviewAudioOutput");
+    assert!(output.contains("PlayerCore.reviewAudioOutputDecision("));
+    assert!(output.contains("video.muted = decision.videoMuted;"));
+    assert!(output.contains("audio.muted = decision.sidecarMuted;"));
+
+    let sync_volume = js_function_body(&review, "syncVolume");
+    assert!(sync_volume.contains("reviewAudioMuted"));
+    assert!(sync_volume.contains("reviewAudioVolume"));
+    let toggle_mute = js_function_body(&review, "toggleMute");
+    assert!(toggle_mute.contains("reviewAudioMuted"));
+    assert!(!toggle_mute.contains("video.muted"));
+    assert!(main.contains("reviewAudioVolume = Number($(\"volume-slider\").value);"));
+    assert!(main.contains("applyReviewAudioOutput();"));
+
+    for lifecycle in [
+        "assignReviewVideoSource",
+        "releaseReviewVideoSource",
+        "releaseVideoFileHandle",
+        "suspendReviewPlayback",
+        "openClip",
+        "closeReview",
+    ] {
+        assert!(
+            js_function_body(&review, lifecycle).contains("clearReviewAudioSidecars("),
+            "{lifecycle} must clear sidecar file handles and callbacks"
+        );
+    }
+}
+
+#[test]
 fn preview_failure_keeps_source_and_reverts_controls_to_audible_selection() {
     let review = read_ui_js("review-player.js");
     let restore = js_function_body(&review, "restoreAudibleAudioSelection");

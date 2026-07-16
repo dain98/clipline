@@ -302,9 +302,13 @@ video.addEventListener("play", () => {
   syncGameEventRail(current);
   syncGamePlayRail(current);
   paintTimeline();
+  syncReviewAudioSidecars();
+  refreshReviewAudioDriftTimer();
   scheduleOverlayIdleCheck();
 });
 video.addEventListener("pause", () => {
+  syncReviewAudioSidecars();
+  refreshReviewAudioDriftTimer();
   syncPlayState();
   clearOverlayIdleCheck();
   paintTimeline();
@@ -316,7 +320,10 @@ video.addEventListener("timeupdate", () => {
   paintTimeline();
   syncGameEventRail(current);
   syncGamePlayRail(current);
+  syncReviewAudioSidecars();
 });
+video.addEventListener("seeking", () => syncReviewAudioSidecars({ forceSeek: true }));
+video.addEventListener("ratechange", () => syncReviewAudioSidecars());
 video.addEventListener("volumechange", syncVolume);
 video.addEventListener("loadedmetadata", () => {
   $("stage-note").textContent = `${video.videoWidth}x${video.videoHeight} · ${fmtDur(video.duration)}`;
@@ -343,8 +350,9 @@ $("rate-select").addEventListener("change", () => {
 });
 $("volume-slider").addEventListener("input", () => {
   syncRangeProgress($("volume-slider"));
-  video.volume = Number($("volume-slider").value);
-  video.muted = video.volume === 0;
+  reviewAudioVolume = Number($("volume-slider").value);
+  reviewAudioMuted = reviewAudioVolume === 0;
+  applyReviewAudioOutput();
 });
 
 $("export-clip").addEventListener("click", exportTrim);

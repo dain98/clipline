@@ -106,7 +106,142 @@ function reviewPlayheadTime() {
   return PlayerCore.logicalPlaybackTime(reviewSeekState, video.currentTime, clipDuration());
 }
 
+function reviewAudioTransportState() {
+  return {
+    currentTime: reviewPlayheadTime(),
+    playbackRate: video.playbackRate,
+    paused: video.paused,
+    ended: video.ended,
+  };
+}
+
+function disposeReviewAudioSidecarSet(sidecars) {
+  for (const sidecar of sidecars || []) {
+    const audio = sidecar.element;
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+  }
+}
+
+function clearReviewAudioDriftTimer() {
+  if (!reviewAudioDriftTimer) return;
+  window.clearInterval(reviewAudioDriftTimer);
+  reviewAudioDriftTimer = 0;
+}
+
+function applyReviewAudioOutput() {
+  const decision = PlayerCore.reviewAudioOutputDecision(
+    reviewAudioMode,
+    reviewAudioMuted,
+    reviewAudioVolume,
+  );
+  video.volume = decision.volume;
+  video.muted = decision.videoMuted;
+  for (const { element: audio } of activeReviewAudioSidecars) {
+    audio.volume = decision.volume;
+    audio.muted = decision.sidecarMuted;
+  }
+}
+
+function clearReviewAudioSidecars(mode = "direct") {
+  const stale = activeReviewAudioSidecars;
+  reviewAudioSidecarGeneration += 1;
+  clearReviewAudioDriftTimer();
+  activeReviewAudioSidecars = [];
+  disposeReviewAudioSidecarSet(stale);
+  reviewAudioMode = mode;
+  applyReviewAudioOutput();
+}
+
+function syncReviewAudioSidecarSet(sidecars, options = {}) {
+  const videoState = reviewAudioTransportState();
+  const playPromises = [];
+  for (const { element: audio } of sidecars || []) {
+    const decision = PlayerCore.audioSidecarSyncDecision(
+      videoState,
+      { currentTime: audio.currentTime },
+      { forceSeek: options.forceSeek === true },
+    );
+    if (decision.seekTime != null) audio.currentTime = decision.seekTime;
+    audio.playbackRate = decision.playbackRate;
+    if (decision.shouldPlay && options.allowPlayback !== false) {
+      if (audio.paused) playPromises.push(Promise.resolve(audio.play()));
+    } else if (!audio.paused) {
+      audio.pause();
+    }
+  }
+  return Promise.all(playPromises);
+}
+
+function handleReviewAudioSidecarFailure(generation, error) {
+  if (generation !== reviewAudioSidecarGeneration) return;
+  clearReviewAudioSidecars("direct");
+  if (currentClip) {
+    currentReviewAudioTrackIds = PlayerCore.directPlaybackAudioTrackIds(clipAudioTracks(currentClip));
+    currentReviewAudioKey = audioSelectionKey(currentClip, currentReviewAudioTrackIds);
+    restoreAudibleAudioSelection(`audio playback failed: ${String(error)}`);
+  }
+}
+
+function syncReviewAudioSidecars(options = {}) {
+  if (reviewAudioMode !== "sidecars" || activeReviewAudioSidecars.length === 0) return;
+  const generation = reviewAudioSidecarGeneration;
+  void syncReviewAudioSidecarSet(activeReviewAudioSidecars, options)
+    .catch((error) => handleReviewAudioSidecarFailure(generation, error));
+}
+
+function refreshReviewAudioDriftTimer() {
+  const shouldRun = reviewAudioMode === "sidecars"
+    && activeReviewAudioSidecars.length > 0
+    && !video.paused
+    && !video.ended;
+  if (!shouldRun) {
+    clearReviewAudioDriftTimer();
+    return;
+  }
+  if (!reviewAudioDriftTimer) {
+    reviewAudioDriftTimer = window.setInterval(() => syncReviewAudioSidecars(), 500);
+  }
+}
+
+async function prepareReviewAudioSidecars(sidecars, generation) {
+  const prepared = (sidecars || []).map((sidecar) => {
+    const audio = new Audio();
+    audio.preload = "auto";
+    audio.muted = true;
+    audio.volume = reviewAudioVolume;
+    audio.src = convertFileSrc(sidecar.path);
+    return {
+      audioTrackId: sidecar.audioTrackId,
+      path: sidecar.path,
+      element: audio,
+      generation,
+    };
+  });
+
+  try {
+    await Promise.all(prepared.map((sidecar) => new Promise((resolve, reject) => {
+      const { element: audio } = sidecar;
+      const stale = () => generation !== reviewAudioSidecarGeneration;
+      const ready = () => stale() ? reject(new Error("stale audio sidecar")) : resolve();
+      const failed = () => reject(new Error(`could not load audio track ${sidecar.audioTrackId}`));
+      audio.addEventListener("canplay", ready, { once: true });
+      audio.addEventListener("error", failed, { once: true });
+      audio.load();
+      if (audio.readyState >= 3) ready();
+    })));
+    if (generation !== reviewAudioSidecarGeneration) throw new Error("stale audio sidecar");
+    await syncReviewAudioSidecarSet(prepared, { forceSeek: true, allowPlayback: false });
+    return prepared;
+  } catch (error) {
+    disposeReviewAudioSidecarSet(prepared);
+    throw error;
+  }
+}
+
 function assignReviewVideoSource(path, options = {}) {
+  clearReviewAudioSidecars("direct");
   const { resumeTime = 0, onLoadedMetadata = null } = options;
   const assignment = { sourceGeneration: ++reviewSourceGeneration };
   reviewSeekState = PlayerCore.beginSourceAssignment(
@@ -139,6 +274,7 @@ function reportReviewSourceError(assignment) {
 }
 
 function releaseReviewVideoSource() {
+  clearReviewAudioSidecars("direct");
   const sourceGeneration = ++reviewSourceGeneration;
   reviewSeekState = PlayerCore.beginSourceAssignment(
     reviewSeekState,
@@ -261,6 +397,7 @@ function requestSelectedAudioPreview() {
 
 async function releaseVideoFileHandle() {
   cancelDesiredAudioPreview();
+  clearReviewAudioSidecars("direct");
   video.pause();
   releaseReviewVideoSource();
   await afterNextPaint();
@@ -269,6 +406,7 @@ async function releaseVideoFileHandle() {
 function suspendReviewPlayback() {
   setClipTitleEditing(false);
   cancelDesiredAudioPreview();
+  clearReviewAudioSidecars("direct");
   clearOverlayIdleCheck();
   video.pause();
   releaseReviewVideoSource();
@@ -439,6 +577,7 @@ function openClip(clip) {
     toggleSettings(false);
   }
   cancelDesiredAudioPreview();
+  clearReviewAudioSidecars("direct");
   clearOverlayIdleCheck();
   reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = clip;
@@ -478,6 +617,7 @@ function openClip(clip) {
 function closeReview() {
   setClipTitleEditing(false);
   cancelDesiredAudioPreview();
+  clearReviewAudioSidecars("direct");
   clearOverlayIdleCheck();
   video.pause();
   releaseReviewVideoSource();
@@ -987,6 +1127,7 @@ video.addEventListener("seeked", () => {
   paintTimeline();
   syncGameEventRail(current);
   syncGamePlayRail(current);
+  syncReviewAudioSidecars({ forceSeek: true });
 });
 
 function seekBy(delta) {
@@ -1011,8 +1152,8 @@ function syncPlayState() {
 }
 
 function syncVolume() {
-  $("mute-toggle").classList.toggle("muted", video.muted || video.volume === 0);
-  $("volume-slider").value = String(video.muted ? 0 : video.volume);
+  $("mute-toggle").classList.toggle("muted", reviewAudioMuted || reviewAudioVolume === 0);
+  $("volume-slider").value = String(reviewAudioMuted ? 0 : reviewAudioVolume);
   syncRangeProgress($("volume-slider"));
 }
 
@@ -1051,12 +1192,13 @@ function scheduleOverlayIdleCheck() {
 }
 
 function toggleMute() {
-  if (video.muted || video.volume === 0) {
-    video.muted = false;
-    if (video.volume === 0) video.volume = 1;
+  if (reviewAudioMuted || reviewAudioVolume === 0) {
+    reviewAudioMuted = false;
+    if (reviewAudioVolume === 0) reviewAudioVolume = 1;
   } else {
-    video.muted = true;
+    reviewAudioMuted = true;
   }
+  applyReviewAudioOutput();
   syncVolume();
 }
 
