@@ -6,6 +6,11 @@
 
 ## Checkpoint (2026-07-16): repository simplification pass
 
+Nightly 0.1.34 contains PRs #83 through #85. It ships the transactional reliability and long-MP4
+fixes, resilient seeking with fast audio-only sidecar switching, continuous quiet-audio capture,
+the dead-code/public-surface reduction, and the accepted arrow/J/L review-navigation remap. The
+previous public nightly was 0.1.33, so the app and Tauri versions were bumped for updater delivery.
+
 The primary checkout is on `main` at the same commit as `origin/main`. A conservative cleanup
 removed unused preview readback, mixed-loopback audio, PCM mixing, MP4/buffer wrappers, generated
 browser snapshots, and completed scratch notes. Internal buffer, event, League, and storage crates
