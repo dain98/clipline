@@ -2623,6 +2623,72 @@ fn audio_preview_queue_applies_only_current_success_and_cancel_keeps_worker_slot
 }
 
 #[test]
+fn audio_sidecar_sync_uses_video_as_the_authoritative_transport() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            r#"
+            (() => ({
+              forced: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 12.5, playbackRate: 1.5, paused: false, ended: false },
+                { currentTime: 12.49 },
+                { forceSeek: true },
+              ),
+              exactTolerance: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 10, playbackRate: 1, paused: false, ended: false },
+                { currentTime: 9.9 },
+              ),
+              belowTolerance: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 10, playbackRate: 1, paused: false, ended: false },
+                { currentTime: 9.901 },
+              ),
+              aboveTolerance: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 10, playbackRate: 1, paused: false, ended: false },
+                { currentTime: 9.899 },
+              ),
+              invalidSidecar: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 4, playbackRate: 0, paused: true, ended: false },
+                { currentTime: NaN },
+              ),
+              invalidVideo: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: Infinity, playbackRate: NaN, paused: false, ended: false },
+                { currentTime: 3 },
+                { forceSeek: true },
+              ),
+              ended: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 8, playbackRate: 2, paused: false, ended: true },
+                { currentTime: 8 },
+              ),
+            }))()
+            "#,
+        ),
+        r#"{"forced":{"seekTime":12.5,"playbackRate":1.5,"shouldPlay":true},"exactTolerance":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"belowTolerance":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"aboveTolerance":{"seekTime":10,"playbackRate":1,"shouldPlay":true},"invalidSidecar":{"seekTime":4,"playbackRate":1,"shouldPlay":false},"invalidVideo":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"ended":{"seekTime":null,"playbackRate":2,"shouldPlay":false}}"#
+    );
+}
+
+#[test]
+fn audio_sidecar_output_routes_only_the_selected_logical_source() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            r#"
+            (() => ({
+              direct: PlayerCore.reviewAudioOutputDecision('direct', false, 0.6),
+              sidecars: PlayerCore.reviewAudioOutputDecision('sidecars', false, 1.4),
+              muted: PlayerCore.reviewAudioOutputDecision('muted', false, -0.2),
+              userMuted: PlayerCore.reviewAudioOutputDecision('direct', true, 0.8),
+              zeroVolume: PlayerCore.reviewAudioOutputDecision('sidecars', false, 0),
+              unknown: PlayerCore.reviewAudioOutputDecision('other', false, 0.5),
+            }))()
+            "#,
+        ),
+        r#"{"direct":{"videoMuted":false,"sidecarMuted":true,"volume":0.6},"sidecars":{"videoMuted":true,"sidecarMuted":false,"volume":1},"muted":{"videoMuted":true,"sidecarMuted":true,"volume":0},"userMuted":{"videoMuted":true,"sidecarMuted":true,"volume":0.8},"zeroVolume":{"videoMuted":true,"sidecarMuted":true,"volume":0},"unknown":{"videoMuted":true,"sidecarMuted":true,"volume":0.5}}"#
+    );
+}
+
+#[test]
 fn region_helpers_set_align_and_clamp_to_display() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(

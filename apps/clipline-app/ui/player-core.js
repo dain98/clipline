@@ -16,6 +16,7 @@ const PlayerCore = (() => {
   // Fine-step fallback when the clip's true frame rate is unknown.
   const DEFAULT_FINE_STEP_S = 1 / 60;
   const QUICK_TRIM_WINDOW_S = 30;
+  const AUDIO_SIDECAR_DRIFT_TOLERANCE_S = 0.1;
 
   // YouTube grammar: controls pin while paused, fade when playing and idle.
   const overlayVisible = (paused, idleMs) => paused || idleMs < OVERLAY_HIDE_MS;
@@ -1927,6 +1928,33 @@ const PlayerCore = (() => {
     };
   };
 
+  const audioSidecarSyncDecision = (videoState, sidecarState, options = {}) => {
+    const videoTime = Number(videoState && videoState.currentTime);
+    const sidecarTime = Number(sidecarState && sidecarState.currentTime);
+    const validVideoTime = Number.isFinite(videoTime) && videoTime >= 0;
+    const driftRequiresSeek = !Number.isFinite(sidecarTime)
+      || Math.abs(videoTime - sidecarTime) > AUDIO_SIDECAR_DRIFT_TOLERANCE_S;
+    const rate = Number(videoState && videoState.playbackRate);
+    return {
+      seekTime: validVideoTime && (options.forceSeek === true || driftRequiresSeek)
+        ? videoTime
+        : null,
+      playbackRate: Number.isFinite(rate) && rate > 0 ? rate : 1,
+      shouldPlay: !(videoState && videoState.paused) && !(videoState && videoState.ended),
+    };
+  };
+
+  const reviewAudioOutputDecision = (mode, muted, volume) => {
+    const value = Number(volume);
+    const normalizedVolume = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 1;
+    const silenceAll = Boolean(muted) || normalizedVolume === 0;
+    return {
+      videoMuted: silenceAll || mode !== "direct",
+      sidecarMuted: silenceAll || mode !== "sidecars",
+      volume: normalizedVolume,
+    };
+  };
+
   // --- Encoder codec playback support (Settings) ---
   // Codecs the in-app review player may need an OS extension to decode.
   // H.264 always plays in WebView2; HEVC/AV1 are probed at runtime via
@@ -2051,6 +2079,8 @@ const PlayerCore = (() => {
     queueAudioPreviewRequest,
     cancelAudioPreviewRequest,
     finishAudioPreviewRequest,
+    audioSidecarSyncDecision,
+    reviewAudioOutputDecision,
   };
 })();
 
