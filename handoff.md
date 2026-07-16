@@ -4,6 +4,130 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-15): resilient seeking complete; fast audio sidecars native-only
+
+This is an intentional intermediate checkpoint requested by the user. Do not assume the fast audio
+switch is wired into the browser yet.
+
+### Workspace and preservation constraints
+
+- Active branch: `fix/resilient-seeking-lazy-previews`
+- Active worktree:
+  `C:\Users\dain\.paseo\worktrees\1qv1k36q\resilient-seeking-lazy-previews`
+- Paseo workspace ID: `wks_226d4582bb9d704b`
+- The original checkout at `C:\Users\dain\Projects\clipline` has user-owned uncommitted changes in
+  `apps/clipline-app/tests/player_core.rs`, `apps/clipline-app/tests/ui_contract.rs`,
+  `apps/clipline-app/ui/index.html`, `apps/clipline-app/ui/player-core.js`, and
+  `apps/clipline-app/ui/review-player.js`, plus untracked `.gsi-spike/`. Never overwrite, stage, or
+  clean those changes. Continue only in the isolated worktree.
+
+### User-visible state before the sidecar conversion
+
+- The rapid right-arrow/forward-seek reset was fixed by making the logical seek target
+  authoritative across media events and source generations. The user manually confirmed this item
+  appears fixed.
+- Quiet WASAPI endpoints now synthesize timeline-continuous silence with one 20 ms capture-latency
+  allowance. The real hardware sync test passed with approximately 11.7 ms maximum skew.
+- Explicit audio previews are serialized/coalesced, use direct fallback audio on open, publish
+  atomically, and use a total 2 GiB LRU cache with active-preview protection.
+- The remaining reported problem is long-video audio switching latency. The currently shipped
+  browser path still creates and loads a whole-video preview, so this checkpoint does not yet
+  improve the user's switch time.
+
+### Diagnosis and approved architecture
+
+The reproduced 31:31, 1.88 GiB clip exposed the root cause: each uncached selection read the whole
+source, rebuilt another full MP4 containing copied video, wrote roughly 1.9 GiB, and reloaded the
+video element. That creates about 3.8 GiB of disk traffic, several GiB of live buffers, and cache
+thrashing.
+
+Live measurements with the packaged FFmpeg:
+
+- one audio track copied to audio-only MP4: 1.87 s, 23.9 MB;
+- two tracks copied in one FFmpeg process: 0.50 s, 47.7 MB total;
+- two tracks decoded/mixed/re-encoded to one audio-only MP4: 15.0 s.
+
+The user approved an approximately 0.5-to-2-second first uncached switch and near-instant cached
+switches. The approved design keeps the original `<video>` loaded, caches one stream-copied
+audio-only MP4 per embedded track, and plays selected tracks through synchronized hidden audio
+elements. The video remains the authoritative clock with a 100 ms drift threshold.
+
+Read these documents completely before continuing:
+
+- `docs/superpowers/specs/2026-07-15-audio-sidecar-switching-design.md`
+- `docs/superpowers/plans/2026-07-15-audio-sidecar-switching.md`
+
+### Completed sidecar work
+
+The design and plan are committed, and Tasks 1-2 have reached the native checkpoint:
+
+- `f4a08779` — `docs(player): design fast audio sidecar switching`
+- `a53a83c8` — `docs(player): plan fast audio sidecar switching`
+- `e1a947bf` — `feat(mp4): expose media track counts`
+- `311dc21a` — `feat(player): prepare cached audio sidecars`
+- `516aef21` — `fix(player): harden audio sidecar preparation`
+- `7050c29b` — `fix(player): close audio sidecar publication boundaries`
+
+Native behavior now available in parallel with the legacy command:
+
+- `prepare_clip_audio_sidecars` accepts `{ path, audioTrackIds, protectedPreviewPaths }` and
+  returns ordered `{ audioTrackId, path }` records.
+- Per-track `audio-track-sidecar-v1` cache keys reuse a track across selection combinations.
+- One FFmpeg process extracts all missing selected streams with explicit `0:a:N`, `-vn`, and
+  `-c:a copy`; the new path never copies or maps video.
+- Existing requested hits are protected before pruning, validated, touched, and reused.
+- Outputs validate as exactly zero video tracks and one audio track before publication.
+- Publication ownership remains armed across the blocking task and Tauri asset-scope calls. A
+  failure removes only invocation-owned finals; collision winners and prior hits are never owned.
+- Legacy clips without audio marker metadata use a bounded `Read + Seek` MP4 metadata reader that
+  skips `mdat`. Finalized `moov` allocation is capped at 64 MiB, with malformed size/header/EOF
+  coverage.
+- The old `preview_clip_audio_tracks` command remains registered deliberately so intermediate
+  commits are runnable. The frontend still invokes it.
+
+Task 1 received an independent approval. Task 2 received two review rounds that found and drove
+fixes for the full-source legacy read, premature hit eviction, publication lifetime, and unbounded
+`moov` allocation. Commit `7050c29b` has implementer test/self-review evidence but has not yet had a
+fresh independent diff review; that should be the first action on resume.
+
+Focused gates reported green at this checkpoint:
+
+- `cargo test -p clipline-mp4 media_track_counts -- --nocapture`
+- `cargo test -p clipline-mp4` (75 tests before the later reader additions; rerun for current count)
+- `cargo test -p clipline-app audio_sidecar -- --nocapture`
+- `cargo test -p clipline-app audio_preview_cache -- --nocapture`
+- `cargo clippy -p clipline-mp4 --all-targets -- -D warnings`
+- `cargo clippy -p clipline-app --all-targets -- -D warnings`
+- `cargo fmt --check`
+
+Fresh controller verification on current native-checkpoint `HEAD` also passed on 2026-07-15:
+
+- `cargo test --workspace`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+
+The oversized-`moov` test's first RED input was malformed and had to be corrected, so its procedural
+RED evidence is weaker than ideal. The final valid oversized case is green and load-bearing.
+
+### Exact next steps
+
+1. Independently review `7050c29b` and the complete Task 2 diff `e1a947bf..7050c29b`, especially
+   publication ownership through asset scoping and the bounded MP4 reader. Resolve any Important or
+   Critical finding with a focused RED/GREEN commit.
+2. Execute Task 3 from the plan: add pure `audioSidecarSyncDecision` and
+   `reviewAudioOutputDecision` helpers plus Boa tests.
+3. Execute Task 4: add dormant browser sidecar preparation/disposal/sync primitives and separate
+   user mute/volume state from transport-level `video.muted`.
+4. Execute Task 5: switch the existing latest-request queue to `prepare_clip_audio_sidecars`, wait
+   for all muted sidecars to become playable, then atomically make them audible without assigning
+   `video.src`.
+5. Execute Task 6: remove the legacy whole-video preview command and generator, update this handoff,
+   run fresh workspace tests/Clippy, launch the worktree app with
+   `CLIPLINE_FFMPEG=C:\Users\dain\AppData\Local\Clipline\ffmpeg\ffmpeg.exe`, and perform the
+   31-minute-clip manual acceptance sequence.
+
+Do not launch manual acceptance at this checkpoint: the frontend has not been converted, so it
+would still exercise the slow legacy preview path.
+
 ## What this project is
 
 Clipline is an open-source, lightweight, ad-free game recorder for Windows (see `ddoc.md`):
