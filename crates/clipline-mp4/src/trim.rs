@@ -23,6 +23,12 @@ pub struct TrimInfo {
     pub duration_s: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaTrackCounts {
+    pub video: usize,
+    pub audio: usize,
+}
+
 #[derive(Debug)]
 pub enum TrimError {
     InvalidRange(String),
@@ -183,12 +189,19 @@ pub fn remux_with_selected_audio_tracks(
 }
 
 pub fn audio_track_count(input: &[u8]) -> Result<usize, TrimError> {
+    Ok(media_track_counts(input)?.audio)
+}
+
+pub fn media_track_counts(input: &[u8]) -> Result<MediaTrackCounts, TrimError> {
     let movie = parse_movie(input)?;
-    Ok(movie
-        .tracks
-        .iter()
-        .filter(|track| matches!(track.cfg, TrackConfig::Audio(_)))
-        .count())
+    let mut counts = MediaTrackCounts { video: 0, audio: 0 };
+    for track in &movie.tracks {
+        match track.cfg {
+            TrackConfig::Video(_) => counts.video += 1,
+            TrackConfig::Audio(_) => counts.audio += 1,
+        }
+    }
+    Ok(counts)
 }
 
 pub fn remux_with_mixed_audio_track(
@@ -1221,21 +1234,26 @@ mod tests {
     use audiopus::coder::{Decoder, Encoder};
     use audiopus::{Application, Channels, SampleRate};
 
+    fn video_track() -> TrackConfig {
+        TrackConfig::Video(VideoTrackConfig::h264(
+            128,
+            72,
+            90_000,
+            vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+            vec![0x68, 0xEE, 0x38, 0x80],
+        ))
+    }
+
+    fn audio_track() -> TrackConfig {
+        TrackConfig::Audio(AudioTrackConfig {
+            channels: 2,
+            sample_rate: 48_000,
+            pre_skip: 312,
+        })
+    }
+
     fn tracks() -> Vec<TrackConfig> {
-        vec![
-            TrackConfig::Video(VideoTrackConfig::h264(
-                128,
-                72,
-                90_000,
-                vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
-                vec![0x68, 0xEE, 0x38, 0x80],
-            )),
-            TrackConfig::Audio(AudioTrackConfig {
-                channels: 2,
-                sample_rate: 48_000,
-                pre_skip: 312,
-            }),
-        ]
+        vec![video_track(), audio_track()]
     }
 
     fn video_gop(start: u32) -> Vec<FragSample> {
@@ -1355,13 +1373,11 @@ mod tests {
     }
 
     fn tracks_two_audio() -> Vec<TrackConfig> {
-        let mut tracks = tracks();
-        tracks.push(TrackConfig::Audio(AudioTrackConfig {
-            channels: 2,
-            sample_rate: 48_000,
-            pre_skip: 312,
-        }));
-        tracks
+        vec![video_track(), audio_track(), audio_track()]
+    }
+
+    fn audio_only_tracks() -> Vec<TrackConfig> {
+        vec![audio_track()]
     }
 
     fn clipline_two_audio_fixture() -> Vec<u8> {
@@ -1372,6 +1388,16 @@ mod tests {
             let output = audio_packets_with("A", second * 50);
             let mic = audio_packets_with("B", second * 50);
             w.write_fragment_multi(&[&v, &output, &mic]).unwrap();
+        }
+        w.finalize().unwrap().into_inner()
+    }
+
+    fn clipline_audio_only_fixture() -> Vec<u8> {
+        let mut w =
+            HybridMp4Writer::new_multi(Cursor::new(Vec::new()), audio_only_tracks()).unwrap();
+        for second in 0..2 {
+            let audio = audio_packets(second * 50);
+            w.write_fragment_multi(&[&audio]).unwrap();
         }
         w.finalize().unwrap().into_inner()
     }
@@ -1585,6 +1611,18 @@ mod tests {
     fn audio_track_count_reports_finalized_audio_tracks() {
         assert_eq!(audio_track_count(&clipline_fixture()).unwrap(), 1);
         assert_eq!(audio_track_count(&clipline_two_audio_fixture()).unwrap(), 2);
+    }
+
+    #[test]
+    fn media_track_counts_reports_video_and_audio_tracks() {
+        assert_eq!(
+            media_track_counts(&clipline_two_audio_fixture()).unwrap(),
+            MediaTrackCounts { video: 1, audio: 2 }
+        );
+        assert_eq!(
+            media_track_counts(&clipline_audio_only_fixture()).unwrap(),
+            MediaTrackCounts { video: 0, audio: 1 }
+        );
     }
 
     #[test]
