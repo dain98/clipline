@@ -640,7 +640,7 @@ function openClip(clip) {
   currentReviewAudioKey = null;
   simpleTrimMode = false;
   resetSelectedAudioTracks(clip);
-  currentReviewAudioTrackIds = selectedAudioTrackIdsForClip(clip);
+  currentReviewAudioTrackIds = PlayerCore.directPlaybackAudioTrackIds(clipAudioTracks(clip));
   currentReviewAudioKey = audioSelectionKey(clip, currentReviewAudioTrackIds);
   $("error").textContent = "";
   setDeckStatus("");
@@ -667,6 +667,9 @@ function openClip(clip) {
   noteActivity();
   requestAnimationFrame(updateStageFrame);
   video.play().catch(() => syncPlayState());
+  if (clipAudioTracks(clip).length > 0) {
+    requestSelectedAudioPreview();
+  }
   syncCloudClipStatus(clip);
 }
 

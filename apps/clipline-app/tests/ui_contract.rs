@@ -1649,12 +1649,26 @@ fn rail_shows_connected_cloud_identity() {
 }
 
 #[test]
-fn opening_multitrack_clip_plays_original_source_without_preview() {
+fn opening_multitrack_clip_starts_direct_and_prepares_default_sidecars() {
+    let app_core = read_ui_js("app-core.js");
+    let reset_selection = js_function_body(&app_core, "resetSelectedAudioTracks");
     let review = read_ui_js("review-player.js");
     let open_clip = js_function_body(&review, "openClip");
+
+    assert!(reset_selection.contains("defaultAudioTrackIds(clip)"));
+    assert!(!reset_selection.contains("directPlaybackAudioTrackIds"));
     assert!(open_clip.contains("resetSelectedAudioTracks(clip);"));
+    assert!(open_clip.contains(
+        "currentReviewAudioTrackIds = PlayerCore.directPlaybackAudioTrackIds(clipAudioTracks(clip));"
+    ));
     assert!(open_clip.contains("assignReviewVideoSource(clip.path, { resumeTime: 0 })"));
     assert!(open_clip.contains("video.play().catch(() => syncPlayState());"));
+    assert!(open_clip.contains("requestSelectedAudioPreview();"));
+    assert!(
+        open_clip.find("video.play().catch(() => syncPlayState());")
+            < open_clip.find("requestSelectedAudioPreview();"),
+        "direct playback should start before the selected sidecars are prepared"
+    );
     assert!(!open_clip.contains("applySelectedAudioTracksToPlayback"));
     assert!(!main_js().contains("function applyDefaultAudioSelectionIfNeeded"));
 }

@@ -92,6 +92,9 @@ Completed behavior:
 - User mute and volume are logical state independent of transport-level video muting. Original
   video audio is not silenced until every current-generation sidecar is playable and its play
   promise succeeds.
+- Opening a clip selects every default review track, including the microphone, while the first
+  embedded track starts immediately; the complete selection activates atomically after its
+  sidecars are ready without reloading the video.
 - Clip open/close, suspend, source release, replacement, and rename invalidate callbacks, stop the
   drift timer, pause sidecars, remove their sources, call `load()`, and release Windows file
   handles.

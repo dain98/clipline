@@ -270,9 +270,7 @@ function defaultAudioTrackIds(clip = currentClip) {
 }
 
 function resetSelectedAudioTracks(clip = currentClip) {
-  selectedAudioTrackIds = new Set(
-    PlayerCore.directPlaybackAudioTrackIds(clipAudioTracks(clip)),
-  );
+  selectedAudioTrackIds = new Set(defaultAudioTrackIds(clip));
 }
 
 function pruneSelectedAudioTracks(clip = currentClip) {
