@@ -13,8 +13,8 @@ use std::sync::Mutex;
 
 use clipline_events::{is_review_event, ClipMarker, ClipMarkers, ClipPlay};
 use clipline_mp4::{
-    media_track_counts, remux_with_mixed_audio_track, remux_with_selected_audio_tracks,
-    trim_keyframe_aligned_file, MediaTrackCounts,
+    remux_with_mixed_audio_track, remux_with_selected_audio_tracks, trim_keyframe_aligned_file,
+    MediaTrackCounts,
 };
 use clipline_storage::storage_status as read_storage_status;
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
@@ -190,6 +190,31 @@ struct AudioTrackSidecarOutput {
     audio_stream_index: u32,
     final_path: PathBuf,
     tmp_path: PathBuf,
+}
+
+#[derive(Debug, Default)]
+struct PublishedAudioSidecars {
+    created_finals: Vec<PathBuf>,
+    committed: bool,
+}
+
+impl PublishedAudioSidecars {
+    fn record_created(&mut self, path: PathBuf) {
+        self.created_finals.push(path);
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PublishedAudioSidecars {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        cleanup_created_audio_sidecar_finals(&self.created_finals);
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -859,17 +884,30 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
         .into_iter()
         .map(PathBuf::from)
         .collect();
-    prune_audio_preview_cache_logged_with_limit(&preview_dir, &currently_active, max_cache_bytes);
+    let requested_final_paths: Vec<PathBuf> = resolved_tracks
+        .iter()
+        .map(|track| {
+            audio_track_sidecar_path(&preview_dir, &source, &source_meta, &track.audio_track_id)
+        })
+        .collect();
+    let protected_before_lookup = [
+        currently_active.as_slice(),
+        requested_final_paths.as_slice(),
+    ]
+    .concat();
+    prune_audio_preview_cache_logged_with_limit(
+        &preview_dir,
+        &protected_before_lookup,
+        max_cache_bytes,
+    );
 
     let mut ordered_hits = Vec::new();
     let mut missing_outputs = Vec::new();
-    for track in &resolved_tracks {
-        let final_path =
-            audio_track_sidecar_path(&preview_dir, &source, &source_meta, &track.audio_track_id);
+    for (track, final_path) in resolved_tracks.iter().zip(requested_final_paths.iter()) {
         if final_path.exists() {
-            match validate_audio_sidecar_file(&final_path) {
+            match validate_audio_sidecar_file(final_path) {
                 Ok(()) => {
-                    if let Err(error) = touch_audio_preview(&final_path) {
+                    if let Err(error) = touch_audio_preview(final_path) {
                         eprintln!("{error}");
                     }
                     ordered_hits.push(PreparedClipAudioSidecar {
@@ -880,7 +918,7 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
                 }
                 Err(error) => {
                     eprintln!("{error}");
-                    let _ = std::fs::remove_file(&final_path);
+                    let _ = std::fs::remove_file(final_path);
                 }
             }
         }
@@ -889,16 +927,11 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
             audio_track_id: track.audio_track_id.clone(),
             audio_stream_index: track.audio_stream_index,
             final_path: final_path.clone(),
-            tmp_path: cached_export_tmp_path(&final_path)?,
+            tmp_path: cached_export_tmp_path(final_path)?,
         });
     }
 
-    let requested_hits: Vec<PathBuf> = ordered_hits
-        .iter()
-        .map(|sidecar| PathBuf::from(&sidecar.path))
-        .collect();
-    let protected_before = [currently_active.as_slice(), requested_hits.as_slice()].concat();
-    prune_audio_preview_cache_logged_with_limit(&preview_dir, &protected_before, max_cache_bytes);
+    let mut publication = None;
 
     if !missing_outputs.is_empty() {
         for output in &missing_outputs {
@@ -908,21 +941,27 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
             cleanup_audio_sidecar_temps(&missing_outputs);
             return Err(error);
         }
-        if let Err(error) = validate_and_publish_audio_sidecars(&missing_outputs) {
+        if let Err(error) = validate_and_publish_audio_sidecars(&missing_outputs).map(|published| {
+            publication = Some(published);
+        }) {
             cleanup_audio_sidecar_temps(&missing_outputs);
             return Err(error);
         }
     }
 
     let mut ordered = Vec::with_capacity(resolved_tracks.len());
-    for track in resolved_tracks {
-        let final_path =
-            audio_track_sidecar_path(&preview_dir, &source, &source_meta, &track.audio_track_id);
-        validate_audio_sidecar_file(&final_path)?;
+    for (track, final_path) in resolved_tracks
+        .into_iter()
+        .zip(requested_final_paths.iter())
+    {
+        validate_audio_sidecar_file(final_path)?;
         ordered.push(PreparedClipAudioSidecar {
             audio_track_id: track.audio_track_id,
             path: final_path.display().to_string(),
         });
+    }
+    if let Some(publication) = publication {
+        publication.commit();
     }
 
     let protected_after: Vec<PathBuf> = ordered
@@ -996,9 +1035,7 @@ fn validate_audio_sidecar_file(path: &Path) -> Result<(), String> {
     if metadata.len() == 0 {
         return Err(format!("audio sidecar {path:?} was empty"));
     }
-    let bytes =
-        std::fs::read(path).map_err(|error| format!("read audio sidecar {path:?}: {error}"))?;
-    let counts = media_track_counts(&bytes)
+    let counts = clipline_mp4::media_track_counts_file(path)
         .map_err(|error| format!("inspect audio sidecar {path:?}: {error}"))?;
     if counts != (MediaTrackCounts { video: 0, audio: 1 }) {
         return Err(format!(
@@ -1009,21 +1046,34 @@ fn validate_audio_sidecar_file(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_and_publish_audio_sidecars(outputs: &[AudioTrackSidecarOutput]) -> Result<(), String> {
+fn validate_and_publish_audio_sidecars(
+    outputs: &[AudioTrackSidecarOutput],
+) -> Result<PublishedAudioSidecars, String> {
     for output in outputs {
         validate_audio_sidecar_file(&output.tmp_path)?;
     }
 
-    let mut created_finals = Vec::new();
+    let mut published = PublishedAudioSidecars::default();
     for output in outputs {
+        if output.final_path.exists() {
+            if let Err(error) = validate_audio_sidecar_file(&output.final_path) {
+                cleanup_audio_sidecar_temps(outputs);
+                return Err(format!(
+                    "finalize audio sidecar collision winner {path:?}: {error}",
+                    path = output.final_path
+                ));
+            }
+            let _ = std::fs::remove_file(&output.tmp_path);
+            continue;
+        }
+
         match std::fs::rename(&output.tmp_path, &output.final_path) {
             Ok(()) => {
-                created_finals.push(output.final_path.clone());
+                published.record_created(output.final_path.clone());
             }
             Err(_) if output.final_path.exists() => {
                 if let Err(error) = validate_audio_sidecar_file(&output.final_path) {
                     cleanup_audio_sidecar_temps(outputs);
-                    cleanup_created_audio_sidecar_finals(&created_finals);
                     return Err(format!(
                         "finalize audio sidecar collision winner {path:?}: {error}",
                         path = output.final_path
@@ -1033,7 +1083,6 @@ fn validate_and_publish_audio_sidecars(outputs: &[AudioTrackSidecarOutput]) -> R
             }
             Err(error) => {
                 cleanup_audio_sidecar_temps(outputs);
-                cleanup_created_audio_sidecar_finals(&created_finals);
                 return Err(format!(
                     "finalize audio sidecar {tmp:?} -> {final_path:?}: {error}",
                     tmp = output.tmp_path,
@@ -1042,7 +1091,7 @@ fn validate_and_publish_audio_sidecars(outputs: &[AudioTrackSidecarOutput]) -> R
             }
         }
     }
-    Ok(())
+    Ok(published)
 }
 
 fn cleanup_audio_sidecar_temps(outputs: &[AudioTrackSidecarOutput]) {
@@ -3169,6 +3218,53 @@ mod tests {
     }
 
     #[test]
+    fn audio_sidecar_requested_cache_hit_survives_initial_prune_without_extraction() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-requested-hit");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, two_real_opus_audio_mp4()).unwrap();
+        write_audio_track_markers(&source, vec![("output", 0, "Output Audio")]);
+
+        let preview_dir = dir.path().join("previews");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        let meta = std::fs::metadata(&source).unwrap();
+        let requested_hit = audio_track_sidecar_path(&preview_dir, &source, &meta, "output");
+        std::fs::write(&requested_hit, audio_only_opus_mp4_for_stream(0)).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&requested_hit)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+
+        let stale = preview_dir.join("audio-preview-stale.mp4");
+        std::fs::write(&stale, [0_u8; 40]).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2))
+            .unwrap();
+
+        let sidecars = prepare_clip_audio_sidecars_file_with_extractor_and_limits(
+            source,
+            vec!["output".into()],
+            Vec::new(),
+            preview_dir,
+            std::fs::metadata(&requested_hit).unwrap().len() + 39,
+            |_, _| panic!("extractor must not run for a valid requested cache hit"),
+        )
+        .unwrap();
+
+        assert!(
+            requested_hit.exists(),
+            "requested hit must survive initial prune"
+        );
+        assert!(!stale.exists(), "stale unrequested entry should be evicted");
+        assert_eq!(sidecars.len(), 1);
+        assert_eq!(sidecars[0].path, requested_hit.display().to_string());
+    }
+
+    #[test]
     fn audio_sidecar_failure_cleans_temps_and_publishes_nothing() {
         let dir = TestDir::new("clipline-library", "audio-sidecar-cleanup");
         let source = dir.path().join("clip.mp4");
@@ -3243,6 +3339,55 @@ mod tests {
         assert!(!args.windows(2).any(|pair| pair == ["-map", "0:v:0"]));
         assert!(!args.iter().any(|arg| *arg == "libopus"));
         assert!(!args.iter().any(|arg| arg.contains("amix")));
+    }
+
+    #[test]
+    fn audio_sidecar_publication_guard_removes_owned_finals_but_keeps_collision_winner() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-publication-guard");
+        let owned_final = dir.path().join("audio-preview-owned.mp4");
+        let owned_tmp = dir.path().join("audio-preview-owned.mp4.tmp");
+        let collision_final = dir.path().join("audio-preview-collision.mp4");
+        let collision_tmp = dir.path().join("audio-preview-collision.mp4.tmp");
+        std::fs::write(&owned_tmp, audio_only_opus_mp4_for_stream(0)).unwrap();
+        std::fs::write(&collision_tmp, audio_only_opus_mp4_for_stream(1)).unwrap();
+        std::fs::write(&collision_final, audio_only_opus_mp4_for_stream(1)).unwrap();
+
+        let outputs = vec![
+            AudioTrackSidecarOutput {
+                audio_track_id: "owned".into(),
+                audio_stream_index: 0,
+                final_path: owned_final.clone(),
+                tmp_path: owned_tmp.clone(),
+            },
+            AudioTrackSidecarOutput {
+                audio_track_id: "collision".into(),
+                audio_stream_index: 1,
+                final_path: collision_final.clone(),
+                tmp_path: collision_tmp.clone(),
+            },
+        ];
+
+        let guard = validate_and_publish_audio_sidecars(&outputs).unwrap();
+        assert!(
+            owned_final.exists(),
+            "successful rename should publish owned final"
+        );
+        assert!(
+            collision_final.exists(),
+            "existing collision winner must remain"
+        );
+        assert!(!owned_tmp.exists(), "owned temp should be consumed");
+        assert!(!collision_tmp.exists(), "collision temp should be removed");
+        drop(guard);
+
+        assert!(
+            !owned_final.exists(),
+            "dropping uncommitted guard should remove invocation-owned finals"
+        );
+        assert!(
+            collision_final.exists(),
+            "dropping uncommitted guard must not delete collision winners"
+        );
     }
 
     fn write_audio_track_markers(source: &Path, tracks: Vec<(&str, u32, &str)>) {
