@@ -1106,6 +1106,39 @@ fn review_audio_defaults_to_direct_fallback_and_explicit_tracks_need_preview() {
 }
 
 #[test]
+fn review_direct_audio_fallback_uses_stream_zero_not_marker_order() {
+    let mut ctx = player_core_context();
+    let model = eval_json(
+        &mut ctx,
+        r#"
+        (() => {
+          const reordered = [
+            { id: 'microphone', kind: 'microphone', track_index: 1 },
+            { id: 'output', kind: 'output', track_index: 0 },
+          ];
+          const legacy = [
+            { id: 'legacy-output', kind: 'output' },
+            { id: 'legacy-microphone', kind: 'microphone' },
+          ];
+          return {
+            reordered: PlayerCore.directPlaybackAudioTrackIds(reordered),
+            reorderedMicNeedsPreview: PlayerCore.reviewSelectionNeedsPreview(
+              reordered,
+              ['microphone'],
+            ),
+            legacy: PlayerCore.directPlaybackAudioTrackIds(legacy),
+          };
+        })()
+        "#,
+    );
+
+    assert_eq!(
+        model,
+        r#"{"reordered":["output"],"reorderedMicNeedsPreview":true,"legacy":["legacy-output"]}"#
+    );
+}
+
+#[test]
 fn key_intents_cover_the_documented_shortcuts() {
     let mut ctx = player_core_context();
     for code in ["Space", "KeyK"] {

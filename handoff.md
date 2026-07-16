@@ -95,6 +95,10 @@ Completed behavior:
 - Opening a clip selects every default review track, including the microphone, while the first
   embedded track starts immediately; the complete selection activates atomically after its
   sidecars are ready without reloading the video.
+- Direct source playback follows audio stream index zero even when marker rows are reordered, and
+  each source assignment keeps one removable error listener for its full lifetime.
+- Validated sidecar cache hits retain their ordered result without a redundant second validation;
+  validation/publication owns temporary-file cleanup on every failure path.
 - Clip open/close, suspend, source release, replacement, and rename invalidate callbacks, stop the
   drift timer, pause sidecars, remove their sources, call `load()`, and release Windows file
   handles.

@@ -794,8 +794,11 @@ const PlayerCore = (() => {
   };
 
   const directPlaybackAudioTrackIds = (tracks) => {
-    const first = normalizedAudioTracks(tracks).map(audioTrackId).find(Boolean);
-    return first ? [first] : [];
+    const normalized = normalizedAudioTracks(tracks);
+    const streamZero = normalized.find((track) =>
+      track && track.track_index === 0 && audioTrackId(track));
+    const direct = streamZero || normalized.find((track) => audioTrackId(track));
+    return direct ? [audioTrackId(direct)] : [];
   };
 
   const selectedReviewAudioTrackIds = (tracks, selectedIds) => {

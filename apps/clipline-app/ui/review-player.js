@@ -99,6 +99,7 @@ function applyRenamedClip(oldClip, result) {
 }
 
 var reviewSourceGeneration = 0;
+var reviewSourceErrorHandler = null;
 var reviewSeekState = PlayerCore.createLogicalSeekState();
 var audioPreviewQueue = PlayerCore.emptyAudioPreviewQueue();
 
@@ -277,6 +278,7 @@ async function activatePreparedReviewAudioSidecars(prepared, request) {
 
 function assignReviewVideoSource(path, options = {}) {
   clearReviewAudioSidecars("direct");
+  clearReviewSourceErrorHandler();
   const { resumeTime = 0, onLoadedMetadata = null } = options;
   const assignment = { sourceGeneration: ++reviewSourceGeneration };
   reviewSeekState = PlayerCore.beginSourceAssignment(
@@ -296,7 +298,8 @@ function assignReviewVideoSource(path, options = {}) {
     if (decision.applyTime != null) video.currentTime = decision.applyTime;
     if (typeof onLoadedMetadata === "function") onLoadedMetadata(assignment);
   }, { once: true });
-  video.addEventListener("error", () => reportReviewSourceError(assignment), { once: true });
+  reviewSourceErrorHandler = () => reportReviewSourceError(assignment);
+  video.addEventListener("error", reviewSourceErrorHandler);
   currentReviewMediaPath = path;
   video.src = convertFileSrc(path);
   return assignment;
@@ -308,8 +311,15 @@ function reportReviewSourceError(assignment) {
   $("stage-note").textContent = `load error ${error ? error.code : "?"}`;
 }
 
+function clearReviewSourceErrorHandler() {
+  if (!reviewSourceErrorHandler) return;
+  video.removeEventListener("error", reviewSourceErrorHandler);
+  reviewSourceErrorHandler = null;
+}
+
 function releaseReviewVideoSource() {
   clearReviewAudioSidecars("direct");
+  clearReviewSourceErrorHandler();
   const sourceGeneration = ++reviewSourceGeneration;
   reviewSeekState = PlayerCore.beginSourceAssignment(
     reviewSeekState,

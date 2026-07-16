@@ -851,7 +851,7 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
         max_cache_bytes,
     );
 
-    let mut ordered_hits = Vec::new();
+    let mut ordered = Vec::with_capacity(resolved_tracks.len());
     let mut missing_outputs = Vec::new();
     for (track, final_path) in resolved_tracks.iter().zip(requested_final_paths.iter()) {
         if final_path.exists() {
@@ -860,10 +860,10 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
                     if let Err(error) = touch_audio_preview(final_path) {
                         eprintln!("{error}");
                     }
-                    ordered_hits.push(PreparedClipAudioSidecar {
+                    ordered.push(Some(PreparedClipAudioSidecar {
                         audio_track_id: track.audio_track_id.clone(),
                         path: final_path.display().to_string(),
-                    });
+                    }));
                     continue;
                 }
                 Err(error) => {
@@ -879,6 +879,7 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
             final_path: final_path.clone(),
             tmp_path: cached_export_tmp_path(final_path)?,
         });
+        ordered.push(None);
     }
 
     let mut publication = None;
@@ -891,25 +892,27 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
             cleanup_audio_sidecar_temps(&missing_outputs);
             return Err(error);
         }
-        if let Err(error) = validate_and_publish_audio_sidecars(&missing_outputs).map(|published| {
-            publication = Some(published);
-        }) {
-            cleanup_audio_sidecar_temps(&missing_outputs);
-            return Err(error);
-        }
+        publication = Some(validate_and_publish_audio_sidecars(&missing_outputs)?);
     }
 
-    let mut ordered = Vec::with_capacity(resolved_tracks.len());
-    for (track, final_path) in resolved_tracks
-        .into_iter()
+    for ((prepared, track), final_path) in ordered
+        .iter_mut()
+        .zip(resolved_tracks.iter())
         .zip(requested_final_paths.iter())
     {
+        if prepared.is_some() {
+            continue;
+        }
         validate_audio_sidecar_file(final_path)?;
-        ordered.push(PreparedClipAudioSidecar {
-            audio_track_id: track.audio_track_id,
+        *prepared = Some(PreparedClipAudioSidecar {
+            audio_track_id: track.audio_track_id.clone(),
             path: final_path.display().to_string(),
         });
     }
+    let ordered = ordered
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "audio sidecar preparation left an unresolved track".to_string())?;
     let protected_after: Vec<PathBuf> = ordered
         .iter()
         .map(|sidecar| PathBuf::from(&sidecar.path))
@@ -1011,49 +1014,52 @@ fn validate_audio_sidecar_file(path: &Path) -> Result<(), String> {
 fn validate_and_publish_audio_sidecars(
     outputs: &[AudioTrackSidecarOutput],
 ) -> Result<PublishedAudioSidecars, String> {
-    for output in outputs {
-        validate_audio_sidecar_file(&output.tmp_path)?;
-    }
-
-    let mut published = PublishedAudioSidecars::default();
-    for output in outputs {
-        if output.final_path.exists() {
-            if let Err(error) = validate_audio_sidecar_file(&output.final_path) {
-                cleanup_audio_sidecar_temps(outputs);
-                return Err(format!(
-                    "finalize audio sidecar collision winner {path:?}: {error}",
-                    path = output.final_path
-                ));
-            }
-            let _ = std::fs::remove_file(&output.tmp_path);
-            continue;
+    let result = (|| {
+        for output in outputs {
+            validate_audio_sidecar_file(&output.tmp_path)?;
         }
 
-        match std::fs::rename(&output.tmp_path, &output.final_path) {
-            Ok(()) => {
-                published.record_created(output.final_path.clone());
-            }
-            Err(_) if output.final_path.exists() => {
+        let mut published = PublishedAudioSidecars::default();
+        for output in outputs {
+            if output.final_path.exists() {
                 if let Err(error) = validate_audio_sidecar_file(&output.final_path) {
-                    cleanup_audio_sidecar_temps(outputs);
                     return Err(format!(
                         "finalize audio sidecar collision winner {path:?}: {error}",
                         path = output.final_path
                     ));
                 }
                 let _ = std::fs::remove_file(&output.tmp_path);
+                continue;
             }
-            Err(error) => {
-                cleanup_audio_sidecar_temps(outputs);
-                return Err(format!(
-                    "finalize audio sidecar {tmp:?} -> {final_path:?}: {error}",
-                    tmp = output.tmp_path,
-                    final_path = output.final_path
-                ));
+
+            match std::fs::rename(&output.tmp_path, &output.final_path) {
+                Ok(()) => {
+                    published.record_created(output.final_path.clone());
+                }
+                Err(_) if output.final_path.exists() => {
+                    if let Err(error) = validate_audio_sidecar_file(&output.final_path) {
+                        return Err(format!(
+                            "finalize audio sidecar collision winner {path:?}: {error}",
+                            path = output.final_path
+                        ));
+                    }
+                    let _ = std::fs::remove_file(&output.tmp_path);
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "finalize audio sidecar {tmp:?} -> {final_path:?}: {error}",
+                        tmp = output.tmp_path,
+                        final_path = output.final_path
+                    ));
+                }
             }
         }
+        Ok(published)
+    })();
+    if result.is_err() {
+        cleanup_audio_sidecar_temps(outputs);
     }
-    Ok(published)
+    result
 }
 
 fn cleanup_audio_sidecar_temps(outputs: &[AudioTrackSidecarOutput]) {
@@ -2920,6 +2926,41 @@ mod tests {
         assert!(
             collision_final.exists(),
             "dropping uncommitted guard must not delete collision winners"
+        );
+    }
+
+    #[test]
+    fn audio_sidecar_validation_failure_owns_temp_cleanup() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-validation-cleanup");
+        let valid_tmp = dir.path().join("audio-preview-valid.mp4.tmp");
+        let invalid_tmp = dir.path().join("audio-preview-invalid.mp4.tmp");
+        std::fs::write(&valid_tmp, audio_only_opus_mp4_for_stream(0)).unwrap();
+        std::fs::write(&invalid_tmp, b"invalid").unwrap();
+        let outputs = vec![
+            AudioTrackSidecarOutput {
+                audio_track_id: "valid".into(),
+                audio_stream_index: 0,
+                final_path: dir.path().join("audio-preview-valid.mp4"),
+                tmp_path: valid_tmp.clone(),
+            },
+            AudioTrackSidecarOutput {
+                audio_track_id: "invalid".into(),
+                audio_stream_index: 1,
+                final_path: dir.path().join("audio-preview-invalid.mp4"),
+                tmp_path: invalid_tmp.clone(),
+            },
+        ];
+
+        validate_and_publish_audio_sidecars(&outputs)
+            .expect_err("invalid extracted sidecar should fail validation");
+
+        assert!(
+            !valid_tmp.exists(),
+            "validation failure must remove sibling temps"
+        );
+        assert!(
+            !invalid_tmp.exists(),
+            "validation failure must remove invalid temp"
         );
     }
 

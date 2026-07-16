@@ -1696,9 +1696,20 @@ fn review_audio_pruning_preserves_fallback_and_muted_selection() {
 fn review_player_applies_logical_seek_only_for_current_metadata() {
     let review = read_ui_js("review-player.js");
     let assign = js_function_body(&review, "assignReviewVideoSource");
+    let clear_error_handler = js_function_body(&review, "clearReviewSourceErrorHandler");
+    let release = js_function_body(&review, "releaseReviewVideoSource");
     assert!(assign.contains("PlayerCore.beginSourceAssignment("));
     assert!(assign.contains("PlayerCore.metadataSeekDecision("));
     assert!(assign.contains("assignment.sourceGeneration !== reviewSourceGeneration"));
+    assert!(assign.contains("clearReviewSourceErrorHandler();"));
+    assert!(
+        assign.contains("reviewSourceErrorHandler = () => reportReviewSourceError(assignment);")
+    );
+    assert!(assign.contains("video.addEventListener(\"error\", reviewSourceErrorHandler);"));
+    assert!(!assign.contains("video.addEventListener(\"error\", () => reportReviewSourceError(assignment), { once: true })"));
+    assert!(clear_error_handler
+        .contains("video.removeEventListener(\"error\", reviewSourceErrorHandler);"));
+    assert!(release.contains("clearReviewSourceErrorHandler();"));
 
     let seek_to = js_function_body(&review, "seekTo");
     assert!(seek_to.contains("PlayerCore.requestLogicalSeek("));
@@ -1732,6 +1743,15 @@ fn review_player_applies_logical_seek_only_for_current_metadata() {
         legacy_identifier_files.join(", "),
     );
     assert!(!review.contains("reviewSeekRevision"));
+}
+
+#[test]
+fn audio_sidecar_preparation_consumes_validated_hits_once() {
+    let library = library_rs();
+    assert!(
+        !library.contains("ordered_hits"),
+        "validated cache hits must be retained in the ordered result instead of rebuilt"
+    );
 }
 
 #[test]
