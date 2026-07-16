@@ -415,6 +415,19 @@ fn audio_preview_command_protects_active_media_and_prunes_cache_on_startup() {
 }
 
 #[test]
+fn audio_sidecar_command_registers_parallel_contract_without_removing_legacy_preview() {
+    let library = library_rs();
+    let app = app_rs();
+    assert!(library.contains("pub struct PrepareClipAudioSidecarsRequest"));
+    assert!(library.contains("pub protected_preview_paths: Vec<String>"));
+    assert!(library.contains("pub struct PreparedClipAudioSidecar"));
+    assert!(library.contains("pub audio_track_id: String"));
+    assert!(library.contains("pub async fn prepare_clip_audio_sidecars"));
+    assert!(app.contains("crate::library::prepare_clip_audio_sidecars"));
+    assert!(app.contains("crate::library::preview_clip_audio_tracks"));
+}
+
+#[test]
 fn review_player_owns_all_controls() {
     let html = index_html();
 
@@ -1667,7 +1680,11 @@ fn review_player_applies_logical_seek_only_for_current_metadata() {
     ];
     let legacy_identifier_files: Vec<_> = task_two_scope
         .iter()
-        .filter_map(|(path, source)| source.contains(&prohibited_legacy_identifier).then_some(*path))
+        .filter_map(|(path, source)| {
+            source
+                .contains(&prohibited_legacy_identifier)
+                .then_some(*path)
+        })
         .collect();
     assert!(
         legacy_identifier_files.is_empty(),
@@ -1683,7 +1700,12 @@ fn explicit_audio_preview_uses_one_pure_coalescing_queue() {
     assert!(review.contains("var audioPreviewQueue = PlayerCore.emptyAudioPreviewQueue();"));
     assert!(review.contains("PlayerCore.queueAudioPreviewRequest("));
     assert!(review.contains("PlayerCore.finishAudioPreviewRequest("));
-    assert_eq!(review.matches("await invoke(\"preview_clip_audio_tracks\"").count(), 1);
+    assert_eq!(
+        review
+            .matches("await invoke(\"preview_clip_audio_tracks\"")
+            .count(),
+        1
+    );
     assert!(review.contains("protectedPreviewPath: currentReviewMediaPath"));
     assert!(!review.contains("audioPreviewSeq"));
 }
@@ -1702,10 +1724,16 @@ fn preview_failure_keeps_source_and_reverts_controls_to_audible_selection() {
 fn valid_preview_swap_reads_latest_player_state_after_await() {
     let review = read_ui_js("review-player.js");
     let run = js_function_body(&review, "runAudioPreviewRequest");
-    let await_preview = run.find("await invoke(\"preview_clip_audio_tracks\"").unwrap();
+    let await_preview = run
+        .find("await invoke(\"preview_clip_audio_tracks\"")
+        .unwrap();
     let latest_time = run[await_preview..].find("reviewPlayheadTime()").unwrap();
-    let latest_pause = run[await_preview..].find("!video.paused && !video.ended").unwrap();
-    let swap = run[await_preview..].find("setReviewVideoSource(path, {").unwrap();
+    let latest_pause = run[await_preview..]
+        .find("!video.paused && !video.ended")
+        .unwrap();
+    let swap = run[await_preview..]
+        .find("setReviewVideoSource(path, {")
+        .unwrap();
     assert!(latest_time < swap);
     assert!(latest_pause < swap);
 }
@@ -1757,7 +1785,8 @@ fn every_review_video_source_mutation_uses_generation_helpers() {
     let restore_rename = js_function_body(&review, "restoreVideoAfterRename");
     assert!(restore_rename.contains("setReviewVideoSource(path, {"));
     let set_source = js_function_body(&review, "setReviewVideoSource");
-    assert!(set_source.contains("assignReviewVideoSource(path, { resumeTime, onLoadedMetadata: restore })"));
+    assert!(set_source
+        .contains("assignReviewVideoSource(path, { resumeTime, onLoadedMetadata: restore })"));
     let open_clip = js_function_body(&review, "openClip");
     assert!(open_clip.contains("assignReviewVideoSource(clip.path, { resumeTime: 0 })"));
 
@@ -2956,7 +2985,10 @@ fn returning_to_no_preview_selection_clears_stale_audio_status() {
     let no_preview_block = request
         .split("if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {")
         .nth(1)
-        .and_then(|rest| rest.split("if (selectionKey === currentReviewAudioKey)").next())
+        .and_then(|rest| {
+            rest.split("if (selectionKey === currentReviewAudioKey)")
+                .next()
+        })
         .expect("no-preview branch must sit between the two guards in requestSelectedAudioPreview");
     let key_assign = no_preview_block
         .find("currentReviewAudioKey = selectionKey;")
