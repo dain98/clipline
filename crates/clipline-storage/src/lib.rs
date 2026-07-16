@@ -1,6 +1,8 @@
 //! Filesystem storage management for saved clips.
 
-pub mod sessions;
+mod sessions;
+
+pub use sessions::{session_label, SessionTracker};
 
 use std::fs;
 use std::io::{self, ErrorKind};

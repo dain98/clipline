@@ -4,15 +4,11 @@
 
 use crate::opus::{FRAME_DURATION_S, FRAME_LEN};
 
-use std::collections::VecDeque;
-
 const SAMPLE_RATE: f64 = 48_000.0;
 /// Gaps shorter than half a frame are treated as device jitter.
 const GAP_TOLERANCE_S: f64 = FRAME_DURATION_S / 2.0;
 /// A bogus device timestamp must not allocate unbounded silence.
 const MAX_GAP_FILL_S: f64 = 5.0;
-const MIX_FRAME_EPSILON_S: f64 = FRAME_DURATION_S / 2.0;
-const MISSING_SOURCE_GRACE_S: f64 = FRAME_DURATION_S * 3.0;
 
 pub type PcmFrame = (f64, Vec<f32>);
 
@@ -218,104 +214,6 @@ fn last_stereo_frame(samples: &[f32], in_frames: usize) -> [f32; 2] {
 
 pub fn resample_stereo_linear(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     StereoResampler::new(from_rate, to_rate).resample(samples)
-}
-
-#[derive(Debug)]
-pub struct PcmFrameMixer {
-    pending: Vec<VecDeque<PcmFrame>>,
-    source_ready_until_s: Vec<f64>,
-    mixed_until_s: f64,
-}
-
-impl PcmFrameMixer {
-    pub fn new(source_count: usize) -> Self {
-        Self {
-            pending: (0..source_count).map(|_| VecDeque::new()).collect(),
-            source_ready_until_s: vec![0.0; source_count],
-            mixed_until_s: 0.0,
-        }
-    }
-
-    pub fn push_source_frames(
-        &mut self,
-        source_index: usize,
-        frames: impl IntoIterator<Item = PcmFrame>,
-    ) {
-        let pending = self
-            .pending
-            .get_mut(source_index)
-            .expect("source index must match mixer source count");
-        let ready_until_s = self
-            .source_ready_until_s
-            .get_mut(source_index)
-            .expect("source index must match mixer source count");
-        for frame in frames {
-            *ready_until_s = ready_until_s.max(frame.0 + FRAME_DURATION_S);
-            pending.push_back(frame);
-        }
-    }
-
-    pub fn pop_mixed_frames(&mut self, until_pts_s: f64) -> Vec<PcmFrame> {
-        let mut mixed = Vec::new();
-        while self.mixed_until_s + FRAME_DURATION_S <= until_pts_s + 1e-9 {
-            if !self.pending.iter().any(|pending| pending.front().is_some()) {
-                break;
-            }
-            let target_pts_s = self.mixed_until_s;
-            let all_sources_ready = self.pending.iter().zip(&self.source_ready_until_s).all(
-                |(pending, &ready_until_s)| {
-                    source_ready_for_mix(pending, ready_until_s, target_pts_s, until_pts_s)
-                },
-            );
-            if !all_sources_ready {
-                break;
-            }
-
-            let mut frames = Vec::with_capacity(self.pending.len());
-            for pending in &mut self.pending {
-                while pending
-                    .front()
-                    .is_some_and(|(pts_s, _)| *pts_s < target_pts_s - MIX_FRAME_EPSILON_S)
-                {
-                    pending.pop_front();
-                }
-                let should_pop = pending
-                    .front()
-                    .is_some_and(|(pts_s, _)| (*pts_s - target_pts_s).abs() <= MIX_FRAME_EPSILON_S);
-                frames.push(should_pop.then(|| pending.pop_front().expect("checked front").1));
-            }
-
-            mixed.push((target_pts_s, mix_optional_frames(&frames)));
-            self.mixed_until_s += FRAME_DURATION_S;
-        }
-        mixed
-    }
-}
-
-fn source_ready_for_mix(
-    pending: &VecDeque<PcmFrame>,
-    ready_until_s: f64,
-    target_pts_s: f64,
-    until_pts_s: f64,
-) -> bool {
-    if pending.front().is_some() {
-        return true;
-    }
-    ready_until_s >= target_pts_s + FRAME_DURATION_S - 1e-9
-        || until_pts_s >= target_pts_s + MISSING_SOURCE_GRACE_S
-}
-
-pub fn mix_optional_frames(frames: &[Option<Vec<f32>>]) -> Vec<f32> {
-    let mut mixed = vec![0.0; FRAME_LEN];
-    for frame in frames.iter().filter_map(|frame| frame.as_ref()) {
-        for (out, sample) in mixed.iter_mut().zip(frame.iter().copied()) {
-            *out += sample;
-        }
-    }
-    for sample in &mut mixed {
-        *sample = sample.clamp(-1.0, 1.0);
-    }
-    mixed
 }
 
 #[cfg(test)]
@@ -557,93 +455,5 @@ mod tests {
         let input_frames = 100_000f64;
         let expected = (input_frames * 48_000.0 / 44_100.0).ceil() as usize;
         assert_eq!(output_frames, expected);
-    }
-
-    #[test]
-    fn mixer_outputs_one_frame_per_grid_slot_for_offset_sources() {
-        let mut mixer = PcmFrameMixer::new(2);
-        mixer.push_source_frames(
-            0,
-            [
-                (0.0, pairs(960, 0.25)),
-                (0.02, pairs(960, 0.25)),
-                (0.04, pairs(960, 0.25)),
-            ],
-        );
-        mixer.push_source_frames(
-            1,
-            [
-                (0.006, pairs(960, 0.5)),
-                (0.026, pairs(960, 0.5)),
-                (0.046, pairs(960, 0.5)),
-            ],
-        );
-
-        let frames = mixer.pop_mixed_frames(0.06);
-
-        assert_eq!(frames.len(), 3);
-        for (i, (pts_s, frame)) in frames.iter().enumerate() {
-            assert!((*pts_s - i as f64 * FRAME_DURATION_S).abs() < 1e-9);
-            assert!(frame.iter().all(|&sample| (sample - 0.75).abs() < 1e-6));
-        }
-    }
-
-    #[test]
-    fn mixer_nearest_pairs_late_phase_frames_without_overlap_packets() {
-        let mut mixer = PcmFrameMixer::new(2);
-        mixer.push_source_frames(
-            0,
-            [
-                (0.0, pairs(960, 0.25)),
-                (0.02, pairs(960, 0.25)),
-                (0.04, pairs(960, 0.25)),
-            ],
-        );
-        mixer.push_source_frames(
-            1,
-            [
-                (0.015, pairs(960, 0.5)),
-                (0.035, pairs(960, 0.5)),
-                (0.055, pairs(960, 0.5)),
-            ],
-        );
-
-        let frames = mixer.pop_mixed_frames(0.06);
-
-        assert_eq!(frames.len(), 3);
-        assert_eq!(frames[0].0, 0.0);
-        assert!(frames[0]
-            .1
-            .iter()
-            .all(|&sample| (sample - 0.25).abs() < 1e-6));
-        assert_eq!(frames[1].0, 0.02);
-        assert!(frames[1]
-            .1
-            .iter()
-            .all(|&sample| (sample - 0.75).abs() < 1e-6));
-        assert_eq!(frames[2].0, 0.04);
-        assert!(frames[2]
-            .1
-            .iter()
-            .all(|&sample| (sample - 0.75).abs() < 1e-6));
-    }
-
-    #[test]
-    fn mixer_waits_briefly_for_missing_sources() {
-        let mut mixer = PcmFrameMixer::new(2);
-        mixer.push_source_frames(0, [(0.0, pairs(960, 0.25))]);
-
-        assert!(
-            mixer.pop_mixed_frames(0.02).is_empty(),
-            "missing source should not become silence immediately"
-        );
-
-        let frames = mixer.pop_mixed_frames(0.08);
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].0, 0.0);
-        assert!(frames[0]
-            .1
-            .iter()
-            .all(|&sample| (sample - 0.25).abs() < 1e-6));
     }
 }

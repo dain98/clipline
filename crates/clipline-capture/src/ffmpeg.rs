@@ -236,7 +236,7 @@ fn test_encode(ffmpeg: &Path, encoder: &str) -> bool {
 
 /// Probe one located `ffmpeg` binary: list compiled encoders, then confirm
 /// each hardware encoder with a test encode (software is trusted).
-pub fn probe_ffmpeg(ffmpeg: &Path) -> Vec<EncoderCapability> {
+fn probe_ffmpeg(ffmpeg: &Path) -> Vec<EncoderCapability> {
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-hide_banner", "-encoders"]);
     let Some(output) = run_bounded(cmd) else {

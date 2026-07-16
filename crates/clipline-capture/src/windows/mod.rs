@@ -17,8 +17,7 @@ pub use mft::{MftConfig, MftH264Encoder};
 pub use wasapi::WasapiLoopback;
 pub use wgc::WgcCapture;
 pub use window::{
-    enumerate_capturable_windows, find_window_by_title, window_client_crop, window_from_raw_handle,
-    CapturableWindow,
+    enumerate_capturable_windows, find_window_by_title, window_from_raw_handle, CapturableWindow,
 };
 
 /// Re-export so downstream crates (the app) can name the shared D3D11 device

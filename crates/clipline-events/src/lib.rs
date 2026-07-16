@@ -1,6 +1,6 @@
-pub mod markers;
-pub mod schema;
-pub mod sync;
+mod markers;
+mod schema;
+mod sync;
 
 pub use markers::{
     ClipAudioTrack, ClipMarker, ClipMarkers, ClipPlay, MarkerLog, PlayerItem, PlayerParticipant,

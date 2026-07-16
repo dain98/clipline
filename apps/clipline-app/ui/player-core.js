@@ -1636,16 +1636,16 @@ const PlayerCore = (() => {
       case "Space":
       case "KeyK":
         return { kind: "toggle-play" };
-      // Arrows step a single frame; Shift+arrow nudges a second. J/L stay the
-      // coarse 5s scrub (Shift 1s) for getting around quickly.
+      // Arrows are the coarse seek keys (Shift for a shorter nudge); J/L are
+      // the frame-aligned step keys.
       case "ArrowLeft":
-        return shiftKey ? { kind: "seek-by", seconds: -1 } : { kind: "step-frame", dir: -1 };
-      case "ArrowRight":
-        return shiftKey ? { kind: "seek-by", seconds: 1 } : { kind: "step-frame", dir: 1 };
-      case "KeyJ":
         return { kind: "seek-by", seconds: shiftKey ? -1 : -5 };
-      case "KeyL":
+      case "ArrowRight":
         return { kind: "seek-by", seconds: shiftKey ? 1 : 5 };
+      case "KeyJ":
+        return { kind: "step-frame", dir: -1 };
+      case "KeyL":
+        return { kind: "step-frame", dir: 1 };
       case "Comma":
         return { kind: "seek-by", seconds: -0.1 };
       case "Period":

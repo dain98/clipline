@@ -924,12 +924,12 @@ function clipFps() {
   return currentSettings && Number.isFinite(currentSettings.fps) ? currentSettings.fps : 0;
 }
 
-// Arrow keys jump several frames at once — one frame is too fine to navigate
-// with, but the step stays frame-aligned (nice for landing trims on a frame).
-const ARROW_STEP_FRAMES = 10;
+// J/L jump several frames at once — one frame is too fine to navigate with, but
+// the step stays frame-aligned (nice for landing trims on a frame).
+const KEYBOARD_STEP_FRAMES = 10;
 
 function stepFrame(dir) {
-  seekBy(dir * ARROW_STEP_FRAMES * frameStep(clipFps(), DEFAULT_FINE_STEP_S));
+  seekBy(dir * KEYBOARD_STEP_FRAMES * frameStep(clipFps(), DEFAULT_FINE_STEP_S));
 }
 
 // Jump to the previous/next edit point (clip ends, trim edges, markers).

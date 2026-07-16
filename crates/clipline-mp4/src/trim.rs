@@ -71,7 +71,7 @@ pub fn trim_keyframe_aligned(
     Ok((out.into_inner(), info))
 }
 
-pub fn trim_keyframe_aligned_to_writer<W: Write + Seek>(
+fn trim_keyframe_aligned_to_writer<W: Write + Seek>(
     input: &[u8],
     start_s: f64,
     end_s: f64,
@@ -191,10 +191,6 @@ pub fn remux_with_selected_audio_tracks(
     writer.write_fragment_multi(&refs)?;
     let _ = writer.finalize()?;
     Ok(out.into_inner())
-}
-
-pub fn audio_track_count(input: &[u8]) -> Result<usize, TrimError> {
-    Ok(media_track_counts(input)?.audio)
 }
 
 pub fn media_track_counts(input: &[u8]) -> Result<MediaTrackCounts, TrimError> {
@@ -1735,12 +1731,6 @@ mod tests {
                 .contains("outside the clip's 2 audio tracks"),
             "{err}"
         );
-    }
-
-    #[test]
-    fn audio_track_count_reports_finalized_audio_tracks() {
-        assert_eq!(audio_track_count(&clipline_fixture()).unwrap(), 1);
-        assert_eq!(audio_track_count(&clipline_two_audio_fixture()).unwrap(), 2);
     }
 
     #[test]
