@@ -217,6 +217,12 @@ impl Drop for PublishedAudioSidecars {
     }
 }
 
+#[derive(Debug)]
+struct PreparedAudioSidecarBatch {
+    sidecars: Vec<PreparedClipAudioSidecar>,
+    publication: Option<PublishedAudioSidecars>,
+}
+
 #[derive(serde::Deserialize)]
 pub struct CopyClipToClipboardRequest {
     pub path: String,
@@ -775,10 +781,9 @@ pub async fn prepare_clip_audio_sidecars<R: Runtime>(
     })
     .await
     .map_err(|e| format!("audio sidecar task: {e}"))??;
-    for sidecar in &sidecars {
-        allow_audio_preview_asset(&app, Path::new(&sidecar.path))?;
-    }
-    Ok(sidecars)
+    finalize_prepared_audio_sidecars(sidecars, |sidecar| {
+        allow_audio_preview_asset(&app, Path::new(&sidecar.path))
+    })
 }
 
 fn allow_audio_preview_asset<R: Runtime>(app: &AppHandle<R>, preview: &Path) -> Result<(), String> {
@@ -837,7 +842,7 @@ fn prepare_clip_audio_sidecars_file(
     source: PathBuf,
     selected_audio_track_ids: Vec<String>,
     protected_preview_paths: Vec<PathBuf>,
-) -> Result<Vec<PreparedClipAudioSidecar>, String> {
+) -> Result<PreparedAudioSidecarBatch, String> {
     prepare_clip_audio_sidecars_file_with_extractor(
         source,
         selected_audio_track_ids,
@@ -856,7 +861,7 @@ fn prepare_clip_audio_sidecars_file_with_extractor(
     protected_preview_paths: Vec<String>,
     preview_dir: PathBuf,
     extract_audio_sidecars: impl FnMut(&Path, &[AudioTrackSidecarOutput]) -> Result<(), String>,
-) -> Result<Vec<PreparedClipAudioSidecar>, String> {
+) -> Result<PreparedAudioSidecarBatch, String> {
     prepare_clip_audio_sidecars_file_with_extractor_and_limits(
         source,
         selected_audio_track_ids,
@@ -874,7 +879,7 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
     preview_dir: PathBuf,
     max_cache_bytes: u64,
     mut extract_audio_sidecars: impl FnMut(&Path, &[AudioTrackSidecarOutput]) -> Result<(), String>,
-) -> Result<Vec<PreparedClipAudioSidecar>, String> {
+) -> Result<PreparedAudioSidecarBatch, String> {
     let resolved_tracks = resolve_audio_sidecar_tracks(&source, &selected_audio_track_ids)?;
     let source_meta = std::fs::metadata(&source).map_err(|e| format!("read clip metadata: {e}"))?;
     std::fs::create_dir_all(&preview_dir)
@@ -960,17 +965,29 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
             path: final_path.display().to_string(),
         });
     }
-    if let Some(publication) = publication {
-        publication.commit();
-    }
-
     let protected_after: Vec<PathBuf> = ordered
         .iter()
         .map(|sidecar| PathBuf::from(&sidecar.path))
         .collect();
     let protected = [currently_active.as_slice(), protected_after.as_slice()].concat();
     prune_audio_preview_cache_logged_with_limit(&preview_dir, &protected, max_cache_bytes);
-    Ok(ordered)
+    Ok(PreparedAudioSidecarBatch {
+        sidecars: ordered,
+        publication,
+    })
+}
+
+fn finalize_prepared_audio_sidecars(
+    mut batch: PreparedAudioSidecarBatch,
+    mut allow_audio_sidecar: impl FnMut(&PreparedClipAudioSidecar) -> Result<(), String>,
+) -> Result<Vec<PreparedClipAudioSidecar>, String> {
+    for sidecar in &batch.sidecars {
+        allow_audio_sidecar(sidecar)?;
+    }
+    if let Some(publication) = batch.publication.take() {
+        publication.commit();
+    }
+    Ok(batch.sidecars)
 }
 
 fn prune_audio_preview_cache_logged_with_limit(
@@ -2993,33 +3010,37 @@ mod tests {
         let preview_dir = dir.path().join("previews");
         let calls = std::cell::RefCell::new(Vec::<Vec<(u32, PathBuf, PathBuf)>>::new());
 
-        let sidecars = prepare_clip_audio_sidecars_file_with_extractor(
-            source.clone(),
-            vec!["output".into(), "microphone".into()],
-            Vec::new(),
-            preview_dir.clone(),
-            |input, outputs| {
-                assert_eq!(input, source.as_path());
-                calls.borrow_mut().push(
-                    outputs
-                        .iter()
-                        .map(|output| {
-                            (
-                                output.audio_stream_index,
-                                output.final_path.clone(),
-                                output.tmp_path.clone(),
-                            )
-                        })
-                        .collect(),
-                );
-                for output in outputs {
-                    let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
-                    std::fs::write(&output.tmp_path, bytes).unwrap();
-                }
-                Ok(())
-            },
+        let sidecars = finalize_prepared_audio_sidecars(
+            prepare_clip_audio_sidecars_file_with_extractor(
+                source.clone(),
+                vec!["output".into(), "microphone".into()],
+                Vec::new(),
+                preview_dir.clone(),
+                |input, outputs| {
+                    assert_eq!(input, source.as_path());
+                    calls.borrow_mut().push(
+                        outputs
+                            .iter()
+                            .map(|output| {
+                                (
+                                    output.audio_stream_index,
+                                    output.final_path.clone(),
+                                    output.tmp_path.clone(),
+                                )
+                            })
+                            .collect(),
+                    );
+                    for output in outputs {
+                        let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
+                        std::fs::write(&output.tmp_path, bytes).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+            .expect("uncached sidecars should succeed"),
+            |_| Ok(()),
         )
-        .expect("uncached sidecars should succeed");
+        .expect("successful sidecars should commit");
 
         assert_eq!(calls.borrow().len(), 1);
         assert_eq!(sidecars.len(), 2);
@@ -3049,18 +3070,22 @@ mod tests {
             ],
         );
 
-        let sidecars = prepare_clip_audio_sidecars_file_with_extractor(
-            source.clone(),
-            vec!["output".into(), "microphone".into()],
-            Vec::new(),
-            dir.path().join("previews"),
-            |_, outputs| {
-                for output in outputs {
-                    let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
-                    std::fs::write(&output.tmp_path, bytes).unwrap();
-                }
-                Ok(())
-            },
+        let sidecars = finalize_prepared_audio_sidecars(
+            prepare_clip_audio_sidecars_file_with_extractor(
+                source.clone(),
+                vec!["output".into(), "microphone".into()],
+                Vec::new(),
+                dir.path().join("previews"),
+                |_, outputs| {
+                    for output in outputs {
+                        let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
+                        std::fs::write(&output.tmp_path, bytes).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap(),
+            |_| Ok(()),
         )
         .unwrap();
 
@@ -3091,45 +3116,53 @@ mod tests {
         let preview_dir = dir.path().join("previews");
         let calls = std::cell::RefCell::new(Vec::<Vec<u32>>::new());
 
-        let first = prepare_clip_audio_sidecars_file_with_extractor(
-            source.clone(),
-            vec!["output".into()],
-            Vec::new(),
-            preview_dir.clone(),
-            |_, outputs| {
-                calls.borrow_mut().push(
-                    outputs
-                        .iter()
-                        .map(|output| output.audio_stream_index)
-                        .collect(),
-                );
-                for output in outputs {
-                    let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
-                    std::fs::write(&output.tmp_path, bytes).unwrap();
-                }
-                Ok(())
-            },
+        let first = finalize_prepared_audio_sidecars(
+            prepare_clip_audio_sidecars_file_with_extractor(
+                source.clone(),
+                vec!["output".into()],
+                Vec::new(),
+                preview_dir.clone(),
+                |_, outputs| {
+                    calls.borrow_mut().push(
+                        outputs
+                            .iter()
+                            .map(|output| output.audio_stream_index)
+                            .collect(),
+                    );
+                    for output in outputs {
+                        let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
+                        std::fs::write(&output.tmp_path, bytes).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap(),
+            |_| Ok(()),
         )
         .unwrap();
 
-        let second = prepare_clip_audio_sidecars_file_with_extractor(
-            source,
-            vec!["output".into(), "microphone".into()],
-            Vec::new(),
-            preview_dir,
-            |_, outputs| {
-                calls.borrow_mut().push(
-                    outputs
-                        .iter()
-                        .map(|output| output.audio_stream_index)
-                        .collect(),
-                );
-                for output in outputs {
-                    let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
-                    std::fs::write(&output.tmp_path, bytes).unwrap();
-                }
-                Ok(())
-            },
+        let second = finalize_prepared_audio_sidecars(
+            prepare_clip_audio_sidecars_file_with_extractor(
+                source,
+                vec!["output".into(), "microphone".into()],
+                Vec::new(),
+                preview_dir,
+                |_, outputs| {
+                    calls.borrow_mut().push(
+                        outputs
+                            .iter()
+                            .map(|output| output.audio_stream_index)
+                            .collect(),
+                    );
+                    for output in outputs {
+                        let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
+                        std::fs::write(&output.tmp_path, bytes).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap(),
+            |_| Ok(()),
         )
         .unwrap();
 
@@ -3185,19 +3218,23 @@ mod tests {
             .set_modified(std::time::UNIX_EPOCH)
             .unwrap();
 
-        let sidecars = prepare_clip_audio_sidecars_file_with_extractor_and_limits(
-            source,
-            vec!["output".into(), "microphone".into()],
-            vec![active.display().to_string()],
-            preview_dir.clone(),
-            120,
-            |_, outputs| {
-                for output in outputs {
-                    let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
-                    std::fs::write(&output.tmp_path, bytes).unwrap();
-                }
-                Ok(())
-            },
+        let sidecars = finalize_prepared_audio_sidecars(
+            prepare_clip_audio_sidecars_file_with_extractor_and_limits(
+                source,
+                vec!["output".into(), "microphone".into()],
+                vec![active.display().to_string()],
+                preview_dir.clone(),
+                120,
+                |_, outputs| {
+                    for output in outputs {
+                        let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
+                        std::fs::write(&output.tmp_path, bytes).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap(),
+            |_| Ok(()),
         )
         .unwrap();
 
@@ -3245,13 +3282,17 @@ mod tests {
             .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2))
             .unwrap();
 
-        let sidecars = prepare_clip_audio_sidecars_file_with_extractor_and_limits(
-            source,
-            vec!["output".into()],
-            Vec::new(),
-            preview_dir,
-            std::fs::metadata(&requested_hit).unwrap().len() + 39,
-            |_, _| panic!("extractor must not run for a valid requested cache hit"),
+        let sidecars = finalize_prepared_audio_sidecars(
+            prepare_clip_audio_sidecars_file_with_extractor_and_limits(
+                source,
+                vec!["output".into()],
+                Vec::new(),
+                preview_dir,
+                std::fs::metadata(&requested_hit).unwrap().len() + 39,
+                |_, _| panic!("extractor must not run for a valid requested cache hit"),
+            )
+            .unwrap(),
+            |_| Ok(()),
         )
         .unwrap();
 
@@ -3387,6 +3428,88 @@ mod tests {
         assert!(
             collision_final.exists(),
             "dropping uncommitted guard must not delete collision winners"
+        );
+    }
+
+    #[test]
+    fn audio_sidecar_scope_failure_rolls_back_all_invocation_owned_finals() {
+        let dir = TestDir::new("clipline-library", "audio-sidecar-scope-rollback");
+        let source = dir.path().join("clip.mp4");
+        touch_mp4(&source);
+        write_audio_track_markers(
+            &source,
+            vec![
+                ("output", 0, "Output Audio"),
+                ("microphone", 1, "Microphone"),
+                ("discord", 2, "Discord"),
+            ],
+        );
+        let preview_dir = dir.path().join("previews");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+
+        let winner_path = audio_track_sidecar_path(
+            &preview_dir,
+            &source,
+            &std::fs::metadata(&source).unwrap(),
+            "output",
+        );
+        std::fs::write(&winner_path, audio_only_opus_mp4_for_stream(0)).unwrap();
+        let winner_bytes = std::fs::read(&winner_path).unwrap();
+
+        let batch = prepare_clip_audio_sidecars_file_with_extractor_and_limits(
+            source,
+            vec!["output".into(), "microphone".into(), "discord".into()],
+            Vec::new(),
+            preview_dir.clone(),
+            AUDIO_PREVIEW_CACHE_MAX_BYTES,
+            |_, outputs| {
+                for output in outputs {
+                    let bytes = audio_only_opus_mp4_for_stream(output.audio_stream_index);
+                    std::fs::write(&output.tmp_path, bytes).unwrap();
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let err = finalize_prepared_audio_sidecars(batch, |prepared| {
+            if prepared.audio_track_id == "microphone" {
+                return Err("forced scope failure".into());
+            }
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(err.contains("forced scope failure"), "{err}");
+        assert!(
+            winner_path.exists(),
+            "pre-existing collision winner must survive rollback"
+        );
+        assert_eq!(
+            std::fs::read(&winner_path).unwrap(),
+            winner_bytes,
+            "collision winner contents must remain untouched"
+        );
+
+        let microphone_path = audio_track_sidecar_path(
+            &preview_dir,
+            &dir.path().join("clip.mp4"),
+            &std::fs::metadata(dir.path().join("clip.mp4")).unwrap(),
+            "microphone",
+        );
+        let discord_path = audio_track_sidecar_path(
+            &preview_dir,
+            &dir.path().join("clip.mp4"),
+            &std::fs::metadata(dir.path().join("clip.mp4")).unwrap(),
+            "discord",
+        );
+        assert!(
+            !microphone_path.exists(),
+            "scope failure must roll back invocation-owned finals"
+        );
+        assert!(
+            !discord_path.exists(),
+            "scope failure must remove every invocation-owned final"
         );
     }
 

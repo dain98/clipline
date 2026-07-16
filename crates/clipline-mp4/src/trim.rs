@@ -14,6 +14,11 @@ use crate::{
     VideoTrackConfig,
 };
 
+/// Conservative upper bound for a finalized `moov` box that this metadata
+/// reader will load into memory. Real Clipline sample tables are far smaller;
+/// this rejects corrupt or hostile declarations before allocation.
+const MAX_FINALIZED_MOOV_BYTES: u64 = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrimInfo {
     pub requested_start_s: f64,
@@ -1274,6 +1279,12 @@ fn read_top_level_box<R: Read + Seek>(
 }
 
 fn read_box_bytes<R: Read + Seek>(reader: &mut R, b: &BoxInfo) -> Result<Vec<u8>, TrimError> {
+    if b.size > MAX_FINALIZED_MOOV_BYTES {
+        return Err(TrimError::Unsupported(format!(
+            "moov box is too large to inspect ({} bytes > {} byte limit)",
+            b.size, MAX_FINALIZED_MOOV_BYTES
+        )));
+    }
     let size = usize::try_from(b.size)
         .map_err(|_| TrimError::Unsupported("moov box is too large to inspect".into()))?;
     reader.seek(SeekFrom::Start(b.offset))?;
@@ -1830,6 +1841,188 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(counts, MediaTrackCounts { video: 0, audio: 1 });
+    }
+
+    #[test]
+    fn media_track_counts_reader_rejects_oversized_declared_moov_before_allocation() {
+        struct LargeMoovReader {
+            pos: u64,
+            len: u64,
+        }
+
+        impl Read for LargeMoovReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                const HEADER: [u8; 8] = [0, 0, 0, 0, b'm', b'o', b'o', b'v'];
+                if self.pos >= self.len {
+                    return Ok(0);
+                }
+                let mut read = 0usize;
+                while read < buf.len() && self.pos < self.len {
+                    buf[read] = if self.pos < HEADER.len() as u64 {
+                        HEADER[self.pos as usize]
+                    } else {
+                        0
+                    };
+                    self.pos += 1;
+                    read += 1;
+                }
+                Ok(read)
+            }
+        }
+
+        impl Seek for LargeMoovReader {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                let next = match pos {
+                    SeekFrom::Start(offset) => offset,
+                    SeekFrom::End(offset) => self
+                        .len
+                        .checked_add_signed(offset)
+                        .ok_or_else(|| std::io::Error::other("seek overflow"))?,
+                    SeekFrom::Current(offset) => self
+                        .pos
+                        .checked_add_signed(offset)
+                        .ok_or_else(|| std::io::Error::other("seek overflow"))?,
+                };
+                self.pos = next;
+                Ok(self.pos)
+            }
+        }
+
+        let mut reader = LargeMoovReader {
+            pos: 0,
+            len: MAX_FINALIZED_MOOV_BYTES + 1,
+        };
+
+        let err = media_track_counts_reader(&mut reader).unwrap_err();
+
+        assert!(
+            err.to_string().contains("moov box is too large to inspect"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn read_top_level_box_supports_extended_size_boxes() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(b"moov");
+        bytes.extend_from_slice(&24u64.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 8]);
+        let limit = bytes.len() as u64;
+        let mut reader = Cursor::new(bytes);
+
+        let b = read_top_level_box(&mut reader, 0, limit).unwrap();
+
+        assert_eq!(b.fourcc, *b"moov");
+        assert_eq!(b.size, 24);
+        assert_eq!(b.payload_offset, 16);
+    }
+
+    #[test]
+    fn read_top_level_box_treats_size_zero_as_terminal_box() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&8u32.to_be_bytes());
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(b"mdat");
+        bytes.extend_from_slice(&[0u8; 5]);
+        let bytes_len = bytes.len();
+        let limit = bytes.len() as u64;
+        let mut reader = Cursor::new(bytes);
+
+        let b = read_top_level_box(&mut reader, 8, limit).unwrap();
+
+        assert_eq!(b.fourcc, *b"mdat");
+        assert_eq!(b.size, (bytes_len - 8) as u64);
+        assert_eq!(b.payload_offset, 16);
+    }
+
+    #[test]
+    fn read_top_level_box_rejects_truncated_header() {
+        let mut reader = Cursor::new(vec![0, 0, 0, 8, b'm', b'o', b'o']);
+
+        let err = read_top_level_box(&mut reader, 0, 7).unwrap_err();
+
+        assert!(err.to_string().contains("truncated box header"), "{err}");
+    }
+
+    #[test]
+    fn read_top_level_box_rejects_truncated_extended_header() {
+        let mut reader = Cursor::new({
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&1u32.to_be_bytes());
+            bytes.extend_from_slice(b"moov");
+            bytes.extend_from_slice(&[0u8; 4]);
+            bytes
+        });
+
+        let err = read_top_level_box(&mut reader, 0, 12).unwrap_err();
+
+        assert!(
+            err.to_string().contains("truncated largesize box header"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn read_box_bytes_rejects_truncated_payload() {
+        let mut reader = Cursor::new(vec![0u8; 12]);
+        let b = BoxInfo {
+            fourcc: *b"moov",
+            offset: 0,
+            size: 16,
+            payload_offset: 8,
+        };
+
+        let err = read_box_bytes(&mut reader, &b).unwrap_err();
+
+        assert!(matches!(err, TrimError::Io(_)), "{err}");
+    }
+
+    #[test]
+    fn read_top_level_box_rejects_too_small_box_size() {
+        let mut reader = Cursor::new({
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&4u32.to_be_bytes());
+            bytes.extend_from_slice(b"moov");
+            bytes
+        });
+
+        let err = read_top_level_box(&mut reader, 0, 8).unwrap_err();
+
+        assert!(err.to_string().contains("invalid moov box size"), "{err}");
+    }
+
+    #[test]
+    fn read_top_level_box_rejects_box_extent_past_file() {
+        let mut reader = Cursor::new({
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&32u32.to_be_bytes());
+            bytes.extend_from_slice(b"moov");
+            bytes.extend_from_slice(&[0u8; 8]);
+            bytes
+        });
+
+        let err = read_top_level_box(&mut reader, 0, 16).unwrap_err();
+
+        assert!(err.to_string().contains("invalid moov box size"), "{err}");
+    }
+
+    #[test]
+    fn read_finalized_moov_bytes_reports_missing_moov_at_eof_without_looping() {
+        let mut reader = Cursor::new({
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&8u32.to_be_bytes());
+            bytes.extend_from_slice(b"ftyp");
+            bytes.extend_from_slice(&0u32.to_be_bytes());
+            bytes.extend_from_slice(b"mdat");
+            bytes.extend_from_slice(&[0u8; 3]);
+            bytes
+        });
+
+        let err = read_finalized_moov_bytes(&mut reader).unwrap_err();
+
+        assert!(err.to_string().contains("missing finalized moov"), "{err}");
     }
 
     #[test]
