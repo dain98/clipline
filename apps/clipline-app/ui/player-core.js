@@ -789,7 +789,7 @@ const PlayerCore = (() => {
   const defaultAudioTrackIds = (tracks) => {
     const splitOutput = hasSplitOutputTracks(tracks);
     return normalizedAudioTracks(tracks)
-      .filter((track) => audioTrackId(track) && !(splitOutput && isMixedOutputTrack(track)))
+      .filter((track) => audioTrackId(track) && !(splitOutput && isProcessOutputTrack(track)))
       .map(audioTrackId);
   };
 

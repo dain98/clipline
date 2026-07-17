@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-17): Discord audio safety-track default
+
+A user report that Discord stopped recording after a recent update was reproduced as a playback-
+selection regression, not loss from the mixed speaker capture. With Experimental app audio tracks
+enabled, Clipline enumerates process audio sessions only when the recorder starts. A native
+`ffplay` process started afterward was absent from the per-process marker metadata but remained
+audible in the mixed Output Audio safety track. In the final five seconds of
+`C:\Users\dain9\Videos\Clipline\2026-07-17 15-52\clip_1784329112.mp4`, mixed output measured
+-33.1 dB mean/-30.0 dB peak while the stale startup Media Player track measured -91.0 dB
+mean/-84.3 dB peak.
+
+Nightly 0.1.34 commit `dc7250e` changed clip opening to prepare every default audio track. The
+existing split-track default excluded mixed Output Audio whenever any startup process track
+existed, so the review player could switch from audible stream zero to stale process tracks and
+make late-start Discord appear unrecorded. Split-track clips now default to mixed Output Audio plus
+non-process inputs such as the microphone; selecting individual app tracks remains available and
+mutually exclusive with mixed output. Runtime process discovery is still a separate, larger
+enhancement. The focused `player_core` regression test covers the safe default.
+
 ## Checkpoint (2026-07-17): Proxmox VM software H.264 fallback
 
 Clipline can now record in Windows VMs that support WGC but expose neither a D3D11 video
