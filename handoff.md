@@ -20,6 +20,17 @@ metadata. The FFmpeg mux round-trip integration test exercised both SVT-AV1 and 
 software H.264. No Proxmox PCI passthrough, IOMMU, or virtual-GPU flag is required for this path;
 its tradeoff is CPU usage, so reducing FPS/resolution is the first tuning lever.
 
+Native Computer Use acceptance then saved and reviewed a fresh fourth replay at
+`C:\Users\dain9\Videos\Clipline\2026-07-17 15-08\clip_1784326197.mp4`. Play/pause, click-seek,
+playhead dragging, and post-scrub playback all worked without visible corruption. The 60.36-second
+file is H.264 1280×800 limited-range BT.709 with two stereo Opus tracks and decodes cleanly; both
+audio inputs were silent in this run. A five-second steady-state sample measured Clipline plus its
+FFmpeg child at roughly 120% of one logical core (about 15% of this eight-logical-processor VM),
+confirming the expected CPU cost rather than iGPU acceleration. Acceptance also caught that the
+frontend discarded the backend's active encoder label, so Automatic mode could not identify the
+selected fallback. The UI now retains the status event's encoder and exposes
+`Stop recording · Software · H.264` on the active recorder control.
+
 Implementation commits on `build-run-app` begin at
 `5f354ab docs(capture): plan software VM encoder fallback`. The local ignored
 `apps/clipline-app/ffmpeg/` directory contains the 2026-07-17 BtbN LGPL shared build used for live
