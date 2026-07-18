@@ -4,6 +4,41 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): long-session burst timestamp fix
+
+A 0.1.34 user report described long VOD playback occasionally jumping to 00:00 after an
+arbitrary seek. The supplied `session_1783827199.markers.json` is internally consistent: 91
+ordered, unique, in-range markers over 2022.944 seconds with a constant recording offset. The
+matching 2,103,075,867-byte MP4 downloaded with SHA-256
+`4A1DB0A25A8435443F7238D9985090D764407694C5BA52EA361F2412D2F68BAA`. FFprobe accepts its H.264
+video and two Opus tracks, every video packet timestamp is strictly increasing, all sampled seeks
+from 60 through 2000 seconds land on the expected preceding keyframe, the maximum keyframe gap is
+0.65 seconds, and a full 33:43 video/audio decode completes without codec errors. Markers,
+keyframes, sample indexes, and bitstream corruption are therefore ruled out for this artifact.
+
+The artifact did expose a reproducible recorder defect. It contains 1,265 consecutive video-frame
+gaps below one millisecond, all exactly 0.1 ms; several cluster around the reported 15-minute area.
+`CadencedCapture` emitted a scheduled duplicate when WGC timed out, then accepted a real frame
+whose presentation timestamp still belonged to that filled cadence slot and forced it to
+`last_pts + 0.0001`. This produced extra near-zero-duration samples and an average frame rate above
+the configured 60 FPS. `CadencedCapture` now retains an early real frame as the latest texture,
+waits only for the remainder of the existing cadence interval, and emits either an on-time real
+frame or one duplicate at the next scheduled point. Three focused tests cover idle duplication,
+stale-frame suppression, and reuse of the newest suppressed texture.
+
+This timing defect is a plausible WebView2 stressor, especially because the supplied file has a
+1.48 MB tail `moov` and Clipline plays it through Tauri's range-based asset protocol, but the exact
+seek-to-zero chain is not yet proven. Computer Use could not attach in the final reproduction pass
+because this thread's native pipe returned OS error 2. Do not claim the player reset itself was
+visually reproduced or fully fixed until a fresh native session exercises this artifact. The
+validated file is hard-linked without an extra 2 GB copy at
+`C:\Users\dain9\Videos\Clipline\Imported seek repro 1783827199\session_1783827199.mp4`.
+
+Plan commit: `03b5f2a docs(capture): plan cadence burst timestamp fix`. Implementation commit:
+`80cb90f fix(capture): suppress burst frame timestamps`. Focused cadence tests, the full workspace
+suite (including live WGC with an active desktop), fresh-cache workspace clippy with warnings
+denied, formatting, and diff checks pass.
+
 ## Checkpoint (2026-07-17): Discord audio safety-track default
 
 A user report that Discord stopped recording after a recent update was reproduced as a playback-
