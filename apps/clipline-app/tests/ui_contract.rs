@@ -476,6 +476,26 @@ fn elevation_restart_restores_retry_if_dialog_closed_during_uac() {
 }
 
 #[test]
+fn elevation_restart_reconciles_after_inflight_and_handles_false_result() {
+    let js = main_js();
+    let restart = js_function_body(&js, "restartAsAdministrator");
+    let cleared = restart
+        .rfind("elevationRestartInFlight = false")
+        .expect("in-flight flag must clear after the restart attempt");
+
+    assert!(
+        restart.contains("const restarted = await invoke(\"restart_as_administrator\")")
+            && restart.contains("if (!restarted)")
+            && restart.contains("cancel.disabled = false"),
+        "Ok(false) must re-enable elevation dialog controls instead of leaving them disabled"
+    );
+    assert!(
+        restart[cleared..].contains("maybeWarnElevatedGame(activeDetectedGame)"),
+        "after in-flight clears, the dialog must reconcile: close if the game already went inactive during UAC (no further detection emit), or restore a closed retry path"
+    );
+}
+
+#[test]
 fn failed_elevation_handoff_does_not_start_tauri() {
     let main = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
         .expect("read src/main.rs");

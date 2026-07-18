@@ -30,7 +30,9 @@ PR #87 review hardened the handoff further: only a confirmed-gone parent may ski
 handoff failures abort before Tauri starts, protected-process token query failures warn
 conservatively, and the frontend retries queued warnings while closing stale ones. Later
 passes keep the elevation dialog open after UAC cancellation, block dismiss/Escape while the
-restart is in flight, and restore the warned PID if the dialog still closed during that wait.
+restart is in flight, restore the warned PID if the dialog closed during that wait, reconcile
+the dialog after in-flight clears (so a game that exited during UAC cannot leave a stale
+modal), and re-enable controls when restart returns false.
 
 ## Checkpoint (2026-07-18): Nightly 0.1.35
 

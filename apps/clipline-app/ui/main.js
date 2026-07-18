@@ -621,10 +621,16 @@ async function restartAsAdministrator() {
   button.textContent = "Waiting for Windows...";
   $("error").textContent = "";
   try {
-    await invoke("restart_as_administrator");
+    const restarted = await invoke("restart_as_administrator");
+    if (!restarted) {
+      button.disabled = false;
+      cancel.disabled = false;
+      button.textContent = "Restart as Administrator";
+    }
   } catch (error) {
     // Leave the dialog open so UAC cancel can retry (PID already warned).
-    // If dismiss still happened during the wait, restore that retry path.
+    // If dismiss still happened during the wait, clear the warned PID so the
+    // post-flight reconcile can re-offer the warning.
     button.disabled = false;
     cancel.disabled = false;
     button.textContent = "Restart as Administrator";
@@ -632,11 +638,13 @@ async function restartAsAdministrator() {
     if (!dialog.open) {
       const processId = Number(activeDetectedGame && activeDetectedGame.process_id);
       if (Number.isFinite(processId)) warnedElevatedGameProcesses.delete(processId);
-      maybeWarnElevatedGame(activeDetectedGame);
     }
   } finally {
     elevationRestartInFlight = false;
   }
+  // After in-flight clears: restore a closed retry path, or close a stale
+  // dialog that could not be closed while UAC suppressed inactive detection.
+  maybeWarnElevatedGame(activeDetectedGame);
 }
 
 /* ---- boot ---- */
