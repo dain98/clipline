@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-17): Proxmox VM software H.264 fallback
+
+Clipline can now record in Windows VMs that support WGC but expose neither a D3D11 video
+processor nor a hardware video encoder. The existing hardware paths are unchanged and preferred.
+The fallback reads WGC BGRA textures through a staging resource, performs deterministic limited-
+range Rec.709 BGRA-to-NV12 crop/scale conversion in neutral Rust, and pipes NV12 to the LGPL
+FFmpeg `h264_mf` encoder with `-hw_encoding 0`. `h264_mf` must pass a real one-frame probe before
+the candidate is offered.
+
+Verified live in this Proxmox Windows 11 VM on Microsoft Basic Display Adapter: Clipline ran at
+1280×800/60 FPS, spawned `h264_mf` in forced software mode, saved three replays, populated their
+Library thumbnails, and produced a validated 60.6-second H.264 MP4 with limited-range BT.709
+metadata. The FFmpeg mux round-trip integration test exercised both SVT-AV1 and Media Foundation
+software H.264. No Proxmox PCI passthrough, IOMMU, or virtual-GPU flag is required for this path;
+its tradeoff is CPU usage, so reducing FPS/resolution is the first tuning lever.
+
+Implementation commits on `build-run-app` begin at
+`5f354ab docs(capture): plan software VM encoder fallback`. The local ignored
+`apps/clipline-app/ffmpeg/` directory contains the 2026-07-17 BtbN LGPL shared build used for live
+acceptance. Keep distributing FFmpeg as a separate process and never add GPL encoders.
+
 ## Checkpoint (2026-07-16): repository simplification pass
 
 Nightly 0.1.34 contains PRs #83 through #85. It ships the transactional reliability and long-MP4

@@ -18,11 +18,19 @@ reported. It is a living document — see [Help us fill this in](#help-us-fill-t
 | **AMD RX 6700 XT (RDNA2)** — AMF H.264, SVT‑AV1 | ✅ Verified live | Primary dev/test rig (5120×1440 primary display). AMF H.264 via the Media Foundation Transform path and software SVT‑AV1 (FFmpeg subprocess) are exercised here. |
 | **NVIDIA — NVENC (H.264 / HEVC / AV1)** | 🟡 Implemented, not hardware‑verified | Probe + arg paths exist and are mock‑tested; not yet confirmed on a physical NVIDIA GPU. NVENC arg tuning is unvalidated. |
 | **Intel — QuickSync (QSV)** | 🟡 Implemented, not hardware‑verified | Same as NVENC: code path present, not yet run on real Intel hardware. |
-| **Software H.264 / HEVC** | ❌ Not shipped | The bundled FFmpeg is an **LGPL** build with no GPL `libx264`/`libx265`. The only software tier is SVT‑AV1. (Microsoft's software H.264 MFT exists as a not‑yet‑wired last resort.) |
+| **Microsoft software H.264 (`h264_mf`)** | ✅ Verified live | Last-resort FFmpeg path for VMs and software-only display adapters. Reads WGC BGRA textures back, converts them to NV12 on the CPU, and explicitly sets `-hw_encoding 0`. Verified in a Proxmox Windows 11 VM using Microsoft Basic Display Adapter at 1280×800/60 FPS. |
+| **Software HEVC** | ❌ Not shipped | The bundled FFmpeg is an **LGPL** build with no GPL `libx264`/`libx265`. Software H.264 comes from Windows Media Foundation; there is no corresponding software HEVC fallback. |
 
-Encoder selection probes hardware at startup (H.264 first for compatibility,
-then NVENC → AMF → QuickSync → software AV1) and test‑encodes each backend, so a
+Encoder selection probes at startup (H.264 first for compatibility, then
+NVENC → AMF → QuickSync → software AV1 → software H.264) and test‑encodes every
+device-dependent backend, including Media Foundation software H.264. A
 compiled‑but‑unusable encoder is dropped rather than offered.
+
+The VM fallback needs no PCI passthrough, virtual GPU feature, or IOMMU setting;
+WGC and the Windows Media Foundation H.264 encoder are sufficient. It trades GPU
+requirements for CPU work, so lower the output resolution or FPS if recording
+affects the guest workload. The LGPL FFmpeg runtime must be present because the
+fallback is implemented as a separate subprocess.
 
 > ⚠️ **About performance figures.** Widely circulated "zero FPS impact" numbers
 > trace to anecdotal, methodology‑free posts. Methodical testing measures a
