@@ -397,6 +397,34 @@ fn update_dialog_body_can_drag_frameless_window() {
     );
 }
 
+#[test]
+fn elevated_game_hotkey_warning_offers_opt_in_restart_once_per_process() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    for required in [
+        "id=\"elevation-dialog\"",
+        "id=\"elevation-restart\"",
+        "id=\"elevation-cancel\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "missing elevated-game UI: {required}"
+        );
+    }
+    assert!(
+        js.contains("elevated_hotkeys_blocked")
+            && js.contains("warnedElevatedGameProcesses")
+            && js.contains("invoke(\"restart_as_administrator\")"),
+        "game detection must warn once per elevated PID and invoke only the explicit restart command"
+    );
+    assert!(
+        css.contains("#elevation-dialog"),
+        "the elevation dialog must share the app's in-product modal styling"
+    );
+}
+
 fn library_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library.rs");
     fs::read_to_string(path).expect("read src/library.rs")

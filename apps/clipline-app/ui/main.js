@@ -67,6 +67,7 @@ listen("game-detection", (e) => {
   activeDetectedGame = e.payload || null;
   updateCaptureStatus();
   updateGameDetectionStatus();
+  maybeWarnElevatedGame(activeDetectedGame);
 });
 
 listen("cloud-upload-progress", (e) => {
@@ -156,6 +157,11 @@ $("update-install").addEventListener("click", installPendingUpdate);
 $("update-cancel").addEventListener("click", () => {
   pendingUpdate = null;
   $("update-dialog").close();
+});
+$("elevation-cancel").addEventListener("click", () => $("elevation-dialog").close());
+$("elevation-restart").addEventListener("click", restartAsAdministrator);
+$("elevation-dialog").addEventListener("click", (ev) => {
+  if (ev.target === $("elevation-dialog")) $("elevation-dialog").close();
 });
 $("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);
 $("set-replay-disk-quota").addEventListener("input", syncReplayStorageFields);
@@ -507,6 +513,7 @@ document.addEventListener("keydown", (ev) => {
     $("confirm-dialog").open ||
     $("quit-dialog").open ||
     $("update-dialog").open ||
+    $("elevation-dialog").open ||
     $("upload-dialog").open ||
     $("game-plugin-settings-dialog").open ||
     $("keys-dialog").open
@@ -578,6 +585,32 @@ document.addEventListener("keydown", (ev) => {
     case "close": closeReview(); break;
   }
 });
+
+function maybeWarnElevatedGame(game) {
+  if (!game || !game.active || !game.elevated_hotkeys_blocked) return;
+  const processId = Number(game.process_id);
+  if (!Number.isFinite(processId) || warnedElevatedGameProcesses.has(processId)) return;
+  if ($("elevation-dialog").open) return;
+
+  warnedElevatedGameProcesses.add(processId);
+  $("elevation-game-name").textContent = game.name || game.exe_name || "This game";
+  $("elevation-dialog").showModal();
+}
+
+async function restartAsAdministrator() {
+  const button = $("elevation-restart");
+  button.disabled = true;
+  button.textContent = "Waiting for Windows...";
+  $("error").textContent = "";
+  try {
+    await invoke("restart_as_administrator");
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "Restart as Administrator";
+    $("error").textContent = String(error);
+    if ($("elevation-dialog").open) $("elevation-dialog").close();
+  }
+}
 
 /* ---- boot ---- */
 

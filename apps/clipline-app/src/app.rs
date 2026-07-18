@@ -72,6 +72,7 @@ struct GameDetectionEvent {
     process_id: Option<u32>,
     exe_name: Option<String>,
     recording_mode: Option<GameRecordingMode>,
+    elevated_hotkeys_blocked: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -89,15 +90,31 @@ struct UpdateCheckResult {
 
 impl GameDetectionEvent {
     fn from_detected(detected: Option<&DetectedGame>) -> Self {
+        let clipline_elevated = crate::windows::current_process_is_elevated().unwrap_or(false);
+        Self::from_detected_with_elevation(detected, clipline_elevated, |process_id| {
+            crate::windows::process_is_elevated(process_id).unwrap_or(false)
+        })
+    }
+
+    fn from_detected_with_elevation(
+        detected: Option<&DetectedGame>,
+        clipline_elevated: bool,
+        game_is_elevated: impl FnOnce(u32) -> bool,
+    ) -> Self {
         match detected {
-            Some(game) => Self {
-                active: true,
-                name: Some(game.name.clone()),
-                window_title: Some(game.window_title.clone()),
-                process_id: Some(game.process_id),
-                exe_name: Some(game.exe_name.clone()),
-                recording_mode: Some(game.recording_mode),
-            },
+            Some(game) => {
+                let elevated_hotkeys_blocked =
+                    !clipline_elevated && game_is_elevated(game.process_id);
+                Self {
+                    active: true,
+                    name: Some(game.name.clone()),
+                    window_title: Some(game.window_title.clone()),
+                    process_id: Some(game.process_id),
+                    exe_name: Some(game.exe_name.clone()),
+                    recording_mode: Some(game.recording_mode),
+                    elevated_hotkeys_blocked,
+                }
+            }
             None => Self {
                 active: false,
                 name: None,
@@ -105,6 +122,7 @@ impl GameDetectionEvent {
                 process_id: None,
                 exe_name: None,
                 recording_mode: None,
+                elevated_hotkeys_blocked: false,
             },
         }
     }
@@ -969,6 +987,16 @@ fn save_replay(state: tauri::State<RuntimeState>) {
 }
 
 #[tauri::command]
+fn restart_as_administrator<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    if crate::windows::current_process_is_elevated()? {
+        return Ok(false);
+    }
+    crate::windows::launch_elevated_after(std::process::id())?;
+    quit_app(&app);
+    Ok(true)
+}
+
+#[tauri::command]
 fn get_autostart_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
     app.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
@@ -1671,6 +1699,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             save_replay,
+            restart_as_administrator,
             set_recording,
             get_settings,
             minimize_main_window,
@@ -2404,6 +2433,28 @@ mod tests {
             exe_name: format!("{name}.exe"),
             recording_mode: GameRecordingMode::FullSession,
         }
+    }
+
+    #[test]
+    fn elevated_game_warning_requires_lower_privilege_clipline() {
+        let game = detected_game("endfield", "Arknights: Endfield", 42);
+
+        let blocked =
+            GameDetectionEvent::from_detected_with_elevation(Some(&game), false, |process_id| {
+                process_id == 42
+            });
+        assert!(blocked.elevated_hotkeys_blocked);
+
+        let already_elevated =
+            GameDetectionEvent::from_detected_with_elevation(Some(&game), true, |_| true);
+        assert!(!already_elevated.elevated_hotkeys_blocked);
+
+        let ordinary_game =
+            GameDetectionEvent::from_detected_with_elevation(Some(&game), false, |_| false);
+        assert!(!ordinary_game.elevated_hotkeys_blocked);
+
+        let inactive = GameDetectionEvent::from_detected_with_elevation(None, false, |_| true);
+        assert!(!inactive.elevated_hotkeys_blocked);
     }
 
     #[test]

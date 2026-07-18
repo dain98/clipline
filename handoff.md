@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): elevated-game Save Replay hotkeys
+
+An Arknights: Endfield report said Save Replay worked only after tabbing out. The reporter's UAC
+prompt identifies the boundary: Endfield runs elevated while Clipline normally runs at medium
+integrity, so Windows UIPI prevents Clipline's low-level keyboard hook from observing input aimed
+at the focused game. Running Clipline as administrator was confirmed as the user workaround.
+
+Clipline remains `asInvoker` by default. Game-detection events now query the detected process token
+through safe Win32 wrappers and flag the blocked state only when the game is elevated above
+Clipline. The frontend shows one in-app explanation per game PID and offers an explicit Restart as
+Administrator action, warning that the rolling buffer resets. Acceptance launches the same
+executable through the `runas` verb with the current PID; the elevated child waits for the normal
+instance to exit before starting Tauri, avoiding overlapping recorders and the single-instance
+race. Clipline exits only after Windows successfully creates the replacement, so a denied or
+cancelled UAC request leaves it running normally. Future launches remain non-elevated.
+
+Focused elevation/Win32/UI tests, CI-mode `cargo test --workspace`, fresh-cache workspace clippy
+with warnings denied, formatting, and diff checks pass. Computer Use could not attach because its
+native pipe returned OS error 2. A live UAC attempt timed out without approval and verified the
+normal PID remained alive with no replacement; accepting UAC and visually confirming the elevated
+replacement/dialog remain the final native checks.
+
 ## Checkpoint (2026-07-18): Nightly 0.1.35
 
 Nightly 0.1.35 contains PR #86. It ships the Proxmox/Windows VM software H.264 fallback,
