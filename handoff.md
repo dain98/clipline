@@ -28,9 +28,9 @@ replacement/dialog remain the final native checks.
 
 PR #87 review hardened the handoff further: only a confirmed-gone parent may skip the wait,
 handoff failures abort before Tauri starts, protected-process token query failures warn
-conservatively, and the frontend retries queued warnings while closing stale ones. A later
-pass keeps the elevation dialog open after UAC cancellation so the already-warned PID still
-has an in-app retry path.
+conservatively, and the frontend retries queued warnings while closing stale ones. Later
+passes keep the elevation dialog open after UAC cancellation, block dismiss/Escape while the
+restart is in flight, and restore the warned PID if the dialog still closed during that wait.
 
 ## Checkpoint (2026-07-18): Nightly 0.1.35
 

@@ -123,6 +123,7 @@ var selectedDetectedGameIds = new Set();
 var detectedGamesScanId = 0;
 var activeDetectedGame = null;
 var warnedElevatedGameProcesses = new Set();
+var elevationRestartInFlight = false;
 var captureTargetDirty = false;
 // Codecs WebView2 can decode in the review player (H.264 always; HEVC/AV1
 // probed at startup). Drives the playback caveat and the recorder's

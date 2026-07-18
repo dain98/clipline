@@ -158,10 +158,17 @@ $("update-cancel").addEventListener("click", () => {
   pendingUpdate = null;
   $("update-dialog").close();
 });
-$("elevation-cancel").addEventListener("click", () => $("elevation-dialog").close());
+$("elevation-cancel").addEventListener("click", () => {
+  if (!elevationRestartInFlight) $("elevation-dialog").close();
+});
 $("elevation-restart").addEventListener("click", restartAsAdministrator);
 $("elevation-dialog").addEventListener("click", (ev) => {
-  if (ev.target === $("elevation-dialog")) $("elevation-dialog").close();
+  if (ev.target === $("elevation-dialog") && !elevationRestartInFlight) {
+    $("elevation-dialog").close();
+  }
+});
+$("elevation-dialog").addEventListener("cancel", (ev) => {
+  if (elevationRestartInFlight) ev.preventDefault();
 });
 $("elevation-dialog").addEventListener("close", () => maybeWarnElevatedGame(activeDetectedGame));
 $("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);
@@ -590,7 +597,9 @@ document.addEventListener("keydown", (ev) => {
 function maybeWarnElevatedGame(game) {
   const dialog = $("elevation-dialog");
   if (!game || !game.active || !game.elevated_hotkeys_blocked) {
-    if (dialog.open) dialog.close();
+    // Keep the dialog up while UAC is in flight so a transient inactive
+    // detection cannot erase the only retry path for this PID.
+    if (dialog.open && !elevationRestartInFlight) dialog.close();
     return;
   }
   const processId = Number(game.process_id);
@@ -604,16 +613,29 @@ function maybeWarnElevatedGame(game) {
 
 async function restartAsAdministrator() {
   const button = $("elevation-restart");
+  const cancel = $("elevation-cancel");
+  const dialog = $("elevation-dialog");
+  elevationRestartInFlight = true;
   button.disabled = true;
+  cancel.disabled = true;
   button.textContent = "Waiting for Windows...";
   $("error").textContent = "";
   try {
     await invoke("restart_as_administrator");
   } catch (error) {
     // Leave the dialog open so UAC cancel can retry (PID already warned).
+    // If dismiss still happened during the wait, restore that retry path.
     button.disabled = false;
+    cancel.disabled = false;
     button.textContent = "Restart as Administrator";
     $("error").textContent = String(error);
+    if (!dialog.open) {
+      const processId = Number(activeDetectedGame && activeDetectedGame.process_id);
+      if (Number.isFinite(processId)) warnedElevatedGameProcesses.delete(processId);
+      maybeWarnElevatedGame(activeDetectedGame);
+    }
+  } finally {
+    elevationRestartInFlight = false;
   }
 }
 

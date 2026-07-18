@@ -418,7 +418,7 @@ fn elevated_game_hotkey_warning_offers_opt_in_restart_once_per_process() {
         js.contains("elevated_hotkeys_blocked")
             && js.contains("warnedElevatedGameProcesses")
             && js.contains("invoke(\"restart_as_administrator\")")
-            && warning.contains("if (dialog.open) dialog.close();")
+            && warning.contains("if (dialog.open && !elevationRestartInFlight) dialog.close();")
             && js.contains("addEventListener(\"close\", () => maybeWarnElevatedGame(activeDetectedGame))"),
         "game detection must warn once per elevated PID, close stale warnings, and invoke only the explicit restart command"
     );
@@ -448,6 +448,30 @@ fn cancelled_uac_restart_keeps_elevation_dialog_open_for_retry() {
             && catch_body.contains("$(\"error\").textContent = String(error)")
             && !catch_body.contains(".close()"),
         "UAC cancellation must leave the elevation dialog open; closing it while the PID stays in warnedElevatedGameProcesses removes the only retry path"
+    );
+}
+
+#[test]
+fn elevation_restart_restores_retry_if_dialog_closed_during_uac() {
+    let js = main_js();
+    let restart = js_function_body(&js, "restartAsAdministrator");
+    let catch_start = restart
+        .find("catch (error)")
+        .expect("administrator restart failure path");
+    let catch_body = &restart[catch_start..];
+
+    assert!(
+        restart.contains("elevationRestartInFlight = true")
+            && restart.contains("cancel.disabled = true")
+            && js.contains("addEventListener(\"cancel\"")
+            && js.contains("elevationRestartInFlight"),
+        "an in-flight administrator restart must disable dismiss controls and block Escape"
+    );
+    assert!(
+        catch_body.contains("if (!dialog.open)")
+            && catch_body.contains("warnedElevatedGameProcesses.delete(processId)")
+            && catch_body.contains("maybeWarnElevatedGame(activeDetectedGame)"),
+        "if the elevation dialog was closed while UAC was showing, failure must clear the warned PID and re-offer the warning"
     );
 }
 
