@@ -429,6 +429,29 @@ fn elevated_game_hotkey_warning_offers_opt_in_restart_once_per_process() {
 }
 
 #[test]
+fn cancelled_uac_restart_keeps_elevation_dialog_open_for_retry() {
+    let js = main_js();
+    let restart = js_function_body(&js, "restartAsAdministrator");
+    let warning = js_function_body(&js, "maybeWarnElevatedGame");
+    let catch_start = restart
+        .find("catch (error)")
+        .expect("administrator restart failure path");
+    let catch_body = &restart[catch_start..];
+
+    assert!(
+        warning.contains("warnedElevatedGameProcesses.has(processId)"),
+        "elevation warnings must remain once-per-PID after an intentional dismiss"
+    );
+    assert!(
+        catch_body.contains("button.disabled = false")
+            && catch_body.contains("Restart as Administrator")
+            && catch_body.contains("$(\"error\").textContent = String(error)")
+            && !catch_body.contains(".close()"),
+        "UAC cancellation must leave the elevation dialog open; closing it while the PID stays in warnedElevatedGameProcesses removes the only retry path"
+    );
+}
+
+#[test]
 fn failed_elevation_handoff_does_not_start_tauri() {
     let main = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
         .expect("read src/main.rs");

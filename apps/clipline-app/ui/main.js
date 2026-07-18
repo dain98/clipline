@@ -610,10 +610,10 @@ async function restartAsAdministrator() {
   try {
     await invoke("restart_as_administrator");
   } catch (error) {
+    // Leave the dialog open so UAC cancel can retry (PID already warned).
     button.disabled = false;
     button.textContent = "Restart as Administrator";
     $("error").textContent = String(error);
-    if ($("elevation-dialog").open) $("elevation-dialog").close();
   }
 }
 
