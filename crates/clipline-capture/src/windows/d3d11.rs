@@ -143,6 +143,32 @@ pub(super) fn create_nv12_staging(
     Ok(texture.expect("CreateTexture2D succeeded but returned null"))
 }
 
+/// CPU-readable BGRA staging texture for the software encoder fallback.
+pub(super) fn create_bgra_staging(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+) -> WinResult<ID3D11Texture2D> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_STAGING,
+        BindFlags: 0,
+        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture))? };
+    Ok(texture.expect("CreateTexture2D succeeded but returned null"))
+}
+
 pub(super) fn texture_desc(texture: &ID3D11Texture2D) -> D3D11_TEXTURE2D_DESC {
     let mut desc = D3D11_TEXTURE2D_DESC::default();
     // SAFETY: GetDesc writes to a valid out-pointer.

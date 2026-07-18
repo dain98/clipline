@@ -2,8 +2,8 @@
 //! WGC delivers BGRA, H.264 encoder MFTs consume NV12; ddoc §3/§7 require
 //! the path to stay on the GPU.
 
-use windows::core::{Interface, Result as WinResult};
-use windows::Win32::Foundation::RECT;
+use windows::core::{Error as WinError, Interface, Result as WinResult};
+use windows::Win32::Foundation::{E_FAIL, RECT};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1,
     ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
@@ -327,9 +327,77 @@ pub fn read_nv12(device: &ID3D11Device, src: &ID3D11Texture2D) -> WinResult<Vec<
     Ok(out)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct BgraReadback {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub stride: usize,
+}
+
+/// Copy a GPU BGRA texture into CPU-readable packed rows. This path uses only
+/// the core D3D11 device/context APIs and therefore works on WARP and Microsoft's
+/// Basic Display Adapter without `ID3D11VideoDevice`.
+pub fn read_bgra(device: &ID3D11Device, src: &ID3D11Texture2D) -> WinResult<BgraReadback> {
+    let (width, height) = d3d11::texture_size(src);
+    let staging = d3d11::create_bgra_staging(device, width, height)?;
+    let dst: ID3D11Resource = staging.cast()?;
+    let source: ID3D11Resource = src.cast()?;
+    let ctx = unsafe { device.GetImmediateContext()? };
+    let row_bytes = width as usize * 4;
+    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    unsafe {
+        ctx.CopyResource(&dst, &source);
+        ctx.Map(&dst, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+    }
+    let result = (|| {
+        let pitch = mapped.RowPitch as usize;
+        if mapped.pData.is_null() || pitch < row_bytes {
+            return Err(WinError::new(E_FAIL, "invalid mapped BGRA texture"));
+        }
+        let len = row_bytes
+            .checked_mul(height as usize)
+            .ok_or_else(|| WinError::new(E_FAIL, "BGRA readback size overflow"))?;
+        let mut bytes = vec![0u8; len];
+        let base = mapped.pData as *const u8;
+        for row in 0..height as usize {
+            let source = unsafe { std::slice::from_raw_parts(base.add(row * pitch), row_bytes) };
+            bytes[row * row_bytes..(row + 1) * row_bytes].copy_from_slice(source);
+        }
+        Ok(BgraReadback {
+            bytes,
+            width,
+            height,
+            stride: row_bytes,
+        })
+    })();
+    unsafe { ctx.Unmap(&dst, 0) };
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_bgra_texture_on_warp_without_video_processor() {
+        let (device, context) = crate::windows::d3d11::create_device_for_tests().unwrap();
+        let texture = crate::windows::d3d11::create_bgra_texture(&device, 2, 2).unwrap();
+        let resource: ID3D11Resource = texture.cast().unwrap();
+        let pixels = [
+            1u8, 2, 3, 255, 4, 5, 6, 255, // row 0
+            7, 8, 9, 255, 10, 11, 12, 255, // row 1
+        ];
+        unsafe {
+            context.UpdateSubresource(&resource, 0, None, pixels.as_ptr().cast(), 8, 0);
+        }
+
+        let readback = read_bgra(&device, &texture).unwrap();
+
+        assert_eq!((readback.width, readback.height), (2, 2));
+        assert_eq!(readback.stride, 8);
+        assert_eq!(readback.bytes, pixels);
+    }
 
     #[test]
     fn reads_back_converted_nv12_as_contiguous_bytes() {
