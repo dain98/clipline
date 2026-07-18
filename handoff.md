@@ -21,10 +21,13 @@ gaps below one millisecond, all exactly 0.1 ms; several cluster around the repor
 `CadencedCapture` emitted a scheduled duplicate when WGC timed out, then accepted a real frame
 whose presentation timestamp still belonged to that filled cadence slot and forced it to
 `last_pts + 0.0001`. This produced extra near-zero-duration samples and an average frame rate above
-the configured 60 FPS. `CadencedCapture` now retains an early real frame as the latest texture,
-waits only for the remainder of the existing cadence interval, and emits either an on-time real
-frame or one duplicate at the next scheduled point. Three focused tests cover idle duplication,
-stale-frame suppression, and reuse of the newest suppressed texture.
+the configured 60 FPS. `CadencedCapture` now retains an early real frame as the latest texture and
+yields a bounded timeout to the service loop before reading again, so save/stop handling stays
+responsive while a stale WGC queue drains. Its retry budget preserves the existing wall-clock
+deadline; successful real frames advance the same wall anchor by their PTS delta; and overloaded
+conversion/encoding skips missed cadence slots instead of letting video PTS drift behind wall time
+and audio. Six focused tests cover idle duplication, stale-frame yielding/data reuse, delayed WGC
+delivery, and time spent in the encoder between capture calls.
 
 This timing defect is a plausible WebView2 stressor, especially because the supplied file has a
 1.48 MB tail `moov` and Clipline plays it through Tauri's range-based asset protocol, but the exact
@@ -34,10 +37,17 @@ visually reproduced or fully fixed until a fresh native session exercises this a
 validated file is hard-linked without an extra 2 GB copy at
 `C:\Users\dain9\Videos\Clipline\Imported seek repro 1783827199\session_1783827199.mp4`.
 
-Plan commit: `03b5f2a docs(capture): plan cadence burst timestamp fix`. Implementation commit:
-`80cb90f fix(capture): suppress burst frame timestamps`. Focused cadence tests, the full workspace
-suite (including live WGC with an active desktop), fresh-cache workspace clippy with warnings
-denied, formatting, and diff checks pass.
+The bounded PR #86 review stopped cleanly after pass 3. It also fixed the split-audio helper that
+normalized the new `output + microphone` default into microphone-only output. Review-fix commits:
+`56f2339 docs: plan PR 86 review fixes`, `97dbd79 fix(capture): yield while dropping stale frames`,
+`42a2744 fix(player): preserve mixed output selection`, and
+`12201c3 fix(capture): keep cadence aligned with wall clock`.
+
+Focused tests, the CI-mode full workspace suite, fresh-cache workspace clippy with warnings denied,
+formatting, and diff checks pass. The unchanged live
+`captures_monotonic_gpu_frames_from_primary_monitor` device test timed out twice waiting for a
+desktop update after the app was stopped; other live WGC tests passed. Treat that as an environment
+signal to rerun with an actively changing desktop, not as validation of this cadence patch.
 
 ## Checkpoint (2026-07-17): Discord audio safety-track default
 
