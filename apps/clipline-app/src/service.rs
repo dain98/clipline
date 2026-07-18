@@ -1221,9 +1221,23 @@ fn build_encoder(
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FfmpegConversionPath {
+    Gpu,
+    Cpu,
+}
+
+fn ffmpeg_conversion_path(backend: EncoderBackend) -> FfmpegConversionPath {
+    if backend == EncoderBackend::MfSoftware {
+        FfmpegConversionPath::Cpu
+    } else {
+        FfmpegConversionPath::Gpu
+    }
+}
+
 /// Construct one candidate encoder. MFT uses the zero-copy GPU H.264 path;
-/// FFmpeg converts BGRA→NV12 on the GPU and pipes it. `MfSoftware` is modeled
-/// by the probe but not yet instantiable, so it is skipped (the walk moves on).
+/// FFmpeg hardware backends convert BGRA→NV12 on the GPU, while `MfSoftware`
+/// uses readback and CPU conversion so it works without a video processor.
 #[allow(clippy::too_many_arguments)]
 fn open_candidate(
     candidate: EncoderCandidate,
@@ -1255,21 +1269,37 @@ fn open_candidate(
             let ffmpeg = ffmpeg_path
                 .as_deref()
                 .ok_or_else(|| "ffmpeg not located".to_string())?;
-            FfmpegVideoEncoder::new_on(
-                device,
-                ffmpeg,
-                candidate.backend,
-                candidate.codec,
-                in_w,
-                in_h,
-                None,
-                enc_w,
-                enc_h,
-                opts.fps,
-                opts.bitrate_bps,
-            )
-            .map(|e| Box::new(e) as Box<dyn Encoder>)
-            .map_err(|e| e.to_string())
+            let encoder = match ffmpeg_conversion_path(candidate.backend) {
+                FfmpegConversionPath::Gpu => FfmpegVideoEncoder::new_on(
+                    device,
+                    ffmpeg,
+                    candidate.backend,
+                    candidate.codec,
+                    in_w,
+                    in_h,
+                    None,
+                    enc_w,
+                    enc_h,
+                    opts.fps,
+                    opts.bitrate_bps,
+                ),
+                FfmpegConversionPath::Cpu => FfmpegVideoEncoder::new_cpu_on(
+                    device,
+                    ffmpeg,
+                    candidate.backend,
+                    candidate.codec,
+                    in_w,
+                    in_h,
+                    None,
+                    enc_w,
+                    enc_h,
+                    opts.fps,
+                    opts.bitrate_bps,
+                ),
+            };
+            encoder
+                .map(|e| Box::new(e) as Box<dyn Encoder>)
+                .map_err(|e| e.to_string())
         }
     }
 }
@@ -2133,6 +2163,22 @@ mod tests {
         }
         assert!(VideoEncoder::from_parts(EncoderBackend::MfSoftware, Codec::H264).is_none());
         assert!(VideoEncoder::from_parts(EncoderBackend::SvtAv1, Codec::H264).is_none());
+    }
+
+    #[test]
+    fn software_media_foundation_uses_cpu_frame_conversion() {
+        assert_eq!(
+            ffmpeg_conversion_path(EncoderBackend::MfSoftware),
+            FfmpegConversionPath::Cpu
+        );
+        assert_eq!(
+            ffmpeg_conversion_path(EncoderBackend::Nvenc),
+            FfmpegConversionPath::Gpu
+        );
+        assert_eq!(
+            ffmpeg_conversion_path(EncoderBackend::SvtAv1),
+            FfmpegConversionPath::Gpu
+        );
     }
 
     #[test]
