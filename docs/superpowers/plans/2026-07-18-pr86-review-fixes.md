@@ -17,4 +17,3 @@ downsampling or the mixed-output safety default.
       replace it, while keeping the existing master-toggle behavior.
 - [ ] Run the focused tests, workspace tests, formatting check, and clippy.
 - [ ] Re-review the complete branch diff for remaining actionable defects.
-
