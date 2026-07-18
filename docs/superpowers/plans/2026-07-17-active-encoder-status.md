@@ -37,4 +37,3 @@
 - [ ] Run `cargo clippy --workspace --all-targets -- -D warnings`.
 - [ ] Review `git diff --check` and keep the change scoped to status presentation.
 - [ ] Rebuild and relaunch Clipline with the staged FFmpeg, then verify Computer Use sees `Software · H.264` in the active recorder status.
-
