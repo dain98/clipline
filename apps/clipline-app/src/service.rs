@@ -88,6 +88,8 @@ struct CadencedCapture<C> {
     last_data: Option<FrameData>,
     last_emit_pts_s: Option<f64>,
     next_pts_s: Option<f64>,
+    last_emit_wall: Instant,
+    retry_deadline: Option<Instant>,
 }
 
 impl<C> CadencedCapture<C> {
@@ -100,10 +102,23 @@ impl<C> CadencedCapture<C> {
             last_data: Some(seed.data.clone()),
             last_emit_pts_s: Some(seed.pts_s),
             next_pts_s: Some(seed.pts_s + frame_interval_s),
+            last_emit_wall: Instant::now(),
+            retry_deadline: None,
         }
     }
 
     fn remember(&mut self, frame: &Frame) {
+        let now = Instant::now();
+        self.last_emit_wall = self
+            .last_emit_pts_s
+            .map(|last| frame.pts_s - last)
+            .filter(|delta| delta.is_finite() && *delta >= 0.0)
+            .and_then(|delta| {
+                self.last_emit_wall
+                    .checked_add(Duration::from_secs_f64(delta))
+            })
+            .map(|anchored| anchored.min(now))
+            .unwrap_or(now);
         self.last_data = Some(frame.data.clone());
         self.last_emit_pts_s = Some(frame.pts_s);
         self.next_pts_s = Some(frame.pts_s + self.frame_interval_s);
@@ -112,8 +127,37 @@ impl<C> CadencedCapture<C> {
 
 impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
     fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError> {
-        match self.inner.next_frame_timeout(self.frame_interval) {
+        let now = Instant::now();
+        let wall_remaining = self
+            .frame_interval
+            .saturating_sub(now.saturating_duration_since(self.last_emit_wall));
+        let timeout = self
+            .retry_deadline
+            .take()
+            .map(|deadline| deadline.saturating_duration_since(now).min(wall_remaining))
+            .unwrap_or(wall_remaining);
+        match self.inner.next_frame_timeout(timeout) {
             Ok(Some(mut frame)) => {
+                if let Some(next_pts_s) = self.next_pts_s {
+                    if frame.pts_s < next_pts_s {
+                        // A timeout duplicate already filled this cadence slot. Keep the
+                        // newest texture, but yield to the service loop before reading again
+                        // so stop/save commands remain responsive while a stale queue drains.
+                        let pts_remaining = Duration::from_secs_f64(
+                            (next_pts_s - frame.pts_s)
+                                .min(self.frame_interval_s)
+                                .max(0.0),
+                        );
+                        let now = Instant::now();
+                        let wall_remaining = self
+                            .frame_interval
+                            .saturating_sub(now.saturating_duration_since(self.last_emit_wall));
+                        let retry_after = pts_remaining.min(wall_remaining);
+                        self.last_data = Some(frame.data);
+                        self.retry_deadline = Some(now + retry_after);
+                        return Err(CaptureError::Timeout(retry_after));
+                    }
+                }
                 if let Some(last) = self.last_emit_pts_s {
                     frame.pts_s = frame.pts_s.max(last + 1e-4);
                 }
@@ -125,10 +169,26 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
                 let Some(data) = self.last_data.clone() else {
                     return Err(CaptureError::Timeout(self.frame_interval));
                 };
+                let now = Instant::now();
+                let elapsed = now.saturating_duration_since(self.last_emit_wall);
+                let elapsed_intervals =
+                    (elapsed.as_secs_f64() / self.frame_interval_s).floor() as u64;
+                let intervals = elapsed_intervals.max(1);
+                let skipped = intervals - 1;
                 let min_pts = self.last_emit_pts_s.map(|last| last + 1e-4).unwrap_or(0.0);
-                let pts_s = self.next_pts_s.unwrap_or(min_pts).max(min_pts);
+                let pts_s = (self.next_pts_s.unwrap_or(min_pts)
+                    + skipped as f64 * self.frame_interval_s)
+                    .max(min_pts);
                 self.last_emit_pts_s = Some(pts_s);
                 self.next_pts_s = Some(pts_s + self.frame_interval_s);
+                if elapsed >= self.frame_interval {
+                    self.last_emit_wall +=
+                        Duration::from_secs_f64(intervals as f64 * self.frame_interval_s);
+                } else {
+                    // A test double (or early platform timeout) may return before its
+                    // requested wait. Treat that return as the emission time.
+                    self.last_emit_wall = now;
+                }
                 Ok(Some(Frame { pts_s, data }))
             }
             Err(e) => Err(e),
@@ -1221,9 +1281,23 @@ fn build_encoder(
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FfmpegConversionPath {
+    Gpu,
+    Cpu,
+}
+
+fn ffmpeg_conversion_path(backend: EncoderBackend) -> FfmpegConversionPath {
+    if backend == EncoderBackend::MfSoftware {
+        FfmpegConversionPath::Cpu
+    } else {
+        FfmpegConversionPath::Gpu
+    }
+}
+
 /// Construct one candidate encoder. MFT uses the zero-copy GPU H.264 path;
-/// FFmpeg converts BGRA→NV12 on the GPU and pipes it. `MfSoftware` is modeled
-/// by the probe but not yet instantiable, so it is skipped (the walk moves on).
+/// FFmpeg hardware backends convert BGRA→NV12 on the GPU, while `MfSoftware`
+/// uses readback and CPU conversion so it works without a video processor.
 #[allow(clippy::too_many_arguments)]
 fn open_candidate(
     candidate: EncoderCandidate,
@@ -1255,21 +1329,37 @@ fn open_candidate(
             let ffmpeg = ffmpeg_path
                 .as_deref()
                 .ok_or_else(|| "ffmpeg not located".to_string())?;
-            FfmpegVideoEncoder::new_on(
-                device,
-                ffmpeg,
-                candidate.backend,
-                candidate.codec,
-                in_w,
-                in_h,
-                None,
-                enc_w,
-                enc_h,
-                opts.fps,
-                opts.bitrate_bps,
-            )
-            .map(|e| Box::new(e) as Box<dyn Encoder>)
-            .map_err(|e| e.to_string())
+            let encoder = match ffmpeg_conversion_path(candidate.backend) {
+                FfmpegConversionPath::Gpu => FfmpegVideoEncoder::new_on(
+                    device,
+                    ffmpeg,
+                    candidate.backend,
+                    candidate.codec,
+                    in_w,
+                    in_h,
+                    None,
+                    enc_w,
+                    enc_h,
+                    opts.fps,
+                    opts.bitrate_bps,
+                ),
+                FfmpegConversionPath::Cpu => FfmpegVideoEncoder::new_cpu_on(
+                    device,
+                    ffmpeg,
+                    candidate.backend,
+                    candidate.codec,
+                    in_w,
+                    in_h,
+                    None,
+                    enc_w,
+                    enc_h,
+                    opts.fps,
+                    opts.bitrate_bps,
+                ),
+            };
+            encoder
+                .map(|e| Box::new(e) as Box<dyn Encoder>)
+                .map_err(|e| e.to_string())
         }
     }
 }
@@ -2085,11 +2175,56 @@ mod tests {
     use super::*;
     use clipline_capture::{MockCapture, MockEncoder};
     use clipline_test_utils::TestDir;
+    use std::collections::VecDeque;
 
     struct TimeoutSource;
 
     impl TimedFrameSource for TimeoutSource {
         fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+            Err(CaptureError::Timeout(timeout))
+        }
+    }
+
+    struct ScriptedTimedSource {
+        outcomes: VecDeque<Result<Option<Frame>, CaptureError>>,
+        requested_timeouts: Vec<Duration>,
+    }
+
+    impl TimedFrameSource for ScriptedTimedSource {
+        fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+            self.requested_timeouts.push(timeout);
+            self.outcomes
+                .pop_front()
+                .expect("scripted timed source exhausted")
+        }
+    }
+
+    struct DelayedFrameSource {
+        frame: Option<Frame>,
+        delay: Duration,
+        requested_timeouts: Vec<Duration>,
+    }
+
+    impl TimedFrameSource for DelayedFrameSource {
+        fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+            self.requested_timeouts.push(timeout);
+            if let Some(frame) = self.frame.take() {
+                std::thread::sleep(self.delay);
+                Ok(Some(frame))
+            } else {
+                Err(CaptureError::Timeout(timeout))
+            }
+        }
+    }
+
+    struct BlockingTimeoutSource {
+        requested_timeouts: Vec<Duration>,
+    }
+
+    impl TimedFrameSource for BlockingTimeoutSource {
+        fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+            self.requested_timeouts.push(timeout);
+            std::thread::sleep(timeout);
             Err(CaptureError::Timeout(timeout))
         }
     }
@@ -2133,6 +2268,22 @@ mod tests {
         }
         assert!(VideoEncoder::from_parts(EncoderBackend::MfSoftware, Codec::H264).is_none());
         assert!(VideoEncoder::from_parts(EncoderBackend::SvtAv1, Codec::H264).is_none());
+    }
+
+    #[test]
+    fn software_media_foundation_uses_cpu_frame_conversion() {
+        assert_eq!(
+            ffmpeg_conversion_path(EncoderBackend::MfSoftware),
+            FfmpegConversionPath::Cpu
+        );
+        assert_eq!(
+            ffmpeg_conversion_path(EncoderBackend::Nvenc),
+            FfmpegConversionPath::Gpu
+        );
+        assert_eq!(
+            ffmpeg_conversion_path(EncoderBackend::SvtAv1),
+            FfmpegConversionPath::Gpu
+        );
     }
 
     #[test]
@@ -2545,6 +2696,174 @@ mod tests {
         assert!((second.pts_s - (1.0 + 2.0 / 60.0)).abs() < 1e-9);
         assert!(matches!(first.data, FrameData::Cpu(ref data) if data == &[7, 8, 9]));
         assert!(matches!(second.data, FrameData::Cpu(ref data) if data == &[7, 8, 9]));
+    }
+
+    #[test]
+    fn cadenced_capture_suppresses_stale_real_frame_after_timeout_duplicate() {
+        let fps = 60;
+        let interval_s = 1.0 / fps as f64;
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![1]),
+        };
+        let stale_pts_s = 1.0 + interval_s + 0.00005;
+        let scheduled_pts_s = 1.0 + 2.0 * interval_s;
+        let source = ScriptedTimedSource {
+            outcomes: VecDeque::from([
+                Err(CaptureError::Timeout(Duration::ZERO)),
+                Ok(Some(Frame {
+                    pts_s: stale_pts_s,
+                    data: FrameData::Cpu(vec![2]),
+                })),
+                Ok(Some(Frame {
+                    pts_s: scheduled_pts_s,
+                    data: FrameData::Cpu(vec![3]),
+                })),
+            ]),
+            requested_timeouts: Vec::new(),
+        };
+        let mut cap = CadencedCapture::new(source, fps, &seed);
+
+        let duplicate = cap.next_frame().unwrap().unwrap();
+        let skipped = cap.next_frame();
+
+        assert!((duplicate.pts_s - (1.0 + interval_s)).abs() < 1e-9);
+        let skipped_for = match skipped {
+            Err(CaptureError::Timeout(duration)) => duration,
+            other => panic!("expected bounded stale-frame timeout, got {other:?}"),
+        };
+        assert_eq!(cap.inner.requested_timeouts.len(), 2);
+
+        let next = cap.next_frame().unwrap().unwrap();
+
+        assert!((next.pts_s - scheduled_pts_s).abs() < 1e-9);
+        assert!(matches!(next.data, FrameData::Cpu(ref data) if data == &[3]));
+        assert_eq!(cap.inner.requested_timeouts.len(), 3);
+        assert!(cap.inner.requested_timeouts[0] <= cap.frame_interval);
+        assert!(cap.inner.requested_timeouts[1] <= cap.frame_interval);
+        assert!(cap.inner.requested_timeouts[2] <= skipped_for);
+        let remaining_s = skipped_for.as_secs_f64();
+        assert!((remaining_s - (scheduled_pts_s - stale_pts_s)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cadenced_capture_timeout_uses_latest_suppressed_frame_data() {
+        let fps = 60;
+        let interval_s = 1.0 / fps as f64;
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![1]),
+        };
+        let source = ScriptedTimedSource {
+            outcomes: VecDeque::from([
+                Err(CaptureError::Timeout(Duration::ZERO)),
+                Ok(Some(Frame {
+                    pts_s: 1.0 + interval_s + 0.00005,
+                    data: FrameData::Cpu(vec![2]),
+                })),
+                Err(CaptureError::Timeout(Duration::ZERO)),
+            ]),
+            requested_timeouts: Vec::new(),
+        };
+        let mut cap = CadencedCapture::new(source, fps, &seed);
+
+        let first = cap.next_frame().unwrap().unwrap();
+        let skipped = cap.next_frame();
+        let second = cap.next_frame().unwrap().unwrap();
+
+        assert!(matches!(first.data, FrameData::Cpu(ref data) if data == &[1]));
+        assert!(matches!(skipped, Err(CaptureError::Timeout(_))));
+        assert!((second.pts_s - (1.0 + 2.0 * interval_s)).abs() < 1e-9);
+        assert!(matches!(second.data, FrameData::Cpu(ref data) if data == &[2]));
+    }
+
+    #[test]
+    fn cadenced_capture_stale_retry_keeps_the_original_wait_deadline() {
+        let fps = 60;
+        let interval_s = 1.0 / fps as f64;
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![1]),
+        };
+        let source = DelayedFrameSource {
+            frame: Some(Frame {
+                pts_s: 1.0 + interval_s / 2.0,
+                data: FrameData::Cpu(vec![2]),
+            }),
+            delay: Duration::from_millis(30),
+            requested_timeouts: Vec::new(),
+        };
+        let mut cap = CadencedCapture::new(source, fps, &seed);
+
+        assert!(matches!(cap.next_frame(), Err(CaptureError::Timeout(_))));
+        let duplicate = cap.next_frame().unwrap().unwrap();
+
+        assert!((duplicate.pts_s - (1.0 + interval_s)).abs() < 1e-9);
+        assert!(matches!(duplicate.data, FrameData::Cpu(ref data) if data == &[2]));
+        assert!(
+            cap.inner.requested_timeouts[1] <= Duration::from_millis(1),
+            "retry restarted the cadence wait: {:?}",
+            cap.inner.requested_timeouts
+        );
+    }
+
+    #[test]
+    fn cadenced_capture_counts_encoder_work_against_the_next_deadline() {
+        let fps = 60;
+        let interval_s = 1.0 / fps as f64;
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![1]),
+        };
+        let source = BlockingTimeoutSource {
+            requested_timeouts: Vec::new(),
+        };
+        let mut cap = CadencedCapture::new(source, fps, &seed);
+
+        let first = cap.next_frame().unwrap().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let second = cap.next_frame().unwrap().unwrap();
+
+        assert!(
+            cap.inner.requested_timeouts[1] <= Duration::from_millis(1),
+            "encoder work restarted the cadence wait: {:?}",
+            cap.inner.requested_timeouts
+        );
+        assert!(
+            second.pts_s - first.pts_s >= 3.0 * interval_s - 1e-9,
+            "missed wall-clock slots were not reflected in PTS: first={}, second={}",
+            first.pts_s,
+            second.pts_s
+        );
+    }
+
+    #[test]
+    fn cadenced_capture_counts_delayed_real_frame_delivery() {
+        let fps = 60;
+        let interval_s = 1.0 / fps as f64;
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![1]),
+        };
+        let source = DelayedFrameSource {
+            frame: Some(Frame {
+                pts_s: 1.0 + interval_s,
+                data: FrameData::Cpu(vec![2]),
+            }),
+            delay: Duration::from_millis(30),
+            requested_timeouts: Vec::new(),
+        };
+        let mut cap = CadencedCapture::new(source, fps, &seed);
+
+        let real = cap.next_frame().unwrap().unwrap();
+        let duplicate = cap.next_frame().unwrap().unwrap();
+
+        assert!(
+            cap.inner.requested_timeouts[1] <= Duration::from_millis(5),
+            "late real-frame delivery restarted the cadence wait: {:?}",
+            cap.inner.requested_timeouts
+        );
+        assert!((duplicate.pts_s - (real.pts_s + interval_s)).abs() < 1e-9);
     }
 
     #[test]

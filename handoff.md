@@ -4,6 +4,102 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): long-session burst timestamp fix
+
+A 0.1.34 user report described long VOD playback occasionally jumping to 00:00 after an
+arbitrary seek. The supplied `session_1783827199.markers.json` is internally consistent: 91
+ordered, unique, in-range markers over 2022.944 seconds with a constant recording offset. The
+matching 2,103,075,867-byte MP4 downloaded with SHA-256
+`4A1DB0A25A8435443F7238D9985090D764407694C5BA52EA361F2412D2F68BAA`. FFprobe accepts its H.264
+video and two Opus tracks, every video packet timestamp is strictly increasing, all sampled seeks
+from 60 through 2000 seconds land on the expected preceding keyframe, the maximum keyframe gap is
+0.65 seconds, and a full 33:43 video/audio decode completes without codec errors. Markers,
+keyframes, sample indexes, and bitstream corruption are therefore ruled out for this artifact.
+
+The artifact did expose a reproducible recorder defect. It contains 1,265 consecutive video-frame
+gaps below one millisecond, all exactly 0.1 ms; several cluster around the reported 15-minute area.
+`CadencedCapture` emitted a scheduled duplicate when WGC timed out, then accepted a real frame
+whose presentation timestamp still belonged to that filled cadence slot and forced it to
+`last_pts + 0.0001`. This produced extra near-zero-duration samples and an average frame rate above
+the configured 60 FPS. `CadencedCapture` now retains an early real frame as the latest texture and
+yields a bounded timeout to the service loop before reading again, so save/stop handling stays
+responsive while a stale WGC queue drains. Its retry budget preserves the existing wall-clock
+deadline; successful real frames advance the same wall anchor by their PTS delta; and overloaded
+conversion/encoding skips missed cadence slots instead of letting video PTS drift behind wall time
+and audio. Six focused tests cover idle duplication, stale-frame yielding/data reuse, delayed WGC
+delivery, and time spent in the encoder between capture calls.
+
+This timing defect is a plausible WebView2 stressor, especially because the supplied file has a
+1.48 MB tail `moov` and Clipline plays it through Tauri's range-based asset protocol, but the exact
+seek-to-zero chain is not yet proven. Computer Use could not attach in the final reproduction pass
+because this thread's native pipe returned OS error 2. Do not claim the player reset itself was
+visually reproduced or fully fixed until a fresh native session exercises this artifact. The
+validated file is hard-linked without an extra 2 GB copy at
+`C:\Users\dain9\Videos\Clipline\Imported seek repro 1783827199\session_1783827199.mp4`.
+
+The bounded PR #86 review stopped cleanly after pass 3. It also fixed the split-audio helper that
+normalized the new `output + microphone` default into microphone-only output. Review-fix commits:
+`56f2339 docs: plan PR 86 review fixes`, `97dbd79 fix(capture): yield while dropping stale frames`,
+`42a2744 fix(player): preserve mixed output selection`, and
+`12201c3 fix(capture): keep cadence aligned with wall clock`.
+
+Focused tests, the CI-mode full workspace suite, fresh-cache workspace clippy with warnings denied,
+formatting, and diff checks pass. The unchanged live
+`captures_monotonic_gpu_frames_from_primary_monitor` device test timed out twice waiting for a
+desktop update after the app was stopped; other live WGC tests passed. Treat that as an environment
+signal to rerun with an actively changing desktop, not as validation of this cadence patch.
+
+## Checkpoint (2026-07-17): Discord audio safety-track default
+
+A user report that Discord stopped recording after a recent update was reproduced as a playback-
+selection regression, not loss from the mixed speaker capture. With Experimental app audio tracks
+enabled, Clipline enumerates process audio sessions only when the recorder starts. A native
+`ffplay` process started afterward was absent from the per-process marker metadata but remained
+audible in the mixed Output Audio safety track. In the final five seconds of
+`C:\Users\dain9\Videos\Clipline\2026-07-17 15-52\clip_1784329112.mp4`, mixed output measured
+-33.1 dB mean/-30.0 dB peak while the stale startup Media Player track measured -91.0 dB
+mean/-84.3 dB peak.
+
+Nightly 0.1.34 commit `dc7250e` changed clip opening to prepare every default audio track. The
+existing split-track default excluded mixed Output Audio whenever any startup process track
+existed, so the review player could switch from audible stream zero to stale process tracks and
+make late-start Discord appear unrecorded. Split-track clips now default to mixed Output Audio plus
+non-process inputs such as the microphone; selecting individual app tracks remains available and
+mutually exclusive with mixed output. Runtime process discovery is still a separate, larger
+enhancement. The focused `player_core` regression test covers the safe default.
+
+## Checkpoint (2026-07-17): Proxmox VM software H.264 fallback
+
+Clipline can now record in Windows VMs that support WGC but expose neither a D3D11 video
+processor nor a hardware video encoder. The existing hardware paths are unchanged and preferred.
+The fallback reads WGC BGRA textures through a staging resource, performs deterministic limited-
+range Rec.709 BGRA-to-NV12 crop/scale conversion in neutral Rust, and pipes NV12 to the LGPL
+FFmpeg `h264_mf` encoder with `-hw_encoding 0`. `h264_mf` must pass a real one-frame probe before
+the candidate is offered.
+
+Verified live in this Proxmox Windows 11 VM on Microsoft Basic Display Adapter: Clipline ran at
+1280×800/60 FPS, spawned `h264_mf` in forced software mode, saved three replays, populated their
+Library thumbnails, and produced a validated 60.6-second H.264 MP4 with limited-range BT.709
+metadata. The FFmpeg mux round-trip integration test exercised both SVT-AV1 and Media Foundation
+software H.264. No Proxmox PCI passthrough, IOMMU, or virtual-GPU flag is required for this path;
+its tradeoff is CPU usage, so reducing FPS/resolution is the first tuning lever.
+
+Native Computer Use acceptance then saved and reviewed a fresh fourth replay at
+`C:\Users\dain9\Videos\Clipline\2026-07-17 15-08\clip_1784326197.mp4`. Play/pause, click-seek,
+playhead dragging, and post-scrub playback all worked without visible corruption. The 60.36-second
+file is H.264 1280×800 limited-range BT.709 with two stereo Opus tracks and decodes cleanly; both
+audio inputs were silent in this run. A five-second steady-state sample measured Clipline plus its
+FFmpeg child at roughly 120% of one logical core (about 15% of this eight-logical-processor VM),
+confirming the expected CPU cost rather than iGPU acceleration. Acceptance also caught that the
+frontend discarded the backend's active encoder label, so Automatic mode could not identify the
+selected fallback. The UI now retains the status event's encoder and exposes
+`Stop recording · Software · H.264` on the active recorder control.
+
+Implementation commits on `build-run-app` begin at
+`5f354ab docs(capture): plan software VM encoder fallback`. The local ignored
+`apps/clipline-app/ffmpeg/` directory contains the 2026-07-17 BtbN LGPL shared build used for live
+acceptance. Keep distributing FFmpeg as a separate process and never add GPL encoders.
+
 ## Checkpoint (2026-07-16): repository simplification pass
 
 Nightly 0.1.34 contains PRs #83 through #85. It ships the transactional reliability and long-MP4

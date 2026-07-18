@@ -25,6 +25,8 @@ use crate::probe::{Codec, EncoderBackend};
 use crate::traits::{EncodeError, EncodedPacket, Encoder, Frame, FrameData};
 
 #[cfg(windows)]
+use crate::cpu_video::{CpuCropRect, CpuVideoConverter};
+#[cfg(windows)]
 use crate::windows::nv12::{CropRect, VideoConverter};
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
@@ -60,12 +62,82 @@ pub struct FfmpegVideoEncoder {
     fps: u32,
     /// Fallback pts cursor if the encoder ever emits more AUs than frames.
     next_synth_pts: f64,
-    /// GPU BGRA → NV12 conversion for `FrameData::Gpu` (Windows). CPU frames
-    /// (`new`) leave this unset and are piped as-is.
+    /// BGRA → NV12 conversion for `FrameData::Gpu` (Windows), using either the
+    /// video processor or the VM-safe CPU fallback. Pre-NV12 CPU frames leave
+    /// this unset and are piped as-is.
     #[cfg(windows)]
-    converter: Option<VideoConverter>,
+    converter: Option<FrameConverter>,
     #[cfg(windows)]
     device: Option<ID3D11Device>,
+}
+
+#[cfg(windows)]
+enum FrameConverter {
+    Gpu(VideoConverter),
+    Cpu(CpuFrameConverter),
+}
+
+#[cfg(windows)]
+struct CpuFrameConverter {
+    converter: CpuVideoConverter,
+    crop: Option<CpuCropRect>,
+    input_width: u32,
+    input_height: u32,
+    output_width: u32,
+    output_height: u32,
+}
+
+#[cfg(windows)]
+impl CpuFrameConverter {
+    fn new(
+        input_width: u32,
+        input_height: u32,
+        crop: Option<CropRect>,
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<Self, EncodeError> {
+        let crop = crop.map(|rect| CpuCropRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        });
+        let converter =
+            CpuVideoConverter::new(input_width, input_height, crop, output_width, output_height)
+                .map_err(|e| EncodeError::Backend(format!("CPU nv12 converter: {e}")))?;
+        Ok(Self {
+            converter,
+            crop,
+            input_width,
+            input_height,
+            output_width,
+            output_height,
+        })
+    }
+
+    fn convert(
+        &mut self,
+        device: &ID3D11Device,
+        texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+    ) -> Result<Vec<u8>, EncodeError> {
+        let bgra = crate::windows::nv12::read_bgra(device, texture)
+            .map_err(|e| EncodeError::Backend(format!("BGRA readback: {e}")))?;
+        if (bgra.width, bgra.height) != (self.input_width, self.input_height) {
+            self.converter = CpuVideoConverter::new(
+                bgra.width,
+                bgra.height,
+                self.crop,
+                self.output_width,
+                self.output_height,
+            )
+            .map_err(|e| EncodeError::Backend(format!("CPU nv12 converter resize: {e}")))?;
+            self.input_width = bgra.width;
+            self.input_height = bgra.height;
+        }
+        self.converter
+            .convert(&bgra.bytes, bgra.stride)
+            .map_err(|e| EncodeError::Backend(format!("CPU nv12 convert: {e}")))
+    }
 }
 
 /// Spawn the ffmpeg child and its stdout reader thread.
@@ -179,7 +251,34 @@ impl FfmpegVideoEncoder {
             .map_err(|e| EncodeError::Backend(format!("nv12 converter: {e}")))?;
         let spawned = spawn_process(ffmpeg, backend, codec, out_w, out_h, fps, bitrate_bps)?;
         let mut enc = Self::assemble(spawned, codec, out_w, out_h, fps);
-        enc.converter = Some(converter);
+        enc.converter = Some(FrameConverter::Gpu(converter));
+        enc.device = Some(device.clone());
+        Ok(enc)
+    }
+
+    /// Windows constructor for VMs and software-only adapters. WGC still
+    /// supplies BGRA GPU textures, but no D3D11 video processor is required:
+    /// frames are read back and converted to NV12 on the CPU before being
+    /// piped to FFmpeg's software Media Foundation encoder.
+    #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_cpu_on(
+        device: &ID3D11Device,
+        ffmpeg: &std::path::Path,
+        backend: EncoderBackend,
+        codec: Codec,
+        in_w: u32,
+        in_h: u32,
+        crop: Option<CropRect>,
+        out_w: u32,
+        out_h: u32,
+        fps: u32,
+        bitrate_bps: u32,
+    ) -> Result<Self, EncodeError> {
+        let converter = CpuFrameConverter::new(in_w, in_h, crop, out_w, out_h)?;
+        let spawned = spawn_process(ffmpeg, backend, codec, out_w, out_h, fps, bitrate_bps)?;
+        let mut enc = Self::assemble(spawned, codec, out_w, out_h, fps);
+        enc.converter = Some(FrameConverter::Cpu(converter));
         enc.device = Some(device.clone());
         Ok(enc)
     }
@@ -194,12 +293,17 @@ impl FfmpegVideoEncoder {
                 let converter = self.converter.as_mut().ok_or_else(|| {
                     EncodeError::Backend("GPU frame but encoder has no converter".into())
                 })?;
-                let nv12 = converter
-                    .convert(texture)
-                    .map_err(|e| EncodeError::Backend(format!("nv12 convert: {e}")))?;
                 let device = self.device.as_ref().expect("device set with converter");
-                crate::windows::nv12::read_nv12(device, &nv12)
-                    .map_err(|e| EncodeError::Backend(format!("nv12 readback: {e}")))
+                match converter {
+                    FrameConverter::Gpu(converter) => {
+                        let nv12 = converter
+                            .convert(texture)
+                            .map_err(|e| EncodeError::Backend(format!("nv12 convert: {e}")))?;
+                        crate::windows::nv12::read_nv12(device, &nv12)
+                            .map_err(|e| EncodeError::Backend(format!("nv12 readback: {e}")))
+                    }
+                    FrameConverter::Cpu(converter) => converter.convert(device, texture),
+                }
             }
         }
     }
@@ -513,7 +617,7 @@ fn backend_rate_control(backend: EncoderBackend, bitrate_bps: u32, bufsize: u64)
             v
         }
         EncoderBackend::SvtAv1 => vec![s("-b:v"), b, s("-preset"), s("8")],
-        EncoderBackend::MfSoftware => Vec::new(),
+        EncoderBackend::MfSoftware => vec![s("-hw_encoding"), s("0"), s("-b:v"), b],
     }
 }
 
@@ -689,9 +793,28 @@ mod tests {
     }
 
     #[test]
-    fn backend_rate_control_mf_software_is_empty() {
+    fn backend_rate_control_mf_software_forces_cpu_encoding() {
         let rc = backend_rate_control(EncoderBackend::MfSoftware, 4_000_000, 8_000_000);
-        assert!(rc.is_empty());
+        let joined = rc.join(" ");
+        assert!(joined.contains("-hw_encoding 0"));
+        assert!(joined.contains("-b:v 4000000"));
+    }
+
+    #[test]
+    fn media_foundation_software_args_emit_h264_elementary_stream() {
+        let args = build_args(
+            "h264_mf",
+            EncoderBackend::MfSoftware,
+            Codec::H264,
+            1280,
+            720,
+            30,
+            6_000_000,
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-c:v h264_mf"));
+        assert!(joined.contains("-hw_encoding 0"));
+        assert!(joined.ends_with("-f h264 pipe:1"));
     }
 
     #[test]

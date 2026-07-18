@@ -348,6 +348,24 @@ fn frontend_reports_webview_readiness_to_native_shell() {
 }
 
 #[test]
+fn active_recording_status_identifies_the_selected_encoder() {
+    let js = main_js();
+    let update_status = js_function_body(&js, "updateCaptureStatus");
+
+    assert!(
+        js.contains("activeEncoderLabel = s.recording ? String(s.encoder || \"\") : \"\";"),
+        "the frontend must retain the backend's active encoder label and clear it when recording stops"
+    );
+    assert!(
+        update_status.contains("Stop recording · ${activeEncoderLabel}")
+            && update_status.contains(
+                "$(\"rail-status\").title = recordingActive ? recordingTitle : `Start ${source} recording`;"
+            ),
+        "the active recorder status must assign the concrete encoder selected by Automatic mode to the visible tooltip"
+    );
+}
+
+#[test]
 fn update_dialog_body_can_drag_frameless_window() {
     let html = index_html();
     let css = styles_css();

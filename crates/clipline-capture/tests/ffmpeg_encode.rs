@@ -1,9 +1,9 @@
 //! End-to-end FFmpeg subprocess encoder test: synthetic NV12 CPU frames →
 //! `FfmpegVideoEncoder` → access-unit framing → `clipline-mp4` mux → ffprobe.
 //! Self-skips when no usable `ffmpeg`/`ffprobe` is present (CI), runs for
-//! real on a machine with the bundle. libsvtav1 ships in every LGPL build,
-//! so the AV1 software path always exercises here; AMF H.264/HEVC run when
-//! the probe finds the hardware (the dev box).
+//! real on a machine with the bundle. libsvtav1 ships in every LGPL build;
+//! Media Foundation H.264 runs where Windows supplies it; hardware encoders
+//! run when the probe confirms the matching device.
 
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -163,6 +163,21 @@ fn ffmpeg_encoder_round_trips_through_the_muxer() {
             ffprobe_codec(&ffprobe, &mp4),
             "av1",
             "SVT-AV1 muxes to av01"
+        );
+        exercised += 1;
+    }
+
+    // Windows' built-in software Media Foundation encoder is optional, so
+    // exercise it whenever the mandatory one-frame probe confirms it.
+    if caps
+        .iter()
+        .any(|c| c.backend == EncoderBackend::MfSoftware && c.codecs.contains(&Codec::H264))
+    {
+        let mp4 = encode_and_mux(&ffmpeg, EncoderBackend::MfSoftware, Codec::H264);
+        assert_eq!(
+            ffprobe_codec(&ffprobe, &mp4),
+            "h264",
+            "Media Foundation software H.264 muxes to avc1"
         );
         exercised += 1;
     }

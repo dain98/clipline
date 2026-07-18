@@ -15,6 +15,7 @@ $('win-close').addEventListener('click', requestWindowClose);
 listen("status", (e) => {
   const s = e.payload;
   recordingActive = s.recording;
+  activeEncoderLabel = s.recording ? String(s.encoder || "") : "";
   fullSessionRecordingActive = Boolean(s.full_session);
   $("rail-dot").className = "dot" + (s.recording ? " on" : "");
   updateCaptureStatus();

@@ -1,6 +1,7 @@
 // Settings page: form I/O, capture region, devices, games.
 var gamePluginSettingsDialogPluginId = null;
 var gamePluginSettingsDialogTab = "general";
+var activeEncoderLabel = "";
 
 function cloneSettings(settings) {
   return settings ? JSON.parse(JSON.stringify(settings)) : null;
@@ -1583,9 +1584,12 @@ function updateCaptureStatus() {
     activeDetectedGame && activeDetectedGame.active
       ? `Game: ${activeDetectedGame.name}`
       : fallbackCaptureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
+  const recordingTitle = activeEncoderLabel
+    ? `Stop recording · ${activeEncoderLabel}`
+    : "Stop recording";
   $("rail-status").classList.toggle("stopped", !recordingActive);
   $("rail-status").setAttribute("aria-pressed", String(recordingActive));
-  $("rail-status").title = recordingActive ? "Stop recording" : `Start ${source} recording`;
+  $("rail-status").title = recordingActive ? recordingTitle : `Start ${source} recording`;
   $("rail-status-text").textContent = recordingActive ? "Rec" : "Off";
   $("rail-save").disabled = !recordingActive;
   renderRailGame();
