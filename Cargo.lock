@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "clipline-app"
-version = "0.1.34"
+version = "0.1.35"
 dependencies = [
  "audiopus",
  "base64 0.22.1",

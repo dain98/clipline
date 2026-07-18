@@ -4,6 +4,14 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): Nightly 0.1.35
+
+Nightly 0.1.35 contains PR #86. It ships the Proxmox/Windows VM software H.264 fallback,
+active-encoder status, safer Discord/output-audio defaults, long-session capture-cadence fixes,
+and mixed-output selection preservation. The previous public nightly was 0.1.34, so the app and
+Tauri versions were bumped for updater delivery. The standalone installer also advances its
+pinned Microsoft WebView2 Fixed Version Runtime patch from 150.0.4078.48 to 150.0.4078.83.
+
 ## Checkpoint (2026-07-18): long-session burst timestamp fix
 
 A 0.1.34 user report described long VOD playback occasionally jumping to 00:00 after an
