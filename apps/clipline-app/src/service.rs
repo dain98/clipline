@@ -112,26 +112,42 @@ impl<C> CadencedCapture<C> {
 
 impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
     fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError> {
-        match self.inner.next_frame_timeout(self.frame_interval) {
-            Ok(Some(mut frame)) => {
-                if let Some(last) = self.last_emit_pts_s {
-                    frame.pts_s = frame.pts_s.max(last + 1e-4);
+        let mut timeout = self.frame_interval;
+        loop {
+            match self.inner.next_frame_timeout(timeout) {
+                Ok(Some(mut frame)) => {
+                    if let Some(next_pts_s) = self.next_pts_s {
+                        if frame.pts_s < next_pts_s {
+                            // A timeout duplicate already filled the current cadence slot. Keep
+                            // the newer texture, but do not emit a second near-zero-duration
+                            // sample before the next scheduled presentation time.
+                            let remaining_s = (next_pts_s - frame.pts_s)
+                                .min(self.frame_interval_s)
+                                .max(0.0);
+                            self.last_data = Some(frame.data);
+                            timeout = Duration::from_secs_f64(remaining_s);
+                            continue;
+                        }
+                    }
+                    if let Some(last) = self.last_emit_pts_s {
+                        frame.pts_s = frame.pts_s.max(last + 1e-4);
+                    }
+                    self.remember(&frame);
+                    return Ok(Some(frame));
                 }
-                self.remember(&frame);
-                Ok(Some(frame))
+                Ok(None) => return Ok(None),
+                Err(CaptureError::Timeout(_)) => {
+                    let Some(data) = self.last_data.clone() else {
+                        return Err(CaptureError::Timeout(self.frame_interval));
+                    };
+                    let min_pts = self.last_emit_pts_s.map(|last| last + 1e-4).unwrap_or(0.0);
+                    let pts_s = self.next_pts_s.unwrap_or(min_pts).max(min_pts);
+                    self.last_emit_pts_s = Some(pts_s);
+                    self.next_pts_s = Some(pts_s + self.frame_interval_s);
+                    return Ok(Some(Frame { pts_s, data }));
+                }
+                Err(e) => return Err(e),
             }
-            Ok(None) => Ok(None),
-            Err(CaptureError::Timeout(_)) => {
-                let Some(data) = self.last_data.clone() else {
-                    return Err(CaptureError::Timeout(self.frame_interval));
-                };
-                let min_pts = self.last_emit_pts_s.map(|last| last + 1e-4).unwrap_or(0.0);
-                let pts_s = self.next_pts_s.unwrap_or(min_pts).max(min_pts);
-                self.last_emit_pts_s = Some(pts_s);
-                self.next_pts_s = Some(pts_s + self.frame_interval_s);
-                Ok(Some(Frame { pts_s, data }))
-            }
-            Err(e) => Err(e),
         }
     }
 }
@@ -2115,12 +2131,27 @@ mod tests {
     use super::*;
     use clipline_capture::{MockCapture, MockEncoder};
     use clipline_test_utils::TestDir;
+    use std::collections::VecDeque;
 
     struct TimeoutSource;
 
     impl TimedFrameSource for TimeoutSource {
         fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
             Err(CaptureError::Timeout(timeout))
+        }
+    }
+
+    struct ScriptedTimedSource {
+        outcomes: VecDeque<Result<Option<Frame>, CaptureError>>,
+        requested_timeouts: Vec<Duration>,
+    }
+
+    impl TimedFrameSource for ScriptedTimedSource {
+        fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+            self.requested_timeouts.push(timeout);
+            self.outcomes
+                .pop_front()
+                .expect("scripted timed source exhausted")
         }
     }
 
@@ -2591,6 +2622,74 @@ mod tests {
         assert!((second.pts_s - (1.0 + 2.0 / 60.0)).abs() < 1e-9);
         assert!(matches!(first.data, FrameData::Cpu(ref data) if data == &[7, 8, 9]));
         assert!(matches!(second.data, FrameData::Cpu(ref data) if data == &[7, 8, 9]));
+    }
+
+    #[test]
+    fn cadenced_capture_suppresses_stale_real_frame_after_timeout_duplicate() {
+        let fps = 60;
+        let interval_s = 1.0 / fps as f64;
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![1]),
+        };
+        let stale_pts_s = 1.0 + interval_s + 0.00005;
+        let scheduled_pts_s = 1.0 + 2.0 * interval_s;
+        let source = ScriptedTimedSource {
+            outcomes: VecDeque::from([
+                Err(CaptureError::Timeout(Duration::ZERO)),
+                Ok(Some(Frame {
+                    pts_s: stale_pts_s,
+                    data: FrameData::Cpu(vec![2]),
+                })),
+                Ok(Some(Frame {
+                    pts_s: scheduled_pts_s,
+                    data: FrameData::Cpu(vec![3]),
+                })),
+            ]),
+            requested_timeouts: Vec::new(),
+        };
+        let mut cap = CadencedCapture::new(source, fps, &seed);
+
+        let duplicate = cap.next_frame().unwrap().unwrap();
+        let next = cap.next_frame().unwrap().unwrap();
+
+        assert!((duplicate.pts_s - (1.0 + interval_s)).abs() < 1e-9);
+        assert!((next.pts_s - scheduled_pts_s).abs() < 1e-9);
+        assert!(matches!(next.data, FrameData::Cpu(ref data) if data == &[3]));
+        assert_eq!(cap.inner.requested_timeouts.len(), 3);
+        assert_eq!(cap.inner.requested_timeouts[0], cap.frame_interval);
+        assert_eq!(cap.inner.requested_timeouts[1], cap.frame_interval);
+        let remaining_s = cap.inner.requested_timeouts[2].as_secs_f64();
+        assert!((remaining_s - (scheduled_pts_s - stale_pts_s)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cadenced_capture_timeout_uses_latest_suppressed_frame_data() {
+        let fps = 60;
+        let interval_s = 1.0 / fps as f64;
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![1]),
+        };
+        let source = ScriptedTimedSource {
+            outcomes: VecDeque::from([
+                Err(CaptureError::Timeout(Duration::ZERO)),
+                Ok(Some(Frame {
+                    pts_s: 1.0 + interval_s + 0.00005,
+                    data: FrameData::Cpu(vec![2]),
+                })),
+                Err(CaptureError::Timeout(Duration::ZERO)),
+            ]),
+            requested_timeouts: Vec::new(),
+        };
+        let mut cap = CadencedCapture::new(source, fps, &seed);
+
+        let first = cap.next_frame().unwrap().unwrap();
+        let second = cap.next_frame().unwrap().unwrap();
+
+        assert!(matches!(first.data, FrameData::Cpu(ref data) if data == &[1]));
+        assert!((second.pts_s - (1.0 + 2.0 * interval_s)).abs() < 1e-9);
+        assert!(matches!(second.data, FrameData::Cpu(ref data) if data == &[2]));
     }
 
     #[test]
