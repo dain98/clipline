@@ -88,6 +88,7 @@ struct CadencedCapture<C> {
     last_data: Option<FrameData>,
     last_emit_pts_s: Option<f64>,
     next_pts_s: Option<f64>,
+    retry_deadline: Option<Instant>,
 }
 
 impl<C> CadencedCapture<C> {
@@ -100,6 +101,7 @@ impl<C> CadencedCapture<C> {
             last_data: Some(seed.data.clone()),
             last_emit_pts_s: Some(seed.pts_s),
             next_pts_s: Some(seed.pts_s + frame_interval_s),
+            retry_deadline: None,
         }
     }
 
@@ -112,42 +114,50 @@ impl<C> CadencedCapture<C> {
 
 impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
     fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError> {
-        let mut timeout = self.frame_interval;
-        loop {
-            match self.inner.next_frame_timeout(timeout) {
-                Ok(Some(mut frame)) => {
-                    if let Some(next_pts_s) = self.next_pts_s {
-                        if frame.pts_s < next_pts_s {
-                            // A timeout duplicate already filled the current cadence slot. Keep
-                            // the newer texture, but do not emit a second near-zero-duration
-                            // sample before the next scheduled presentation time.
-                            let remaining_s = (next_pts_s - frame.pts_s)
+        let now = Instant::now();
+        let deadline = self
+            .retry_deadline
+            .take()
+            .unwrap_or(now + self.frame_interval);
+        let timeout = deadline.saturating_duration_since(now);
+        match self.inner.next_frame_timeout(timeout) {
+            Ok(Some(mut frame)) => {
+                if let Some(next_pts_s) = self.next_pts_s {
+                    if frame.pts_s < next_pts_s {
+                        // A timeout duplicate already filled this cadence slot. Keep the
+                        // newest texture, but yield to the service loop before reading again
+                        // so stop/save commands remain responsive while a stale queue drains.
+                        let pts_remaining = Duration::from_secs_f64(
+                            (next_pts_s - frame.pts_s)
                                 .min(self.frame_interval_s)
-                                .max(0.0);
-                            self.last_data = Some(frame.data);
-                            timeout = Duration::from_secs_f64(remaining_s);
-                            continue;
-                        }
+                                .max(0.0),
+                        );
+                        let now = Instant::now();
+                        let retry_after =
+                            pts_remaining.min(deadline.saturating_duration_since(now));
+                        self.last_data = Some(frame.data);
+                        self.retry_deadline = Some(now + retry_after);
+                        return Err(CaptureError::Timeout(retry_after));
                     }
-                    if let Some(last) = self.last_emit_pts_s {
-                        frame.pts_s = frame.pts_s.max(last + 1e-4);
-                    }
-                    self.remember(&frame);
-                    return Ok(Some(frame));
                 }
-                Ok(None) => return Ok(None),
-                Err(CaptureError::Timeout(_)) => {
-                    let Some(data) = self.last_data.clone() else {
-                        return Err(CaptureError::Timeout(self.frame_interval));
-                    };
-                    let min_pts = self.last_emit_pts_s.map(|last| last + 1e-4).unwrap_or(0.0);
-                    let pts_s = self.next_pts_s.unwrap_or(min_pts).max(min_pts);
-                    self.last_emit_pts_s = Some(pts_s);
-                    self.next_pts_s = Some(pts_s + self.frame_interval_s);
-                    return Ok(Some(Frame { pts_s, data }));
+                if let Some(last) = self.last_emit_pts_s {
+                    frame.pts_s = frame.pts_s.max(last + 1e-4);
                 }
-                Err(e) => return Err(e),
+                self.remember(&frame);
+                Ok(Some(frame))
             }
+            Ok(None) => Ok(None),
+            Err(CaptureError::Timeout(_)) => {
+                let Some(data) = self.last_data.clone() else {
+                    return Err(CaptureError::Timeout(self.frame_interval));
+                };
+                let min_pts = self.last_emit_pts_s.map(|last| last + 1e-4).unwrap_or(0.0);
+                let pts_s = self.next_pts_s.unwrap_or(min_pts).max(min_pts);
+                self.last_emit_pts_s = Some(pts_s);
+                self.next_pts_s = Some(pts_s + self.frame_interval_s);
+                Ok(Some(Frame { pts_s, data }))
+            }
+            Err(e) => Err(e),
         }
     }
 }
@@ -2155,6 +2165,24 @@ mod tests {
         }
     }
 
+    struct DelayedStaleSource {
+        stale: Option<Frame>,
+        delay: Duration,
+        requested_timeouts: Vec<Duration>,
+    }
+
+    impl TimedFrameSource for DelayedStaleSource {
+        fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+            self.requested_timeouts.push(timeout);
+            if let Some(frame) = self.stale.take() {
+                std::thread::sleep(self.delay);
+                Ok(Some(frame))
+            } else {
+                Err(CaptureError::Timeout(timeout))
+            }
+        }
+    }
+
     #[test]
     fn video_encoder_id_matches_serde_serialization() {
         // The Settings dropdown sends EncoderOption.id; settings.rs maps it
@@ -2651,15 +2679,24 @@ mod tests {
         let mut cap = CadencedCapture::new(source, fps, &seed);
 
         let duplicate = cap.next_frame().unwrap().unwrap();
-        let next = cap.next_frame().unwrap().unwrap();
+        let skipped = cap.next_frame();
 
         assert!((duplicate.pts_s - (1.0 + interval_s)).abs() < 1e-9);
+        let skipped_for = match skipped {
+            Err(CaptureError::Timeout(duration)) => duration,
+            other => panic!("expected bounded stale-frame timeout, got {other:?}"),
+        };
+        assert_eq!(cap.inner.requested_timeouts.len(), 2);
+
+        let next = cap.next_frame().unwrap().unwrap();
+
         assert!((next.pts_s - scheduled_pts_s).abs() < 1e-9);
         assert!(matches!(next.data, FrameData::Cpu(ref data) if data == &[3]));
         assert_eq!(cap.inner.requested_timeouts.len(), 3);
         assert_eq!(cap.inner.requested_timeouts[0], cap.frame_interval);
         assert_eq!(cap.inner.requested_timeouts[1], cap.frame_interval);
-        let remaining_s = cap.inner.requested_timeouts[2].as_secs_f64();
+        assert!(cap.inner.requested_timeouts[2] <= skipped_for);
+        let remaining_s = skipped_for.as_secs_f64();
         assert!((remaining_s - (scheduled_pts_s - stale_pts_s)).abs() < 1e-9);
     }
 
@@ -2685,11 +2722,43 @@ mod tests {
         let mut cap = CadencedCapture::new(source, fps, &seed);
 
         let first = cap.next_frame().unwrap().unwrap();
+        let skipped = cap.next_frame();
         let second = cap.next_frame().unwrap().unwrap();
 
         assert!(matches!(first.data, FrameData::Cpu(ref data) if data == &[1]));
+        assert!(matches!(skipped, Err(CaptureError::Timeout(_))));
         assert!((second.pts_s - (1.0 + 2.0 * interval_s)).abs() < 1e-9);
         assert!(matches!(second.data, FrameData::Cpu(ref data) if data == &[2]));
+    }
+
+    #[test]
+    fn cadenced_capture_stale_retry_keeps_the_original_wait_deadline() {
+        let fps = 60;
+        let interval_s = 1.0 / fps as f64;
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![1]),
+        };
+        let source = DelayedStaleSource {
+            stale: Some(Frame {
+                pts_s: 1.0 + interval_s / 2.0,
+                data: FrameData::Cpu(vec![2]),
+            }),
+            delay: Duration::from_millis(30),
+            requested_timeouts: Vec::new(),
+        };
+        let mut cap = CadencedCapture::new(source, fps, &seed);
+
+        assert!(matches!(cap.next_frame(), Err(CaptureError::Timeout(_))));
+        let duplicate = cap.next_frame().unwrap().unwrap();
+
+        assert!((duplicate.pts_s - (1.0 + interval_s)).abs() < 1e-9);
+        assert!(matches!(duplicate.data, FrameData::Cpu(ref data) if data == &[2]));
+        assert!(
+            cap.inner.requested_timeouts[1] <= Duration::from_millis(1),
+            "retry restarted the cadence wait: {:?}",
+            cap.inner.requested_timeouts
+        );
     }
 
     #[test]
