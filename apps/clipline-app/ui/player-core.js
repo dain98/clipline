@@ -778,10 +778,13 @@ const PlayerCore = (() => {
   const selectedAudioTrackIds = (tracks, selectedIds) => {
     const selected = audioIdSet(selectedIds);
     const splitOutput = hasSplitOutputTracks(tracks);
+    const processOutputSelected = processOutputTracks(tracks)
+      .some((track) => selected.has(audioTrackId(track)));
     return normalizedAudioTracks(tracks)
       .filter((track) => {
         const id = audioTrackId(track);
-        return id && selected.has(id) && !(splitOutput && isMixedOutputTrack(track));
+        return id && selected.has(id)
+          && !(splitOutput && processOutputSelected && isMixedOutputTrack(track));
       })
       .map(audioTrackId);
   };
@@ -854,6 +857,9 @@ const PlayerCore = (() => {
   const audioTrackRowState = (track, tracks, selectedIds) => {
     const selected = audioIdSet(selectedIds);
     if (hasSplitOutputTracks(tracks) && isMixedOutputTrack(track)) {
+      if (selected.has(audioTrackId(track))) {
+        return { checked: true, indeterminate: false };
+      }
       const processIds = processOutputTracks(tracks).map(audioTrackId).filter(Boolean);
       const checkedCount = processIds.filter((id) => selected.has(id)).length;
       return {

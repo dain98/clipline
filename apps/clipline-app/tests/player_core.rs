@@ -976,10 +976,13 @@ fn split_output_defaults_to_fallback_while_master_toggles_process_tracks() {
             { id: 'microphone', kind: 'microphone', label: 'Microphone' },
           ];
           const defaults = PlayerCore.defaultAudioTrackIds(tracks);
+          const normalizedDefaults = PlayerCore.selectedAudioTrackIds(tracks, defaults);
           const afterOff = PlayerCore.applyAudioTrackToggle(tracks, defaults, 'output', false);
           const afterOn = PlayerCore.applyAudioTrackToggle(tracks, afterOff, 'output', true);
           return {
             defaults,
+            normalizedDefaults,
+            outputDefault: PlayerCore.audioTrackRowState(tracks[0], tracks, defaults),
             afterOff,
             afterOn,
             outputOn: PlayerCore.audioTrackRowState(tracks[0], tracks, afterOn),
@@ -992,7 +995,7 @@ fn split_output_defaults_to_fallback_while_master_toggles_process_tracks() {
 
     assert_eq!(
         model,
-        r#"{"defaults":["output","microphone"],"afterOff":["microphone"],"afterOn":["process:1","process:2","microphone"],"outputOn":{"checked":true,"indeterminate":false},"outputPartial":{"checked":false,"indeterminate":true},"effectiveAfterOn":["process:1","process:2","microphone"]}"#
+        r#"{"defaults":["output","microphone"],"normalizedDefaults":["output","microphone"],"outputDefault":{"checked":true,"indeterminate":false},"afterOff":["microphone"],"afterOn":["process:1","process:2","microphone"],"outputOn":{"checked":true,"indeterminate":false},"outputPartial":{"checked":false,"indeterminate":true},"effectiveAfterOn":["process:1","process:2","microphone"]}"#
     );
 }
 
