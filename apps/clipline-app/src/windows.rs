@@ -4,7 +4,7 @@ use std::ffi::{c_void, OsStr};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, HANDLE};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
 };
@@ -132,9 +132,7 @@ where
 fn wait_for_process_exit(process_id: u32) -> Result<(), String> {
     let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, process_id) };
     if process.is_null() {
-        // The parent may have completed between ShellExecute returning and this
-        // child reaching main. In that case there is nothing left to wait for.
-        return Ok(());
+        return parent_open_failure(process_id, unsafe { GetLastError() });
     }
     let process = OwnedHandle(process);
     let result = unsafe { WaitForSingleObject(process.0, INFINITE) };
@@ -144,6 +142,18 @@ fn wait_for_process_exit(process_id: u32) -> Result<(), String> {
         )));
     }
     Ok(())
+}
+
+fn parent_open_failure(process_id: u32, error_code: u32) -> Result<(), String> {
+    if error_code == ERROR_INVALID_PARAMETER {
+        // The parent completed between ShellExecute returning and this child
+        // reaching main, leaving no process to wait for.
+        Ok(())
+    } else {
+        Err(format!(
+            "open Clipline process {process_id} for handoff: Windows error {error_code}"
+        ))
+    }
 }
 
 fn elevation_restart_parameters(parent_process_id: u32) -> String {
@@ -187,5 +197,17 @@ mod tests {
     #[test]
     fn current_process_elevation_is_queryable() {
         current_process_is_elevated().expect("query this test process token");
+    }
+
+    #[test]
+    fn parent_open_failure_only_ignores_a_gone_process() {
+        assert!(parent_open_failure(
+            4242,
+            windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER
+        )
+        .is_ok());
+        assert!(
+            parent_open_failure(4242, windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED).is_err()
+        );
     }
 }

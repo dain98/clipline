@@ -402,6 +402,7 @@ fn elevated_game_hotkey_warning_offers_opt_in_restart_once_per_process() {
     let html = index_html();
     let js = main_js();
     let css = styles_css();
+    let warning = js_function_body(&js, "maybeWarnElevatedGame");
 
     for required in [
         "id=\"elevation-dialog\"",
@@ -416,12 +417,31 @@ fn elevated_game_hotkey_warning_offers_opt_in_restart_once_per_process() {
     assert!(
         js.contains("elevated_hotkeys_blocked")
             && js.contains("warnedElevatedGameProcesses")
-            && js.contains("invoke(\"restart_as_administrator\")"),
-        "game detection must warn once per elevated PID and invoke only the explicit restart command"
+            && js.contains("invoke(\"restart_as_administrator\")")
+            && warning.contains("if (dialog.open) dialog.close();")
+            && js.contains("addEventListener(\"close\", () => maybeWarnElevatedGame(activeDetectedGame))"),
+        "game detection must warn once per elevated PID, close stale warnings, and invoke only the explicit restart command"
     );
     assert!(
         css.contains("#elevation-dialog"),
         "the elevation dialog must share the app's in-product modal styling"
+    );
+}
+
+#[test]
+fn failed_elevation_handoff_does_not_start_tauri() {
+    let main = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+        .expect("read src/main.rs");
+    let handoff_error = main
+        .find("if let Err(error) = windows::wait_for_elevation_parent_from_args()")
+        .expect("elevation handoff error branch");
+    let app_run = main[handoff_error..]
+        .find("app::run();")
+        .map(|offset| handoff_error + offset)
+        .expect("Tauri startup");
+    assert!(
+        main[handoff_error..app_run].contains("return;"),
+        "a failed parent handoff must abort before Tauri and the recorder start"
     );
 }
 

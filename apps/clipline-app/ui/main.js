@@ -163,6 +163,7 @@ $("elevation-restart").addEventListener("click", restartAsAdministrator);
 $("elevation-dialog").addEventListener("click", (ev) => {
   if (ev.target === $("elevation-dialog")) $("elevation-dialog").close();
 });
+$("elevation-dialog").addEventListener("close", () => maybeWarnElevatedGame(activeDetectedGame));
 $("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);
 $("set-replay-disk-quota").addEventListener("input", syncReplayStorageFields);
 $("set-replay-disk-quota").addEventListener("change", syncReplayStorageFields);
@@ -587,14 +588,18 @@ document.addEventListener("keydown", (ev) => {
 });
 
 function maybeWarnElevatedGame(game) {
-  if (!game || !game.active || !game.elevated_hotkeys_blocked) return;
+  const dialog = $("elevation-dialog");
+  if (!game || !game.active || !game.elevated_hotkeys_blocked) {
+    if (dialog.open) dialog.close();
+    return;
+  }
   const processId = Number(game.process_id);
   if (!Number.isFinite(processId) || warnedElevatedGameProcesses.has(processId)) return;
-  if ($("elevation-dialog").open) return;
+  if (dialog.open) return;
 
   warnedElevatedGameProcesses.add(processId);
   $("elevation-game-name").textContent = game.name || game.exe_name || "This game";
-  $("elevation-dialog").showModal();
+  dialog.showModal();
 }
 
 async function restartAsAdministrator() {

@@ -90,21 +90,22 @@ struct UpdateCheckResult {
 
 impl GameDetectionEvent {
     fn from_detected(detected: Option<&DetectedGame>) -> Self {
-        let clipline_elevated = crate::windows::current_process_is_elevated().unwrap_or(false);
-        Self::from_detected_with_elevation(detected, clipline_elevated, |process_id| {
-            crate::windows::process_is_elevated(process_id).unwrap_or(false)
-        })
+        Self::from_detected_with_elevation(
+            detected,
+            crate::windows::current_process_is_elevated(),
+            crate::windows::process_is_elevated,
+        )
     }
 
     fn from_detected_with_elevation(
         detected: Option<&DetectedGame>,
-        clipline_elevated: bool,
-        game_is_elevated: impl FnOnce(u32) -> bool,
+        clipline_elevated: Result<bool, String>,
+        game_is_elevated: impl FnOnce(u32) -> Result<bool, String>,
     ) -> Self {
         match detected {
             Some(game) => {
-                let elevated_hotkeys_blocked =
-                    !clipline_elevated && game_is_elevated(game.process_id);
+                let elevated_hotkeys_blocked = matches!(clipline_elevated, Ok(false))
+                    && game_is_elevated(game.process_id).unwrap_or(true);
                 Self {
                     active: true,
                     name: Some(game.name.clone()),
@@ -2439,22 +2440,42 @@ mod tests {
     fn elevated_game_warning_requires_lower_privilege_clipline() {
         let game = detected_game("endfield", "Arknights: Endfield", 42);
 
-        let blocked =
-            GameDetectionEvent::from_detected_with_elevation(Some(&game), false, |process_id| {
-                process_id == 42
-            });
+        let blocked = GameDetectionEvent::from_detected_with_elevation(
+            Some(&game),
+            Ok(false),
+            |process_id| Ok(process_id == 42),
+        );
         assert!(blocked.elevated_hotkeys_blocked);
 
         let already_elevated =
-            GameDetectionEvent::from_detected_with_elevation(Some(&game), true, |_| true);
+            GameDetectionEvent::from_detected_with_elevation(Some(&game), Ok(true), |_| Ok(true));
         assert!(!already_elevated.elevated_hotkeys_blocked);
 
         let ordinary_game =
-            GameDetectionEvent::from_detected_with_elevation(Some(&game), false, |_| false);
+            GameDetectionEvent::from_detected_with_elevation(Some(&game), Ok(false), |_| Ok(false));
         assert!(!ordinary_game.elevated_hotkeys_blocked);
 
-        let inactive = GameDetectionEvent::from_detected_with_elevation(None, false, |_| true);
+        let inactive =
+            GameDetectionEvent::from_detected_with_elevation(None, Ok(false), |_| Ok(true));
         assert!(!inactive.elevated_hotkeys_blocked);
+    }
+
+    #[test]
+    fn elevated_game_warning_is_conservative_when_elevation_cannot_be_queried() {
+        let game = detected_game("endfield", "Arknights: Endfield", 42);
+
+        let blocked =
+            GameDetectionEvent::from_detected_with_elevation(Some(&game), Ok(false), |_| {
+                Err("protected process".to_string())
+            });
+        assert!(blocked.elevated_hotkeys_blocked);
+
+        let unknown_clipline = GameDetectionEvent::from_detected_with_elevation(
+            Some(&game),
+            Err("token query failed".to_string()),
+            |_| Ok(true),
+        );
+        assert!(!unknown_clipline.elevated_hotkeys_blocked);
     }
 
     #[test]

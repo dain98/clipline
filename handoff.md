@@ -26,6 +26,10 @@ native pipe returned OS error 2. A live UAC attempt timed out without approval a
 normal PID remained alive with no replacement; accepting UAC and visually confirming the elevated
 replacement/dialog remain the final native checks.
 
+PR #87 review hardened the handoff further: only a confirmed-gone parent may skip the wait,
+handoff failures abort before Tauri starts, protected-process token query failures warn
+conservatively, and the frontend retries queued warnings while closing stale ones.
+
 ## Checkpoint (2026-07-18): Nightly 0.1.35
 
 Nightly 0.1.35 contains PR #86. It ships the Proxmox/Windows VM software H.264 fallback,
