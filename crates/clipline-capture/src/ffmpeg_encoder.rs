@@ -513,7 +513,7 @@ fn backend_rate_control(backend: EncoderBackend, bitrate_bps: u32, bufsize: u64)
             v
         }
         EncoderBackend::SvtAv1 => vec![s("-b:v"), b, s("-preset"), s("8")],
-        EncoderBackend::MfSoftware => Vec::new(),
+        EncoderBackend::MfSoftware => vec![s("-hw_encoding"), s("0"), s("-b:v"), b],
     }
 }
 
@@ -689,9 +689,28 @@ mod tests {
     }
 
     #[test]
-    fn backend_rate_control_mf_software_is_empty() {
+    fn backend_rate_control_mf_software_forces_cpu_encoding() {
         let rc = backend_rate_control(EncoderBackend::MfSoftware, 4_000_000, 8_000_000);
-        assert!(rc.is_empty());
+        let joined = rc.join(" ");
+        assert!(joined.contains("-hw_encoding 0"));
+        assert!(joined.contains("-b:v 4000000"));
+    }
+
+    #[test]
+    fn media_foundation_software_args_emit_h264_elementary_stream() {
+        let args = build_args(
+            "h264_mf",
+            EncoderBackend::MfSoftware,
+            Codec::H264,
+            1280,
+            720,
+            30,
+            6_000_000,
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-c:v h264_mf"));
+        assert!(joined.contains("-hw_encoding 0"));
+        assert!(joined.ends_with("-f h264 pipe:1"));
     }
 
     #[test]

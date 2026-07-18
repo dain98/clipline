@@ -39,6 +39,7 @@ const KNOWN_ENCODERS: &[(&str, EncoderBackend, Codec)] = &[
     ("h264_qsv", EncoderBackend::QuickSync, Codec::H264),
     ("hevc_qsv", EncoderBackend::QuickSync, Codec::Hevc),
     ("av1_qsv", EncoderBackend::QuickSync, Codec::Av1),
+    ("h264_mf", EncoderBackend::MfSoftware, Codec::H264),
     ("libsvtav1", EncoderBackend::SvtAv1, Codec::Av1),
 ];
 
@@ -51,13 +52,11 @@ pub fn encoder_name(backend: EncoderBackend, codec: Codec) -> Option<&'static st
         .map(|(name, _, _)| *name)
 }
 
-/// Software backends are always usable if FFmpeg lists them; hardware
-/// backends must pass a test encode (the list is hardware-blind).
-fn is_hardware(backend: EncoderBackend) -> bool {
-    matches!(
-        backend,
-        EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::QuickSync
-    )
+/// FFmpeg's encoder list only describes compiled support. Hardware encoders
+/// and Media Foundation's optional system encoder must prove they can encode
+/// on this machine. SVT-AV1 is the only bundled, self-contained exception.
+fn requires_test_encode(backend: EncoderBackend) -> bool {
+    backend != EncoderBackend::SvtAv1
 }
 
 /// Parse `ffmpeg -encoders` output into the subset of [`KNOWN_ENCODERS`]
@@ -211,7 +210,7 @@ fn runs(path: &Path) -> bool {
 /// 640x360, not a tiny placeholder: AMF rejects very small resolutions
 /// (`Init() failed with error 5` at 128x72), which would wrongly drop a
 /// working H.264/HEVC encoder.
-fn test_encode(ffmpeg: &Path, encoder: &str) -> bool {
+fn test_encode(ffmpeg: &Path, encoder: &str, backend: EncoderBackend) -> bool {
     let mut cmd = Command::new(ffmpeg);
     cmd.args([
         "-hide_banner",
@@ -225,10 +224,11 @@ fn test_encode(ffmpeg: &Path, encoder: &str) -> bool {
         "1",
         "-c:v",
         encoder,
-        "-f",
-        "null",
-        "-",
     ]);
+    if backend == EncoderBackend::MfSoftware {
+        cmd.args(["-hw_encoding", "0"]);
+    }
+    cmd.args(["-f", "null", "-"]);
     run_bounded(cmd)
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -249,9 +249,9 @@ fn probe_ffmpeg(ffmpeg: &Path) -> Vec<EncoderCapability> {
     let usable: Vec<(EncoderBackend, Codec)> = listed
         .into_iter()
         .filter(|&(backend, codec)| {
-            !is_hardware(backend)
+            !requires_test_encode(backend)
                 || encoder_name(backend, codec)
-                    .map(|name| test_encode(ffmpeg, name))
+                    .map(|name| test_encode(ffmpeg, name, backend))
                     .unwrap_or(false)
         })
         .collect();
@@ -284,6 +284,7 @@ mod tests {
  V....D av1_amf              AMD AMF AV1 encoder (codec av1)
  V....D h264_amf             AMD AMF H.264 Encoder (codec h264)
  V....D h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
+ V..... h264_mf              MediaFoundation H.264 encoder (codec h264)
  V....D libx265              libx265 H.265 / HEVC (codec hevc)
  V....D hevc_amf             AMD AMF HEVC encoder (codec hevc)
  V....D hevc_nvenc           NVIDIA NVENC hevc encoder (codec hevc)
@@ -300,7 +301,8 @@ mod tests {
         assert!(found.contains(&(EncoderBackend::Nvenc, Codec::H264)));
         assert!(found.contains(&(EncoderBackend::Amf, Codec::Hevc)));
         assert!(found.contains(&(EncoderBackend::QuickSync, Codec::Av1)));
-        assert_eq!(found.len(), 10, "9 hw + libsvtav1");
+        assert!(found.contains(&(EncoderBackend::MfSoftware, Codec::H264)));
+        assert_eq!(found.len(), 11, "9 hw + 2 software encoders");
     }
 
     #[test]
@@ -341,9 +343,19 @@ mod tests {
             encoder_name(EncoderBackend::SvtAv1, Codec::Av1),
             Some("libsvtav1")
         );
-        // No software H.264/HEVC through FFmpeg (LGPL: no x264/x265).
+        // Media Foundation supplies LGPL-compatible software H.264 on Windows.
         assert_eq!(encoder_name(EncoderBackend::SvtAv1, Codec::H264), None);
-        assert_eq!(encoder_name(EncoderBackend::MfSoftware, Codec::H264), None);
+        assert_eq!(
+            encoder_name(EncoderBackend::MfSoftware, Codec::H264),
+            Some("h264_mf")
+        );
+    }
+
+    #[test]
+    fn software_media_foundation_requires_a_test_encode() {
+        assert!(requires_test_encode(EncoderBackend::MfSoftware));
+        assert!(requires_test_encode(EncoderBackend::Nvenc));
+        assert!(!requires_test_encode(EncoderBackend::SvtAv1));
     }
 
     #[test]
