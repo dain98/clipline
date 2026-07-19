@@ -1,0 +1,5 @@
+[advisories]
+# Keep this empty by default. Every temporary ignore requires an inline comment naming its owner,
+# reachability rationale, expiry date, and tracking issue for removal.
+ignore = []
+informational_warnings = ["unmaintained"]
