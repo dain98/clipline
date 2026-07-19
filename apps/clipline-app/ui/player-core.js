@@ -1,6 +1,6 @@
 // Pure review-player logic: formatting, trim clamping, timeline math, marker
 // navigation, keyboard intents. No DOM, no Tauri — tests/player_core.rs
-// evaluates this file in Boa, so it must stay dependency-free.
+// evaluates this file with presentation-core.js in Boa, so both stay DOM-free.
 const PlayerCore = (() => {
   const MIN_TRIM_GAP_S = 0.1;
   const MARKER_EPSILON_S = 0.05;
@@ -44,7 +44,7 @@ const PlayerCore = (() => {
     return text.split(/[\\/]/).filter(Boolean).pop() || text;
   };
 
-  const clipNameStem = (name) => String(name || "").replace(/\.mp4$/i, "").trim();
+  const clipNameStem = PresentationCore.clipNameStem;
 
   const cloudLibraryEntries = (uploads, localClips = [], cloudClips = []) => {
     const localPaths = new Set((localClips || []).map((clip) => String(clip && clip.path || "")));
@@ -1636,13 +1636,7 @@ const PlayerCore = (() => {
     return groups;
   };
 
-  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-  const formatClipTitle = (month0, day, hours, minutes) => {
-    const h12 = hours % 12 === 0 ? 12 : hours % 12;
-    const ampm = hours < 12 ? "AM" : "PM";
-    return `${MONTHS[month0]} ${day} · ${h12}:${String(minutes).padStart(2, "0")} ${ampm}`;
-  };
+  const formatClipTitle = PresentationCore.formatClipTitle;
 
   // Prefer the backend's stable clip kind. Older clips can still be classified
   // from their on-disk names.

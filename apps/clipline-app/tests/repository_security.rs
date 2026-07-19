@@ -574,3 +574,50 @@ fn divergence_prone_paths_keep_single_production_owners() {
         "all fragment transports must share one metadata commit path"
     );
 }
+
+#[test]
+fn large_application_surfaces_delegate_to_named_domain_owners() {
+    let root = workspace_root();
+    let app =
+        fs::read_to_string(root.join("apps/clipline-app/src/app.rs")).expect("read app shell");
+    let service = fs::read_to_string(root.join("apps/clipline-app/src/service.rs"))
+        .expect("read service shell");
+    let library = fs::read_to_string(root.join("apps/clipline-app/src/library.rs"))
+        .expect("read library shell");
+    let cloud =
+        fs::read_to_string(root.join("apps/clipline-app/src/cloud.rs")).expect("read cloud shell");
+
+    for relative in [
+        "apps/clipline-app/src/app/diagnostic_log.rs",
+        "apps/clipline-app/src/service/media_root.rs",
+        "apps/clipline-app/src/library/naming.rs",
+        "apps/clipline-app/src/cloud/cache_identity.rs",
+    ] {
+        assert!(
+            root.join(relative).is_file(),
+            "missing domain owner {relative}"
+        );
+    }
+    assert!(app.contains("mod diagnostic_log;") && !app.contains("struct DiagnosticLogWriter"));
+    assert!(
+        service.contains("mod media_root;") && !service.contains("static MEDIA_ROOT_PROBE_COUNTER")
+    );
+    assert!(library.contains("mod naming;") && !library.contains("fn normalized_clip_file_name("));
+    assert!(
+        cloud.contains("mod cache_identity;")
+            && !cloud.contains("fn validate_cloud_cache_component")
+    );
+
+    let presentation = fs::read_to_string(root.join("apps/clipline-app/ui/presentation-core.js"))
+        .expect("read presentation core");
+    let bootstrap = fs::read_to_string(root.join("apps/clipline-app/ui/bootstrap.mjs"))
+        .expect("read module bootstrap");
+    let index = fs::read_to_string(root.join("apps/clipline-app/ui/index.html"))
+        .expect("read renderer markup");
+    assert!(presentation.contains("Object.freeze({"));
+    assert!(bootstrap.contains("import { PresentationCore }"));
+    assert!(
+        bootstrap.contains("import { PlayerCore }") && bootstrap.contains("import { CloudCore }")
+    );
+    assert!(index.contains("<script type=\"module\" src=\"bootstrap.mjs\"></script>"));
+}

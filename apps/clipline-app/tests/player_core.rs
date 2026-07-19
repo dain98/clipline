@@ -9,13 +9,48 @@ use std::fs;
 use std::path::Path;
 
 fn player_core_context() -> Context {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/player-core.js");
-    let source = fs::read_to_string(path).expect("read ui/player-core.js");
     let mut context = Context::default();
+    for name in ["presentation-core.js", "player-core.js"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui").join(name);
+        let source =
+            fs::read_to_string(path).unwrap_or_else(|error| panic!("read {name}: {error}"));
+        context
+            .eval(Source::from_bytes(&source))
+            .unwrap_or_else(|error| {
+                panic!("{name} evaluates without DOM or Tauri globals: {error}")
+            });
+    }
     context
-        .eval(Source::from_bytes(&source))
-        .expect("player-core.js evaluates standalone (no DOM, no Tauri globals)");
-    context
+}
+
+#[test]
+fn shared_presentation_normalizes_names_labels_and_dates() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "['clip.MP4','clip.mov','clip.MKV','clip.webm','clip.avi'].map(PresentationCore.clipNameStem)"
+        ),
+        "[\"clip\",\"clip\",\"clip\",\"clip\",\"clip.avi\"]"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PresentationCore.markerKindLabel('multiKill', '')"
+        ),
+        "multi Kill"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PresentationCore.markerKindLabel('multiKill', 'Spree')"
+        ),
+        "Spree"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PresentationCore.formatClipTitle(6, 18, 0, 5)"),
+        "Jul 18 · 12:05 AM"
+    );
 }
 
 /// Evaluate an expression and return its string conversion ("null" for null).

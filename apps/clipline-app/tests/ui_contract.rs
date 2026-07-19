@@ -11,6 +11,7 @@ fn index_html() -> String {
 }
 
 const APP_UI_JS: &[&str] = &[
+    "presentation-core.js",
     "cloud-core.js",
     "app-core.js",
     "settings.js",
@@ -3273,16 +3274,36 @@ fn ui_is_split_into_markup_styles_and_logic() {
 
     for asset in [
         "href=\"styles.css\"",
+        "src=\"presentation-core.js\"",
         "src=\"player-core.js\"",
         "src=\"app-core.js\"",
         "src=\"settings.js\"",
         "src=\"library.js\"",
         "src=\"cloud.js\"",
         "src=\"review-player.js\"",
-        "src=\"main.js\"",
+        "type=\"module\" src=\"bootstrap.mjs\"",
     ] {
         assert!(html.contains(asset), "index.html must reference {asset}");
     }
+
+    let bootstrap = read_ui_js("bootstrap.mjs");
+    assert!(
+        bootstrap.contains("import { PresentationCore } from \"./presentation.mjs\"")
+            && bootstrap.contains("import { PlayerCore } from \"./player-core.mjs\"")
+            && bootstrap.contains("import { CloudCore } from \"./cloud-core.mjs\"")
+            && bootstrap.contains("globalThis.CliplineModules = Object.freeze(")
+            && bootstrap.contains("await import(\"./main.js\")"),
+        "renderer startup must enter through an explicit ES-module core/controller boundary"
+    );
+
+    let presentation = read_ui_js("presentation-core.js");
+    let library = read_ui_js("library.js");
+    let cloud = read_ui_js("cloud.js");
+    let player = player_core_js();
+    assert!(presentation.contains("const clipNameStem ="));
+    assert!(!library.contains("function clipFileStem("));
+    assert!(!cloud.contains("function clipNameStem("));
+    assert!(!player.contains("const MONTHS ="));
 
     assert!(
         !html.contains("<style"),

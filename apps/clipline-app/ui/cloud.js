@@ -382,12 +382,8 @@ function observeCloudThumbnail(entry, thumb) {
   posterObserver.observe(thumb);
 }
 
-function clipNameStem(name) {
-  return String(name || "").replace(/\.mp4$/i, "").trim();
-}
-
 function clipUploadDefaultTitle(clip) {
-  return clipDisplayTitle(clip) || clipNameStem(clip && clip.name) || "Untitled clip";
+  return clipDisplayTitle(clip) || PresentationCore.clipNameStem(clip && clip.name) || "Untitled clip";
 }
 
 function upsertCloudUploadRecord(record) {

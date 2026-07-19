@@ -48,13 +48,9 @@ function renderRailGame() {
   }
 }
 
-function clipFileStem(name) {
-  return String(name || "").replace(/\.(mp4|mov|mkv|webm)$/i, "").trim();
-}
-
 function clipDisplayTitle(clip) {
   const title = String(clip && clip.title || "").trim();
-  return title || clipFileStem(clip && clip.name);
+  return title || PresentationCore.clipNameStem(clip && clip.name);
 }
 
 function replacePosterCachePath(oldPath, newPath) {
@@ -224,7 +220,7 @@ function pluginGalleryPolicy(clip) {
 function markerDisplayLabel(marker, presentation) {
   const kind = marker && marker.kind ? marker.kind : "Other";
   const configured = PlayerCore.markerKindConfig(kind, presentation);
-  const label = configured && configured.label ? configured.label : kind.replace(/([a-z])([A-Z])/g, "$1 $2");
+  const label = PresentationCore.markerKindLabel(kind, configured && configured.label);
   const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
   return `${fmtDur(marker.t_s)} ${label}${actor}`;
 }
@@ -232,7 +228,7 @@ function markerDisplayLabel(marker, presentation) {
 function markerEventText(marker, presentation) {
   const kind = marker && marker.kind ? marker.kind : "Other";
   const configured = PlayerCore.markerKindConfig(kind, presentation);
-  const label = configured && configured.label ? configured.label : kind.replace(/([a-z])([A-Z])/g, "$1 $2");
+  const label = PresentationCore.markerKindLabel(kind, configured && configured.label);
   const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
   return `${label}${actor}`;
 }
@@ -1171,9 +1167,6 @@ function sortGalleryClips(clips) {
   return out;
 }
 
-const GALLERY_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const GALLERY_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
 // Bucket clips by an arbitrary key. Clips keep the caller's incoming order
 // (already sorted by the chosen gallery sort), so Largest / Most markers
 // survives inside each group; only the group order is by recency. A
@@ -1197,7 +1190,7 @@ function galleryDayGroups(clips) {
   return bucketGroups(
     clips,
     (c) => { const d = new Date(c.modified_unix * 1000); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; },
-    (c) => { const d = new Date(c.modified_unix * 1000); return `${GALLERY_DAYS[d.getDay()]}, ${GALLERY_MONTHS[d.getMonth()]} ${d.getDate()}`; },
+    (c) => PresentationCore.formatGalleryDay(new Date(c.modified_unix * 1000)),
   );
 }
 

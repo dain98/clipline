@@ -2,9 +2,8 @@
 //! pipeline is a synchronous pull loop on its own thread) talking to the
 //! shell over channels. No Tauri types in here.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -46,7 +45,8 @@ const LOW_REPLAY_CACHE_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const REPLAY_CACHE_RUN_PREFIX: &str = "clipline-replay-cache-";
 const REPLAY_CACHE_OWNER_FILE: &str = ".clipline-run.json";
 const AMBIGUOUS_REPLAY_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-static MEDIA_ROOT_PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
+#[path = "service/media_root.rs"]
+mod media_root;
 pub enum Cmd {
     Save,
     Stop { announce: bool },
@@ -2373,19 +2373,11 @@ fn local_session_label(league_match: bool) -> String {
 }
 
 pub(crate) fn default_clips_dir() -> PathBuf {
-    std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Videos")
-        .join("Clipline")
+    media_root::default_clips_dir()
 }
 
 pub(crate) fn clips_dir(media_dir: &Path) -> Result<PathBuf, String> {
-    // Library reads use the root already resolved into `StorageSettings` by the
-    // recorder. Do not repeat the durable write probe on every refresh.
-    std::fs::create_dir_all(media_dir)
-        .map_err(|error| format!("create media folder {}: {error}", media_dir.display()))?;
-    Ok(media_dir.to_path_buf())
+    media_root::clips_dir(media_dir)
 }
 
 /// Resolve the directory clips are actually written to. The configured folder
@@ -2397,27 +2389,16 @@ pub(crate) fn clips_dir_resolved(
     media_dir: &Path,
     fallback: impl FnOnce() -> PathBuf,
 ) -> Result<(PathBuf, bool), String> {
-    clips_dir_resolved_with_probe(media_dir, fallback, probe_writable_directory)
+    media_root::clips_dir_resolved_with_probe(media_dir, fallback, probe_writable_directory)
 }
 
+#[cfg(test)]
 fn clips_dir_resolved_with_probe(
     media_dir: &Path,
     fallback: impl FnOnce() -> PathBuf,
     mut probe: impl FnMut(&Path) -> std::io::Result<()>,
 ) -> Result<(PathBuf, bool), String> {
-    let configured_error = match prepare_writable_directory_with(media_dir, &mut probe) {
-        Ok(()) => return Ok((media_dir.to_path_buf(), false)),
-        Err(error) => error,
-    };
-    let dir = fallback();
-    if let Err(fallback_error) = prepare_writable_directory_with(&dir, &mut probe) {
-        return Err(format!(
-            "media folder {} is not writable ({configured_error}); fallback {} is not writable ({fallback_error})",
-            media_dir.display(),
-            dir.display()
-        ));
-    }
-    Ok((dir, true))
+    media_root::clips_dir_resolved_with_probe(media_dir, fallback, &mut probe)
 }
 
 pub(crate) fn prepare_writable_media_directory(dir: &Path) -> Result<(), String> {
@@ -2427,46 +2408,19 @@ pub(crate) fn prepare_writable_media_directory(dir: &Path) -> Result<(), String>
 
 fn prepare_writable_directory_with(
     dir: &Path,
-    mut probe: impl FnMut(&Path) -> std::io::Result<()>,
+    probe: impl FnMut(&Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    probe(dir)
+    media_root::prepare_writable_directory_with(dir, probe)
 }
 
 fn probe_writable_directory(dir: &Path) -> std::io::Result<()> {
-    for _ in 0..16 {
-        let unique = MEDIA_ROOT_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = dir.join(format!(
-            ".clipline-write-probe-{}-{unique}.tmp",
-            std::process::id()
-        ));
-        let mut file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        };
-        let result = file.write_all(&[0]).and_then(|()| file.sync_data());
-        drop(file);
-        let cleanup = std::fs::remove_file(&path);
-        result?;
-        cleanup?;
-        return Ok(());
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        "could not reserve a unique media-folder probe file",
-    ))
+    media_root::probe_writable_directory(dir)
 }
 
 /// Whether `dir` lives under the system temp root. Both paths are canonicalized
 /// when they exist so a symlinked or short-name temp root still matches.
 fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
-    let normalize = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    normalize(dir).starts_with(normalize(temp_dir))
+    media_root::is_within_temp(dir, temp_dir)
 }
 
 #[cfg(test)]

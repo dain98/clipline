@@ -1,6 +1,10 @@
 //! Clipline Cloud desktop integration: connection state, OS credential storage,
 //! and per-clip uploads through the first-party API client.
 
+#[path = "cloud/cache_identity.rs"]
+mod cache_identity;
+use cache_identity::validate_cloud_cache_component;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -743,14 +747,13 @@ fn cloud_clip_cache_path(
     extension: &str,
     version: Option<u64>,
 ) -> Result<PathBuf, String> {
-    let remote_clip_id = validate_cloud_cache_component(remote_clip_id, "remote clip id")?;
-    let asset = validate_cloud_cache_component(asset, "cloud asset")?;
-    let extension = validate_cloud_cache_component(extension, "cloud asset extension")?;
-    let version = version.unwrap_or(0);
-    Ok(
-        cloud_clip_cache_dir(cloud)?
-            .join(format!("{remote_clip_id}-{asset}-{version}.{extension}")),
-    )
+    let file_name = cache_identity::cloud_cache_file_name(
+        remote_clip_id,
+        asset,
+        extension,
+        version.unwrap_or(0),
+    )?;
+    Ok(cloud_clip_cache_dir(cloud)?.join(file_name))
 }
 
 fn cloud_clip_cache_dir(cloud: &CloudSettings) -> Result<PathBuf, String> {
@@ -818,20 +821,10 @@ fn cloud_cache_namespace(cloud: &CloudSettings) -> Result<String, String> {
         .or(cloud.credential_target.as_deref())
         .unwrap_or("anonymous")
         .trim();
-    let key = format!("{}|{account}", base.as_str().trim_end_matches('/'));
-    Ok(sha256_hex(key.as_bytes())[..16].to_string())
-}
-
-fn validate_cloud_cache_component<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty()
-        || !trimmed
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
-        return Err(format!("{label} contains unsupported characters"));
-    }
-    Ok(trimmed)
+    Ok(cache_identity::cloud_cache_namespace(
+        base.as_str(),
+        account,
+    ))
 }
 
 fn cached_asset_matches(path: &Path, expected_size_bytes: Option<i64>) -> bool {
