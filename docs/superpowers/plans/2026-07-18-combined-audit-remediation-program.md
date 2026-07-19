@@ -43,6 +43,7 @@ Additional completed findings:
 - [ ] M-22 — latest-generation local snapshots, mutation invalidation, and caught event refresh failures (`9cebaf5`)
 - [ ] M-23 — verified multithread protection at every caller-provided shared D3D11 boundary (`fe55590`)
 - [ ] L-01 — borrowed/COM wave-format ownership and all-branch MFT output cleanup (`3c5d059`); event-handle overlap already closed by M-14
+- [ ] L-03 — shared typed recorder-hotkey parsing, released orphan `KeyF` intent, and data-driven open-dialog keyboard ownership (`cc836fa`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
 

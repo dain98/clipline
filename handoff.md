@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): unified keyboard contracts
+
+The combined audit's L-03 is fixed. Settings parsing now produces one crate-private typed hotkey
+specification containing modifier state and a distinct function-key, keyboard-key, or mouse-button
+value. The Windows low-level hook maps that specification directly to virtual keys instead of
+reparsing the normalized display string, so literal `Ctrl+Shift+F` can no longer be mistaken for a
+malformed function key while `F1` through `F24` and mouse buttons retain their existing mappings.
+
+The orphaned review-player `KeyF` intent was removed because focus mode and its UI had already been
+removed; the browser event is no longer prevented for an action the dispatcher cannot perform. The
+global player shortcut guard now derives modal ownership from `document.querySelector("dialog[open]")`
+instead of an incomplete dialog-id list, automatically covering detected-games, window-picker,
+rename-file, and future native dialogs while preserving the separate Settings and form guards.
+
+Plan commit `94ab793`; implementation commit `cc836fa`. The app suite now has 394 unit tests, 86
+player-core tests, and 72 UI contracts, including literal/function/mouse virtual-key identity,
+released `KeyF`, and data-driven modal ownership. Fresh-cache app Clippy, CI-mode workspace tests,
+and workspace Clippy pass with warnings denied. Computer Use verified normal startup, the Hotkeys
+settings pane with both binding fields, and clean close back to the nine-clip Library. No new
+manual-only item remains for this deterministic contract.
+
 ## Checkpoint (2026-07-18): exact Windows native-resource ownership
 
 The combined audit's L-01 is fixed. WASAPI mix formats now carry an explicit borrowed-stack or
