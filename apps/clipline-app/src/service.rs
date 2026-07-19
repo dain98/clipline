@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
 
 use clipline_capture::ffmpeg;
 use clipline_capture::ffmpeg_encoder::FfmpegVideoEncoder;
@@ -35,9 +34,9 @@ use clipline_storage::{
     remove_clip_ownership_marker, storage_status, StorageStatus,
 };
 use clipline_storage::{session_label, SessionTracker};
-use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 use crate::markers::PollerMsg;
+use crate::util::{unix_now as unix_now_u64, unix_now_i64};
 
 /// Re-exported so the app layer can name codecs without its own
 /// clipline-capture import.
@@ -1637,30 +1636,7 @@ fn ensure_replay_cache_free_space(opts: &ServiceOptions) -> Result<(), String> {
 }
 
 fn available_space_bytes(path: &Path) -> Result<u64, String> {
-    let mut wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    if wide.len() == 1 {
-        wide = OsStr::new(".")
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-    }
-    let mut free = 0u64;
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(
-            wide.as_ptr(),
-            &mut free,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        return Err(format!("could not read free space for {path:?}"));
-    }
-    Ok(free)
+    crate::windows::available_space_bytes(path, &format!("could not read free space for {path:?}"))
 }
 
 fn send_stopped(events: &Sender<Event>) {
@@ -1803,7 +1779,7 @@ fn begin_full_session_recording(
         return None;
     }
     write_session_game_meta(&session_dir, active_game);
-    let stamp = media_timestamp_seconds();
+    let stamp = unix_now_u64();
     let (final_path, temp_path, file) =
         match reserve_full_session_path_at(&session_dir, "session", stamp) {
             Ok(reservation) => reservation,
@@ -1829,7 +1805,7 @@ fn begin_full_session_recording(
     Some(FullSessionRecording {
         final_path,
         temp_path,
-        wall_start_unix: unix_now(),
+        wall_start_unix: unix_now_i64(),
         min_duration_s: minimum_full_session_duration_s(active_game),
     })
 }
@@ -1897,7 +1873,7 @@ fn finish_full_session_recording(
                     markers,
                     full_session: true,
                     recording_start_unix: Some(recording.wall_start_unix),
-                    recording_end_unix: Some(unix_now()),
+                    recording_end_unix: Some(unix_now_i64()),
                 },
                 ctx.opts,
             );
@@ -2016,14 +1992,7 @@ fn should_discard_full_session_for_min_duration(min_duration_s: f64, duration_s:
 }
 
 fn unique_media_path(session_dir: &Path, prefix: &str) -> PathBuf {
-    unique_media_path_at(session_dir, prefix, media_timestamp_seconds())
-}
-
-fn media_timestamp_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    unique_media_path_at(session_dir, prefix, unix_now_u64())
 }
 
 fn unique_media_path_at(session_dir: &Path, prefix: &str, stamp: u64) -> PathBuf {
@@ -2401,13 +2370,6 @@ fn local_session_label(league_match: bool) -> String {
         now.minute(),
         league_match,
     )
-}
-
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 pub(crate) fn default_clips_dir() -> PathBuf {

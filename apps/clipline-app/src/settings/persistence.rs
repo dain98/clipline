@@ -8,9 +8,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use windows_sys::Win32::Storage::FileSystem::{
-    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-};
 
 use crate::service::VideoEncoder;
 use crate::updates::normalize_channel;
@@ -519,16 +516,8 @@ pub(crate) fn sibling_tmp_path(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
-    let from_w = crate::util::wide_null(from.as_os_str());
-    let to_w = crate::util::wide_null(to.as_os_str());
-    let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
-    if unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), flags) } == 0 {
-        return Err(format!(
-            "replace settings file {to:?}: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(())
+    crate::windows::replace_file(from, to)
+        .map_err(|error| format!("replace settings file {to:?}: {error}"))
 }
 
 pub(crate) fn deserialize_field<T>(object: &Map<String, Value>, key: &str) -> Option<T>

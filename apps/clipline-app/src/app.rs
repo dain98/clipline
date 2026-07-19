@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
@@ -30,6 +30,7 @@ use crate::settings::{
     CustomGameSettings, GameRecordingMode,
 };
 use crate::updates::UpdateChannel;
+use crate::util::unix_now_i64;
 
 const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 1_048_576;
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -1063,7 +1064,7 @@ impl RuntimeState {
         let Some(start) = start else {
             return Vec::new();
         };
-        let end = end.unwrap_or_else(unix_now);
+        let end = end.unwrap_or_else(unix_now_i64);
         self.0
             .lock()
             .map(|inner| filter_osu_title_events(&inner.osu_title_events, start, end))
@@ -1210,7 +1211,7 @@ impl RuntimeState {
         let event = GameDetectionEvent::from_detected(detected.as_ref());
         let (prepared_restart, emit_event) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            record_osu_title_event(&mut inner, detected.as_ref(), unix_now());
+            record_osu_title_event(&mut inner, detected.as_ref(), unix_now_i64());
             if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
                 if game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref()) {
                     inner.active_game = detected;
@@ -1249,13 +1250,6 @@ impl RuntimeState {
         }
         Ok(())
     }
-}
-
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 fn record_osu_title_event(inner: &mut RuntimeInner, detected: Option<&DetectedGame>, unix_s: i64) {

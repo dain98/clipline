@@ -139,26 +139,7 @@ impl Drop for PosterTemp {
 
 #[cfg(windows)]
 fn atomic_replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let from_w: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to_w: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: both paths are live, NUL-terminated UTF-16 buffers for the duration of the call.
-    let moved = unsafe {
-        MoveFileExW(
-            from_w.as_ptr(),
-            to_w.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    crate::windows::replace_file(from, to)
 }
 
 #[cfg(not(windows))]

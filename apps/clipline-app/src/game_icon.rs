@@ -4,7 +4,6 @@
 //! handle is released before returning.
 
 use std::mem::size_of;
-use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 
 use base64::Engine as _;
@@ -19,11 +18,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICO
 /// The shell's "large" icon is 32x32 — plenty for a list badge.
 pub fn extract_exe_icon_png(exe_path: &str) -> Option<Vec<u8>> {
     let path = validated_local_exe_path(Path::new(exe_path.trim()))?;
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide = crate::windows::wide_null(path.as_os_str());
 
     unsafe {
         let mut info: SHFILEINFOW = std::mem::zeroed();

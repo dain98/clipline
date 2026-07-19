@@ -479,7 +479,8 @@ fn app_has_no_full_application_elevation_entrypoint() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let app = app_rs();
     let main = fs::read_to_string(root.join("src/main.rs")).expect("read src/main.rs");
-    let windows = fs::read_to_string(root.join("src/windows.rs")).expect("read src/windows.rs");
+    let windows =
+        fs::read_to_string(root.join("src/windows/mod.rs")).expect("read src/windows/mod.rs");
     let ui = main_js();
 
     for (name, source) in [

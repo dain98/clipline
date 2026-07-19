@@ -1,27 +1,17 @@
 //! Direct osu! API integration for play-block enrichment.
 
 use std::collections::HashSet;
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::ptr;
-use std::slice;
 use std::sync::{Mutex, OnceLock};
 
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
-use windows_sys::Win32::Security::Credentials::{
-    CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
-    CRED_TYPE_GENERIC,
-};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 use crate::app::RuntimeState;
 use crate::library::StorageSettings;
 use crate::settings::OsuApiSettings;
-use crate::util::{last_os_error, wide_null};
+use crate::windows::CredentialStore;
 
 const OSU_TOKEN_URL: &str = "https://osu.ppy.sh/oauth/token";
 const OSU_API_VERSION: &str = "20220705";
@@ -29,6 +19,7 @@ const RECENT_LIMIT: usize = 100;
 const RECENT_SCORE_CEILING: usize = 500;
 const OSU_RECENT_MODE: &str = "osu";
 const CREDENTIAL_PREFIX: &str = "Clipline osu!";
+const OSU_CREDENTIALS: CredentialStore = CredentialStore::new("osu! client secret");
 static ENRICHMENT_PASSES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 struct EnrichmentPassLease {
@@ -815,58 +806,15 @@ fn osu_user_lookup_segment(user: &str) -> String {
 }
 
 fn write_secret(target: &str, username: &str, secret: &str) -> Result<(), String> {
-    let mut target_w = wide_null(OsStr::new(target));
-    let mut username_w = wide_null(OsStr::new(username));
-    let mut blob = secret.as_bytes().to_vec();
-    let blob_len =
-        u32::try_from(blob.len()).map_err(|_| "osu! client secret is too large".to_string())?;
-    let credential = CREDENTIALW {
-        Flags: 0,
-        Type: CRED_TYPE_GENERIC,
-        TargetName: target_w.as_mut_ptr(),
-        Comment: ptr::null_mut(),
-        LastWritten: Default::default(),
-        CredentialBlobSize: blob_len,
-        CredentialBlob: blob.as_mut_ptr(),
-        Persist: CRED_PERSIST_LOCAL_MACHINE,
-        AttributeCount: 0,
-        Attributes: ptr::null_mut(),
-        TargetAlias: ptr::null_mut(),
-        UserName: username_w.as_mut_ptr(),
-    };
-    if unsafe { CredWriteW(&credential, 0) } == 0 {
-        return Err(last_os_error("store osu! client secret"));
-    }
-    Ok(())
+    OSU_CREDENTIALS.write(target, username, secret)
 }
 
 fn read_secret(target: &str) -> Result<String, String> {
-    let target_w = wide_null(OsStr::new(target));
-    let mut raw: *mut CREDENTIALW = ptr::null_mut();
-    if unsafe { CredReadW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0, &mut raw) } == 0 {
-        return Err(last_os_error("read osu! client secret"));
-    }
-    let _free = CredentialFree(raw);
-    let credential = unsafe { &*raw };
-    let bytes = unsafe {
-        slice::from_raw_parts(
-            credential.CredentialBlob,
-            credential.CredentialBlobSize as usize,
-        )
-    };
-    String::from_utf8(bytes.to_vec())
-        .map_err(|_| "osu! client secret is not valid UTF-8".to_string())
+    OSU_CREDENTIALS.read(target)
 }
 
 fn delete_secret_if_present(target: &str) -> Result<(), String> {
-    let target_w = wide_null(OsStr::new(target));
-    if unsafe { CredDeleteW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0 {
-        return Ok(());
-    }
-    if unsafe { GetLastError() } == ERROR_NOT_FOUND {
-        return Ok(());
-    }
-    Err(last_os_error("delete osu! client secret"))
+    OSU_CREDENTIALS.delete_if_present(target)
 }
 
 fn reconcile_osu_credential_cleanup(state: &RuntimeState) -> Result<(), String> {
@@ -889,35 +837,8 @@ fn reconcile_osu_credential_cleanup(state: &RuntimeState) -> Result<(), String> 
     }
 }
 
-struct CredentialFree(*mut CREDENTIALW);
-
-impl Drop for CredentialFree {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                CredFree(self.0.cast());
-            }
-        }
-    }
-}
-
 fn open_path(path: &std::path::Path, context: &str) -> Result<(), String> {
-    let operation = wide_null(OsStr::new("open"));
-    let target = wide_null(path.as_os_str());
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            target.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    if result as isize <= 32 {
-        return Err(format!("{context} failed with shell code {result:?}"));
-    }
-    Ok(())
+    crate::windows::open_with_shell(path.as_os_str(), context)
 }
 
 fn osu_setup_guide_html() -> &'static str {

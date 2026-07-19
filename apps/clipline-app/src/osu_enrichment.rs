@@ -3,11 +3,13 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use clipline_events::{ClipMarkers, ClipPlay, GameId};
 use serde::{Deserialize, Serialize};
+
+use crate::util::unix_now_i64;
 
 const PENDING_SCHEMA_VERSION: u32 = 1;
 const SESSION_META_FILE: &str = "clipline-session.json";
@@ -249,24 +251,7 @@ fn write_json_atomically<T: Serialize>(
 
 #[cfg(windows)]
 fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let from = crate::util::wide_null(from.as_os_str());
-    let to = crate::util::wide_null(to.as_os_str());
-    let result = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    crate::windows::replace_file(from, to)
 }
 
 #[cfg(not(windows))]
@@ -278,7 +263,7 @@ pub fn write_pending_for_saved_clip(saved: &OsuSavedClip) -> Result<Option<PathB
     if !saved.full_session || !clip_session_is_osu(&saved.path) {
         return Ok(None);
     }
-    let end = saved.recording_end_unix.unwrap_or_else(unix_now);
+    let end = saved.recording_end_unix.unwrap_or_else(unix_now_i64);
     let derived_start = end.saturating_sub(saved.seconds.max(0.0).round() as i64);
     let start = saved.recording_start_unix.unwrap_or(derived_start);
     let record = OsuPendingEnrichment {
@@ -872,13 +857,6 @@ fn clamp_clip_time(value: f64, pending: &OsuPendingEnrichment) -> f64 {
 fn unix_to_rfc3339(value: i64) -> String {
     let timestamp = UNIX_EPOCH + Duration::from_secs(value.max(0) as u64);
     DateTime::<Utc>::from(timestamp).to_rfc3339()
-}
-
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 #[cfg(test)]

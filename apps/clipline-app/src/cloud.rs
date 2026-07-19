@@ -2,10 +2,7 @@
 //! and per-clip uploads through the first-party API client.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::ptr;
-use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -22,19 +19,12 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::io::AsyncWriteExt;
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
-use windows_sys::Win32::Security::Credentials::{
-    CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
-    CRED_TYPE_GENERIC,
-};
-use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 use crate::app::RuntimeState;
 use crate::library::{validate_clip_path, StorageSettings};
 use crate::settings::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
-use crate::util::{last_os_error, unix_now, wide_null};
+use crate::util::unix_now;
+use crate::windows::CredentialStore;
 
 const DEFAULT_DEVICE_NAME: &str = "Clipline Desktop";
 const READY_POLL_ATTEMPTS: usize = 30;
@@ -53,6 +43,7 @@ const CLOUD_THUMBNAIL_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const CLOUD_MEDIA_FALLBACK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const CLOUD_MEDIA_HARD_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const CLOUD_MEDIA_SIZE_SLACK_BYTES: u64 = 64 * 1024 * 1024;
+const CLOUD_CREDENTIALS: CredentialStore = CredentialStore::new("cloud token");
 const CLOUD_CACHE_QUOTA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const CLOUD_CACHE_FREE_SPACE_FLOOR_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const CLOUD_CACHE_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -471,22 +462,7 @@ pub fn open_cloud_clip(
 }
 
 fn open_cloud_url(url: &str, context: &str) -> Result<(), String> {
-    let operation = wide_null(OsStr::new("open"));
-    let target = wide_null(OsStr::new(url));
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            target.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    if result as isize <= 32 {
-        return Err(format!("{context} failed with shell code {result:?}"));
-    }
-    Ok(())
+    crate::windows::open_with_shell(std::ffi::OsStr::new(url), context)
 }
 
 fn cloud_asset_context(
@@ -1143,23 +1119,7 @@ fn touch_cloud_cache_entry(path: &Path) -> Result<(), String> {
 }
 
 fn cloud_cache_available_space(path: &Path) -> Result<u64, String> {
-    let path_w = wide_null(path.as_os_str());
-    let mut available = 0_u64;
-    let result = unsafe {
-        GetDiskFreeSpaceExW(
-            path_w.as_ptr(),
-            &mut available,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    if result == 0 {
-        return Err(format!(
-            "read cloud cache free space: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(available)
+    crate::windows::available_space_bytes(path, "read cloud cache free space")
 }
 
 fn allow_cloud_cache_asset<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), String> {
@@ -2382,68 +2342,15 @@ fn credential_target(host_url: &str, user_id: &str) -> String {
 }
 
 fn write_credential(target: &str, username: &str, token: &str) -> Result<(), String> {
-    let mut target_w = wide_null(OsStr::new(target));
-    let mut username_w = wide_null(OsStr::new(username));
-    let mut blob = token.as_bytes().to_vec();
-    let blob_len = u32::try_from(blob.len()).map_err(|_| "cloud token is too large".to_string())?;
-    let credential = CREDENTIALW {
-        Flags: 0,
-        Type: CRED_TYPE_GENERIC,
-        TargetName: target_w.as_mut_ptr(),
-        Comment: ptr::null_mut(),
-        LastWritten: Default::default(),
-        CredentialBlobSize: blob_len,
-        CredentialBlob: blob.as_mut_ptr(),
-        Persist: CRED_PERSIST_LOCAL_MACHINE,
-        AttributeCount: 0,
-        Attributes: ptr::null_mut(),
-        TargetAlias: ptr::null_mut(),
-        UserName: username_w.as_mut_ptr(),
-    };
-    if unsafe { CredWriteW(&credential, 0) } == 0 {
-        return Err(last_os_error("store cloud token"));
-    }
-    Ok(())
+    CLOUD_CREDENTIALS.write(target, username, token)
 }
 
 fn read_credential(target: &str) -> Result<String, String> {
-    let target_w = wide_null(OsStr::new(target));
-    let mut raw: *mut CREDENTIALW = ptr::null_mut();
-    if unsafe { CredReadW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0, &mut raw) } == 0 {
-        return Err(last_os_error("read cloud token"));
-    }
-    let _free = CredentialFree(raw);
-    let credential = unsafe { &*raw };
-    let bytes = unsafe {
-        slice::from_raw_parts(
-            credential.CredentialBlob,
-            credential.CredentialBlobSize as usize,
-        )
-    };
-    String::from_utf8(bytes.to_vec()).map_err(|_| "cloud token is not valid UTF-8".to_string())
+    CLOUD_CREDENTIALS.read(target)
 }
 
 fn delete_credential_if_present(target: &str) -> Result<(), String> {
-    let target_w = wide_null(OsStr::new(target));
-    if unsafe { CredDeleteW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0 {
-        return Ok(());
-    }
-    if unsafe { GetLastError() } == ERROR_NOT_FOUND {
-        return Ok(());
-    }
-    Err(last_os_error("delete cloud token"))
-}
-
-struct CredentialFree(*mut CREDENTIALW);
-
-impl Drop for CredentialFree {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                CredFree(self.0.cast());
-            }
-        }
-    }
+    CLOUD_CREDENTIALS.delete_if_present(target)
 }
 
 fn cloud_error(error: CloudApiError) -> String {

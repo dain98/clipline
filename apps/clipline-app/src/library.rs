@@ -30,7 +30,7 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::service::{clips_dir, default_clips_dir};
 use crate::util;
-use crate::util::last_os_error;
+use crate::windows::last_os_error;
 
 pub struct StorageSettings {
     quota_bytes: Mutex<Option<u64>>,

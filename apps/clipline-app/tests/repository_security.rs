@@ -52,6 +52,75 @@ fn assert_not_past(value: &str, subject: &str) {
     );
 }
 
+fn rust_sources_below(root: &Path) -> Vec<PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut sources = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).expect("read Rust source directory") {
+            let path = entry.expect("Rust source entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                sources.push(path);
+            }
+        }
+    }
+    sources
+}
+
+#[test]
+fn unsafe_application_platform_helpers_live_under_the_windows_module() {
+    let source_root = workspace_root().join("apps/clipline-app/src");
+    let windows_root = source_root.join("windows");
+    let sources = rust_sources_below(&source_root);
+    for symbol in [
+        "CredWriteW",
+        "CredReadW",
+        "CredDeleteW",
+        "CredFree",
+        "CREDENTIALW",
+        "ShellExecuteW",
+        "GetDiskFreeSpaceExW",
+        "MoveFileExW",
+    ] {
+        let owners: Vec<_> = sources
+            .iter()
+            .filter(|path| fs::read_to_string(path).unwrap().contains(symbol))
+            .collect();
+        assert!(!owners.is_empty(), "expected a Windows owner for {symbol}");
+        assert!(
+            owners.iter().all(|path| path.starts_with(&windows_root)),
+            "{symbol} must be confined below {} but appears in {owners:?}",
+            windows_root.display()
+        );
+    }
+
+    let duplicate_clocks: Vec<_> = sources
+        .iter()
+        .filter(|path| {
+            path.file_name().and_then(|name| name.to_str()) != Some("util.rs")
+                && fs::read_to_string(path).unwrap().contains("fn unix_now(")
+        })
+        .collect();
+    assert!(
+        duplicate_clocks.is_empty(),
+        "Unix wall-clock helpers must be shared from util.rs: {duplicate_clocks:?}"
+    );
+
+    let duplicate_wide_terminators: Vec<_> = sources
+        .iter()
+        .filter(|path| !path.starts_with(&windows_root))
+        .filter(|path| {
+            let source = fs::read_to_string(path).unwrap();
+            source.contains("chain(std::iter::once(0))") || source.contains("chain(Some(0))")
+        })
+        .collect();
+    assert!(
+        duplicate_wide_terminators.is_empty(),
+        "NUL-terminated UTF-16 conversion must use windows::wide_null: {duplicate_wide_terminators:?}"
+    );
+}
+
 #[test]
 fn dependency_and_ci_supply_chain_is_reviewable_and_audited() {
     let root = workspace_root();
