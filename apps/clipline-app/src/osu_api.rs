@@ -1,9 +1,11 @@
 //! Direct osu! API integration for play-block enrichment.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
+use std::sync::{Mutex, OnceLock};
 
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,37 @@ const RECENT_LIMIT: usize = 100;
 const RECENT_SCORE_CEILING: usize = 500;
 const OSU_RECENT_MODE: &str = "osu";
 const CREDENTIAL_PREFIX: &str = "Clipline osu!";
+static ENRICHMENT_PASSES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+struct EnrichmentPassLease {
+    root: PathBuf,
+}
+
+impl EnrichmentPassLease {
+    fn try_acquire(root: &Path) -> Result<Option<Self>, String> {
+        let root = root
+            .canonicalize()
+            .map_err(|e| format!("canonicalize osu! enrichment worker root {root:?}: {e}"))?;
+        let mut active = ENRICHMENT_PASSES
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .map_err(|e| format!("lock osu! enrichment worker registry: {e}"))?;
+        if !active.insert(root.clone()) {
+            return Ok(None);
+        }
+        Ok(Some(Self { root }))
+    }
+}
+
+impl Drop for EnrichmentPassLease {
+    fn drop(&mut self) {
+        let mut active = ENRICHMENT_PASSES
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.remove(&self.root);
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct SaveOsuApiSettingsRequest {
@@ -230,6 +263,9 @@ async fn retry_pending_enrichment_with_settings(
     settings: &OsuApiSettings,
     media_root: PathBuf,
 ) -> Result<bool, String> {
+    let Some(_lease) = EnrichmentPassLease::try_acquire(&media_root)? else {
+        return Ok(false);
+    };
     let config = match config_from_settings(settings) {
         Ok(config) => config,
         Err(e) => {
@@ -240,7 +276,11 @@ async fn retry_pending_enrichment_with_settings(
             return Ok(false);
         }
     };
-    let pending = crate::osu_enrichment::discover_pending(&media_root)?;
+    let now_unix = crate::util::unix_now();
+    let pending: Vec<_> = crate::osu_enrichment::discover_pending(&media_root)?
+        .into_iter()
+        .filter(|job| job.retry_due(now_unix))
+        .collect();
     if pending.is_empty() {
         return Ok(false);
     }
@@ -248,7 +288,18 @@ async fn retry_pending_enrichment_with_settings(
         .iter()
         .map(|job| job.record().recording_start_unix)
         .min();
-    let fetch = fetch_recent_scores(&config, earliest).await?;
+    let fetch = match fetch_recent_scores(&config, earliest).await {
+        Ok(fetch) => fetch,
+        Err(error) => {
+            for job in &pending {
+                let _ = crate::osu_enrichment::mark_pending_retry(
+                    job,
+                    &format!("osu! API fetch failed; retrying later: {error}"),
+                );
+            }
+            return Err(error);
+        }
+    };
     let mut updated = false;
     for job in pending {
         match crate::osu_enrichment::apply_scores_to_pending(
@@ -1030,6 +1081,34 @@ mod tests {
         assert!(
             !changed,
             "missing osu! API credentials should not trigger an osu-enrichment-updated refresh loop"
+        );
+    }
+
+    #[test]
+    fn enrichment_pass_lease_coalesces_per_root_and_releases_on_drop() {
+        let first = TestDir::new("clipline-osu-api", "single-flight-first");
+        let second = TestDir::new("clipline-osu-api", "single-flight-second");
+
+        let lease = EnrichmentPassLease::try_acquire(first.path())
+            .unwrap()
+            .expect("first pass owns root");
+        assert!(
+            EnrichmentPassLease::try_acquire(first.path())
+                .unwrap()
+                .is_none(),
+            "overlapping pass is coalesced"
+        );
+        let other = EnrichmentPassLease::try_acquire(second.path())
+            .unwrap()
+            .expect("another root remains independent");
+        drop(other);
+        drop(lease);
+
+        assert!(
+            EnrichmentPassLease::try_acquire(first.path())
+                .unwrap()
+                .is_some(),
+            "root is released after the pass"
         );
     }
 }

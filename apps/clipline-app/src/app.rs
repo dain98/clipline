@@ -2354,11 +2354,9 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
                 match crate::osu_enrichment::write_pending_for_saved_clip(&saved) {
                     Ok(Some(_)) => {
                         let app = handle.clone();
-                        let media_root = saved
-                            .path
-                            .parent()
-                            .map(std::path::Path::to_path_buf)
-                            .unwrap_or_else(|| std::path::PathBuf::from("."));
+                        let media_root = handle
+                            .state::<crate::library::StorageSettings>()
+                            .media_dir();
                         tauri::async_runtime::spawn(async move {
                             if let Err(e) =
                                 crate::osu_api::retry_pending_enrichment(&app, media_root).await
