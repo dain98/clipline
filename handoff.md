@@ -25,6 +25,14 @@ unit/integration tests, CI-mode `cargo test --workspace` passes, fresh-cache MP4
 workspace clippy pass with warnings denied, formatting and diff checks pass. No multi-gigabyte
 fixture is required: boundary tests use forged metadata and synthetic sample-size records.
 
+Computer Use acceptance opened the known three-audio-track `clip_1784329112.mp4`, confirmed video
+playback advanced past ten seconds with the expected `2/3 selected` audio state, exported the
+default keyframe-aligned range, and reopened the resulting 33.4-second / 2,591,953-byte trim. The
+trim exposed all three audio tracks and playback advanced past ten seconds. The acceptance artifact
+is `2026-07-17 15-52/clip_1784329112_trim_001797_035204.mp4`. A fresh Save Replay could not be
+exercised in this VM: the running app reports that no video encoder can be opened, and neither a
+system nor local packaged FFmpeg binary is present to activate the software H.264 fallback.
+
 ## Checkpoint (2026-07-18): elevated-game Save Replay hotkeys
 
 An Arknights: Endfield report said Save Replay worked only after tabbing out. The reporter's UAC
