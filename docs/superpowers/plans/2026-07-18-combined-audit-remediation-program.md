@@ -27,6 +27,7 @@ Additional completed findings:
 - [ ] M-08 — canonical sidecar-derived osu! enrichment jobs with path/depth/mismatch/reparse validation (`d143dbc`)
 - [ ] M-09 — per-root single-flight osu! worker, persisted backoff, atomic JSON publication, and per-record quarantine (`16b20f1`)
 - [ ] M-11 — pre-append Annex-B cap, incremental start-code cursor, and generation-safe malformed reset (`725a310`)
+- [ ] M-12 — first-slice/AUD picture framing, encoded AV1 frame types, and strict input/output timestamp cardinality (`68c6606`)
 - [ ] H-05 — bounded file transforms, hashing, upload, and temporary ownership (`db86efe`)
 - [ ] M-16 — hard-link identity checks and atomic MP4 publication (`db86efe`)
 

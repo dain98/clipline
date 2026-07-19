@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): bitstream-authored picture and sync boundaries
+
+The combined audit's M-12 is fixed. H.264 and HEVC Annex-B framing now uses access-unit
+delimiters plus the codecs' first-slice fields, so every standards-valid multi-slice picture stays
+one MP4 sample. Parameter-set and SEI prefix NALs after a completed picture are held for the next
+picture. The streaming classifier still works when any start code or slice header is divided
+across stdout reads.
+
+AV1 sync status now comes from the frame/frame-header OBU rather than configured GOP position;
+reduced still-picture streams and `show_existing_frame` are handled explicitly, while malformed
+or metadata-free temporal units fail the encoder. FFmpeg output consumes exactly one queued input
+timestamp per encoded picture. Extra output and missing output at finish are encoder errors rather
+than causes to synthesize timestamps and silently desynchronize a replay.
+
+Plan commit `a8b92a9`; implementation commit `68c6606`. The 170 capture unit tests include new
+multi-slice H.264/HEVC, AV1 frame-type, malformed-metadata, and timestamp-cardinality regressions.
+The FFmpeg/mux integration now asserts exactly one packet per input frame, though it self-skipped
+on this machine because FFmpeg was not on `PATH`. Fresh-cache capture Clippy, CI-mode workspace
+tests (384 app tests), and workspace Clippy pass with warnings denied. Computer Use verified normal
+startup with all nine clips at 6.5 MB. No manual-only acceptance item remains for the deterministic
+bitstream rules; supported real encoder fixtures remain covered whenever the integration binary is
+available.
+
 ## Checkpoint (2026-07-18): bounded incremental Annex-B framing
 
 The combined audit's M-11 is fixed. `AnnexBFramer` no longer allocates a complete start-code list
