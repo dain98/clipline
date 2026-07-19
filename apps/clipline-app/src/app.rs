@@ -2,7 +2,7 @@
 //! wiring around the recorder service thread.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -35,7 +35,7 @@ const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 1_048_576;
 const MAIN_WINDOW_LABEL: &str = "main";
 const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const GAME_DETECTOR_INTERVAL: Duration = Duration::from_millis(500);
-static DIAGNOSTIC_LOG: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+static DIAGNOSTIC_LOG: OnceLock<Mutex<Option<DiagnosticLogWriter>>> = OnceLock::new();
 static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_READY_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_REPAIR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -162,37 +162,143 @@ fn diagnostic_log_path() -> Option<PathBuf> {
         .map(|appdata| diagnostic_log_path_from_appdata(&appdata))
 }
 
-fn open_diagnostic_log() -> Result<File, String> {
-    let path = diagnostic_log_path().ok_or_else(|| "APPDATA is not set".to_string())?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create log directory: {e}"))?;
+struct DiagnosticLogWriter {
+    path: PathBuf,
+    file: Option<File>,
+    bytes_written: u64,
+    max_bytes: u64,
+}
+
+impl DiagnosticLogWriter {
+    fn open_at(path: PathBuf, max_bytes: u64) -> Result<Self, String> {
+        if max_bytes < 2 {
+            return Err("diagnostic log cap must leave room for content and a newline".into());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("create log directory: {e}"))?;
+        }
+        rotate_diagnostic_log_if_needed(&path, max_bytes)?;
+        let file = open_diagnostic_log_file(&path)?;
+        let bytes_written = file
+            .metadata()
+            .map_err(|e| format!("read diagnostic log metadata {path:?}: {e}"))?
+            .len();
+        Ok(Self {
+            path,
+            file: Some(file),
+            bytes_written,
+            max_bytes,
+        })
     }
-    rotate_diagnostic_log_if_needed(&path)?;
+
+    fn write_line(&mut self, line: &str) -> Result<(), String> {
+        let max_content_bytes = usize::try_from(self.max_bytes - 1).unwrap_or(usize::MAX);
+        let line = truncate_utf8(line, max_content_bytes);
+        let record_bytes = u64::try_from(line.len() + 1).unwrap_or(u64::MAX);
+        if self.bytes_written.saturating_add(record_bytes) > self.max_bytes {
+            self.rotate()?;
+        }
+
+        let Some(file) = self.file.as_mut() else {
+            return Err("diagnostic log is not open".into());
+        };
+        if let Err(error) = writeln!(file, "{line}") {
+            self.bytes_written = file
+                .metadata()
+                .map_or(self.bytes_written, |meta| meta.len());
+            return Err(format!("write diagnostic log {:?}: {error}", self.path));
+        }
+        self.bytes_written = self.bytes_written.saturating_add(record_bytes);
+        Ok(())
+    }
+
+    fn rotate(&mut self) -> Result<(), String> {
+        if let Some(mut file) = self.file.take() {
+            let _ = file.flush();
+        }
+        let rotation_result = rotate_diagnostic_log(&self.path, self.max_bytes);
+        let reopen_result = open_diagnostic_log_file(&self.path);
+        match reopen_result {
+            Ok(file) => {
+                self.bytes_written = file.metadata().map_or(0, |meta| meta.len());
+                self.file = Some(file);
+            }
+            Err(error) => return Err(error),
+        }
+        rotation_result
+    }
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+fn open_diagnostic_log() -> Result<DiagnosticLogWriter, String> {
+    let path = diagnostic_log_path().ok_or_else(|| "APPDATA is not set".to_string())?;
+    DiagnosticLogWriter::open_at(path, DIAGNOSTIC_LOG_MAX_BYTES)
+}
+
+fn open_diagnostic_log_file(path: &Path) -> Result<File, String> {
     OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .map_err(|e| format!("open diagnostic log {path:?}: {e}"))
 }
 
-fn rotate_diagnostic_log_if_needed(path: &Path) -> Result<(), String> {
+fn rotate_diagnostic_log_if_needed(path: &Path, max_bytes: u64) -> Result<(), String> {
     let Ok(metadata) = std::fs::metadata(path) else {
         return Ok(());
     };
-    if metadata.len() <= DIAGNOSTIC_LOG_MAX_BYTES {
+    if metadata.len() < max_bytes {
         return Ok(());
     }
 
+    rotate_diagnostic_log(path, max_bytes)
+}
+
+fn rotate_diagnostic_log(path: &Path, max_bytes: u64) -> Result<(), String> {
     let rotated = path.with_file_name("clipline.old.log");
     if let Err(e) = std::fs::remove_file(&rotated) {
         if e.kind() != std::io::ErrorKind::NotFound {
             return Err(format!("remove old diagnostic log {rotated:?}: {e}"));
         }
     }
-    std::fs::rename(path, &rotated).map_err(|e| format!("rotate diagnostic log: {e}"))
+    std::fs::rename(path, &rotated).map_err(|e| format!("rotate diagnostic log: {e}"))?;
+    if std::fs::metadata(&rotated).is_ok_and(|metadata| metadata.len() > max_bytes) {
+        if let Err(error) = retain_file_tail(&rotated, max_bytes) {
+            let _ = std::fs::remove_file(&rotated);
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
-fn diagnostic_log() -> &'static Mutex<Option<File>> {
+fn retain_file_tail(path: &Path, max_bytes: u64) -> Result<(), String> {
+    let mut source = File::open(path).map_err(|e| format!("open oversized log {path:?}: {e}"))?;
+    let length = source
+        .metadata()
+        .map_err(|e| format!("read oversized log metadata {path:?}: {e}"))?
+        .len();
+    source
+        .seek(SeekFrom::Start(length.saturating_sub(max_bytes)))
+        .map_err(|e| format!("seek oversized log {path:?}: {e}"))?;
+    let mut tail = Vec::with_capacity(usize::try_from(max_bytes).unwrap_or(usize::MAX));
+    source
+        .take(max_bytes)
+        .read_to_end(&mut tail)
+        .map_err(|e| format!("read oversized log tail {path:?}: {e}"))?;
+    std::fs::write(path, tail).map_err(|e| format!("bound oversized log {path:?}: {e}"))
+}
+
+fn diagnostic_log() -> &'static Mutex<Option<DiagnosticLogWriter>> {
     DIAGNOSTIC_LOG.get_or_init(|| Mutex::new(open_diagnostic_log().ok()))
 }
 
@@ -211,11 +317,14 @@ fn format_diagnostic_log_line(
 fn log_diagnostic(message: impl AsRef<str>) {
     let line = format_diagnostic_log_line(chrono::Utc::now(), std::process::id(), message.as_ref());
     if let Ok(mut log) = diagnostic_log().lock() {
-        if let Some(file) = log.as_mut() {
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
+        if let Some(log) = log.as_mut() {
+            let _ = log.write_line(&line);
         }
     }
+}
+
+fn should_log_window_event(event: &WindowEvent) -> bool {
+    !matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_))
 }
 
 fn configure_bundled_ffmpeg<R: Runtime>(app: &tauri::App<R>) {
@@ -2317,7 +2426,9 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::WindowEvent { label, event, .. } => {
-                log_diagnostic(format!("window event: label={label} event={event:?}"));
+                if should_log_window_event(&event) {
+                    log_diagnostic(format!("window event: label={label} event={event:?}"));
+                }
             }
             tauri::RunEvent::ExitRequested {
                 code: None, api, ..
@@ -2569,6 +2680,7 @@ mod tests {
     use crate::settings::{
         CloudUploadRecord, GameRecordingMode, ReplayStorageMode, ReplayStorageSettings,
     };
+    use clipline_test_utils::TestDir;
 
     #[test]
     fn quota_parser_converts_gib_to_bytes() {
@@ -3940,6 +4052,67 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             format_diagnostic_log_line(timestamp, 42, "tray open\nshow: ok"),
             "2026-06-24T12:34:56.789Z pid=42 tray open show: ok"
         );
+    }
+
+    #[test]
+    fn diagnostic_log_rotates_repeatedly_and_keeps_both_generations_bounded() {
+        let dir = TestDir::new("clipline-app", "diagnostic-log-rotation");
+        let path = dir.path().join("clipline.log");
+        let mut log = DiagnosticLogWriter::open_at(path.clone(), 128).unwrap();
+
+        for index in 0..20 {
+            log.write_line(&format!("entry-{index:02}-{}", "x".repeat(48)))
+                .unwrap();
+        }
+        drop(log);
+
+        let rotated = path.with_file_name("clipline.old.log");
+        assert!(std::fs::metadata(&path).unwrap().len() <= 128);
+        assert!(std::fs::metadata(&rotated).unwrap().len() <= 128);
+        assert!(std::fs::read_to_string(path).unwrap().contains("entry-19"));
+    }
+
+    #[test]
+    fn diagnostic_log_truncates_one_oversized_line_to_its_generation_cap() {
+        let dir = TestDir::new("clipline-app", "diagnostic-log-long-line");
+        let path = dir.path().join("clipline.log");
+        let mut log = DiagnosticLogWriter::open_at(path.clone(), 96).unwrap();
+
+        log.write_line(&"é".repeat(100)).unwrap();
+        drop(log);
+
+        let bytes = std::fs::read(path).unwrap();
+        assert!(bytes.len() <= 96);
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        assert!(std::str::from_utf8(&bytes).is_ok());
+    }
+
+    #[test]
+    fn diagnostic_log_open_bounds_an_oversized_legacy_generation() {
+        let dir = TestDir::new("clipline-app", "diagnostic-log-legacy");
+        let path = dir.path().join("clipline.log");
+        let mut legacy = vec![b'a'; 512];
+        legacy[511] = b'z';
+        std::fs::write(&path, legacy).unwrap();
+
+        drop(DiagnosticLogWriter::open_at(path.clone(), 96).unwrap());
+
+        let rotated = path.with_file_name("clipline.old.log");
+        let retained = std::fs::read(rotated).unwrap();
+        assert!(retained.len() <= 96);
+        assert_eq!(retained.last(), Some(&b'z'));
+    }
+
+    #[test]
+    fn diagnostic_window_event_filter_drops_move_and_resize_noise() {
+        assert!(!should_log_window_event(&WindowEvent::Moved(
+            tauri::PhysicalPosition::new(10, 20)
+        )));
+        assert!(!should_log_window_event(&WindowEvent::Resized(
+            tauri::PhysicalSize::new(800, 600)
+        )));
+        assert!(should_log_window_event(&WindowEvent::Focused(true)));
+        assert!(should_log_window_event(&WindowEvent::Destroyed));
     }
 
     #[test]
