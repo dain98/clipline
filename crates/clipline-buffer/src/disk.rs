@@ -28,6 +28,7 @@ pub struct DiskSegment {
 
 #[derive(Debug, Clone)]
 struct DiskTrack {
+    pts_start_s: Option<f64>,
     offset: usize,
     len: usize,
     samples: Vec<SampleInfo>,
@@ -64,6 +65,7 @@ impl DiskReplayRing {
         for track in &seg.audio {
             file.write_all(&track.data)?;
             audio.push(DiskTrack {
+                pts_start_s: track.pts_start_s,
                 offset,
                 len: track.data.len(),
                 samples: track.samples.clone(),
@@ -212,6 +214,7 @@ impl DiskSegment {
                 let start = track.offset;
                 let end = start + track.len;
                 TrackSamples {
+                    pts_start_s: track.pts_start_s,
                     data: buf[start..end].to_vec(),
                     samples: track.samples.clone(),
                 }
@@ -249,6 +252,7 @@ mod tests {
                 is_sync: key,
             }],
             audio: vec![TrackSamples {
+                pts_start_s: Some(pts),
                 data: vec![b'a'; bytes / 2],
                 samples: vec![SampleInfo {
                     size: (bytes / 2) as u32,

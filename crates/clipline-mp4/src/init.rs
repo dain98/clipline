@@ -1,9 +1,17 @@
 use crate::boxes::{full_box, mp4_box, Payload};
 
-/// Movie-header timescale (ticks per second) for mvhd/tkhd durations.
-pub const MOVIE_TIMESCALE: u32 = 1000;
+/// Movie-header timescale. 720 kHz is the least common multiple of Clipline's
+/// 90 kHz video and 48 kHz Opus clocks, so edit-list gaps stay exact integers.
+pub const MOVIE_TIMESCALE: u32 = 720_000;
 /// Identity transformation matrix for mvhd/tkhd.
 const MATRIX: [u32; 9] = [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EditListEntry {
+    pub duration_movie_ts: u64,
+    /// Track-media time, or -1 for an empty edit (silence/blank presentation).
+    pub media_time: i64,
+}
 
 /// Codec-specific decoder configuration for the video sample entry
 /// (ddoc §4 encoder matrix: AV1 / HEVC / H.264). Parameter sets are raw
@@ -12,13 +20,13 @@ const MATRIX: [u32; 9] = [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_000
 #[derive(Debug, Clone)]
 pub enum VideoCodecParams {
     H264 {
-        sps: Vec<u8>,
-        pps: Vec<u8>,
+        sps: Vec<Vec<u8>>,
+        pps: Vec<Vec<u8>>,
     },
     Hevc {
-        vps: Vec<u8>,
-        sps: Vec<u8>,
-        pps: Vec<u8>,
+        vps: Vec<Vec<u8>>,
+        sps: Vec<Vec<u8>>,
+        pps: Vec<Vec<u8>>,
     },
     Av1 {
         sequence_header_obu: Vec<u8>,
@@ -37,6 +45,16 @@ pub struct VideoTrackConfig {
 
 impl VideoTrackConfig {
     pub fn h264(width: u16, height: u16, timescale: u32, sps: Vec<u8>, pps: Vec<u8>) -> Self {
+        Self::h264_with_parameter_sets(width, height, timescale, vec![sps], vec![pps])
+    }
+
+    pub fn h264_with_parameter_sets(
+        width: u16,
+        height: u16,
+        timescale: u32,
+        sps: Vec<Vec<u8>>,
+        pps: Vec<Vec<u8>>,
+    ) -> Self {
         Self {
             width,
             height,
@@ -52,6 +70,17 @@ impl VideoTrackConfig {
         vps: Vec<u8>,
         sps: Vec<u8>,
         pps: Vec<u8>,
+    ) -> Self {
+        Self::hevc_with_parameter_sets(width, height, timescale, vec![vps], vec![sps], vec![pps])
+    }
+
+    pub fn hevc_with_parameter_sets(
+        width: u16,
+        height: u16,
+        timescale: u32,
+        vps: Vec<Vec<u8>>,
+        sps: Vec<Vec<u8>>,
+        pps: Vec<Vec<u8>>,
     ) -> Self {
         Self {
             width,
@@ -185,11 +214,32 @@ pub fn video_trak_with_tables(
     duration_media_ts: u64,
     stbl_tail: Vec<u8>,
 ) -> Vec<u8> {
+    video_trak_with_tables_and_edits(
+        cfg,
+        track_id,
+        duration_movie_ts,
+        duration_media_ts,
+        stbl_tail,
+        &[],
+    )
+}
+
+pub(crate) fn video_trak_with_tables_and_edits(
+    cfg: &VideoTrackConfig,
+    track_id: u32,
+    duration_movie_ts: u64,
+    duration_media_ts: u64,
+    stbl_tail: Vec<u8>,
+    edits: &[EditListEntry],
+) -> Vec<u8> {
     let mut v = Payload::new();
     v.u16(0).u16(0).u16(0).u16(0); // graphicsmode + opcolor
     let vmhd = full_box(*b"vmhd", 0, 1, v.into_vec());
 
     let mut t = tkhd(track_id, duration_movie_ts, 0, cfg.width, cfg.height);
+    if !edits.is_empty() {
+        t.extend(edts(edits));
+    }
     t.extend(mdia_generic(
         cfg.timescale,
         duration_media_ts,
@@ -209,11 +259,32 @@ pub fn audio_trak_with_tables(
     duration_media_ts: u64,
     stbl_tail: Vec<u8>,
 ) -> Vec<u8> {
+    audio_trak_with_tables_and_edits(
+        cfg,
+        track_id,
+        duration_movie_ts,
+        duration_media_ts,
+        stbl_tail,
+        &[],
+    )
+}
+
+pub(crate) fn audio_trak_with_tables_and_edits(
+    cfg: &AudioTrackConfig,
+    track_id: u32,
+    duration_movie_ts: u64,
+    duration_media_ts: u64,
+    stbl_tail: Vec<u8>,
+    edits: &[EditListEntry],
+) -> Vec<u8> {
     let mut s = Payload::new();
     s.u16(0).u16(0); // balance + reserved
     let smhd = full_box(*b"smhd", 0, 0, s.into_vec());
 
     let mut t = tkhd(track_id, duration_movie_ts, 0x0100, 0, 0);
+    if !edits.is_empty() {
+        t.extend(edts(edits));
+    }
     t.extend(mdia_generic(
         cfg.sample_rate,
         duration_media_ts,
@@ -224,6 +295,26 @@ pub fn audio_trak_with_tables(
         stbl_tail,
     ));
     mp4_box(*b"trak", t)
+}
+
+fn edts(entries: &[EditListEntry]) -> Vec<u8> {
+    let version = u8::from(entries.iter().any(|entry| {
+        entry.duration_movie_ts > u32::MAX as u64
+            || entry.media_time < i32::MIN as i64
+            || entry.media_time > i32::MAX as i64
+    }));
+    let mut p = Payload::new();
+    p.u32(entries.len() as u32);
+    for entry in entries {
+        if version == 1 {
+            p.u64(entry.duration_movie_ts).u64(entry.media_time as u64);
+        } else {
+            p.u32(entry.duration_movie_ts as u32)
+                .u32(entry.media_time as i32 as u32);
+        }
+        p.u16(1).u16(0); // media_rate = 1.0
+    }
+    mp4_box(*b"edts", full_box(*b"elst", version, 0, p.into_vec()))
 }
 
 fn tkhd(track_id: u32, duration_movie_ts: u64, volume: u16, width: u16, height: u16) -> Vec<u8> {
@@ -404,29 +495,38 @@ fn nclx_rec709_limited_colr() -> Vec<u8> {
     mp4_box(*b"colr", p.into_vec())
 }
 
-fn avcc(sps: &[u8], pps: &[u8]) -> Vec<u8> {
+fn avcc(sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Vec<u8> {
     // avcC NAL-length fields are u16 by spec; real parameter sets are well
     // under 64 KiB, so a longer one signals an upstream bug, not valid input.
     debug_assert!(
-        sps.len() <= u16::MAX as usize,
-        "SPS exceeds avcC u16 length"
+        !sps.is_empty() && sps.len() <= 31,
+        "avcC requires 1..=31 SPS entries"
     );
     debug_assert!(
-        pps.len() <= u16::MAX as usize,
-        "PPS exceeds avcC u16 length"
+        !pps.is_empty() && pps.len() <= u8::MAX as usize,
+        "avcC requires 1..=255 PPS entries"
     );
+    debug_assert!(
+        sps.iter()
+            .chain(pps)
+            .all(|nal| nal.len() <= u16::MAX as usize),
+        "AVC parameter set exceeds avcC u16 length"
+    );
+    let primary_sps = &sps[0];
     let mut p = Payload::new();
     p.u8(1) // configurationVersion
-        .u8(sps.get(1).copied().unwrap_or(0)) // AVCProfileIndication
-        .u8(sps.get(2).copied().unwrap_or(0)) // profile_compatibility
-        .u8(sps.get(3).copied().unwrap_or(0)) // AVCLevelIndication
+        .u8(primary_sps.get(1).copied().unwrap_or(0)) // AVCProfileIndication
+        .u8(primary_sps.get(2).copied().unwrap_or(0)) // profile_compatibility
+        .u8(primary_sps.get(3).copied().unwrap_or(0)) // AVCLevelIndication
         .u8(0xFF) // lengthSizeMinusOne = 3
-        .u8(0xE1) // 1 SPS
-        .u16(sps.len() as u16)
-        .bytes(sps)
-        .u8(1) // 1 PPS
-        .u16(pps.len() as u16)
-        .bytes(pps);
+        .u8(0xE0 | sps.len() as u8);
+    for nal in sps {
+        p.u16(nal.len() as u16).bytes(nal);
+    }
+    p.u8(pps.len() as u8);
+    for nal in pps {
+        p.u16(nal.len() as u16).bytes(nal);
+    }
     mp4_box(*b"avcC", p.into_vec())
 }
 

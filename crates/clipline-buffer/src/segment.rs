@@ -11,23 +11,38 @@ pub struct SampleInfo {
 /// indexed by `samples`.
 #[derive(Debug, Clone, Default)]
 pub struct TrackSamples {
+    /// Presentation start of the first sample, seconds since recording t0.
+    pub pts_start_s: Option<f64>,
     pub data: Vec<u8>,
     pub samples: Vec<SampleInfo>,
 }
 
 impl TrackSamples {
     /// Iterate `data` sliced per the sample index.
-    pub fn sample_slices(&self) -> impl Iterator<Item = &[u8]> {
+    pub fn sample_slices(&self) -> impl Iterator<Item = std::io::Result<&[u8]>> {
         slice_samples(&self.data, &self.samples)
     }
 }
 
-fn slice_samples<'a>(data: &'a [u8], samples: &'a [SampleInfo]) -> impl Iterator<Item = &'a [u8]> {
+fn slice_samples<'a>(
+    data: &'a [u8],
+    samples: &'a [SampleInfo],
+) -> impl Iterator<Item = std::io::Result<&'a [u8]>> {
     let mut offset = 0usize;
     samples.iter().map(move |s| {
         let start = offset;
-        offset += s.size as usize;
-        &data[start..offset]
+        offset = offset.checked_add(s.size as usize).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "sample byte range overflow",
+            )
+        })?;
+        data.get(start..offset).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "sample metadata exceeds encoded track data",
+            )
+        })
     })
 }
 
@@ -60,7 +75,7 @@ impl Segment {
     }
 
     /// Iterate `data` sliced per the sample index.
-    pub fn sample_slices(&self) -> impl Iterator<Item = &[u8]> {
+    pub fn sample_slices(&self) -> impl Iterator<Item = std::io::Result<&[u8]>> {
         slice_samples(&self.data, &self.samples)
     }
 }
@@ -95,7 +110,7 @@ mod tests {
             ],
             audio: Vec::new(),
         };
-        let slices: Vec<&[u8]> = seg.sample_slices().collect();
+        let slices: Vec<&[u8]> = seg.sample_slices().collect::<Result<_, _>>().unwrap();
         assert_eq!(
             slices,
             vec![b"AAAA".as_slice(), b"BBB".as_slice(), b"CC".as_slice()]
@@ -112,10 +127,12 @@ mod tests {
             samples: vec![],
             audio: vec![
                 TrackSamples {
+                    pts_start_s: Some(0.0),
                     data: vec![0; 30],
                     samples: vec![],
                 },
                 TrackSamples {
+                    pts_start_s: Some(0.0),
                     data: vec![0; 20],
                     samples: vec![],
                 },
@@ -127,6 +144,7 @@ mod tests {
     #[test]
     fn track_samples_slice_like_segments() {
         let t = TrackSamples {
+            pts_start_s: Some(0.0),
             data: b"XXYYY".to_vec(),
             samples: vec![
                 SampleInfo {
@@ -141,7 +159,23 @@ mod tests {
                 },
             ],
         };
-        let slices: Vec<&[u8]> = t.sample_slices().collect();
+        let slices: Vec<&[u8]> = t.sample_slices().collect::<Result<_, _>>().unwrap();
         assert_eq!(slices, vec![b"XX".as_slice(), b"YYY".as_slice()]);
+    }
+
+    #[test]
+    fn malformed_public_sample_metadata_returns_error_instead_of_panicking() {
+        let track = TrackSamples {
+            pts_start_s: None,
+            data: vec![1, 2],
+            samples: vec![SampleInfo {
+                size: 3,
+                duration_s: 0.02,
+                is_sync: true,
+            }],
+        };
+
+        let error = track.sample_slices().next().unwrap().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 }

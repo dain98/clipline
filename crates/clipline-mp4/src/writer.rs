@@ -6,9 +6,17 @@ use crate::fragment::{
     FragmentError, TrackRun, TrackRunInfo,
 };
 use crate::init::{
-    audio_trak_with_tables, free_placeholder, ftyp, moov_init_multi, mvhd, video_trak_with_tables,
-    TrackConfig, VideoTrackConfig, MOVIE_TIMESCALE,
+    audio_trak_with_tables_and_edits, free_placeholder, ftyp, moov_init_multi, mvhd,
+    video_trak_with_tables_and_edits, EditListEntry, TrackConfig, VideoTrackConfig,
+    MOVIE_TIMESCALE,
 };
+
+#[derive(Debug, Clone, Copy)]
+struct TimelineRun {
+    presentation_start: u64,
+    media_start: u64,
+    duration: u64,
+}
 
 /// Per-track bookkeeping for the final moov.
 struct TrackState {
@@ -20,6 +28,7 @@ struct TrackState {
     /// (absolute offset of first sample byte, sample count) per fragment
     /// in which this track had samples.
     chunks: Vec<(u64, u32)>,
+    timeline_runs: Vec<TimelineRun>,
 }
 
 /// Streaming Hybrid MP4 writer (ddoc §10). While recording the file is a
@@ -53,6 +62,7 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
     }
 
     pub fn new_multi(mut w: W, tracks: Vec<TrackConfig>) -> io::Result<Self> {
+        validate_track_configs(&tracks)?;
         let ftyp = ftyp();
         w.write_all(&ftyp)?;
         let free_offset = ftyp.len() as u64;
@@ -69,6 +79,7 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
                     durations: Vec::new(),
                     sync: Vec::new(),
                     chunks: Vec::new(),
+                    timeline_runs: Vec::new(),
                 })
                 .collect(),
             free_offset,
@@ -79,6 +90,27 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
     /// Single-track fragment write (original API; requires exactly 1 track).
     pub fn write_fragment(&mut self, samples: &[FragSample]) -> io::Result<()> {
         self.write_fragment_multi(&[samples])
+    }
+
+    /// Advance one track to an absolute decode timestamp in its own
+    /// timescale. The next non-empty fragment for that track begins there.
+    pub fn set_track_decode_time(
+        &mut self,
+        track_index: usize,
+        decode_time: u64,
+    ) -> io::Result<()> {
+        let state = self
+            .tracks
+            .get_mut(track_index)
+            .ok_or_else(|| invalid_config(format!("track index {track_index} is out of range")))?;
+        if decode_time < state.next_decode_time {
+            return Err(invalid_config(format!(
+                "track {track_index} decode time cannot move backward from {} to {decode_time}",
+                state.next_decode_time
+            )));
+        }
+        state.next_decode_time = decode_time;
+        Ok(())
     }
 
     /// One fragment carrying samples for each track, positionally aligned
@@ -98,6 +130,11 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         if per_track.iter().all(|s| s.is_empty()) {
             return Ok(());
         }
+        validate_nonzero_durations(
+            per_track
+                .iter()
+                .flat_map(|samples| samples.iter().map(|s| s.duration)),
+        )?;
 
         let runs: Vec<TrackRun<'_>> = per_track
             .iter()
@@ -135,6 +172,7 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         for run in &runs {
             let idx = (run.track_id - 1) as usize;
             let state = &mut self.tracks[idx];
+            state.record_run(run.samples.iter().map(|sample| sample.duration))?;
             state.chunks.push((sample_offset, run.samples.len() as u32));
             for s in run.samples {
                 state.sizes.push(
@@ -170,6 +208,11 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         if per_track.iter().all(|s| s.is_empty()) {
             return Ok(());
         }
+        validate_nonzero_durations(
+            per_track
+                .iter()
+                .flat_map(|samples| samples.iter().map(|s| s.duration)),
+        )?;
 
         let info_storage: Vec<Vec<FragSampleInfo>> = per_track
             .iter()
@@ -227,6 +270,7 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         for run in &runs {
             let idx = (run.track_id - 1) as usize;
             let state = &mut self.tracks[idx];
+            state.record_run(per_track[idx].iter().map(|sample| sample.duration))?;
             state.chunks.push((sample_offset, run.samples.len() as u32));
             for s in per_track[idx] {
                 let size = s.data.len() as u32;
@@ -259,6 +303,11 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         if per_track.iter().all(|s| s.is_empty()) {
             return Ok(());
         }
+        validate_nonzero_durations(
+            per_track
+                .iter()
+                .flat_map(|samples| samples.iter().map(|s| s.duration)),
+        )?;
 
         let info_storage: Vec<Vec<FragSampleInfo>> = per_track
             .iter()
@@ -314,6 +363,7 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         for run in &runs {
             let idx = (run.track_id - 1) as usize;
             let state = &mut self.tracks[idx];
+            state.record_run(per_track[idx].iter().map(|sample| sample.duration))?;
             state.chunks.push((sample_offset, run.samples.len() as u32));
             for s in per_track[idx] {
                 state.sizes.push(s.size);
@@ -346,6 +396,11 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         if per_track.iter().all(|samples| samples.is_empty()) {
             return Ok(());
         }
+        validate_nonzero_durations(
+            per_track
+                .iter()
+                .flat_map(|samples| samples.iter().map(|s| s.duration)),
+        )?;
 
         let info_storage: Vec<Vec<FragSampleInfo>> = per_track
             .iter()
@@ -406,6 +461,7 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         for run in &runs {
             let index = (run.track_id - 1) as usize;
             let state = &mut self.tracks[index];
+            state.record_run(per_track[index].iter().map(|sample| sample.duration))?;
             state.chunks.push((sample_offset, run.samples.len() as u32));
             for sample in per_track[index] {
                 state.sizes.push(sample.size);
@@ -452,9 +508,97 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
 
         let mut moov = mvhd(duration_movie, self.tracks.len() as u32 + 1);
         for (i, t) in self.tracks.iter().enumerate() {
-            moov.extend(t.trak(i as u32 + 1, duration_movie));
+            moov.extend(t.trak(i as u32 + 1));
         }
         mp4_box(*b"moov", moov)
+    }
+}
+
+fn validate_track_configs(tracks: &[TrackConfig]) -> io::Result<()> {
+    if tracks.is_empty() {
+        return Err(invalid_config("at least one MP4 track is required"));
+    }
+    for (index, track) in tracks.iter().enumerate() {
+        match track {
+            TrackConfig::Video(cfg) => {
+                if cfg.width == 0 || cfg.height == 0 {
+                    return Err(invalid_config(format!(
+                        "video track {index} dimensions must be nonzero"
+                    )));
+                }
+                if cfg.timescale == 0 {
+                    return Err(invalid_config(format!(
+                        "video track {index} timescale must be nonzero"
+                    )));
+                }
+                match &cfg.codec {
+                    crate::init::VideoCodecParams::H264 { sps, pps } => {
+                        validate_parameter_sets(index, "H.264 SPS", sps, 31)?;
+                        validate_parameter_sets(index, "H.264 PPS", pps, u8::MAX as usize)?;
+                    }
+                    crate::init::VideoCodecParams::Hevc { vps, sps, pps } => {
+                        validate_parameter_sets(index, "HEVC VPS", vps, u16::MAX as usize)?;
+                        validate_parameter_sets(index, "HEVC SPS", sps, u16::MAX as usize)?;
+                        validate_parameter_sets(index, "HEVC PPS", pps, u16::MAX as usize)?;
+                    }
+                    crate::init::VideoCodecParams::Av1 {
+                        sequence_header_obu,
+                    } if sequence_header_obu.is_empty() => {
+                        return Err(invalid_config(format!(
+                            "video track {index} AV1 sequence header must be nonempty"
+                        )));
+                    }
+                    crate::init::VideoCodecParams::Av1 { .. } => {}
+                }
+            }
+            TrackConfig::Audio(cfg) => {
+                if cfg.channels == 0 || cfg.channels > u8::MAX as u16 {
+                    return Err(invalid_config(format!(
+                        "audio track {index} channel count must fit dOps"
+                    )));
+                }
+                if cfg.sample_rate == 0 || cfg.sample_rate > u16::MAX as u32 {
+                    return Err(invalid_config(format!(
+                        "audio track {index} sample rate must fit 16.16 sample-entry rate"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_parameter_sets(
+    track_index: usize,
+    label: &str,
+    sets: &[Vec<u8>],
+    max_count: usize,
+) -> io::Result<()> {
+    if sets.is_empty() || sets.len() > max_count {
+        return Err(invalid_config(format!(
+            "video track {track_index} {label} count must be 1..={max_count}"
+        )));
+    }
+    if sets
+        .iter()
+        .any(|set| set.is_empty() || set.len() > u16::MAX as usize)
+    {
+        return Err(invalid_config(format!(
+            "video track {track_index} {label} entries must be 1..=65535 bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_config(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
+
+fn validate_nonzero_durations(durations: impl Iterator<Item = u32>) -> io::Result<()> {
+    if durations.into_iter().any(|duration| duration == 0) {
+        Err(invalid_config("MP4 sample duration must be nonzero"))
+    } else {
+        Ok(())
     }
 }
 
@@ -489,13 +633,105 @@ impl TrackState {
 
     fn duration_movie_ts(&self) -> u64 {
         rescale_duration(
-            self.duration_media_ts(),
+            self.presentation_end(),
             self.cfg.timescale(),
             MOVIE_TIMESCALE,
         )
     }
 
-    fn trak(&self, track_id: u32, duration_movie: u64) -> Vec<u8> {
+    fn presentation_end(&self) -> u64 {
+        self.timeline_runs
+            .last()
+            .and_then(|run| run.presentation_start.checked_add(run.duration))
+            .unwrap_or(0)
+    }
+
+    fn record_run(&mut self, mut durations: impl Iterator<Item = u32>) -> io::Result<()> {
+        let duration = durations.try_fold(0_u64, |total, duration| {
+            total
+                .checked_add(u64::from(duration))
+                .ok_or_else(|| invalid_config("track duration overflow"))
+        })?;
+        let presentation_end = self
+            .next_decode_time
+            .checked_add(duration)
+            .ok_or_else(|| invalid_config("track decode time overflow"))?;
+        let media_start = self.duration_media_ts();
+        if media_start > i64::MAX as u64 {
+            return Err(invalid_config("track media time exceeds edit-list range"));
+        }
+        if let Some(previous) = self.timeline_runs.last_mut() {
+            let previous_presentation_end = previous
+                .presentation_start
+                .checked_add(previous.duration)
+                .ok_or_else(|| invalid_config("track presentation duration overflow"))?;
+            let previous_media_end = previous
+                .media_start
+                .checked_add(previous.duration)
+                .ok_or_else(|| invalid_config("track media duration overflow"))?;
+            if previous_presentation_end == self.next_decode_time
+                && previous_media_end == media_start
+            {
+                previous.duration = previous
+                    .duration
+                    .checked_add(duration)
+                    .ok_or_else(|| invalid_config("track duration overflow"))?;
+                return Ok(());
+            }
+        }
+        self.timeline_runs.push(TimelineRun {
+            presentation_start: self.next_decode_time,
+            media_start,
+            duration,
+        });
+        debug_assert_eq!(presentation_end, self.next_decode_time + duration);
+        Ok(())
+    }
+
+    fn edit_list(&self) -> Vec<EditListEntry> {
+        let mut entries = Vec::new();
+        let mut presentation_cursor_movie = 0_u64;
+        for run in &self.timeline_runs {
+            let run_start_movie = rescale_duration(
+                run.presentation_start,
+                self.cfg.timescale(),
+                MOVIE_TIMESCALE,
+            );
+            let run_end_movie = rescale_duration(
+                run.presentation_start.saturating_add(run.duration),
+                self.cfg.timescale(),
+                MOVIE_TIMESCALE,
+            );
+            if run_start_movie > presentation_cursor_movie {
+                entries.push(EditListEntry {
+                    duration_movie_ts: run_start_movie - presentation_cursor_movie,
+                    media_time: -1,
+                });
+            }
+            let duration_movie = run_end_movie.saturating_sub(run_start_movie);
+            if duration_movie > 0 {
+                entries.push(EditListEntry {
+                    duration_movie_ts: duration_movie,
+                    media_time: i64::try_from(run.media_start)
+                        .expect("record_run validates edit-list media time"),
+                });
+            }
+            presentation_cursor_movie = run_end_movie;
+        }
+        if entries.len() == 1
+            && entries[0].media_time == 0
+            && self
+                .timeline_runs
+                .first()
+                .is_some_and(|run| run.presentation_start == 0)
+        {
+            Vec::new()
+        } else {
+            entries
+        }
+    }
+
+    fn trak(&self, track_id: u32) -> Vec<u8> {
         let mut tail = self.stts();
         if let Some(stss) = self.stss() {
             tail.extend(stss);
@@ -504,12 +740,14 @@ impl TrackState {
         tail.extend(self.stsz());
         tail.extend(self.co64());
         let media = self.duration_media_ts();
+        let duration_movie = self.duration_movie_ts();
+        let edits = self.edit_list();
         match &self.cfg {
             TrackConfig::Video(v) => {
-                video_trak_with_tables(v, track_id, duration_movie, media, tail)
+                video_trak_with_tables_and_edits(v, track_id, duration_movie, media, tail, &edits)
             }
             TrackConfig::Audio(a) => {
-                audio_trak_with_tables(a, track_id, duration_movie, media, tail)
+                audio_trak_with_tables_and_edits(a, track_id, duration_movie, media, tail, &edits)
             }
         }
     }
@@ -633,6 +871,14 @@ mod tests {
             .collect()
     }
 
+    fn read_u32_at(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn read_i32_at(bytes: &[u8], offset: usize) -> i32 {
+        i32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
     // --- TrackState helper tests ---
 
     fn make_track_state(cfg: TrackConfig, samples: &[(u32, u32, bool)]) -> TrackState {
@@ -643,12 +889,20 @@ mod tests {
             durations: Vec::new(),
             sync: Vec::new(),
             chunks: Vec::new(),
+            timeline_runs: Vec::new(),
         };
         for &(size, duration, is_sync) in samples {
             state.sizes.push(size);
             state.durations.push(duration);
             state.sync.push(is_sync);
             state.next_decode_time += duration as u64;
+        }
+        if state.next_decode_time > 0 {
+            state.timeline_runs.push(TimelineRun {
+                presentation_start: 0,
+                media_start: 0,
+                duration: state.next_decode_time,
+            });
         }
         state
     }
@@ -818,19 +1072,138 @@ mod tests {
     fn duration_movie_ts_scales_to_movie_timescale() {
         let state = make_track_state(
             TrackConfig::Video(video_cfg()),
-            // 90_000 ticks at media timescale 90_000 = 1 second = 1000 movie ts
+            // 90_000 ticks at media timescale 90_000 = 1 second.
             &[(100, 90_000, true)],
         );
-        assert_eq!(state.duration_movie_ts(), 1000);
+        assert_eq!(state.duration_movie_ts(), MOVIE_TIMESCALE as u64);
+    }
+
+    #[test]
+    fn explicit_track_decode_times_survive_fragments_and_final_edit_list() {
+        let tracks = vec![
+            TrackConfig::Video(video_cfg()),
+            TrackConfig::Audio(audio_cfg()),
+        ];
+        let mut writer = HybridMp4Writer::new_multi(Cursor::new(Vec::new()), tracks).unwrap();
+        let video = vec![FragSample {
+            data: vec![0x01],
+            duration: 90_000,
+            is_sync: true,
+        }];
+        let audio = vec![FragSample {
+            data: vec![0x02],
+            duration: 960,
+            is_sync: true,
+        }];
+
+        writer.write_fragment_multi(&[&video, &[]]).unwrap();
+        writer.set_track_decode_time(1, 48_000).unwrap();
+        writer.write_fragment_multi(&[&video, &audio]).unwrap();
+        writer.set_track_decode_time(1, 96_000).unwrap();
+        writer.write_fragment_multi(&[&video, &audio]).unwrap();
+        let bytes = writer.finalize().unwrap().into_inner();
+
+        let tfdt_values: Vec<u64> = bytes
+            .windows(4)
+            .enumerate()
+            .filter(|(_, fourcc)| *fourcc == b"tfdt")
+            .map(|(offset, _)| {
+                assert_eq!(bytes[offset + 4], 1, "writer emits version-1 tfdt");
+                u64::from_be_bytes(bytes[offset + 8..offset + 16].try_into().unwrap())
+            })
+            .collect();
+        assert!(tfdt_values.contains(&48_000));
+        assert!(tfdt_values.contains(&96_000));
+
+        let elst_fourcc = bytes
+            .windows(4)
+            .position(|fourcc| fourcc == b"elst")
+            .expect("final track with gaps has elst");
+        let payload = elst_fourcc + 4;
+        assert_eq!(bytes[payload], 0, "small edit list uses version zero");
+        assert_eq!(read_u32_at(&bytes, payload + 4), 4);
+        let mut pos = payload + 8;
+        let mut entries = Vec::new();
+        for _ in 0..4 {
+            entries.push((read_u32_at(&bytes, pos), read_i32_at(&bytes, pos + 4)));
+            assert_eq!(read_u32_at(&bytes, pos + 8), 0x0001_0000);
+            pos += 12;
+        }
+        assert_eq!(
+            entries,
+            vec![(720_000, -1), (14_400, 0), (705_600, -1), (14_400, 960)]
+        );
+    }
+
+    #[test]
+    fn explicit_decode_time_rejects_unknown_track_backward_motion_and_zero_duration() {
+        let mut writer = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        assert_eq!(
+            writer.set_track_decode_time(1, 1).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        writer.set_track_decode_time(0, 100).unwrap();
+        assert_eq!(
+            writer.set_track_decode_time(0, 99).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let zero = [FragSample {
+            data: vec![1],
+            duration: 0,
+            is_sync: true,
+        }];
+        assert_eq!(
+            writer.write_fragment(&zero).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn new_multi_rejects_invalid_public_track_configuration_before_writing() {
+        let mut invalid_video = video_cfg();
+        invalid_video.timescale = 0;
+        let error = match HybridMp4Writer::new(Cursor::new(Vec::new()), invalid_video) {
+            Ok(_) => panic!("invalid video config was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        let invalid_audio = AudioTrackConfig {
+            channels: 256,
+            sample_rate: 48_000,
+            pre_skip: 0,
+        };
+        let error = match HybridMp4Writer::new_multi(
+            Cursor::new(Vec::new()),
+            vec![TrackConfig::Audio(invalid_audio)],
+        ) {
+            Ok(_) => panic!("invalid audio config was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        let invalid_params = VideoTrackConfig {
+            width: 64,
+            height: 64,
+            timescale: 90_000,
+            codec: crate::init::VideoCodecParams::H264 {
+                sps: vec![vec![0; u16::MAX as usize + 1]],
+                pps: vec![vec![1]],
+            },
+        };
+        let error = match HybridMp4Writer::new(Cursor::new(Vec::new()), invalid_params) {
+            Ok(_) => panic!("overlong parameter set was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
     fn duration_rescale_uses_wide_intermediate() {
         let duration = u64::MAX;
-        let expected = ((duration as u128 * MOVIE_TIMESCALE as u128) / 90_000u128) as u64;
         assert_eq!(
-            rescale_duration(duration, 90_000, MOVIE_TIMESCALE),
-            expected
+            rescale_duration(duration, MOVIE_TIMESCALE, MOVIE_TIMESCALE),
+            duration
         );
     }
 

@@ -558,10 +558,18 @@ fn set_params_if_empty(codec: Codec, au: &[u8], params: &Arc<Mutex<Option<VideoC
     }
     *guard = match codec {
         Codec::H264 => {
-            crate::annexb::extract_sps_pps(au).map(|(sps, pps)| VideoCodecParams::H264 { sps, pps })
+            crate::annexb::extract_sps_pps(au).map(|(sps, pps)| VideoCodecParams::H264 {
+                sps: vec![sps],
+                pps: vec![pps],
+            })
         }
-        Codec::Hevc => crate::hevc::extract_vps_sps_pps(au)
-            .map(|(vps, sps, pps)| VideoCodecParams::Hevc { vps, sps, pps }),
+        Codec::Hevc => {
+            crate::hevc::extract_vps_sps_pps(au).map(|(vps, sps, pps)| VideoCodecParams::Hevc {
+                vps: vec![vps],
+                sps: vec![sps],
+                pps: vec![pps],
+            })
+        }
         Codec::Av1 => crate::av1::extract_sequence_header(au).map(|sequence_header_obu| {
             VideoCodecParams::Av1 {
                 sequence_header_obu,
@@ -990,7 +998,11 @@ mod tests {
             let guard = params.lock().unwrap();
             match guard.as_ref().unwrap() {
                 VideoCodecParams::H264 { sps, .. } => {
-                    assert_eq!(sps, &[0x67, 0x64, 0x00, 0x0A, 0xAC], "first params cached");
+                    assert_eq!(
+                        sps,
+                        &[vec![0x67, 0x64, 0x00, 0x0A, 0xAC]],
+                        "first params cached"
+                    );
                 }
                 _ => panic!("expected H264"),
             }

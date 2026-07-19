@@ -395,8 +395,10 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             track_cfgs.push(TrackConfig::Audio(cfg.clone()));
         }
         let mut writer = HybridMp4Writer::new_multi(w, track_cfgs)?;
+        let timeline_origin_s = segments[0].pts_start_s;
         for seg in &segments {
-            let per_track = segment_fragment_refs(seg, &video_cfg, &audio_cfgs);
+            set_segment_decode_times(&mut writer, seg, &video_cfg, &audio_cfgs, timeline_origin_s)?;
+            let per_track = segment_fragment_refs(seg, &video_cfg, &audio_cfgs, timeline_origin_s)?;
             let slices: Vec<&[FragSampleRef<'_>]> =
                 per_track.iter().map(|v| v.as_slice()).collect();
             writer.write_fragment_multi_borrowed(&slices)?;
@@ -481,6 +483,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
                 .unwrap_or(pending.len());
             let mut track = TrackSamples::default();
             for p in pending.drain(..split) {
+                track.pts_start_s.get_or_insert(p.pts_s);
                 track.samples.push(SampleInfo {
                     size: p.data.len() as u32,
                     duration_s: p.duration_s,
@@ -714,6 +717,7 @@ fn full_session_writer_loop(
 ) {
     let mut target = Some(target);
     let mut writer: Option<HybridMp4Writer<Box<dyn WriteSeek>>> = None;
+    let mut timeline_origin_s = None;
     let mut first_error: Option<io::Error> = None;
     while let Ok(msg) = rx.recv() {
         match msg {
@@ -723,6 +727,7 @@ fn full_session_writer_loop(
                     if let Err(e) = write_full_session_segment(
                         &mut target,
                         &mut writer,
+                        &mut timeline_origin_s,
                         segment.video_cfg,
                         segment.audio_cfgs,
                         segment.segment,
@@ -751,10 +756,12 @@ fn full_session_writer_loop(
 fn write_full_session_segment(
     target: &mut Option<Box<dyn WriteSeek>>,
     writer: &mut Option<HybridMp4Writer<Box<dyn WriteSeek>>>,
+    timeline_origin_s: &mut Option<f64>,
     video_cfg: clipline_mp4::VideoTrackConfig,
     audio_cfgs: Vec<clipline_mp4::AudioTrackConfig>,
     seg: Arc<Segment>,
 ) -> io::Result<()> {
+    let origin_s = *timeline_origin_s.get_or_insert(seg.pts_start_s);
     if writer.is_none() {
         let mut track_cfgs = vec![TrackConfig::Video(video_cfg.clone())];
         for cfg in &audio_cfgs {
@@ -768,12 +775,11 @@ fn write_full_session_segment(
         })?;
         *writer = Some(HybridMp4Writer::new_multi(target, track_cfgs)?);
     }
-    let per_track = segment_fragment_refs(&seg, &video_cfg, &audio_cfgs);
+    let writer = writer.as_mut().expect("writer initialized");
+    set_segment_decode_times(writer, &seg, &video_cfg, &audio_cfgs, origin_s)?;
+    let per_track = segment_fragment_refs(&seg, &video_cfg, &audio_cfgs, origin_s)?;
     let slices: Vec<&[FragSampleRef<'_>]> = per_track.iter().map(|v| v.as_slice()).collect();
-    writer
-        .as_mut()
-        .expect("writer initialized")
-        .write_fragment_multi_borrowed(&slices)
+    writer.write_fragment_multi_borrowed(&slices)
 }
 
 fn try_reserve_queue_bytes(queued: &AtomicUsize, bytes: usize, max_bytes: usize) -> bool {
@@ -794,36 +800,118 @@ fn segment_fragment_refs<'a>(
     seg: &'a Segment,
     video_cfg: &clipline_mp4::VideoTrackConfig,
     audio_cfgs: &[clipline_mp4::AudioTrackConfig],
-) -> Vec<Vec<FragSampleRef<'a>>> {
-    let video_ts = video_cfg.timescale as f64;
-    let video: Vec<FragSampleRef<'a>> = seg
-        .sample_slices()
-        .zip(&seg.samples)
-        .map(|(slice, info)| FragSampleRef {
-            data: slice,
-            duration: (info.duration_s * video_ts).round() as u32,
-            is_sync: info.is_sync,
-        })
-        .collect();
+    timeline_origin_s: f64,
+) -> io::Result<Vec<Vec<FragSampleRef<'a>>>> {
+    let video_start = relative_pts_ticks(seg.pts_start_s, timeline_origin_s, video_cfg.timescale)?;
+    let video = quantized_fragment_refs(
+        seg.sample_slices(),
+        &seg.samples,
+        video_cfg.timescale,
+        video_start,
+    )?;
     let mut per_track: Vec<Vec<FragSampleRef<'a>>> = vec![video];
     for (track, cfg) in seg.audio.iter().zip(audio_cfgs) {
-        let ts = cfg.sample_rate as f64;
-        per_track.push(
-            track
-                .sample_slices()
-                .zip(&track.samples)
-                .map(|(slice, info)| FragSampleRef {
-                    data: slice,
-                    duration: (info.duration_s * ts).round() as u32,
-                    is_sync: info.is_sync,
-                })
-                .collect(),
-        );
+        let start = track
+            .pts_start_s
+            .map(|pts| relative_pts_ticks(pts, timeline_origin_s, cfg.sample_rate))
+            .transpose()?
+            .unwrap_or(0);
+        per_track.push(quantized_fragment_refs(
+            track.sample_slices(),
+            &track.samples,
+            cfg.sample_rate,
+            start,
+        )?);
     }
     // Segments recorded before an audio source was attached have fewer audio
     // tracks; pad with empty runs to keep alignment.
     per_track.resize_with(1 + audio_cfgs.len(), Vec::new);
-    per_track
+    Ok(per_track)
+}
+
+fn quantized_fragment_refs<'a>(
+    slices: impl Iterator<Item = io::Result<&'a [u8]>>,
+    samples: &[SampleInfo],
+    timescale: u32,
+    start_ticks: u64,
+) -> io::Result<Vec<FragSampleRef<'a>>> {
+    let mut elapsed_s = 0.0_f64;
+    let mut previous_end = start_ticks;
+    slices
+        .zip(samples)
+        .map(|(slice, info)| {
+            elapsed_s += info.duration_s;
+            let relative_end = elapsed_s * f64::from(timescale);
+            if !relative_end.is_finite() || relative_end < 0.0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid media sample duration",
+                ));
+            }
+            let end_ticks = start_ticks
+                .checked_add(relative_end.round() as u64)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "media duration overflow")
+                })?;
+            let duration = end_ticks.checked_sub(previous_end).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "media sample timeline moved backward",
+                )
+            })?;
+            previous_end = end_ticks;
+            Ok(FragSampleRef {
+                data: slice?,
+                duration: u32::try_from(duration).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "media sample duration exceeds MP4 field",
+                    )
+                })?,
+                is_sync: info.is_sync,
+            })
+        })
+        .collect()
+}
+
+fn set_segment_decode_times<W: Write + Seek>(
+    writer: &mut HybridMp4Writer<W>,
+    seg: &Segment,
+    video_cfg: &clipline_mp4::VideoTrackConfig,
+    audio_cfgs: &[clipline_mp4::AudioTrackConfig],
+    timeline_origin_s: f64,
+) -> io::Result<()> {
+    writer.set_track_decode_time(
+        0,
+        relative_pts_ticks(seg.pts_start_s, timeline_origin_s, video_cfg.timescale)?,
+    )?;
+    for (index, (track, cfg)) in seg.audio.iter().zip(audio_cfgs).enumerate() {
+        if let Some(start_s) = track.pts_start_s {
+            writer.set_track_decode_time(
+                index + 1,
+                relative_pts_ticks(start_s, timeline_origin_s, cfg.sample_rate)?,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn relative_pts_ticks(pts_s: f64, origin_s: f64, timescale: u32) -> io::Result<u64> {
+    let relative = pts_s - origin_s;
+    if !relative.is_finite() || relative < -1e-9 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "media sample timestamp precedes recording origin",
+        ));
+    }
+    let ticks = relative.max(0.0) * f64::from(timescale);
+    if ticks > u64::MAX as f64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "media sample timestamp exceeds MP4 timeline",
+        ));
+    }
+    Ok(ticks.round() as u64)
 }
 
 #[cfg(test)]
@@ -863,6 +951,68 @@ mod tests {
                 vec![0x68, 0xEE, 0x38, 0x80],
             )
         }
+    }
+
+    struct GappedAudioSource {
+        packets: std::collections::VecDeque<AudioPacket>,
+    }
+
+    impl GappedAudioSource {
+        fn new() -> Self {
+            let mut packets = std::collections::VecDeque::new();
+            for start in [1.2_f64, 3.2] {
+                for index in 0..38 {
+                    packets.push_back(AudioPacket {
+                        data: vec![index as u8; 24],
+                        pts_s: start + f64::from(index) * 0.02,
+                        duration_s: 0.02,
+                    });
+                }
+            }
+            Self { packets }
+        }
+    }
+
+    impl AudioSource for GappedAudioSource {
+        fn poll_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
+            let mut output = Vec::new();
+            while self
+                .packets
+                .front()
+                .is_some_and(|packet| packet.pts_s + packet.duration_s <= until_pts_s + 1e-9)
+            {
+                output.push(self.packets.pop_front().expect("front packet exists"));
+            }
+            Ok(output)
+        }
+
+        fn track_config(&self) -> clipline_mp4::AudioTrackConfig {
+            clipline_mp4::AudioTrackConfig {
+                channels: 2,
+                sample_rate: 48_000,
+                pre_skip: 312,
+            }
+        }
+    }
+
+    fn edit_list_entries(bytes: &[u8]) -> Vec<(u32, i32)> {
+        let fourcc = bytes
+            .windows(4)
+            .position(|window| window == b"elst")
+            .expect("audio gap edit list");
+        let payload = fourcc + 4;
+        assert_eq!(bytes[payload], 0);
+        let count = u32::from_be_bytes(bytes[payload + 4..payload + 8].try_into().unwrap());
+        let mut entries = Vec::new();
+        let mut pos = payload + 8;
+        for _ in 0..count {
+            entries.push((
+                u32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap()),
+                i32::from_be_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()),
+            ));
+            pos += 12;
+        }
+        entries
     }
 
     #[test]
@@ -989,6 +1139,44 @@ mod tests {
         // First packet of the second segment starts at its GOP boundary.
         let seg2 = ring.segments().nth(1).unwrap();
         assert_eq!(&seg2.audio[0].data[..6], b"P00050");
+        assert!((seg2.audio[0].pts_start_s.unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn delayed_and_gapped_audio_timing_survives_replay_and_full_session_muxing() {
+        let dir = TestDir::new("clipline-pipeline", "gapped-audio-timeline");
+        let full_path = dir.path().join("full.mp4");
+        let mut recorder = Recorder::new(
+            MockCapture::new(120, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        )
+        .with_audio(Box::new(GappedAudioSource::new()));
+        recorder
+            .start_full_session(std::fs::File::create(&full_path).unwrap())
+            .unwrap();
+
+        recorder.run_to_end().unwrap();
+        let segments: Vec<_> = recorder.ring().unwrap().segments().collect();
+        assert!(segments[0].audio[0].samples.is_empty());
+        assert!((segments[1].audio[0].pts_start_s.unwrap() - 1.2).abs() < 1e-9);
+        assert!(segments[2].audio[0].samples.is_empty());
+        assert!((segments[3].audio[0].pts_start_s.unwrap() - 3.2).abs() < 1e-9);
+
+        let replay = recorder
+            .save_replay(std::io::Cursor::new(Vec::new()), 10.0, None)
+            .map(|(writer, _)| writer.into_inner())
+            .unwrap();
+        recorder.finish_full_session().unwrap().unwrap();
+        let full = std::fs::read(full_path).unwrap();
+        let expected = vec![
+            (864_000, -1),
+            (547_200, 0),
+            (892_800, -1),
+            (547_200, 36_480),
+        ];
+        assert_eq!(edit_list_entries(&replay), expected);
+        assert_eq!(edit_list_entries(&full), expected);
     }
 
     #[test]
