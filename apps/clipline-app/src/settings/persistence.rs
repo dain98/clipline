@@ -169,6 +169,18 @@ pub fn config_base() -> PathBuf {
         .join("Clipline")
 }
 
+pub fn local_cache_base() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .map(|home| home.join("AppData").join("Local"))
+        })
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Clipline")
+}
+
 pub fn settings_path() -> PathBuf {
     config_base().join("settings.json")
 }

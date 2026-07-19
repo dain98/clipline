@@ -1,13 +1,14 @@
 //! Clipline Cloud desktop integration: connection state, OS credential storage,
 //! and per-clip uploads through the first-party API client.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Utc};
@@ -23,6 +24,7 @@ use windows_sys::Win32::Security::Credentials::{
     CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
     CRED_TYPE_GENERIC,
 };
+use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -44,8 +46,15 @@ const CLOUD_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const UPLOAD_PAYLOAD_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CLOUD_THUMBNAIL_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const CLOUD_MEDIA_FALLBACK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const CLOUD_MEDIA_HARD_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const CLOUD_MEDIA_SIZE_SLACK_BYTES: u64 = 64 * 1024 * 1024;
+const CLOUD_CACHE_QUOTA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+const CLOUD_CACHE_FREE_SPACE_FLOOR_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const CLOUD_CACHE_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const CLOUD_CACHE_PLAYBACK_LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 static CLOUD_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static CLOUD_CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static CLOUD_CACHE_LEASES: OnceLock<Mutex<BTreeMap<PathBuf, Instant>>> = OnceLock::new();
 static CLOUD_USER_AVATAR_CACHE: OnceLock<Mutex<Option<CachedCloudUserAvatar>>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +200,29 @@ struct CachedCloudUserAvatar {
     key: String,
     etag: Option<String>,
     data_url: String,
+}
+
+struct OwnedCloudCacheTemp {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl OwnedCloudCacheTemp {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for OwnedCloudCacheTemp {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 #[tauri::command]
@@ -436,7 +468,7 @@ async fn download_cloud_asset_to_cache(
     token: &str,
     request: CloudAssetDownload<'_>,
 ) -> Result<Option<PathBuf>, String> {
-    prune_old_cloud_cache_files(&cloud_clip_cache_root_dir(), CLOUD_CACHE_MAX_AGE);
+    let cache_root = prepare_cloud_cache_root()?;
     let target = cloud_clip_cache_path(
         cloud,
         request.remote_clip_id,
@@ -444,7 +476,10 @@ async fn download_cloud_asset_to_cache(
         request.extension,
         request.version,
     )?;
+    lease_cloud_cache_path(&target);
+    prune_cloud_cache_for_download(&cache_root, 0, std::slice::from_ref(&target))?;
     if cached_asset_matches(&target, request.expected_size_bytes) {
+        touch_cloud_cache_entry(&target)?;
         return Ok(Some(target));
     }
     let url = cloud_clip_asset_url(cloud, request.remote_clip_id, request.asset)?;
@@ -481,12 +516,21 @@ async fn download_cloud_asset_to_cache(
             request.max_size_bytes as f64 / (1024.0 * 1024.0)
         ));
     }
+    let reservation = response
+        .content_length()
+        .unwrap_or(request.max_size_bytes)
+        .min(request.max_size_bytes);
+    prune_cloud_cache_for_download(&cache_root, reservation, std::slice::from_ref(&target))?;
 
     let tmp = cloud_clip_cache_tmp_path(&target)?;
     let mut response = response;
-    let mut file = tokio::fs::File::create(&tmp)
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
         .await
         .map_err(|e| format!("create cloud cache file: {e}"))?;
+    let mut tmp_owner = OwnedCloudCacheTemp::new(tmp.clone());
     let mut written = 0_u64;
     while let Some(chunk) = response
         .chunk()
@@ -495,8 +539,6 @@ async fn download_cloud_asset_to_cache(
     {
         written += chunk.len() as u64;
         if written > request.max_size_bytes {
-            drop(file);
-            let _ = tokio::fs::remove_file(&tmp).await;
             return Err(format!(
                 "download cloud {} is too large (limit {:.1} MB)",
                 request.asset,
@@ -512,35 +554,52 @@ async fn download_cloud_asset_to_cache(
         .map_err(|e| format!("flush cloud cache file: {e}"))?;
     drop(file);
     if written == 0 {
-        let _ = tokio::fs::remove_file(&tmp).await;
         return Err(format!(
             "download cloud {} returned an empty body",
             request.asset
         ));
     }
 
-    if target.exists() && !cached_asset_matches(&target, request.expected_size_bytes) {
-        let _ = tokio::fs::remove_file(cloud_cache_marker_path(&target)).await;
-        let _ = tokio::fs::remove_file(&target).await;
+    {
+        let _cache_guard = cloud_cache_lock()
+            .lock()
+            .map_err(|_| "cloud cache lock is poisoned".to_string())?;
+        if target.exists() && !cached_asset_matches(&target, request.expected_size_bytes) {
+            let _ = std::fs::remove_file(cloud_cache_marker_path(&target));
+            let _ = std::fs::remove_file(&target);
+        }
+        let mut protected = leased_cloud_cache_paths();
+        protected.push(target.clone());
+        protected.push(tmp.clone());
+        let free = cloud_cache_available_space(&cache_root)?;
+        enforce_cloud_cache_limits(
+            &cache_root,
+            CLOUD_CACHE_MAX_AGE,
+            CLOUD_CACHE_QUOTA_BYTES,
+            free,
+            CLOUD_CACHE_FREE_SPACE_FLOOR_BYTES,
+            written,
+            &protected,
+        )?;
     }
 
     match tokio::fs::rename(&tmp, &target).await {
         Ok(()) => {
+            tmp_owner.disarm();
             write_cloud_cache_marker(&target, written).await?;
+            touch_cloud_cache_entry(&target)?;
+            lease_cloud_cache_path(&target);
             Ok(Some(target))
         }
         Err(error) if target.exists() => {
-            let _ = tokio::fs::remove_file(&tmp).await;
             if cached_asset_matches(&target, request.expected_size_bytes) {
+                touch_cloud_cache_entry(&target)?;
                 Ok(Some(target))
             } else {
                 Err(format!("finalize cloud cache file: {error}"))
             }
         }
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            Err(format!("finalize cloud cache file: {error}"))
-        }
+        Err(error) => Err(format!("finalize cloud cache file: {error}")),
     }
 }
 
@@ -680,7 +739,54 @@ fn cloud_clip_cache_dir(cloud: &CloudSettings) -> Result<PathBuf, String> {
 }
 
 fn cloud_clip_cache_root_dir() -> PathBuf {
+    crate::settings::persistence::local_cache_base().join("cloud-cache")
+}
+
+fn legacy_cloud_clip_cache_root_dir() -> PathBuf {
     crate::settings::persistence::config_base().join("cloud-cache")
+}
+
+fn prepare_cloud_cache_root() -> Result<PathBuf, String> {
+    let root = cloud_clip_cache_root_dir();
+    migrate_legacy_cloud_cache(&legacy_cloud_clip_cache_root_dir(), &root)?;
+    std::fs::create_dir_all(&root).map_err(|error| format!("create cloud cache: {error}"))?;
+    Ok(root)
+}
+
+fn migrate_legacy_cloud_cache(legacy: &Path, local: &Path) -> Result<(), String> {
+    if legacy == local || !legacy.exists() {
+        return Ok(());
+    }
+    let metadata = std::fs::symlink_metadata(legacy)
+        .map_err(|error| format!("inspect legacy cloud cache: {error}"))?;
+    if !metadata.is_dir() || metadata_is_link(&metadata) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(local).map_err(|error| format!("create local cloud cache: {error}"))?;
+    let entries =
+        std::fs::read_dir(legacy).map_err(|error| format!("read legacy cloud cache: {error}"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let namespace = name.to_string_lossy();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_dir()
+            || metadata_is_link(&metadata)
+            || namespace.len() != 16
+            || !namespace.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            continue;
+        }
+        let destination = local.join(&name);
+        if destination.exists() {
+            continue;
+        }
+        std::fs::rename(&path, &destination)
+            .map_err(|error| format!("migrate cloud cache namespace {namespace}: {error}"))?;
+    }
+    Ok(())
 }
 
 fn cloud_cache_namespace(cloud: &CloudSettings) -> Result<String, String> {
@@ -765,41 +871,256 @@ fn cloud_media_cache_max_bytes(expected_size_bytes: Option<i64>) -> u64 {
                 .saturating_add(CLOUD_MEDIA_SIZE_SLACK_BYTES)
         })
         .unwrap_or(CLOUD_MEDIA_FALLBACK_MAX_BYTES)
+        .min(CLOUD_MEDIA_HARD_MAX_BYTES)
 }
 
-fn prune_old_cloud_cache_files(cache_dir: &Path, max_age: Duration) {
-    let Ok(entries) = std::fs::read_dir(cache_dir) else {
-        return;
-    };
-    let now = std::time::SystemTime::now();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            prune_old_cloud_cache_files(&path, max_age);
-            continue;
-        }
-        if !path.is_file() {
-            continue;
-        }
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        let is_tmp = file_name.ends_with(".tmp");
-        let old = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| age >= max_age);
-        if is_tmp || old {
-            let _ = std::fs::remove_file(path);
-        }
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CloudCachePruneReport {
+    evicted_entries: usize,
+    freed_bytes: u64,
+    remaining_bytes: u64,
+}
+
+struct CloudCacheEntry {
+    path: PathBuf,
+    marker: Option<PathBuf>,
+    bytes: u64,
+    modified: std::time::SystemTime,
+}
+
+fn cloud_cache_lock() -> &'static Mutex<()> {
+    CLOUD_CACHE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn cloud_cache_leases() -> &'static Mutex<BTreeMap<PathBuf, Instant>> {
+    CLOUD_CACHE_LEASES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn lease_cloud_cache_path(path: &Path) {
+    if let Ok(mut leases) = cloud_cache_leases().lock() {
+        let now = Instant::now();
+        leases.retain(|_, expires| *expires > now);
+        leases.insert(path.to_path_buf(), now + CLOUD_CACHE_PLAYBACK_LEASE);
     }
 }
 
+fn leased_cloud_cache_paths() -> Vec<PathBuf> {
+    let Ok(mut leases) = cloud_cache_leases().lock() else {
+        return Vec::new();
+    };
+    let now = Instant::now();
+    leases.retain(|_, expires| *expires > now);
+    leases.keys().cloned().collect()
+}
+
+fn prune_cloud_cache_for_download(
+    root: &Path,
+    additional_bytes: u64,
+    additionally_protected: &[PathBuf],
+) -> Result<CloudCachePruneReport, String> {
+    let _guard = cloud_cache_lock()
+        .lock()
+        .map_err(|_| "cloud cache lock is poisoned".to_string())?;
+    let mut protected = leased_cloud_cache_paths();
+    protected.extend_from_slice(additionally_protected);
+    let free = cloud_cache_available_space(root)?;
+    enforce_cloud_cache_limits(
+        root,
+        CLOUD_CACHE_MAX_AGE,
+        CLOUD_CACHE_QUOTA_BYTES,
+        free,
+        CLOUD_CACHE_FREE_SPACE_FLOOR_BYTES.saturating_add(additional_bytes),
+        additional_bytes,
+        &protected,
+    )
+}
+
+fn enforce_cloud_cache_limits(
+    root: &Path,
+    max_age: Duration,
+    quota_bytes: u64,
+    available_bytes: u64,
+    free_space_floor_bytes: u64,
+    additional_bytes: u64,
+    protected: &[PathBuf],
+) -> Result<CloudCachePruneReport, String> {
+    let now = std::time::SystemTime::now();
+    let mut entries = Vec::new();
+    collect_cloud_cache_entries(root, now, &mut entries)?;
+    entries.sort_by_key(|entry| entry.modified);
+    let total = entries
+        .iter()
+        .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+    let required_for_quota = total
+        .saturating_add(additional_bytes)
+        .saturating_sub(quota_bytes);
+    let required_for_free_space = free_space_floor_bytes.saturating_sub(available_bytes);
+    let required = required_for_quota.max(required_for_free_space);
+    let mut report = CloudCachePruneReport::default();
+
+    for entry in entries {
+        let is_protected = protected.iter().any(|path| {
+            path == &entry.path || entry.marker.as_ref().is_some_and(|marker| marker == path)
+        });
+        if is_protected {
+            continue;
+        }
+        let old = now
+            .duration_since(entry.modified)
+            .ok()
+            .is_some_and(|age| age >= max_age);
+        if !old && report.freed_bytes >= required {
+            continue;
+        }
+        if std::fs::remove_file(&entry.path).is_err() {
+            continue;
+        }
+        if let Some(marker) = entry.marker {
+            let _ = std::fs::remove_file(marker);
+        }
+        report.evicted_entries += 1;
+        report.freed_bytes = report.freed_bytes.saturating_add(entry.bytes);
+    }
+
+    report.remaining_bytes = total.saturating_sub(report.freed_bytes);
+    let quota_satisfied = report.remaining_bytes.saturating_add(additional_bytes) <= quota_bytes;
+    let free_space_satisfied =
+        available_bytes.saturating_add(report.freed_bytes) >= free_space_floor_bytes;
+    if !quota_satisfied || !free_space_satisfied {
+        return Err(format!(
+            "cloud cache cannot reserve {:.1} MB without evicting active media or crossing its disk limits",
+            additional_bytes as f64 / (1024.0 * 1024.0)
+        ));
+    }
+    Ok(report)
+}
+
+fn collect_cloud_cache_entries(
+    directory: &Path,
+    now: std::time::SystemTime,
+    entries: &mut Vec<CloudCacheEntry>,
+) -> Result<(), String> {
+    let read_dir = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("read cloud cache {directory:?}: {error}")),
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.is_dir() {
+            if !metadata_is_link(&metadata) {
+                collect_cloud_cache_entries(&path, now, entries)?;
+            }
+            continue;
+        }
+        if !metadata.is_file() || metadata_is_link(&metadata) {
+            continue;
+        }
+        let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+        if is_owned_cloud_cache_temp(&path) {
+            let stale = now
+                .duration_since(modified)
+                .ok()
+                .is_some_and(|age| age >= CLOUD_CACHE_TEMP_MAX_AGE);
+            if stale {
+                let _ = std::fs::remove_file(path);
+            }
+            continue;
+        }
+        let is_marker = path.extension().and_then(|ext| ext.to_str()) == Some("ok");
+        if is_marker {
+            let asset = path.with_extension("");
+            if asset.is_file() {
+                continue;
+            }
+            entries.push(CloudCacheEntry {
+                path,
+                marker: None,
+                bytes: metadata.len(),
+                modified,
+            });
+            continue;
+        }
+        let marker = cloud_cache_marker_path(&path);
+        let marker_bytes = std::fs::metadata(&marker)
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        entries.push(CloudCacheEntry {
+            path,
+            marker: (marker_bytes > 0).then_some(marker),
+            bytes: metadata.len().saturating_add(marker_bytes),
+            modified,
+        });
+    }
+    Ok(())
+}
+
+fn is_owned_cloud_cache_temp(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let mut parts = name.rsplit('.');
+    parts.next() == Some("tmp")
+        && parts
+            .next()
+            .is_some_and(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
+        && parts
+            .next()
+            .is_some_and(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
+        && parts.next().is_some()
+}
+
+fn metadata_is_link(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+fn touch_cloud_cache_entry(path: &Path) -> Result<(), String> {
+    let now = std::time::SystemTime::now();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(now))
+        .map_err(|error| format!("refresh cloud cache recency: {error}"))?;
+    let marker = cloud_cache_marker_path(path);
+    if marker.exists() {
+        let _ = std::fs::File::options()
+            .write(true)
+            .open(marker)
+            .and_then(|file| file.set_modified(now));
+    }
+    Ok(())
+}
+
+fn cloud_cache_available_space(path: &Path) -> Result<u64, String> {
+    let path_w = wide_null(path.as_os_str());
+    let mut available = 0_u64;
+    let result = unsafe {
+        GetDiskFreeSpaceExW(
+            path_w.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        return Err(format!(
+            "read cloud cache free space: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(available)
+}
+
 fn allow_cloud_cache_asset<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), String> {
-    let cache_dir = crate::settings::persistence::config_base().join("cloud-cache");
+    let cache_dir = prepare_cloud_cache_root()?;
     let canonical_dir = cache_dir
         .canonicalize()
         .map_err(|e| format!("canonicalize cloud cache {cache_dir:?}: {e}"))?;
@@ -2404,24 +2725,148 @@ mod tests {
     }
 
     #[test]
-    fn prune_cloud_cache_removes_old_and_tmp_files() {
-        let dir = TestDir::new("clipline-cloud", "cloud-cache-prune");
-        let keep = dir.path().join("keep.mp4");
-        let old = dir.path().join("old.mp4");
-        let tmp = dir.path().join("new.mp4.1.tmp");
-        let nested = dir.path().join("account").join("nested.mp4");
-        std::fs::write(&keep, b"keep").unwrap();
-        std::fs::write(&old, b"old").unwrap();
-        std::fs::write(&tmp, b"tmp").unwrap();
-        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
-        std::fs::write(&nested, b"nested").unwrap();
+    fn cloud_cache_prunes_lru_pairs_but_preserves_leased_entries() {
+        let dir = TestDir::new("clipline-cloud", "cloud-cache-lru");
+        let account = dir.path().join("account");
+        std::fs::create_dir_all(&account).unwrap();
+        let oldest = account.join("old.mp4");
+        let newer = account.join("new.mp4");
+        let leased = account.join("playing.mp4");
+        let now = std::time::SystemTime::now();
+        for (path, age) in [(&oldest, 30), (&newer, 20), (&leased, 10)] {
+            std::fs::write(path, [0_u8; 8]).unwrap();
+            std::fs::write(cloud_cache_marker_path(path), b"8").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(now - Duration::from_secs(age))
+                .unwrap();
+        }
 
-        prune_old_cloud_cache_files(dir.path(), Duration::ZERO);
+        let report = enforce_cloud_cache_limits(
+            dir.path(),
+            Duration::from_secs(365 * 24 * 60 * 60),
+            18,
+            u64::MAX,
+            0,
+            0,
+            std::slice::from_ref(&leased),
+        )
+        .unwrap();
 
-        assert!(!old.exists());
-        assert!(!tmp.exists());
-        assert!(!keep.exists());
-        assert!(!nested.exists());
+        assert_eq!(report.evicted_entries, 1);
+        assert!(!oldest.exists());
+        assert!(!cloud_cache_marker_path(&oldest).exists());
+        assert!(newer.exists());
+        assert!(leased.exists());
+    }
+
+    #[test]
+    fn cloud_cache_prunes_only_stale_owned_temps() {
+        let dir = TestDir::new("clipline-cloud", "cloud-cache-temp-ownership");
+        let stale = dir.path().join("media.mp4.123.1.tmp");
+        let active = dir.path().join("media.mp4.123.2.tmp");
+        let unrelated = dir.path().join("editor.tmp");
+        for path in [&stale, &active, &unrelated] {
+            std::fs::write(path, b"tmp").unwrap();
+        }
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+
+        enforce_cloud_cache_limits(
+            dir.path(),
+            CLOUD_CACHE_MAX_AGE,
+            u64::MAX,
+            u64::MAX,
+            0,
+            0,
+            &[],
+        )
+        .unwrap();
+
+        assert!(!stale.exists());
+        assert!(active.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn cloud_cache_refuses_capacity_when_every_candidate_is_leased() {
+        let dir = TestDir::new("clipline-cloud", "cloud-cache-leased-capacity");
+        let leased = dir.path().join("playing.mp4");
+        std::fs::write(&leased, [0_u8; 8]).unwrap();
+
+        let error = enforce_cloud_cache_limits(
+            dir.path(),
+            CLOUD_CACHE_MAX_AGE,
+            4,
+            u64::MAX,
+            0,
+            0,
+            std::slice::from_ref(&leased),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("active media"), "{error}");
+        assert!(leased.exists());
+    }
+
+    #[test]
+    fn owned_cloud_cache_temp_cleans_only_while_armed() {
+        let dir = TestDir::new("clipline-cloud", "cloud-cache-temp-guard");
+        let abandoned = dir.path().join("abandoned.tmp");
+        let published = dir.path().join("published.tmp");
+        std::fs::write(&abandoned, b"partial").unwrap();
+        std::fs::write(&published, b"complete").unwrap();
+
+        drop(OwnedCloudCacheTemp::new(abandoned.clone()));
+        let mut owner = OwnedCloudCacheTemp::new(published.clone());
+        owner.disarm();
+        drop(owner);
+
+        assert!(!abandoned.exists());
+        assert!(published.exists());
+    }
+
+    #[test]
+    fn cloud_media_size_hint_is_clamped_to_hard_limit() {
+        assert_eq!(
+            cloud_media_cache_max_bytes(Some(i64::MAX)),
+            CLOUD_MEDIA_HARD_MAX_BYTES
+        );
+        assert_eq!(
+            cloud_media_cache_max_bytes(Some(1)),
+            CLOUD_MEDIA_SIZE_SLACK_BYTES + 2
+        );
+    }
+
+    #[test]
+    fn legacy_cloud_cache_migration_moves_only_regular_namespace_directories() {
+        let dir = TestDir::new("clipline-cloud", "cloud-cache-migration");
+        let legacy = dir.path().join("roaming-cloud-cache");
+        let local = dir.path().join("local-cloud-cache");
+        let namespace = legacy.join("abcdef0123456789");
+        std::fs::create_dir_all(&namespace).unwrap();
+        std::fs::write(namespace.join("clip.mp4"), b"clip").unwrap();
+        std::fs::write(legacy.join("unrelated.txt"), b"leave me").unwrap();
+        let external = dir.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("outside.mp4"), b"outside").unwrap();
+        let linked_namespace = legacy.join("1111111111111111");
+        let linked = std::os::windows::fs::symlink_dir(&external, &linked_namespace).is_ok();
+
+        migrate_legacy_cloud_cache(&legacy, &local).unwrap();
+
+        assert!(local.join("abcdef0123456789").join("clip.mp4").exists());
+        assert!(legacy.join("unrelated.txt").exists());
+        if linked {
+            assert!(external.join("outside.mp4").exists());
+            assert!(!local.join("1111111111111111").exists());
+        }
     }
 
     #[test]
