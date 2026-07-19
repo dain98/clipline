@@ -4,6 +4,30 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): destructive storage ownership boundary
+
+The combined codebase audit's H-02 is fixed. Storage status, quota GC, and abandoned-recording
+recovery no longer adopt every MP4 merely because it is in the configured media directory or one
+of its direct children. A `<clip>.clipline.json` metadata document is now the per-file ownership
+proof for newly authored replays and full sessions. Clipline creates it atomically before writing,
+keeps it with recoverable recordings, carries it through collision recovery, skips stale marker
+names during reservation, and removes it when a save fails or a session is deliberately discarded.
+
+Quota and recovery ignore ambiguous unmarked MP4 and `.mp4.recording` files, including files in
+custom-folder child directories. Existing finalized clips with Clipline marker or osu! enrichment
+sidecars remain conservatively recognized for legacy compatibility; poster caches alone are not
+ownership proof. Recording recovery requires the explicit ownership document, handles mixed-case
+`.MP4.RECORDING` suffixes, and moves the document when a recovered filename needs a collision
+suffix. The library continues to display unmarked MP4s for compatibility, but background storage
+maintenance cannot delete them.
+
+Plan commit `7dfc10a`; implementation commit `234f6af`. The focused storage suite passes with 23
+tests, focused service coverage passes with 37 tests, CI-mode `cargo test --workspace` passes, and
+fresh-cache workspace clippy passes with warnings denied. Computer Use opened the rebuilt app and
+confirmed the existing nine-clip library and quota status render normally. A new replay could not
+be recorded on this VM because no video encoder can be opened; marker creation and unrelated-file
+preservation are covered through controlled filesystem tests.
+
 ## Checkpoint (2026-07-18): MP4 untrusted-input hardening
 
 The first `CODEBASE_AUDIT.md` remediation batch fixes H1, M19, and M20 in `clipline-mp4`.
