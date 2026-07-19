@@ -1399,7 +1399,8 @@ async function bulkDeleteSelected() {
     const notice = deletionNotice(report.deleted.length);
     if (notice) setNotice(notice, { transient: true });
     $("error").textContent = formatDeletionFailures(report.failed);
-    clearSelection();
+    if (report.deleted.length > 0) exitSelectMode();
+    else clearSelection();
   } catch (e) {
     $("error").textContent = String(e);
   }
