@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): transition-only Cloud gallery rendering
+
+The combined audit's L-32 is fixed. Cloud upload progress reconciliation is now DOM-free in
+`CloudCore` and returns the normalized record plus a `renderRequired` decision. Byte-only multipart
+ticks still update the deck percentage immediately, but they preserve the upload record timestamp
+and do not rebuild either gallery or rearm poster observers.
+
+The first record plus path, local/remote identity, URL, visibility, status, or error transitions
+still render synchronously. That preserves Cloud membership, search/filter results, sort order,
+visibility badges, processing/failure states, and terminal uploaded state. Explicit null values in
+native events now authoritatively clear stale remote/error fields rather than being mistaken for an
+omitted field.
+
+Plan commit `1bd80ca`; implementation commit `255a8a6`. Boa tests cover byte-only reconciliation,
+all meaningful transitions, and a 500-event burst that produces zero gallery renders and no
+timestamp churn. A UI contract proves the constant-size percentage update precedes the single
+conditional render, and JavaScript syntax checks pass. All 419 app unit tests, eight CloudCore tests,
+77 UI contracts, CI-mode workspace tests, fresh app Clippy, and warning-denied workspace Clippy are
+green. Computer Use verified the rebuilt nine-of-nine Local gallery and disconnected Cloud view.
+The existing large real-account upload scenario now also checks gallery stability during progress.
+
 ## Checkpoint (2026-07-18): typed rate-limited capture diagnostics
 
 The combined audit's L-31 is fixed. ToolHelp snapshot entries now call their fallback executable
