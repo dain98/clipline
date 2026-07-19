@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): cloud upload durability boundary
+
+The combined audit's H-03 is fixed. Post-upload polling no longer treats the first successful
+metadata response as proof that the clip is usable. It continues through `processing`, accepts
+only explicit `ready`, treats explicit `failed` as terminal, and preserves the local clip on poll
+timeout, HTTP error, visibility-update error, or any unknown state. Every such outcome persists the
+remote id/link plus a reconcilable status and error instead of escaping through IPC while leaving
+the saved upload record stuck at `processing`.
+
+When delete-local-after-upload is enabled, a ready metadata response is still insufficient:
+Clipline makes a no-redirect, authenticated `Range: bytes=0-0` request with five-second connect and
+15-second total deadlines and requires at least one returned media byte. Local cleanup runs only
+after that probe. It deletes the MP4 first, never touches sidecars if primary deletion fails, and
+returns/persists primary or sidecar cleanup errors rather than silently discarding them.
+
+Plan commit `876a778`; implementation commit `5323174`. The focused cloud suite passes with 32
+tests covering processing/ready/failed outcomes, bounded media success/empty/missing responses,
+reconcilable state, and primary-first cleanup failures. CI-mode `cargo test --workspace` and both
+fresh-cache app clippy and workspace clippy pass with warnings denied. Computer Use verified the
+rebuilt native app opens with all nine local clips and the Local/Cloud library controls intact; no
+real upload was attempted because that would transmit user media.
+
 ## Checkpoint (2026-07-18): full-session writer backpressure
 
 The combined audit's M-10 is fixed. Full-session output no longer receives deep-cloned GOPs through
