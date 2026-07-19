@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): collision-safe Riot ID matching
+
+The combined audit's L-26 is fixed. League player names now parse into a normalized game name and
+an optional normalized full Riot ID. Event attribution requires the full identity when both the
+event and local player include taglines, while retaining the name-only fallback when either Live
+Client payload omits a usable tagline.
+
+Player-summary lookup scans the entire participant list for an exact full Riot ID before considering
+fallbacks. When a participant supplies a valid `riotId`, that identity also takes precedence over
+its legacy untagged `summonerName`, so an earlier same-name player with a different tagline cannot
+shadow the local player.
+
+Plan commit `af0322a`; implementation commit `2c40f15`. New fixtures put the wrong same-name
+participant first, vary case and separator whitespace, reject a foreign taglined event, and retain
+untagged compatibility. All 30 League unit tests plus its HTTP, marker, and poll integration tests
+pass; fresh crate Clippy, 409 app tests within the CI-mode workspace suite, and warning-denied
+workspace Clippy are green. Computer Use verified the rebuilt nine-of-nine Library. No manual-only
+item remains for these deterministic payload variants.
+
 ## Checkpoint (2026-07-18): explicit event clock-anchor validation
 
 The combined audit's L-25 is fixed. `recording_offset_s` now uses
