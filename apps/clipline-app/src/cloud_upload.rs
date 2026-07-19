@@ -304,6 +304,7 @@ where
         .put(url)
         .bearer_auth(device_token)
         .header(header::CONTENT_LENGTH, file_size)
+        .header(header::CONTENT_TYPE, "video/mp4")
         .body(reqwest::Body::wrap_stream(ReaderStream::new(file)))
         .timeout(crate::bounded_http::upload_timeout(file_size))
         .send()
@@ -1250,6 +1251,7 @@ mod tests {
         let single_put = cloud.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v1/uploads/u1/content")
+                .header("content-type", "video/mp4")
                 .body("single body");
             then.status(200).json_body(progress_json(
                 "u1",
