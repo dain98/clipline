@@ -34,6 +34,8 @@ use crate::util::{last_os_error, unix_now, wide_null};
 const DEFAULT_DEVICE_NAME: &str = "Clipline Desktop";
 const READY_POLL_ATTEMPTS: usize = 30;
 const READY_POLL_DELAY: Duration = Duration::from_secs(1);
+const READY_MEDIA_PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const READY_MEDIA_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOUD_LIBRARY_PAGE_SIZE: i64 = 100;
 const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
@@ -114,6 +116,13 @@ pub struct CloudUploadProgressEvent {
 pub struct CloudUploadResult {
     pub record: CloudUploadRecord,
     pub clip: Option<ClipDetailResponse>,
+}
+
+#[derive(Debug)]
+enum ReadyClipOutcome {
+    Ready(ClipDetailResponse),
+    Failed(ClipDetailResponse),
+    TimedOut,
 }
 
 #[derive(Debug, Serialize)]
@@ -1122,45 +1131,97 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     );
 
     let clip = match wait_for_ready_clip(&client, &progress.clip_id).await {
-        Ok(Some(clip)) if visibility == "private" => Some(clip),
-        Ok(Some(clip)) => Some(
-            client
-                .set_visibility(&clip.id, visibility.clone())
-                .await
-                .map_err(cloud_error)?,
-        ),
-        Ok(None) => {
-            mark_ready_timeout(&mut record);
-            persist_record(&state, &record)?;
-            emit_upload_progress(
-                &app,
-                &record,
-                progress.file_size_bytes,
-                progress.file_size_bytes,
-                record.error.clone(),
+        Ok(ReadyClipOutcome::Ready(clip)) => clip,
+        Ok(ReadyClipOutcome::Failed(clip)) => {
+            apply_remote_clip_to_record(&cloud, &mut record, &clip);
+            record.upload_status = "failed".to_string();
+            record.error = Some(
+                "cloud upload completed, but cloud media processing failed; the local clip was preserved"
+                    .to_string(),
             );
-            None
+            record.updated_at_unix = unix_now();
+            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            return Ok(CloudUploadResult { record, clip: None });
         }
-        Err(error) => return Err(cloud_error(error)),
+        Ok(ReadyClipOutcome::TimedOut) => {
+            mark_ready_timeout(&mut record);
+            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            return Ok(CloudUploadResult { record, clip: None });
+        }
+        Err(error) => {
+            mark_post_upload_problem(
+                &mut record,
+                format!(
+                    "cloud upload completed, but checking cloud processing failed: {}; the local clip was preserved",
+                    cloud_error(error)
+                ),
+            );
+            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            return Ok(CloudUploadResult { record, clip: None });
+        }
     };
 
-    if let Some(clip) = &clip {
-        apply_remote_clip_to_record(&cloud, &mut record, clip);
-        persist_record(&state, &record)?;
-        emit_upload_progress(
-            &app,
-            &record,
-            progress.file_size_bytes,
-            progress.file_size_bytes,
-            None,
-        );
+    let clip = if visibility == "private" {
+        clip
+    } else {
+        match client.set_visibility(&clip.id, visibility.clone()).await {
+            Ok(updated) if updated.status == "ready" => updated,
+            Ok(updated) => {
+                apply_remote_clip_to_record(&cloud, &mut record, &updated);
+                mark_post_upload_problem(
+                    &mut record,
+                    format!(
+                        "cloud upload completed, but visibility update returned status {:?}; the local clip was preserved",
+                        updated.status
+                    ),
+                );
+                persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+                return Ok(CloudUploadResult { record, clip: None });
+            }
+            Err(error) => {
+                mark_post_upload_problem(
+                    &mut record,
+                    format!(
+                        "cloud upload completed, but updating visibility failed: {}; the local clip was preserved",
+                        cloud_error(error)
+                    ),
+                );
+                persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+                return Ok(CloudUploadResult { record, clip: None });
+            }
+        }
+    };
 
-        if cloud.delete_local_after_upload {
-            delete_uploaded_local_files(&target);
+    apply_remote_clip_to_record(&cloud, &mut record, &clip);
+    persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+
+    if cloud.delete_local_after_upload {
+        if let Err(error) = verify_ready_cloud_media(&cloud, &token, &clip.id).await {
+            mark_post_upload_problem(
+                &mut record,
+                format!(
+                    "cloud reported the upload ready, but its media could not be verified: {error}; the local clip was preserved"
+                ),
+            );
+            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            return Ok(CloudUploadResult {
+                record,
+                clip: Some(clip),
+            });
+        }
+        if let Err(error) = delete_uploaded_local_files(&target) {
+            record.error = Some(format!(
+                "cloud upload is ready, but local cleanup failed: {error}"
+            ));
+            record.updated_at_unix = unix_now();
+            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
         }
     }
 
-    Ok(CloudUploadResult { record, clip })
+    Ok(CloudUploadResult {
+        record,
+        clip: Some(clip),
+    })
 }
 
 fn connection_status(cloud: &CloudSettings) -> CloudConnectionStatus {
@@ -1417,10 +1478,33 @@ fn persist_record(state: &RuntimeState, record: &CloudUploadRecord) -> Result<()
 fn mark_ready_timeout(record: &mut CloudUploadRecord) {
     record.upload_status = "uploaded_processing".to_string();
     record.error = Some(format!(
-        "cloud upload completed, but cloud processing did not become ready within {} seconds; the cloud link may finish processing shortly",
+        "cloud upload completed, but cloud processing did not become ready within {} seconds; the local clip was preserved and the cloud link may finish processing shortly",
         READY_POLL_ATTEMPTS as u64 * READY_POLL_DELAY.as_secs()
     ));
     record.updated_at_unix = unix_now();
+}
+
+fn mark_post_upload_problem(record: &mut CloudUploadRecord, message: String) {
+    record.upload_status = "uploaded_processing".to_string();
+    record.error = Some(message);
+    record.updated_at_unix = unix_now();
+}
+
+fn persist_post_upload_record<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &RuntimeState,
+    record: &CloudUploadRecord,
+    file_size_bytes: u64,
+) -> Result<(), String> {
+    persist_record(state, record)?;
+    emit_upload_progress(
+        app,
+        record,
+        file_size_bytes,
+        file_size_bytes,
+        record.error.clone(),
+    );
+    Ok(())
 }
 
 fn apply_remote_clip_to_record(
@@ -1514,13 +1598,28 @@ fn mark_remote_not_found_once(record: &mut CloudUploadRecord) {
     record.updated_at_unix = unix_now();
 }
 
-fn delete_uploaded_local_files(target: &Path) {
-    if let Err(e) = std::fs::remove_file(target) {
-        eprintln!("delete local clip after upload {target:?}: {e}");
-    }
+fn delete_uploaded_local_files(target: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(target).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("delete uploaded local clip {target:?}: {error}"),
+        )
+    })?;
     // Sidecars may not exist — ignore missing-file errors.
+    let mut first_error = None;
     for sidecar in crate::library::clip_sidecar_paths(target) {
-        let _ = std::fs::remove_file(sidecar);
+        if let Err(error) = std::fs::remove_file(&sidecar) {
+            if error.kind() != std::io::ErrorKind::NotFound && first_error.is_none() {
+                first_error = Some(std::io::Error::new(
+                    error.kind(),
+                    format!("delete uploaded clip sidecar {sidecar:?}: {error}"),
+                ));
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -1549,17 +1648,68 @@ fn emit_upload_progress<R: Runtime>(
 async fn wait_for_ready_clip(
     client: &CloudClient,
     clip_id: &str,
-) -> Result<Option<ClipDetailResponse>, CloudApiError> {
-    for _ in 0..READY_POLL_ATTEMPTS {
+) -> Result<ReadyClipOutcome, CloudApiError> {
+    wait_for_ready_clip_with_policy(client, clip_id, READY_POLL_ATTEMPTS, READY_POLL_DELAY).await
+}
+
+async fn wait_for_ready_clip_with_policy(
+    client: &CloudClient,
+    clip_id: &str,
+    attempts: usize,
+    delay: Duration,
+) -> Result<ReadyClipOutcome, CloudApiError> {
+    for attempt in 0..attempts {
         match client.get_clip(clip_id).await {
-            Ok(clip) => return Ok(Some(clip)),
-            Err(CloudApiError::Api { status, .. }) if status.as_u16() == 404 => {
-                tokio::time::sleep(READY_POLL_DELAY).await;
-            }
+            Ok(clip) if clip.status == "ready" => return Ok(ReadyClipOutcome::Ready(clip)),
+            Ok(clip) if clip.status == "failed" => return Ok(ReadyClipOutcome::Failed(clip)),
+            Ok(_)
+            | Err(CloudApiError::Api {
+                status: reqwest::StatusCode::NOT_FOUND,
+                ..
+            }) => {}
             Err(error) => return Err(error),
         }
+        if attempt + 1 < attempts && !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
     }
-    Ok(None)
+    Ok(ReadyClipOutcome::TimedOut)
+}
+
+async fn verify_ready_cloud_media(
+    cloud: &CloudSettings,
+    token: &str,
+    remote_clip_id: &str,
+) -> Result<(), String> {
+    let url = cloud_clip_asset_url(cloud, remote_clip_id, "media")?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(READY_MEDIA_PROBE_CONNECT_TIMEOUT)
+        .timeout(READY_MEDIA_PROBE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("create media verification client: {error}"))?;
+    let mut response = client
+        .get(url)
+        .bearer_auth(token)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .send()
+        .await
+        .map_err(|error| format!("request ready cloud media: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "ready cloud media returned HTTP {}",
+            response.status()
+        ));
+    }
+    let first_chunk = response
+        .chunk()
+        .await
+        .map_err(|error| format!("read ready cloud media: {error}"))?;
+    if first_chunk.as_ref().is_none_or(|bytes| bytes.is_empty()) {
+        return Err("ready cloud media returned no bytes".to_string());
+    }
+    Ok(())
 }
 
 fn cloud_clip_url(cloud: &CloudSettings, clip_id: &str) -> Option<String> {
@@ -1656,6 +1806,7 @@ mod tests {
         AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
     };
     use clipline_test_utils::TestDir;
+    use httpmock::prelude::*;
     use std::io::Cursor;
 
     #[test]
@@ -1795,6 +1946,148 @@ mod tests {
                 .is_some_and(|error| error.contains("processing") && !error.contains("retry the upload")),
             "timeout should explain that cloud processing is still pending without forcing a reupload"
         );
+    }
+
+    #[tokio::test]
+    async fn readiness_poll_does_not_accept_processing_as_ready() {
+        let server = MockServer::start();
+        let response = clip_detail("remote-1", "private", "processing", None);
+        let request = server.mock(|when, then| {
+            when.method(GET).path("/api/v1/clips/remote-1");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body_obj(&response);
+        });
+
+        let outcome = wait_for_ready_clip_with_policy(
+            &test_cloud_client(&server),
+            "remote-1",
+            3,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, ReadyClipOutcome::TimedOut));
+        request.assert_hits(3);
+    }
+
+    #[tokio::test]
+    async fn readiness_poll_treats_remote_processing_failure_as_terminal() {
+        let server = MockServer::start();
+        let response = clip_detail("remote-1", "private", "failed", None);
+        let request = server.mock(|when, then| {
+            when.method(GET).path("/api/v1/clips/remote-1");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body_obj(&response);
+        });
+
+        let outcome = wait_for_ready_clip_with_policy(
+            &test_cloud_client(&server),
+            "remote-1",
+            3,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, ReadyClipOutcome::Failed(clip) if clip.status == "failed"));
+        request.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn readiness_poll_returns_only_an_explicitly_ready_clip() {
+        let server = MockServer::start();
+        let response = clip_detail("remote-1", "private", "ready", None);
+        let request = server.mock(|when, then| {
+            when.method(GET).path("/api/v1/clips/remote-1");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body_obj(&response);
+        });
+
+        let outcome = wait_for_ready_clip_with_policy(
+            &test_cloud_client(&server),
+            "remote-1",
+            3,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, ReadyClipOutcome::Ready(clip) if clip.status == "ready"));
+        request.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn ready_media_probe_requires_retrievable_nonempty_content() {
+        let server = MockServer::start();
+        let media = server.mock(|when, then| {
+            when.method(GET)
+                .path("/api/v1/clips/remote-1/media")
+                .header("authorization", "Bearer token")
+                .header("range", "bytes=0-0");
+            then.status(206).body("x");
+        });
+        let cloud = CloudSettings {
+            host_url: server.base_url(),
+            ..CloudSettings::default()
+        };
+
+        verify_ready_cloud_media(&cloud, "token", "remote-1")
+            .await
+            .unwrap();
+
+        media.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn ready_media_probe_rejects_empty_and_failed_responses() {
+        let empty_server = MockServer::start();
+        empty_server.mock(|when, then| {
+            when.method(GET).path("/api/v1/clips/remote-1/media");
+            then.status(206);
+        });
+        let empty_cloud = CloudSettings {
+            host_url: empty_server.base_url(),
+            ..CloudSettings::default()
+        };
+        let empty_error = verify_ready_cloud_media(&empty_cloud, "token", "remote-1")
+            .await
+            .expect_err("empty media is not durable");
+        assert!(empty_error.contains("no bytes"), "{empty_error}");
+
+        let failed_server = MockServer::start();
+        failed_server.mock(|when, then| {
+            when.method(GET).path("/api/v1/clips/remote-1/media");
+            then.status(404);
+        });
+        let failed_cloud = CloudSettings {
+            host_url: failed_server.base_url(),
+            ..CloudSettings::default()
+        };
+        let failed_error = verify_ready_cloud_media(&failed_cloud, "token", "remote-1")
+            .await
+            .expect_err("missing media is not durable");
+        assert!(failed_error.contains("404"), "{failed_error}");
+    }
+
+    #[test]
+    fn post_upload_problem_keeps_remote_identity_for_reconciliation() {
+        let mut record = upload_record("local", "D:\\Videos\\clip.mp4", "processing", 10);
+        record.remote_clip_id = Some("remote-1".into());
+        record.remote_url = Some("https://clips.example.com/clip/remote-1".into());
+
+        mark_post_upload_problem(&mut record, "visibility update failed".into());
+
+        assert_eq!(record.upload_status, "uploaded_processing");
+        assert_eq!(record.remote_clip_id.as_deref(), Some("remote-1"));
+        assert_eq!(
+            record.remote_url.as_deref(),
+            Some("https://clips.example.com/clip/remote-1")
+        );
+        assert_eq!(record.error.as_deref(), Some("visibility update failed"));
     }
 
     #[test]
@@ -2077,7 +2370,7 @@ mod tests {
         std::fs::write(&pending_osu, b"{}").unwrap();
         std::fs::write(&poster, b"jpg").unwrap();
 
-        delete_uploaded_local_files(&clip);
+        delete_uploaded_local_files(&clip).unwrap();
 
         assert!(!clip.exists());
         assert!(!markers.exists());
@@ -2085,6 +2378,35 @@ mod tests {
         assert!(!pending_osu.exists());
         assert!(!poster.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_cleanup_preserves_sidecars_when_primary_deletion_fails() {
+        let dir = TestDir::new("clipline-cloud", "delete-primary-first");
+        let clip = dir.path().join("clip.mp4");
+        let markers = clip.with_extension("markers.json");
+        std::fs::create_dir(&clip).unwrap();
+        std::fs::write(&markers, b"{}").unwrap();
+
+        delete_uploaded_local_files(&clip).expect_err("a directory is not a removable MP4 file");
+
+        assert!(clip.exists());
+        assert!(markers.exists());
+    }
+
+    #[test]
+    fn local_cleanup_reports_sidecar_failure_after_primary_deletion() {
+        let dir = TestDir::new("clipline-cloud", "delete-sidecar-error");
+        let clip = dir.path().join("clip.mp4");
+        let markers = clip.with_extension("markers.json");
+        std::fs::write(&clip, b"mp4").unwrap();
+        std::fs::create_dir(&markers).unwrap();
+
+        let error = delete_uploaded_local_files(&clip).expect_err("sidecar directory must fail");
+
+        assert!(!clip.exists(), "primary deletion happens before sidecars");
+        assert!(markers.exists());
+        assert!(error.to_string().contains("sidecar"), "{error}");
     }
 
     fn audio_markers() -> ClipMarkers {
@@ -2211,6 +2533,10 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    fn test_cloud_client(server: &MockServer) -> CloudClient {
+        CloudClient::with_device_token(server.base_url().parse().unwrap(), "token")
     }
 
     fn clip_summary(
