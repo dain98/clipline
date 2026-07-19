@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): MP4 untrusted-input hardening
+
+The first `CODEBASE_AUDIT.md` remediation batch fixes H1, M19, and M20 in `clipline-mp4`.
+Malformed extended-size boxes now stop the tolerant walker through checked offset arithmetic,
+including forged parent ranges and trim-side box-end conversion. Sample-table entry counts are
+validated against their containing boxes before allocation; per-track metadata is capped at four
+million samples (more than 18 hours at 60 FPS); and compressed `stts` durations expand only to the
+already-validated `stsz` count.
+
+Fragment construction is now fallible when sample sizes, payload totals, sample counts, or signed
+`trun` data offsets cannot be represented. In-memory fragments use the same 8/16-byte `mdat`
+header selection as streaming writers, large-header offsets are included in `trun`, and ordinary
+box construction rejects sizes that would previously truncate through `as u32`. The in-memory
+builder also writes directly into the final allocation instead of creating a second `mdat` payload
+copy.
+
+Plan commit `5d2fdf6`; implementation commit `14d1f90`. The focused MP4 suite passes with 100
+unit/integration tests, CI-mode `cargo test --workspace` passes, fresh-cache MP4 clippy and full
+workspace clippy pass with warnings denied, formatting and diff checks pass. No multi-gigabyte
+fixture is required: boundary tests use forged metadata and synthetic sample-size records.
+
 ## Checkpoint (2026-07-18): elevated-game Save Replay hotkeys
 
 An Arknights: Endfield report said Save Replay worked only after tabbing out. The reporter's UAC
