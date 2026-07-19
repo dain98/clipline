@@ -1,31 +1,105 @@
-//! League event source (ddoc §5a): a thread with a current-thread tokio
-//! runtime polling the Live Client Data API at ~1 Hz, forwarding anchored
-//! events to the recorder service. Quietly waits while no game runs; the
-//! API only exists in-game. The League game plugin owns when this source is
-//! attached to a recorder session.
+//! League event source (ddoc section 5a): a thread with a current-thread
+//! Tokio runtime polling the Live Client Data API at roughly 1 Hz and
+//! forwarding anchored events to the recorder service. The League game
+//! plugin owns when this source is attached to a recorder session.
 
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use clipline_events::{GameEvent, PlayerSummary};
-use clipline_lol::{poll_once, EventTracker, LiveClient};
+use clipline_events::{EventKind, GameEvent, PlayerSummary};
+use clipline_lol::{poll_once_with_continuity, EventTracker, LiveClient};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const MATCH_ABSENCE_FAILURES: u32 = 6;
 
-/// What the poller tells the service: anchored events, plus the match
-/// boundaries it observes (the Live Client API only exists in-game, so
-/// connecting/losing it *is* the boundary signal).
+/// What the poller tells the service: anchored events, match boundaries, and
+/// a non-semantic heartbeat used only to detect a departed consumer.
 pub enum PollerMsg {
     Event(GameEvent),
     PlayerSummary(PlayerSummary),
     MatchStarted,
     MatchEnded,
+    Heartbeat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchBoundary {
+    Started,
+    Ended,
+}
+
+#[derive(Debug, Default)]
+struct PollDecision {
+    before_events: Vec<MatchBoundary>,
+    end_after_events: bool,
+}
+
+#[derive(Debug, Default)]
+struct MatchLifecycle {
+    observed_match: bool,
+    match_active: bool,
+    consecutive_failures: u32,
+}
+
+impl MatchLifecycle {
+    fn poll_succeeded(&mut self, new_match: bool, has_game_end: bool) -> PollDecision {
+        self.consecutive_failures = 0;
+        let mut decision = PollDecision::default();
+        if !self.observed_match {
+            self.observed_match = true;
+            self.match_active = true;
+            decision.before_events.push(MatchBoundary::Started);
+        } else if new_match {
+            if self.match_active {
+                decision.before_events.push(MatchBoundary::Ended);
+            }
+            self.match_active = true;
+            decision.before_events.push(MatchBoundary::Started);
+        }
+
+        if has_game_end && self.match_active {
+            self.match_active = false;
+            decision.end_after_events = true;
+        }
+        decision
+    }
+
+    fn poll_failed(&mut self) -> Option<MatchBoundary> {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if self.match_active && self.consecutive_failures == MATCH_ABSENCE_FAILURES {
+            self.match_active = false;
+            Some(MatchBoundary::Ended)
+        } else {
+            None
+        }
+    }
+
+    fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+}
+
+fn failure_backoff(consecutive_failures: u32) -> Duration {
+    let shift = consecutive_failures.saturating_sub(1).min(3);
+    Duration::from_secs((1_u64 << shift).min(RETRY_INTERVAL.as_secs()))
+}
+
+fn send_heartbeat(tx: &Sender<PollerMsg>) -> bool {
+    tx.send(PollerMsg::Heartbeat).is_ok()
+}
+
+fn send_boundary(tx: &Sender<PollerMsg>, boundary: MatchBoundary) -> bool {
+    let message = match boundary {
+        MatchBoundary::Started => PollerMsg::MatchStarted,
+        MatchBoundary::Ended => PollerMsg::MatchEnded,
+    };
+    tx.send(message).is_ok()
 }
 
 /// Spawn the poller. `base_url` overrides the local Live Client endpoint
 /// (mock servers in tests/demos); `recording_t0` is the wall-clock twin of
-/// the capture clock origin — sample them together.
+/// the capture clock origin, sampled at the same time.
 pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<PollerMsg> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
@@ -36,8 +110,8 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<Poller
                 .build()
             {
                 Ok(rt) => rt,
-                Err(e) => {
-                    eprintln!("lol poller: failed to build tokio runtime: {e}");
+                Err(error) => {
+                    eprintln!("lol poller: failed to build tokio runtime: {error}");
                     return;
                 }
             };
@@ -47,55 +121,177 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<Poller
                     None => LiveClient::default_local(),
                 };
                 let client = match client {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("lol poller: failed to create live client: {e}");
+                    Ok(client) => client,
+                    Err(error) => {
+                        eprintln!("lol poller: failed to create live client: {error}");
                         return;
                     }
                 };
+                let mut tracker = EventTracker::default();
+                let mut lifecycle = MatchLifecycle::default();
+                let mut local_player = None;
+
                 loop {
-                    // Wait for a game: the endpoint 404s/refuses otherwise.
-                    let local_player = loop {
+                    // Outside a game, the endpoint normally refuses requests.
+                    if local_player.is_none() {
                         match client.active_player_name().await {
-                            Ok(name) => break name,
-                            Err(_) => tokio::time::sleep(RETRY_INTERVAL).await,
+                            Ok(name) => local_player = Some(name),
+                            Err(_) => {
+                                if !send_heartbeat(&tx) {
+                                    return;
+                                }
+                                tokio::time::sleep(RETRY_INTERVAL).await;
+                                continue;
+                            }
                         }
+                    }
+                    let Some(player) = local_player.as_deref() else {
+                        continue;
                     };
-                    if tx.send(PollerMsg::MatchStarted).is_err() {
-                        return; // service gone
-                    }
-                    if let Ok(Some(summary)) = client.player_summary(&local_player).await {
-                        if tx.send(PollerMsg::PlayerSummary(summary)).is_err() {
-                            return;
-                        }
-                    }
-                    let mut tracker = EventTracker::default();
-                    loop {
-                        match poll_once(&client, &mut tracker, &local_player, recording_t0, 0.0)
-                            .await
-                        {
-                            Ok(events) => {
-                                for ev in events {
-                                    if tx.send(PollerMsg::Event(ev)).is_err() {
-                                        return; // service gone
-                                    }
+
+                    match poll_once_with_continuity(
+                        &client,
+                        &mut tracker,
+                        player,
+                        recording_t0,
+                        0.0,
+                    )
+                    .await
+                    {
+                        Ok(batch) => {
+                            let has_game_end = batch
+                                .events
+                                .iter()
+                                .any(|event| event.kind == EventKind::GameEnd);
+                            let decision = lifecycle.poll_succeeded(batch.new_match, has_game_end);
+                            for boundary in decision.before_events {
+                                if !send_boundary(&tx, boundary) {
+                                    return;
                                 }
                             }
-                            Err(_) => break, // game ended — back to waiting
-                        }
-                        if let Ok(Some(summary)) = client.player_summary(&local_player).await {
-                            if tx.send(PollerMsg::PlayerSummary(summary)).is_err() {
+                            if let Ok(Some(summary)) = client.player_summary(player).await {
+                                if tx.send(PollerMsg::PlayerSummary(summary)).is_err() {
+                                    return;
+                                }
+                            }
+                            for event in batch.events {
+                                if tx.send(PollerMsg::Event(event)).is_err() {
+                                    return;
+                                }
+                            }
+                            if decision.end_after_events
+                                && !send_boundary(&tx, MatchBoundary::Ended)
+                            {
                                 return;
                             }
+                            tokio::time::sleep(POLL_INTERVAL).await;
                         }
-                        tokio::time::sleep(POLL_INTERVAL).await;
-                    }
-                    if tx.send(PollerMsg::MatchEnded).is_err() {
-                        return;
+                        Err(_) => {
+                            if lifecycle
+                                .poll_failed()
+                                .is_some_and(|boundary| !send_boundary(&tx, boundary))
+                            {
+                                return;
+                            }
+                            if !send_heartbeat(&tx) {
+                                return;
+                            }
+                            let failures = lifecycle.consecutive_failures();
+                            if failures >= MATCH_ABSENCE_FAILURES {
+                                // Re-acquire identity after sustained absence,
+                                // but retain tracker state across the outage.
+                                local_player = None;
+                            }
+                            tokio::time::sleep(failure_backoff(failures)).await;
+                        }
                     }
                 }
             });
         })
         .expect("spawn lol poller thread");
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_failures_do_not_end_or_restart_a_match() {
+        let mut lifecycle = MatchLifecycle::default();
+        let started = lifecycle.poll_succeeded(false, false);
+        assert_eq!(started.before_events, vec![MatchBoundary::Started]);
+
+        for _ in 0..(MATCH_ABSENCE_FAILURES - 1) {
+            assert_eq!(lifecycle.poll_failed(), None);
+        }
+
+        let recovered = lifecycle.poll_succeeded(false, false);
+        assert!(recovered.before_events.is_empty());
+        assert!(!recovered.end_after_events);
+    }
+
+    #[test]
+    fn sustained_absence_ends_once_without_forgetting_match_identity() {
+        let mut lifecycle = MatchLifecycle::default();
+        lifecycle.poll_succeeded(false, false);
+
+        for _ in 0..(MATCH_ABSENCE_FAILURES - 1) {
+            assert_eq!(lifecycle.poll_failed(), None);
+        }
+        assert_eq!(lifecycle.poll_failed(), Some(MatchBoundary::Ended));
+        assert_eq!(lifecycle.poll_failed(), None, "end is emitted only once");
+
+        let same_match = lifecycle.poll_succeeded(false, false);
+        assert!(same_match.before_events.is_empty());
+
+        let new_match = lifecycle.poll_succeeded(true, false);
+        assert_eq!(new_match.before_events, vec![MatchBoundary::Started]);
+    }
+
+    #[test]
+    fn explicit_game_end_closes_once_and_new_match_restarts() {
+        let mut lifecycle = MatchLifecycle::default();
+        lifecycle.poll_succeeded(false, false);
+
+        let ended = lifecycle.poll_succeeded(false, true);
+        assert!(ended.before_events.is_empty());
+        assert!(ended.end_after_events);
+
+        let lingering_endpoint = lifecycle.poll_succeeded(false, true);
+        assert!(lingering_endpoint.before_events.is_empty());
+        assert!(!lingering_endpoint.end_after_events);
+
+        let next = lifecycle.poll_succeeded(true, false);
+        assert_eq!(next.before_events, vec![MatchBoundary::Started]);
+    }
+
+    #[test]
+    fn new_match_signal_ends_active_match_before_starting_next() {
+        let mut lifecycle = MatchLifecycle::default();
+        lifecycle.poll_succeeded(false, false);
+
+        let next = lifecycle.poll_succeeded(true, false);
+        assert_eq!(
+            next.before_events,
+            vec![MatchBoundary::Ended, MatchBoundary::Started]
+        );
+    }
+
+    #[test]
+    fn heartbeat_detects_a_dropped_receiver() {
+        let (tx, rx) = mpsc::channel();
+        assert!(send_heartbeat(&tx));
+        assert!(matches!(rx.recv().unwrap(), PollerMsg::Heartbeat));
+        drop(rx);
+        assert!(!send_heartbeat(&tx));
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded() {
+        assert_eq!(failure_backoff(1), Duration::from_secs(1));
+        assert_eq!(failure_backoff(2), Duration::from_secs(2));
+        assert_eq!(failure_backoff(3), Duration::from_secs(4));
+        assert_eq!(failure_backoff(20), RETRY_INTERVAL);
+    }
 }

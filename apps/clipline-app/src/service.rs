@@ -925,6 +925,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     player_summary.match_ended();
                     session.match_ended();
                 }
+                PollerMsg::Heartbeat => {}
             }
         }
 
