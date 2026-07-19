@@ -256,40 +256,22 @@ fn parse_hook_hotkeys(raws: &[&str]) -> Result<Vec<HookHotkey>, String> {
 }
 
 fn parse_hook_hotkey(raw: &str) -> Result<HookHotkey, String> {
-    let normalized = crate::settings::normalize_hotkey(raw)?;
-    let mut ctrl = false;
-    let mut alt = false;
-    let mut shift = false;
-    let mut key_vk = None;
+    use crate::settings::hotkey::{parse_hotkey_spec, HotkeyKey};
 
-    for part in normalized.split('+') {
-        match part {
-            "Ctrl" => ctrl = true,
-            "Alt" => alt = true,
-            "Shift" => shift = true,
-            key if key.starts_with('F') => {
-                let number = key[1..]
-                    .parse::<u32>()
-                    .map_err(|_| "hotkey key must be an F-key".to_string())?;
-                key_vk = Some(VK_F1_CODE + number - 1);
-            }
-            "Middle" => key_vk = Some(VK_MBUTTON_CODE),
-            "Mouse4" => key_vk = Some(VK_XBUTTON1_CODE),
-            "Mouse5" => key_vk = Some(VK_XBUTTON2_CODE),
-            key => {
-                key_vk = Some(
-                    keyboard_key_vk_code(key)
-                        .ok_or_else(|| format!("unsupported hotkey key: {key}"))?,
-                );
-            }
+    let spec = parse_hotkey_spec(raw)?;
+    let key_vk = match &spec.key {
+        HotkeyKey::Function(number) => VK_F1_CODE + u32::from(*number) - 1,
+        HotkeyKey::Keyboard(key) => {
+            keyboard_key_vk_code(key).ok_or_else(|| format!("unsupported hotkey key: {key}"))?
         }
-    }
-
-    let key_vk = key_vk.ok_or_else(|| "hotkey needs a key".to_string())?;
+        HotkeyKey::Middle => VK_MBUTTON_CODE,
+        HotkeyKey::Mouse4 => VK_XBUTTON1_CODE,
+        HotkeyKey::Mouse5 => VK_XBUTTON2_CODE,
+    };
     Ok(HookHotkey {
-        ctrl,
-        alt,
-        shift,
+        ctrl: spec.ctrl,
+        alt: spec.alt,
+        shift: spec.shift,
         key_vk,
     })
 }
@@ -532,12 +514,26 @@ mod tests {
         assert!(letter.matches(0x47, true, false, false));
         assert!(!letter.matches(0x47, false, false, false));
 
+        let literal_f = parse_hook_hotkey("Ctrl+Shift+F").unwrap();
+        assert!(literal_f.matches(0x46, true, false, true));
+        assert!(!literal_f.matches(VK_F1_CODE, true, false, true));
+
         let arrow = parse_hook_hotkey("Alt+Shift+ArrowLeft").unwrap();
         assert!(arrow.matches(0x25, false, true, true));
         assert!(!arrow.matches(0x25, false, true, false));
 
         let slash = parse_hook_hotkey("Ctrl+Slash").unwrap();
         assert!(slash.matches(0xBF, true, false, false));
+    }
+
+    #[test]
+    fn function_key_range_keeps_distinct_virtual_keys() {
+        assert!(parse_hook_hotkey("F1")
+            .unwrap()
+            .matches(VK_F1_CODE, false, false, false));
+        assert!(parse_hook_hotkey("F24")
+            .unwrap()
+            .matches(VK_F24_CODE, false, false, false));
     }
 
     #[test]

@@ -519,15 +519,7 @@ $("timeline").addEventListener("pointercancel", endDrag);
 $("timeline").addEventListener("lostpointercapture", endDrag);
 
 document.addEventListener("keydown", (ev) => {
-  if (
-    $("confirm-dialog").open ||
-    $("quit-dialog").open ||
-    $("update-dialog").open ||
-    $("elevation-dialog").open ||
-    $("upload-dialog").open ||
-    $("game-plugin-settings-dialog").open ||
-    $("keys-dialog").open
-  ) return; // a dialog owns the keyboard
+  if (document.querySelector("dialog[open]")) return; // a dialog owns the keyboard
   if (ev.code === "Escape" && settingsOpen) {
     ev.preventDefault();
     requestSettingsClose();

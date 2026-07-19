@@ -2495,11 +2495,11 @@ fn session_groups_bucket_and_sort_by_newest() {
 }
 
 #[test]
-fn focus_mode_has_a_key() {
+fn removed_focus_mode_key_is_not_consumed() {
     let mut ctx = player_core_context();
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('KeyF', false)"),
-        r#"{"kind":"toggle-focus"}"#
+        "null"
     );
 }
 

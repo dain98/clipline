@@ -3434,3 +3434,38 @@ fn gallery_card_hover_keeps_hit_target_stable() {
         "the delete button should become clickable only while visible on card hover"
     );
 }
+
+#[test]
+fn player_shortcuts_defer_to_any_open_dialog() {
+    let main = read_ui_js("main.js");
+    let handler = main
+        .split("document.addEventListener(\"keydown\", (ev) => {")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split("if (ev.code === \"Escape\" && settingsOpen)")
+                .next()
+        })
+        .expect("global keydown handler has a dialog guard");
+
+    assert!(
+        handler.contains("document.querySelector(\"dialog[open]\")"),
+        "the global keydown guard must automatically cover every open dialog"
+    );
+    for dialog_id in [
+        "confirm-dialog",
+        "quit-dialog",
+        "update-dialog",
+        "elevation-dialog",
+        "upload-dialog",
+        "detected-games-dialog",
+        "game-window-picker-dialog",
+        "rename-file-dialog",
+        "game-plugin-settings-dialog",
+        "keys-dialog",
+    ] {
+        assert!(
+            !handler.contains(dialog_id),
+            "the dialog guard must not maintain a drifting special case for {dialog_id}"
+        );
+    }
+}

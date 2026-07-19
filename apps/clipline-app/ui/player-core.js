@@ -1662,8 +1662,6 @@ const PlayerCore = (() => {
         return { kind: "set-out" };
       case "KeyM":
         return { kind: shiftKey ? "prev-marker" : "next-marker" };
-      case "KeyF":
-        return { kind: "toggle-focus" };
       // Zoom: +/- step at the playhead, \ fits the clip, Shift+\ fits the trim.
       case "Equal":
       case "NumpadAdd":
