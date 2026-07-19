@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): pinned League loopback transport
+
+The combined audit's L-10 is fixed. League Live Client bases are now parsed once and accepted only
+as plain HTTP(S) root URLs with no credentials, query, or fragment. Numeric IPv4/IPv6 loopback
+addresses are retained, while `localhost` is rewritten to `127.0.0.1` before request construction,
+so DNS and hosts-file changes cannot move the connection off loopback.
+
+The dedicated reqwest client disables redirects and all configured proxies before enabling invalid
+certificates for Riot's self-signed local endpoint. Fixed Live Client paths are joined against the
+normalized URL instead of concatenated renderer/configuration text. The existing one-second connect,
+two-second request/read, and 4 MiB response bounds remain intact.
+
+Plan commit `783482b`; implementation commit `a49813e`. The League crate has 28 unit tests plus five
+integration tests. New coverage pins IPv4/IPv6/localhost normalization, rejects remote hosts and URL
+tricks, structurally requires proxy/redirect disabling, and proves a redirect target receives zero
+requests. Fresh-cache League Clippy, CI-mode workspace tests (401 app tests), and workspace Clippy
+pass with warnings denied. Computer Use verified rebuilt app startup and the nine-clip Library. The
+existing real-match/network-interruption acceptance scenario covers endpoint continuity.
+
 ## Checkpoint (2026-07-18): backend-owned filesystem authority
 
 The combined audit's L-09 is fixed. Changing the media root now requires an exact, transient

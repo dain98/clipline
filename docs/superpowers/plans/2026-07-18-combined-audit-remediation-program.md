@@ -50,6 +50,7 @@ Additional completed findings:
 - [ ] L-07 — backend-only Cloud auth merge that preserves unrelated settings drafts and preferences (`4ad75ac`)
 - [ ] L-08 — explicit normalized-origin consent before any plain-HTTP password request (`962ba5e`)
 - [ ] L-09 — native-authorized media roots, exact-file asset scopes, and backend-enumerated local icon paths (`f80117b`)
+- [ ] L-10 — numeric loopback normalization with proxy bypass and redirect refusal for League requests (`a49813e`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
