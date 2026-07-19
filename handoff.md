@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): generation-safe local Library refreshes
+
+The combined audit's M-22 is fixed. Every local `list_clips` request now owns a monotonically newer
+generation and may mutate `clipsCache`, the active review, or the gallery only while it remains the
+latest request. Superseded successes and failures are ignored. Successful rename, delete, and export
+mutations explicitly invalidate snapshots that began before their optimistic cache update, so an
+older filesystem view cannot undo the mutation or close a newly updated review.
+
+Saved and osu! enrichment events now use one fire-and-forget refresh wrapper that catches current
+failures and reports them through the existing visible error surface. Awaited settings, upload, and
+startup refreshes retain their existing propagation, while local/cloud source switching and the
+separate cloud account-scoped request gate are unchanged.
+
+Plan commit `1f05190`; implementation commit `9cebaf5`. The 71 UI contracts pin generation checks,
+pre-mutation invalidation, and caught event refreshes; the existing request-gate unit tests cover
+supersession and invalidation behavior. JavaScript syntax checks, fresh-cache app Clippy, CI-mode
+workspace tests (393 app tests), and workspace Clippy pass with warnings denied. Computer Use
+verified the nine-clip Library and opening a clip into review. No manual-only acceptance item remains
+for this deterministic race.
+
 ## Checkpoint (2026-07-18): verified writable media-root fallback
 
 The combined audit's M-21 is fixed. Recording now verifies a configured media directory by
