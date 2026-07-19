@@ -2,8 +2,9 @@
 //! pipeline is a synchronous pull loop on its own thread) talking to the
 //! shell over channels. No Tauri types in here.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
@@ -46,6 +47,7 @@ const LOW_REPLAY_CACHE_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const REPLAY_CACHE_RUN_PREFIX: &str = "clipline-replay-cache-";
 const REPLAY_CACHE_OWNER_FILE: &str = ".clipline-run.json";
 const AMBIGUOUS_REPLAY_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+static MEDIA_ROOT_PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub enum Cmd {
     Save,
     Stop { announce: bool },
@@ -471,6 +473,10 @@ impl OutputResolution {
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
+    MediaRootResolved {
+        path: String,
+        fell_back: bool,
+    },
     Status {
         recording: bool,
         segments: usize,
@@ -820,6 +826,10 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let encoder_status = encoder_label(active);
 
     let (clips_dir, fell_back) = clips_dir_resolved(&opts.media_dir, default_clips_dir)?;
+    let _ = events.send(Event::MediaRootResolved {
+        path: clips_dir.display().to_string(),
+        fell_back,
+    });
     if fell_back {
         warn_user(
             events,
@@ -2409,24 +2419,85 @@ pub(crate) fn default_clips_dir() -> PathBuf {
 }
 
 pub(crate) fn clips_dir(media_dir: &Path) -> Result<PathBuf, String> {
-    clips_dir_resolved(media_dir, default_clips_dir).map(|(dir, _)| dir)
+    // Library reads use the root already resolved into `StorageSettings` by the
+    // recorder. Do not repeat the durable write probe on every refresh.
+    std::fs::create_dir_all(media_dir)
+        .map_err(|error| format!("create media folder {}: {error}", media_dir.display()))?;
+    Ok(media_dir.to_path_buf())
 }
 
 /// Resolve the directory clips are actually written to. The configured folder
-/// is used when it can be created; otherwise `fallback` is, so an unplugged
-/// external drive degrades to the default folder instead of killing recording
-/// and emptying the library. The bool is true when the fallback was taken, so
-/// callers with a UI channel can warn the user.
+/// is used when it can reserve and durably write a new file; otherwise
+/// `fallback` is, so an unplugged external drive degrades to the default folder
+/// instead of killing recording and emptying the library. The bool is true when
+/// the fallback was taken, so callers with a UI channel can warn the user.
 pub(crate) fn clips_dir_resolved(
     media_dir: &Path,
     fallback: impl FnOnce() -> PathBuf,
 ) -> Result<(PathBuf, bool), String> {
-    if std::fs::create_dir_all(media_dir).is_ok() {
-        return Ok((media_dir.to_path_buf(), false));
-    }
+    clips_dir_resolved_with_probe(media_dir, fallback, probe_writable_directory)
+}
+
+fn clips_dir_resolved_with_probe(
+    media_dir: &Path,
+    fallback: impl FnOnce() -> PathBuf,
+    mut probe: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(PathBuf, bool), String> {
+    let configured_error = match prepare_writable_directory_with(media_dir, &mut probe) {
+        Ok(()) => return Ok((media_dir.to_path_buf(), false)),
+        Err(error) => error,
+    };
     let dir = fallback();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
+    if let Err(fallback_error) = prepare_writable_directory_with(&dir, &mut probe) {
+        return Err(format!(
+            "media folder {} is not writable ({configured_error}); fallback {} is not writable ({fallback_error})",
+            media_dir.display(),
+            dir.display()
+        ));
+    }
     Ok((dir, true))
+}
+
+pub(crate) fn prepare_writable_media_directory(dir: &Path) -> Result<(), String> {
+    prepare_writable_directory_with(dir, probe_writable_directory)
+        .map_err(|error| format!("media folder {} is not writable: {error}", dir.display()))
+}
+
+fn prepare_writable_directory_with(
+    dir: &Path,
+    mut probe: impl FnMut(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    probe(dir)
+}
+
+fn probe_writable_directory(dir: &Path) -> std::io::Result<()> {
+    for _ in 0..16 {
+        let unique = MEDIA_ROOT_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(
+            ".clipline-write-probe-{}-{unique}.tmp",
+            std::process::id()
+        ));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let result = file.write_all(&[0]).and_then(|()| file.sync_data());
+        drop(file);
+        let cleanup = std::fs::remove_file(&path);
+        result?;
+        cleanup?;
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not reserve a unique media-folder probe file",
+    ))
 }
 
 /// Whether `dir` lives under the system temp root. Both paths are canonicalized
@@ -3243,6 +3314,75 @@ mod tests {
         assert!(fell_back);
         assert_eq!(resolved, fallback);
         assert!(fallback.is_dir());
+    }
+
+    #[test]
+    fn clips_dir_falls_back_when_existing_configured_root_is_not_writable() {
+        let dir = TestDir::new("clipline-service", "unwritable-existing-root");
+        let configured = dir.path().join("configured");
+        let fallback = dir.path().join("fallback");
+        std::fs::create_dir_all(&configured).unwrap();
+        let mut probed = Vec::new();
+
+        let (resolved, fell_back) = clips_dir_resolved_with_probe(
+            &configured,
+            || fallback.clone(),
+            |candidate| {
+                probed.push(candidate.to_path_buf());
+                if candidate == configured {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected ACL denial",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap();
+
+        assert!(fell_back);
+        assert_eq!(resolved, fallback);
+        assert_eq!(probed, [configured, fallback]);
+    }
+
+    #[test]
+    fn writable_directory_probe_leaves_no_probe_file() {
+        let dir = TestDir::new("clipline-service", "writable-root-probe");
+        let media = dir.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("existing.txt"), b"keep").unwrap();
+
+        probe_writable_directory(&media).unwrap();
+
+        let mut names = std::fs::read_dir(&media)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, [std::ffi::OsString::from("existing.txt")]);
+    }
+
+    #[test]
+    fn clips_dir_reports_configured_and_fallback_probe_failures() {
+        let dir = TestDir::new("clipline-service", "double-probe-failure");
+        let configured = dir.path().join("configured");
+        let fallback = dir.path().join("fallback");
+
+        let error = clips_dir_resolved_with_probe(
+            &configured,
+            || fallback.clone(),
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected denial",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains(&configured.display().to_string()), "{error}");
+        assert!(error.contains(&fallback.display().to_string()), "{error}");
     }
 
     #[test]

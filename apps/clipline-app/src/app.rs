@@ -1735,8 +1735,7 @@ fn save_settings<R: Runtime>(
     settings.games.normalize();
     settings.validate()?;
     let media_dir = settings.media_dir_path()?;
-    std::fs::create_dir_all(&media_dir)
-        .map_err(|e| format!("create media folder {media_dir:?}: {e}"))?;
+    service::prepare_writable_media_directory(&media_dir)?;
     // Extend the asset-protocol scope to the (possibly custom) root so the
     // webview can play clips from it, without granting the whole disk.
     app.asset_protocol_scope()
@@ -2318,6 +2317,23 @@ where
 fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, generation: u64) {
     std::thread::spawn(move || {
         for event in event_rx {
+            if let Event::MediaRootResolved { path, .. } = &event {
+                let media_root = PathBuf::from(path);
+                handle
+                    .state::<crate::library::StorageSettings>()
+                    .set_media_dir(media_root.clone());
+                if let Err(error) = handle
+                    .asset_protocol_scope()
+                    .allow_directory(&media_root, true)
+                {
+                    let message = format!(
+                        "scope resolved media folder {} for playback: {error}",
+                        media_root.display()
+                    );
+                    eprintln!("{message}");
+                    let _ = handle.emit("error", message);
+                }
+            }
             if let Event::Status {
                 recording: false, ..
             } = &event
@@ -2327,6 +2343,7 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
                     .clear_recording_sender_for_generation(generation);
             }
             let _ = match &event {
+                Event::MediaRootResolved { .. } => Ok(()),
                 Event::Status { .. } => handle.emit("status", &event),
                 Event::Saved { .. } => handle.emit("saved", &event),
                 Event::Error { message } => handle.emit("error", message.clone()),

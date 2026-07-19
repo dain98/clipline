@@ -1322,6 +1322,21 @@ fn custom_game_ids_use_a_reserved_namespace_and_migrated_icons_do_not_become_plu
 }
 
 #[test]
+fn resolved_recorder_media_root_updates_library_and_playback_scope() {
+    let app = app_rs();
+
+    assert!(
+        app.contains("Event::MediaRootResolved")
+            && app.contains("StorageSettings>()")
+            && app.contains("set_media_dir")
+            && app.contains("asset_protocol_scope()")
+            && app.contains("allow_directory")
+            && app.contains("service::prepare_writable_media_directory(&media_dir)?"),
+        "recorder fallback must publish the actual media root to library and playback state"
+    );
+}
+
+#[test]
 fn keyboard_shortcuts_document_j_l_frame_step_and_arrows_seek() {
     let html = index_html();
 
