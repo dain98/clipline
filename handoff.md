@@ -4,6 +4,31 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): recorder control and hotkey readiness
+
+The combined audit's H-04 and M-19 are fixed. Runtime state now records the user's desired
+recording state independently from the currently installed service sender. Game-detection restarts
+reserve a monotonically increasing generation, spawn outside the runtime mutex, and install only
+when both desired state and generation still match. Stop advances the generation even during the
+sender-less restart gap, so it cannot be undone by a late replacement. A manual Start or newer
+game/settings restart supersedes older work, and every rejected service receives an immediate
+non-announcing Stop. Option errors still preserve an installed working recorder while invalidating
+an older replacement when no sender is installed.
+
+The low-level keyboard hook now creates its Windows message queue, calls `SetWindowsHookExW`, and
+reports the real thread id or installation error before global hook state is published. The hook
+waits for installer acknowledgement, unhooks if startup is abandoned, and has stored thread
+identity for partial-install teardown. Mouse-hook or singleton-publication failure also tears down
+the ready keyboard hook. Later settings updates now fail explicitly if the singleton is absent
+instead of silently accepting a nonfunctional fallback.
+
+Plan commit `d3b2183`; implementation commit `820c68f`. Focused coverage passes with 52 runtime
+state tests and 12 hotkey tests, including deterministic Stop/Start/newer-restart races plus hook
+success, failure, disconnect, and timeout. CI-mode `cargo test --workspace` passes and fresh-cache
+workspace clippy passes with warnings denied. Computer Use verified the native hook starts without
+an error, the live UI shows `Alt+F10`, and saving unchanged settings reports `saved`, exercising the
+new hook-required update path against the installed singleton.
+
 ## Checkpoint (2026-07-18): destructive storage ownership boundary
 
 The combined codebase audit's H-02 is fixed. Storage status, quota GC, and abandoned-recording
