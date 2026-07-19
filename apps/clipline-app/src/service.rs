@@ -43,6 +43,9 @@ use crate::markers::PollerMsg;
 pub use clipline_capture::probe::Codec;
 
 const LOW_REPLAY_CACHE_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const REPLAY_CACHE_RUN_PREFIX: &str = "clipline-replay-cache-";
+const REPLAY_CACHE_OWNER_FILE: &str = ".clipline-run.json";
+const AMBIGUOUS_REPLAY_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 pub enum Cmd {
     Save,
     Stop { announce: bool },
@@ -812,29 +815,6 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let (encoder, active) = build_encoder(&device, &opts, in_w, in_h, enc_w, enc_h, events)?;
     let encoder_status = encoder_label(active);
 
-    let replay_cache_dir = prepare_replay_storage(&opts)?;
-    let replay_storage = match &opts.replay_storage {
-        ReplayStorageOptions::Memory => ReplayStorageConfig::Memory {
-            max_bytes: opts.buffer_bytes,
-        },
-        ReplayStorageOptions::Disk { quota_bytes, .. } => ReplayStorageConfig::Disk {
-            max_bytes: usize::try_from(*quota_bytes).unwrap_or(usize::MAX),
-            dir: replay_cache_dir
-                .clone()
-                .ok_or_else(|| "disk replay cache was not prepared".to_string())?,
-        },
-    };
-    let cap = CadencedCapture::new(cap, opts.fps, &first);
-    let mut rec = Recorder::new_with_replay_storage(cap, encoder, replay_storage)
-        .map_err(|e| format!("replay cache: {e}"))?;
-    let audio_tracks = audio_sources_from_options(clock, &opts.audio, events);
-    let audio_track_metadata: Vec<ClipAudioTrack> = audio_tracks
-        .iter()
-        .map(|(_, track)| track.clone())
-        .collect();
-    for (audio, _) in audio_tracks {
-        rec = rec.with_audio(audio);
-    }
     let (clips_dir, fell_back) = clips_dir_resolved(&opts.media_dir, default_clips_dir)?;
     if fell_back {
         warn_user(
@@ -854,6 +834,32 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                 "saving recordings to a temporary folder {clips_dir:?} that the system may delete; choose a Media folder in Settings"
             ),
         );
+    }
+
+    let mut prepared_replay = prepare_replay_storage(&opts)?;
+    let replay_cache_dir = prepared_replay.run_dir.clone();
+    let replay_storage = match &opts.replay_storage {
+        ReplayStorageOptions::Memory => ReplayStorageConfig::Memory {
+            max_bytes: opts.buffer_bytes,
+        },
+        ReplayStorageOptions::Disk { .. } => ReplayStorageConfig::Disk {
+            max_bytes: prepared_replay.max_bytes,
+            dir: replay_cache_dir
+                .clone()
+                .ok_or_else(|| "disk replay cache was not prepared".to_string())?,
+        },
+    };
+    let cap = CadencedCapture::new(cap, opts.fps, &first);
+    let mut rec = Recorder::new_with_replay_storage(cap, encoder, replay_storage)
+        .map_err(|e| format!("replay cache: {e}"))?;
+    prepared_replay.disarm();
+    let audio_tracks = audio_sources_from_options(clock, &opts.audio, events);
+    let audio_track_metadata: Vec<ClipAudioTrack> = audio_tracks
+        .iter()
+        .map(|(_, track)| track.clone())
+        .collect();
+    for (audio, _) in audio_tracks {
+        rec = rec.with_audio(audio);
     }
     if opts.recover_abandoned_recordings {
         recover_abandoned_recordings(&clips_dir, events);
@@ -879,19 +885,21 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             // Idle screen: WGC delivers nothing — keep serving commands.
             Err(PipelineError::Capture(CaptureError::Timeout(_))) => {}
             Err(e) => {
-                let _ = shutdown_recorder(
-                    &mut rec,
-                    &mut full_session,
-                    RecorderFinishContext {
-                        marker_log: &marker_log,
-                        player_summary: player_summary.full_session_summary(),
-                        audio_tracks: &audio_track_metadata,
-                        clips_dir: &clips_dir,
-                        opts: &opts,
-                        events,
-                    },
-                );
-                return Err(format!("recording: {e}"));
+                let primary = format!("recording: {e}");
+                return Err(finalize_runtime_failure(primary, || {
+                    shutdown_recorder(
+                        &mut rec,
+                        &mut full_session,
+                        RecorderFinishContext {
+                            marker_log: &marker_log,
+                            player_summary: player_summary.full_session_summary(),
+                            audio_tracks: &audio_track_metadata,
+                            clips_dir: &clips_dir,
+                            opts: &opts,
+                            events,
+                        },
+                    )
+                }));
             }
         }
 
@@ -924,7 +932,22 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             last_status = Instant::now();
             send_recording_status(events, &rec, &full_session, &encoder_status);
             if replay_cache_dir.is_some() {
-                ensure_replay_cache_free_space(&opts)?;
+                if let Err(primary) = ensure_replay_cache_free_space(&opts) {
+                    return Err(finalize_runtime_failure(primary, || {
+                        shutdown_recorder(
+                            &mut rec,
+                            &mut full_session,
+                            RecorderFinishContext {
+                                marker_log: &marker_log,
+                                player_summary: player_summary.full_session_summary(),
+                                audio_tracks: &audio_track_metadata,
+                                clips_dir: &clips_dir,
+                                opts: &opts,
+                                events,
+                            },
+                        )
+                    }));
+                }
             }
         }
 
@@ -1367,9 +1390,53 @@ fn open_candidate(
     }
 }
 
-fn prepare_replay_storage(opts: &ServiceOptions) -> Result<Option<PathBuf>, String> {
+struct PreparedReplayStorage {
+    run_dir: Option<PathBuf>,
+    max_bytes: usize,
+    armed: bool,
+}
+
+impl PreparedReplayStorage {
+    fn memory(max_bytes: usize) -> Self {
+        Self {
+            run_dir: None,
+            max_bytes,
+            armed: false,
+        }
+    }
+
+    fn disk(run_dir: PathBuf, max_bytes: usize) -> Self {
+        Self {
+            run_dir: Some(run_dir),
+            max_bytes,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PreparedReplayStorage {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Some(run_dir) = &self.run_dir {
+                let _ = std::fs::remove_dir_all(run_dir);
+            }
+        }
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ReplayCacheOwner {
+    process_instance_id: String,
+    created_at_unix: u64,
+}
+
+fn prepare_replay_storage(opts: &ServiceOptions) -> Result<PreparedReplayStorage, String> {
     match &opts.replay_storage {
-        ReplayStorageOptions::Memory => Ok(None),
+        ReplayStorageOptions::Memory => Ok(PreparedReplayStorage::memory(opts.buffer_bytes)),
         ReplayStorageOptions::Disk { dir, quota_bytes } => {
             if *quota_bytes < 256 * 1024 * 1024 {
                 return Err("replay cache quota is too small".into());
@@ -1377,6 +1444,17 @@ fn prepare_replay_storage(opts: &ServiceOptions) -> Result<Option<PathBuf>, Stri
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("create replay cache folder {dir:?}: {e}"))?;
             ensure_replay_cache_free_space(opts)?;
+            let now = SystemTime::now();
+            let preserved_bytes =
+                sweep_replay_cache_runs(dir, now, crate::windows::process_instance_id)?;
+            let available_quota = quota_bytes.saturating_sub(preserved_bytes);
+            if available_quota == 0 {
+                return Err(format!(
+                    "replay cache quota is already consumed by active or protected runs ({preserved_bytes} bytes)"
+                ));
+            }
+            let current_process_instance_id =
+                crate::windows::process_instance_id(std::process::id())?;
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1384,7 +1462,7 @@ fn prepare_replay_storage(opts: &ServiceOptions) -> Result<Option<PathBuf>, Stri
             let run_dir = (0u32..1024)
                 .find_map(|attempt| {
                     let candidate = dir.join(format!(
-                        "clipline-replay-cache-{stamp}-{}-{attempt}",
+                        "{REPLAY_CACHE_RUN_PREFIX}{stamp}-{}-{attempt}",
                         std::process::id()
                     ));
                     match std::fs::create_dir(&candidate) {
@@ -1398,9 +1476,135 @@ fn prepare_replay_storage(opts: &ServiceOptions) -> Result<Option<PathBuf>, Stri
                 .unwrap_or_else(|| {
                     Err("create replay cache run folder: too many collisions".into())
                 })?;
-            Ok(Some(run_dir))
+            let owner = ReplayCacheOwner {
+                process_instance_id: current_process_instance_id,
+                created_at_unix: now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            };
+            if let Err(error) = write_replay_cache_owner(&run_dir, &owner) {
+                let _ = std::fs::remove_dir_all(&run_dir);
+                return Err(error);
+            }
+            Ok(PreparedReplayStorage::disk(
+                run_dir,
+                usize::try_from(available_quota).unwrap_or(usize::MAX),
+            ))
         }
     }
+}
+
+fn write_replay_cache_owner(run_dir: &Path, owner: &ReplayCacheOwner) -> Result<(), String> {
+    let path = run_dir.join(REPLAY_CACHE_OWNER_FILE);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| format!("create replay cache ownership record {path:?}: {e}"))?;
+    serde_json::to_writer(&mut file, owner)
+        .map_err(|e| format!("write replay cache ownership record {path:?}: {e}"))?;
+    file.sync_all()
+        .map_err(|e| format!("flush replay cache ownership record {path:?}: {e}"))
+}
+
+fn sweep_replay_cache_runs(
+    root: &Path,
+    now: SystemTime,
+    mut process_instance_id: impl FnMut(u32) -> Result<String, String>,
+) -> Result<u64, String> {
+    let entries =
+        std::fs::read_dir(root).map_err(|e| format!("scan replay cache folder {root:?}: {e}"))?;
+    let mut preserved_bytes = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !is_replay_cache_run_name(name) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
+            continue;
+        }
+
+        let owner = std::fs::read(path.join(REPLAY_CACHE_OWNER_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ReplayCacheOwner>(&bytes).ok());
+        let definitively_stale = owner
+            .as_ref()
+            .and_then(|owner| {
+                replay_cache_owner_pid(&owner.process_instance_id).map(|pid| (owner, pid))
+            })
+            .and_then(|(owner, pid)| {
+                process_instance_id(pid)
+                    .ok()
+                    .map(|current| current != owner.process_instance_id)
+            });
+        let old_enough = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= AMBIGUOUS_REPLAY_CACHE_MAX_AGE);
+        let should_remove = definitively_stale.unwrap_or(old_enough);
+
+        if should_remove && std::fs::remove_dir_all(&path).is_ok() {
+            continue;
+        }
+        preserved_bytes = preserved_bytes.saturating_add(replay_cache_run_size(&path));
+    }
+    Ok(preserved_bytes)
+}
+
+fn is_replay_cache_run_name(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(REPLAY_CACHE_RUN_PREFIX) else {
+        return false;
+    };
+    let mut parts = suffix.split('-');
+    let valid = (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    });
+    valid && parts.next().is_none()
+}
+
+fn replay_cache_owner_pid(process_instance_id: &str) -> Option<u32> {
+    let (pid, creation_time) = process_instance_id.split_once(':')?;
+    if creation_time.is_empty() || !creation_time.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+fn replay_cache_run_size(path: &Path) -> u64 {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if is_link_or_reparse_point(&metadata) {
+        return 0;
+    }
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    std::fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| replay_cache_run_size(&entry.path()))
+                .fold(0u64, u64::saturating_add)
+        })
+        .unwrap_or(0)
+}
+
+fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 fn ensure_replay_cache_free_space(opts: &ServiceOptions) -> Result<(), String> {
@@ -1531,6 +1735,13 @@ fn shutdown_recorder(
             );
             Some(message)
         }
+    }
+}
+
+fn finalize_runtime_failure(primary: String, finalize: impl FnOnce() -> Option<String>) -> String {
+    match finalize() {
+        Some(finish) => format!("{primary}; additionally, {finish}"),
+        None => primary,
     }
 }
 
@@ -3184,6 +3395,112 @@ mod tests {
             panic!("expected warning");
         };
         assert!(message.contains("finalize full session"));
+    }
+
+    #[test]
+    fn replay_cache_sweep_removes_stale_instance_and_preserves_live_quota() {
+        let dir = TestDir::new("clipline-service", "replay-cache-sweep");
+        let stale = dir.path().join("clipline-replay-cache-100-41-0");
+        let live = dir.path().join("clipline-replay-cache-101-42-0");
+        let unrelated = dir.path().join("somebody-elses-folder");
+        for run in [&stale, &live, &unrelated] {
+            std::fs::create_dir(run).unwrap();
+        }
+        write_replay_cache_owner(
+            &stale,
+            &ReplayCacheOwner {
+                process_instance_id: "41:1000".into(),
+                created_at_unix: 100,
+            },
+        )
+        .unwrap();
+        write_replay_cache_owner(
+            &live,
+            &ReplayCacheOwner {
+                process_instance_id: "42:2000".into(),
+                created_at_unix: 101,
+            },
+        )
+        .unwrap();
+        std::fs::write(stale.join("seg.bin"), vec![1; 17]).unwrap();
+        std::fs::write(live.join("seg.bin"), vec![2; 23]).unwrap();
+        std::fs::write(unrelated.join("keep.txt"), b"keep").unwrap();
+
+        let preserved = sweep_replay_cache_runs(
+            dir.path(),
+            SystemTime::now() + Duration::from_secs(48 * 60 * 60),
+            |pid| match pid {
+                41 => Ok("41:9999".into()),
+                42 => Ok("42:2000".into()),
+                _ => Err("unexpected pid".into()),
+            },
+        )
+        .unwrap();
+
+        assert!(!stale.exists());
+        assert!(live.exists());
+        assert!(unrelated.exists());
+        assert!(preserved >= 23);
+    }
+
+    #[test]
+    fn replay_cache_sweep_preserves_ambiguous_fresh_run() {
+        let dir = TestDir::new("clipline-service", "replay-cache-ambiguous");
+        let run = dir.path().join("clipline-replay-cache-100-42-0");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::write(run.join("seg.bin"), vec![3; 29]).unwrap();
+
+        let preserved = sweep_replay_cache_runs(dir.path(), SystemTime::now(), |_| {
+            Err("process cannot be queried".into())
+        })
+        .unwrap();
+
+        assert!(run.exists());
+        assert_eq!(preserved, 29);
+    }
+
+    #[test]
+    fn replay_cache_sweep_removes_ambiguous_run_only_after_grace_period() {
+        let dir = TestDir::new("clipline-service", "replay-cache-aged");
+        let run = dir.path().join("clipline-replay-cache-100-42-0");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::write(run.join("seg.bin"), vec![4; 31]).unwrap();
+
+        let preserved = sweep_replay_cache_runs(
+            dir.path(),
+            SystemTime::now() + Duration::from_secs(25 * 60 * 60),
+            |_| Err("process cannot be queried".into()),
+        )
+        .unwrap();
+
+        assert!(!run.exists());
+        assert_eq!(preserved, 0);
+    }
+
+    #[test]
+    fn prepared_replay_storage_cleans_untransferred_run() {
+        let dir = TestDir::new("clipline-service", "replay-cache-construction");
+        let run = dir.path().join("clipline-replay-cache-100-42-0");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::write(run.join(REPLAY_CACHE_OWNER_FILE), b"owned").unwrap();
+
+        drop(PreparedReplayStorage::disk(run.clone(), 1024));
+
+        assert!(!run.exists());
+    }
+
+    #[test]
+    fn low_space_runtime_failure_always_finalizes_and_keeps_primary_error() {
+        let finalized = std::cell::Cell::new(false);
+
+        let message = finalize_runtime_failure("replay cache disk is low".into(), || {
+            finalized.set(true);
+            Some("finish: writer failed".into())
+        });
+
+        assert!(finalized.get());
+        assert!(message.starts_with("replay cache disk is low"), "{message}");
+        assert!(message.contains("finish: writer failed"), "{message}");
     }
 
     #[test]
