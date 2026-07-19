@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::segment::Segment;
 
@@ -8,7 +9,7 @@ use crate::segment::Segment;
 #[derive(Debug)]
 pub struct ReplayRing {
     max_bytes: usize,
-    segments: VecDeque<Segment>,
+    segments: VecDeque<Arc<Segment>>,
     bytes: usize,
 }
 
@@ -22,6 +23,11 @@ impl ReplayRing {
     }
 
     pub fn push(&mut self, seg: Segment) {
+        self.push_shared(Arc::new(seg));
+    }
+
+    /// Insert a segment already shared with another immutable consumer.
+    pub fn push_shared(&mut self, seg: Arc<Segment>) {
         self.bytes += seg.byte_len();
         self.segments.push_back(seg);
         while self.bytes > self.max_bytes && self.segments.len() > 1 {
@@ -44,7 +50,7 @@ impl ReplayRing {
     }
 
     pub fn segments(&self) -> impl Iterator<Item = &Segment> {
-        self.segments.iter()
+        self.segments.iter().map(Arc::as_ref)
     }
 
     /// Segments for a Save Replay of the trailing `window_s` seconds
@@ -89,7 +95,7 @@ impl ReplayRing {
             }
         }
 
-        self.segments.iter().skip(idx).collect()
+        self.segments.iter().skip(idx).map(Arc::as_ref).collect()
     }
 }
 
@@ -125,6 +131,18 @@ mod tests {
         let mut ring = ReplayRing::new(10);
         ring.push(seg(0.0, 2.0, 100, true)); // oversized but alone
         assert_eq!(ring.len(), 1);
+    }
+
+    #[test]
+    fn shared_insert_keeps_the_original_segment_allocation() {
+        let mut ring = ReplayRing::new(100);
+        let shared = Arc::new(seg(0.0, 2.0, 10, true));
+        let original = Arc::as_ptr(&shared);
+
+        ring.push_shared(Arc::clone(&shared));
+
+        assert_eq!(ring.segments().next().unwrap() as *const Segment, original);
+        assert_eq!(Arc::strong_count(&shared), 2);
     }
 
     #[test]

@@ -46,6 +46,12 @@ impl DiskReplayRing {
     }
 
     pub fn push(&mut self, seg: Segment) -> io::Result<()> {
+        self.push_ref(&seg)
+    }
+
+    /// Persist a borrowed segment so another immutable consumer can retain
+    /// the same payload without a deep clone.
+    pub fn push_ref(&mut self, seg: &Segment) -> io::Result<()> {
         let id = self.next_id;
         self.next_id += 1;
         let path = self.dir.join(format!("seg_{id:08}.bin"));
@@ -74,7 +80,7 @@ impl DiskReplayRing {
             path,
             byte_len: seg.byte_len(),
             video_len: seg.data.len(),
-            samples: seg.samples,
+            samples: seg.samples.clone(),
             audio,
         };
         self.bytes += stored.byte_len;

@@ -1,6 +1,8 @@
 use std::io::{self, Seek, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use clipline_buffer::{DiskReplayRing, ReplayRing, SampleInfo, Segment, TrackSamples};
@@ -11,6 +13,8 @@ use crate::traits::{
 };
 
 const MAX_PENDING_GOP_BYTES: usize = 64 * 1024 * 1024;
+const FULL_SESSION_QUEUE_MAX_BYTES: usize = 128 * 1024 * 1024;
+const FULL_SESSION_QUEUE_MAX_SEGMENTS: usize = 8;
 const MID_STREAM_REPLAY_OPUS_PRE_SKIP: u16 = 960; // One 20 ms Opus frame at 48 kHz.
 
 #[derive(Debug, thiserror::Error)]
@@ -46,8 +50,10 @@ pub struct FullSessionSummary {
 }
 
 struct FullSessionSink {
-    tx: Sender<FullSessionWriteMsg>,
+    tx: SyncSender<FullSessionWriteMsg>,
     join: JoinHandle<()>,
+    queued_bytes: Arc<AtomicUsize>,
+    max_queue_bytes: usize,
     audio_cfgs: Vec<clipline_mp4::AudioTrackConfig>,
     video_cfg: Option<clipline_mp4::VideoTrackConfig>,
     start_s: Option<f64>,
@@ -58,7 +64,8 @@ struct FullSessionSink {
 struct FullSessionSegment {
     video_cfg: clipline_mp4::VideoTrackConfig,
     audio_cfgs: Vec<clipline_mp4::AudioTrackConfig>,
-    segment: Segment,
+    segment: Arc<Segment>,
+    reserved_bytes: usize,
 }
 
 enum FullSessionWriteMsg {
@@ -273,6 +280,19 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
     }
 
     pub fn start_full_session<W: Write + Seek + Send + 'static>(&mut self, w: W) -> io::Result<()> {
+        self.start_full_session_with_limits(
+            w,
+            FULL_SESSION_QUEUE_MAX_BYTES,
+            FULL_SESSION_QUEUE_MAX_SEGMENTS,
+        )
+    }
+
+    fn start_full_session_with_limits<W: Write + Seek + Send + 'static>(
+        &mut self,
+        w: W,
+        max_queue_bytes: usize,
+        max_queue_segments: usize,
+    ) -> io::Result<()> {
         if self.full_session.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -284,10 +304,19 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             .iter()
             .map(|source| source.track_config())
             .collect();
-        let (tx, join) = spawn_full_session_writer(Box::new(w) as Box<dyn WriteSeek>);
+        if max_queue_bytes == 0 || max_queue_segments == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "full session queue limits must be non-zero",
+            ));
+        }
+        let (tx, join, queued_bytes) =
+            spawn_full_session_writer(Box::new(w) as Box<dyn WriteSeek>, max_queue_segments)?;
         self.full_session = Some(FullSessionSink {
             tx,
             join,
+            queued_bytes,
+            max_queue_bytes,
             audio_cfgs,
             video_cfg: None,
             start_s: None,
@@ -453,23 +482,23 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             audio.push(track);
         }
 
-        let seg = Segment {
+        let seg = Arc::new(Segment {
             starts_with_keyframe,
             pts_start_s,
             duration_s,
             data,
             samples,
             audio,
-        };
-        let full_session_segment = self
+        });
+        let queue_full_session = self
             .full_session
             .as_ref()
-            .and_then(|sink| sink.send_error.is_none().then(|| seg.clone()));
+            .is_some_and(|sink| sink.send_error.is_none());
         match &mut self.ring {
-            ReplayStorage::Memory(ring) => ring.push(seg),
-            ReplayStorage::Disk(ring) => ring.push(seg)?,
+            ReplayStorage::Memory(ring) => ring.push_shared(Arc::clone(&seg)),
+            ReplayStorage::Disk(ring) => ring.push_ref(&seg)?,
         }
-        if let Some(seg) = full_session_segment {
+        if queue_full_session {
             self.queue_full_session_segment(seg);
         }
         Ok(())
@@ -509,15 +538,24 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         Ok(())
     }
 
-    fn queue_full_session_segment(&mut self, seg: Segment) {
+    fn queue_full_session_segment(&mut self, seg: Arc<Segment>) {
         let Some(sink) = &mut self.full_session else {
             return;
         };
         if sink.send_error.is_some() {
             return;
         }
-        sink.start_s.get_or_insert(seg.pts_start_s);
-        sink.end_s = Some(seg.pts_end_s());
+        let reserved_bytes = seg.byte_len();
+        if !try_reserve_queue_bytes(&sink.queued_bytes, reserved_bytes, sink.max_queue_bytes) {
+            sink.send_error = Some(format!(
+                "full session writer queue byte budget exceeded ({reserved_bytes} byte segment, {} of {} bytes already queued); full-session recording stopped",
+                sink.queued_bytes.load(Ordering::Acquire),
+                sink.max_queue_bytes
+            ));
+            return;
+        }
+        let start_s = seg.pts_start_s;
+        let end_s = seg.pts_end_s();
         let video_cfg = sink
             .video_cfg
             .get_or_insert_with(|| self.encoder.track_config())
@@ -526,9 +564,24 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             video_cfg,
             audio_cfgs: sink.audio_cfgs.clone(),
             segment: seg,
+            reserved_bytes,
         });
-        if let Err(e) = sink.tx.send(msg) {
-            sink.send_error = Some(format!("full session writer stopped: {e}"));
+        match sink.tx.try_send(msg) {
+            Ok(()) => {
+                sink.start_s.get_or_insert(start_s);
+                sink.end_s = Some(end_s);
+            }
+            Err(TrySendError::Full(msg)) => {
+                release_message_reservation(&sink.queued_bytes, &msg);
+                sink.send_error = Some(
+                    "full session writer queue reached its segment limit; full-session recording stopped"
+                        .into(),
+                );
+            }
+            Err(TrySendError::Disconnected(msg)) => {
+                release_message_reservation(&sink.queued_bytes, &msg);
+                sink.send_error = Some("full session writer stopped".into());
+            }
         }
     }
 }
@@ -539,13 +592,19 @@ fn pending_byte_budget(max_buffer_bytes: usize) -> usize {
 
 fn spawn_full_session_writer(
     target: Box<dyn WriteSeek>,
-) -> (Sender<FullSessionWriteMsg>, JoinHandle<()>) {
-    let (tx, rx) = mpsc::channel();
+    max_queue_segments: usize,
+) -> io::Result<(
+    SyncSender<FullSessionWriteMsg>,
+    JoinHandle<()>,
+    Arc<AtomicUsize>,
+)> {
+    let (tx, rx) = mpsc::sync_channel(max_queue_segments);
+    let queued_bytes = Arc::new(AtomicUsize::new(0));
+    let writer_queued_bytes = Arc::clone(&queued_bytes);
     let join = thread::Builder::new()
         .name("clipline-full-session-writer".into())
-        .spawn(move || full_session_writer_loop(target, rx))
-        .expect("spawn full-session writer thread");
-    (tx, join)
+        .spawn(move || full_session_writer_loop(target, rx, writer_queued_bytes))?;
+    Ok((tx, join, queued_bytes))
 }
 
 fn finish_full_session_writer(sink: FullSessionSink) -> io::Result<()> {
@@ -567,26 +626,31 @@ fn finish_full_session_writer(sink: FullSessionSink) -> io::Result<()> {
     }
 }
 
-fn full_session_writer_loop(target: Box<dyn WriteSeek>, rx: Receiver<FullSessionWriteMsg>) {
+fn full_session_writer_loop(
+    target: Box<dyn WriteSeek>,
+    rx: Receiver<FullSessionWriteMsg>,
+    queued_bytes: Arc<AtomicUsize>,
+) {
     let mut target = Some(target);
     let mut writer: Option<HybridMp4Writer<Box<dyn WriteSeek>>> = None;
     let mut first_error: Option<io::Error> = None;
     while let Ok(msg) = rx.recv() {
         match msg {
             FullSessionWriteMsg::Segment(segment) => {
-                if first_error.is_some() {
-                    continue;
+                let reserved_bytes = segment.reserved_bytes;
+                if first_error.is_none() {
+                    if let Err(e) = write_full_session_segment(
+                        &mut target,
+                        &mut writer,
+                        segment.video_cfg,
+                        segment.audio_cfgs,
+                        segment.segment,
+                    ) {
+                        first_error = Some(e);
+                        writer = None;
+                    }
                 }
-                if let Err(e) = write_full_session_segment(
-                    &mut target,
-                    &mut writer,
-                    segment.video_cfg,
-                    segment.audio_cfgs,
-                    segment.segment,
-                ) {
-                    first_error = Some(e);
-                    writer = None;
-                }
+                queued_bytes.fetch_sub(reserved_bytes, Ordering::AcqRel);
             }
             FullSessionWriteMsg::Finish(reply) => {
                 let result = if let Some(e) = first_error.take() {
@@ -608,7 +672,7 @@ fn write_full_session_segment(
     writer: &mut Option<HybridMp4Writer<Box<dyn WriteSeek>>>,
     video_cfg: clipline_mp4::VideoTrackConfig,
     audio_cfgs: Vec<clipline_mp4::AudioTrackConfig>,
-    seg: Segment,
+    seg: Arc<Segment>,
 ) -> io::Result<()> {
     if writer.is_none() {
         let mut track_cfgs = vec![TrackConfig::Video(video_cfg.clone())];
@@ -629,6 +693,20 @@ fn write_full_session_segment(
         .as_mut()
         .expect("writer initialized")
         .write_fragment_multi_borrowed(&slices)
+}
+
+fn try_reserve_queue_bytes(queued: &AtomicUsize, bytes: usize, max_bytes: usize) -> bool {
+    queued
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(bytes).filter(|next| *next <= max_bytes)
+        })
+        .is_ok()
+}
+
+fn release_message_reservation(queued: &AtomicUsize, msg: &FullSessionWriteMsg) {
+    if let FullSessionWriteMsg::Segment(segment) = msg {
+        queued.fetch_sub(segment.reserved_bytes, Ordering::AcqRel);
+    }
 }
 
 fn segment_fragment_refs<'a>(
@@ -973,6 +1051,107 @@ mod tests {
         assert_eq!(rec.ring().unwrap().len(), 3);
         let err = rec.finish_full_session().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn full_session_queue_budget_failure_does_not_abort_replay_capture() {
+        let mut rec = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        );
+
+        rec.start_full_session_with_limits(std::io::Cursor::new(Vec::new()), 1, 1)
+            .unwrap();
+        rec.run_to_end()
+            .expect("full-session backpressure must not stop replay capture");
+
+        assert_eq!(rec.ring().unwrap().len(), 3);
+        let err = rec.finish_full_session().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert!(
+            err.to_string().contains("queue byte budget"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn full_session_queue_byte_reservations_never_exceed_the_limit() {
+        let queued = AtomicUsize::new(0);
+
+        assert!(try_reserve_queue_bytes(&queued, 6, 10));
+        assert_eq!(queued.load(Ordering::Acquire), 6);
+        assert!(!try_reserve_queue_bytes(&queued, 5, 10));
+        assert_eq!(queued.load(Ordering::Acquire), 6);
+
+        queued.fetch_sub(6, Ordering::AcqRel);
+        assert!(try_reserve_queue_bytes(&queued, 10, 10));
+        assert_eq!(queued.load(Ordering::Acquire), 10);
+    }
+
+    #[test]
+    fn stalled_full_session_writer_hits_segment_limit_without_blocking_capture() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer = GatedWriter {
+            inner: std::io::Cursor::new(Vec::new()),
+            entered: Some(entered_tx),
+            release: release_rx,
+        };
+        let mut rec = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        );
+        rec.start_full_session_with_limits(writer, usize::MAX, 1)
+            .unwrap();
+
+        for _ in 0..31 {
+            assert!(rec.step().unwrap());
+        }
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("writer must begin the first segment");
+        rec.run_to_end()
+            .expect("stalled full-session output must not block capture");
+        assert_eq!(rec.ring().unwrap().len(), 3);
+
+        release_tx.send(()).unwrap();
+        let err = rec.finish_full_session().unwrap_err();
+        assert!(
+            err.to_string().contains("segment limit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    struct GatedWriter {
+        inner: std::io::Cursor<Vec<u8>>,
+        entered: Option<Sender<()>>,
+        release: Receiver<()>,
+    }
+
+    impl Write for GatedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if let Some(entered) = self.entered.take() {
+                entered
+                    .send(())
+                    .map_err(|_| io::Error::other("gate observer stopped"))?;
+                self.release
+                    .recv()
+                    .map_err(|_| io::Error::other("gate released by disconnect"))?;
+            }
+            self.inner.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    impl Seek for GatedWriter {
+        fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+            self.inner.seek(pos)
+        }
     }
 
     struct FailingWriter;
