@@ -111,7 +111,6 @@ $("gallery-select-toggle").addEventListener("click", () => {
 });
 $("bulk-select-all").addEventListener("click", selectAllVisible);
 $("bulk-clear").addEventListener("click", clearSelection);
-$("bulk-cancel").addEventListener("click", exitSelectMode);
 $("bulk-delete").addEventListener("click", bulkDeleteSelected);
 $("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });
 $("gallery-group").addEventListener("change", (ev) => { galleryGroup = ev.target.value; renderClips(); });

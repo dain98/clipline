@@ -3162,7 +3162,6 @@ fn gallery_supports_multi_select_bulk_actions() {
         "id=\"bulk-select-all\"",
         "id=\"bulk-clear\"",
         "id=\"bulk-delete\"",
-        "id=\"bulk-cancel\"",
         "id=\"confirm-title\"",
     ] {
         assert!(
@@ -3211,6 +3210,7 @@ fn gallery_supports_multi_select_bulk_actions() {
         "dataset.clipPath",
         "selectedClipPaths.has(c.path)",
         "Select multiple",
+        "Done",
         "selectMode || count > 0",
         "await invoke(\"delete_clips\"",
         "gallerySource !== \"local\"",
@@ -3260,6 +3260,10 @@ fn gallery_supports_multi_select_bulk_actions() {
         !html.contains("id=\"bulk-upload\"") && !html.contains("Upload to cloud"),
         "bulk actions should not expose bulk cloud upload"
     );
+    assert!(
+        !html.contains("id=\"bulk-cancel\"") && !js.contains("$(\"bulk-cancel\")"),
+        "the active Select multiple control should be the single manual exit from select mode"
+    );
 
     let delete_clip_fn = js
         .split("async function deleteClip")
@@ -3287,6 +3291,10 @@ fn gallery_supports_multi_select_bulk_actions() {
     assert!(
         bulk_delete_fn.contains("formatDeletionFailures(report.failed)"),
         "bulk delete must surface partial failures even when the current clip was removed"
+    );
+    assert!(
+        bulk_delete_fn.contains("if (report.deleted.length > 0) exitSelectMode();"),
+        "bulk delete should leave select mode after at least one clip is removed"
     );
 
     let select_all_fn = js
