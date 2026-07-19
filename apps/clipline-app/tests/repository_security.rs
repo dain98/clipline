@@ -396,8 +396,8 @@ fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
     let readme = fs::read_to_string(root.join("apps/clipline-app/ffmpeg/README.md"))
         .expect("read bundled FFmpeg notice");
     assert!(readme.contains("LGPL") && readme.contains("replace"));
-    let notices = fs::read_to_string(root.join("THIRD-PARTY-NOTICES.md"))
-        .expect("read third-party notices");
+    let notices =
+        fs::read_to_string(root.join("THIRD-PARTY-NOTICES.md")).expect("read third-party notices");
     for provenance in [release_tag, "ce3c09c101", "PROVENANCE.json", "LGPL v3"] {
         assert!(
             notices.contains(provenance),

@@ -292,9 +292,9 @@ function cloudStatusLabel(status) {
 }
 
 async function openCloudClipUrl(entry) {
-  if (!entry || !entry.remote_url) return;
+  if (!entry || !entry.remote_clip_id) return;
   try {
-    await invoke("open_cloud_clip_url", { url: entry.remote_url });
+    await invoke("open_cloud_clip", { remoteClipId: entry.remote_clip_id });
   } catch (e) {
     $("error").textContent = String(e);
     setDeckStatus("could not open cloud clip", { transient: true });

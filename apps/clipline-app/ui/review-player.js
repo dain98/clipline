@@ -1043,11 +1043,9 @@ const MARKER_IMAGES = {
 };
 
 function markerImageForKind(kind, presentation) {
-  const kinds = presentation && presentation.marker_kinds ? presentation.marker_kinds : null;
-  const configured = kinds && kinds[kind] && typeof kinds[kind] === "object"
-    ? kinds[kind].icon
-    : null;
-  return configured || MARKER_IMAGES[kind] || "";
+  const configured = PlayerCore.markerKindConfig(kind, presentation).icon;
+  const fallback = PlayerCore.ownObjectValue(MARKER_IMAGES, kind);
+  return PlayerCore.safeMarkerImage(configured) || PlayerCore.safeMarkerImage(fallback);
 }
 
 function renderPlayBlocks() {
@@ -1107,7 +1105,9 @@ function renderMarkers() {
       glyph.classList.add("img");
       glyph.style.setProperty("--marker-img", `url("${img}")`);
     } else {
-      glyph.innerHTML = MARKER_ICONS[m.kind] || MARKER_ICON_FALLBACK[style.cls] || MARKER_ICONS.Other;
+      glyph.innerHTML = PlayerCore.ownObjectValue(MARKER_ICONS, m.kind)
+        || PlayerCore.ownObjectValue(MARKER_ICON_FALLBACK, style.cls)
+        || MARKER_ICONS.Other;
     }
     const hair = document.createElement("span");
     hair.className = "hair";

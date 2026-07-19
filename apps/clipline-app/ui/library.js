@@ -206,12 +206,7 @@ function pluginGalleryPolicy(clip) {
 
 function markerDisplayLabel(marker, presentation) {
   const kind = marker && marker.kind ? marker.kind : "Other";
-  const configured = presentation
-    && presentation.marker_kinds
-    && presentation.marker_kinds[kind]
-    && typeof presentation.marker_kinds[kind] === "object"
-      ? presentation.marker_kinds[kind]
-      : null;
+  const configured = PlayerCore.markerKindConfig(kind, presentation);
   const label = configured && configured.label ? configured.label : kind.replace(/([a-z])([A-Z])/g, "$1 $2");
   const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
   return `${fmtDur(marker.t_s)} ${label}${actor}`;
@@ -219,12 +214,7 @@ function markerDisplayLabel(marker, presentation) {
 
 function markerEventText(marker, presentation) {
   const kind = marker && marker.kind ? marker.kind : "Other";
-  const configured = presentation
-    && presentation.marker_kinds
-    && presentation.marker_kinds[kind]
-    && typeof presentation.marker_kinds[kind] === "object"
-      ? presentation.marker_kinds[kind]
-      : null;
+  const configured = PlayerCore.markerKindConfig(kind, presentation);
   const label = configured && configured.label ? configured.label : kind.replace(/([a-z])([A-Z])/g, "$1 $2");
   const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
   return `${label}${actor}`;

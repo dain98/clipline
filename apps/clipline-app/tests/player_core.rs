@@ -1507,6 +1507,88 @@ fn marker_styles_accept_injected_plugin_presentation() {
 }
 
 #[test]
+fn marker_presentation_ignores_inherited_keys_and_rejects_unsafe_images() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const inheritedKinds = Object.create({
+          constructor: { category: 'kill', icon: 'assets/markers/kill.png' },
+          SneakyKind: { category: 'kill' }
+        });
+        inheritedKinds.RealKind = { category: 'objective' };
+        const inheritedCategories = Object.create({
+          constructor: { singular: 'forged', plural: 'forged', glyph: '!' }
+        });
+        inheritedCategories.objective = { singular: 'objective', plural: 'objectives', glyph: 'O' };
+        const INHERITED_PRESENTATION = {
+          marker_kinds: inheritedKinds,
+          marker_categories: inheritedCategories
+        };
+        const OWN_DANGEROUS_PRESENTATION = JSON.parse(
+          '{"marker_kinds":{"__proto__":{"category":"kill"},"constructor":{"category":"kill"}}}'
+        );
+        "#,
+    ))
+    .expect("define inherited presentation maps");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.markerStyle('SneakyKind', INHERITED_PRESENTATION)"
+        ),
+        r#"{"glyph":"•","cls":"info"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.markerStyle('RealKind', INHERITED_PRESENTATION)"
+        ),
+        r#"{"glyph":"O","cls":"objective"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.markerKindConfig('constructor', INHERITED_PRESENTATION)"
+        ),
+        "{}"
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "[PlayerCore.markerKindConfig('__proto__', OWN_DANGEROUS_PRESENTATION), PlayerCore.markerKindConfig('constructor', OWN_DANGEROUS_PRESENTATION)]"
+        ),
+        "[{},{}]"
+    );
+
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.safeMarkerImage('assets/markers/kill.png')"
+        ),
+        "assets/markers/kill.png"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.safeMarkerImage('data:image/png;base64,a2lsbA==')"
+        ),
+        "data:image/png;base64,a2lsbA=="
+    );
+    for unsafe_image in [
+        "assets/markers/../kill.png",
+        "https://tracker.example/marker.png",
+        "assets/markers/kill.png\");color:red/*",
+        "data:image/svg+xml,<svg onload=alert(1)>",
+    ] {
+        let encoded = serde_json::to_string(unsafe_image).expect("JSON image fixture");
+        assert_eq!(
+            eval(&mut ctx, &format!("PlayerCore.safeMarkerImage({encoded})")),
+            ""
+        );
+    }
+}
+
+#[test]
 fn ruler_marks_pick_nice_steps() {
     let mut ctx = player_core_context();
     assert_eq!(

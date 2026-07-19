@@ -461,9 +461,13 @@ pub fn open_cloud_user_profile(state: tauri::State<RuntimeState>) -> Result<(), 
 }
 
 #[tauri::command]
-pub fn open_cloud_clip_url(url: String) -> Result<(), String> {
-    let url = validate_cloud_link_url(&url)?;
-    open_cloud_url(&url, "cloud clip URL")
+pub fn open_cloud_clip(
+    state: tauri::State<RuntimeState>,
+    remote_clip_id: String,
+) -> Result<(), String> {
+    let cloud = state.settings().cloud;
+    let url = cloud_clip_page_url(&cloud, &remote_clip_id)?;
+    open_cloud_url(url.as_str(), "cloud clip page")
 }
 
 fn open_cloud_url(url: &str, context: &str) -> Result<(), String> {
@@ -483,14 +487,6 @@ fn open_cloud_url(url: &str, context: &str) -> Result<(), String> {
         return Err(format!("{context} failed with shell code {result:?}"));
     }
     Ok(())
-}
-
-fn validate_cloud_link_url(input: &str) -> Result<String, String> {
-    let url = reqwest::Url::parse(input).map_err(|e| format!("cloud clip URL is invalid: {e}"))?;
-    match url.scheme() {
-        "http" | "https" => Ok(url.to_string()),
-        scheme => Err(format!("cloud clip URL scheme is not supported: {scheme}")),
-    }
 }
 
 fn cloud_asset_context(
@@ -2359,14 +2355,26 @@ async fn verify_ready_cloud_media(
 }
 
 fn cloud_clip_url(cloud: &CloudSettings, clip_id: &str) -> Option<String> {
-    if clip_id.is_empty() {
-        return None;
-    }
-    let base = cloud.public_url.as_deref().unwrap_or(&cloud.host_url);
-    clipline_cloud_api::validate_cloud_host(base, true)
+    cloud_clip_page_url(cloud, clip_id)
         .ok()
-        .and_then(|url| url.join(&format!("clip/{clip_id}")).ok())
         .map(|url| url.to_string())
+}
+
+fn cloud_clip_page_url(
+    cloud: &CloudSettings,
+    remote_clip_id: &str,
+) -> Result<reqwest::Url, String> {
+    let remote_clip_id = validate_cloud_cache_component(remote_clip_id, "remote clip id")?;
+    let base = cloud.public_url.as_deref().unwrap_or(&cloud.host_url);
+    let mut url = clipline_cloud_api::validate_cloud_host(base, true).map_err(cloud_error)?;
+    url = url
+        .join("clip/")
+        .map_err(|error| format!("cloud clip page URL is invalid: {error}"))?;
+    url.path_segments_mut()
+        .map_err(|_| "cloud clip page URL cannot be a base".to_string())?
+        .pop_if_empty()
+        .push(remote_clip_id);
+    Ok(url)
 }
 
 fn credential_target(host_url: &str, user_id: &str) -> String {
@@ -2867,17 +2875,35 @@ mod tests {
     }
 
     #[test]
-    fn cloud_link_url_accepts_only_http_or_https() {
+    fn cloud_clip_page_url_uses_configured_origin_and_one_safe_segment() {
+        let public_cloud = CloudSettings {
+            host_url: "https://api.example.com/base/".into(),
+            public_url: Some("https://clips.example.com/cloud/".into()),
+            ..CloudSettings::default()
+        };
         assert_eq!(
-            validate_cloud_link_url("https://clips.example.com/clip/remote-1").as_deref(),
-            Ok("https://clips.example.com/clip/remote-1")
+            cloud_clip_page_url(&public_cloud, "remote-1_ABC")
+                .expect("public clip page")
+                .as_str(),
+            "https://clips.example.com/cloud/clip/remote-1_ABC"
         );
+
+        let private_cloud = CloudSettings {
+            host_url: "http://127.0.0.1:8080/root/".into(),
+            ..CloudSettings::default()
+        };
         assert_eq!(
-            validate_cloud_link_url("http://localhost:8080/clip/remote-1").as_deref(),
-            Ok("http://localhost:8080/clip/remote-1")
+            cloud_clip_page_url(&private_cloud, "remote-2")
+                .expect("private clip page")
+                .as_str(),
+            "http://127.0.0.1:8080/root/clip/remote-2"
         );
-        assert!(validate_cloud_link_url("file:///C:/Windows/win.ini").is_err());
-        assert!(validate_cloud_link_url("clipline://remote-1").is_err());
+        for invalid in ["", "../escape", "remote/escape", "remote?redirect=evil"] {
+            assert!(
+                cloud_clip_page_url(&public_cloud, invalid).is_err(),
+                "remote id must be one safe segment: {invalid}"
+            );
+        }
     }
 
     #[test]

@@ -2049,7 +2049,7 @@ pub fn run() {
             crate::cloud::cloud_user_profile,
             crate::cloud::cloud_user_avatar,
             crate::cloud::open_cloud_user_profile,
-            crate::cloud::open_cloud_clip_url,
+            crate::cloud::open_cloud_clip,
             crate::osu_api::osu_api_status,
             crate::osu_api::save_osu_api_settings,
             crate::osu_api::test_osu_api_connection,

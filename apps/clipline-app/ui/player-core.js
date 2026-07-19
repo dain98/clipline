@@ -926,28 +926,35 @@ const PlayerCore = (() => {
     info: { singular: "event", plural: "events", glyph: "•" },
   };
 
+  const PRESENTATION_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+  const ownObjectValue = (object, key) => typeof key === "string"
+    && PRESENTATION_KEY.test(key)
+    && key !== "constructor"
+    && key !== "prototype"
+    && typeof object === "object"
+    && object !== null
+    && Object.prototype.hasOwnProperty.call(object, key)
+      ? object[key]
+      : undefined;
+
   const markerKindConfig = (kind, presentation) => {
-    const configured = presentation && presentation.marker_kinds
-      ? presentation.marker_kinds[kind]
-      : null;
+    const configured = ownObjectValue(presentation && presentation.marker_kinds, kind);
     return configured && typeof configured === "object" ? configured : {};
   };
 
   const markerCategoryConfig = (category, presentation) => {
-    const configured = presentation && presentation.marker_categories
-      ? presentation.marker_categories[category]
-      : null;
+    const configured = ownObjectValue(presentation && presentation.marker_categories, category);
     return configured && typeof configured === "object" ? configured : {};
   };
 
   const markerCategory = (kind, presentation) => {
     const configured = markerKindConfig(kind, presentation);
-    return String(configured.category || DEFAULT_MARKER_KINDS[kind] || "info");
+    return String(configured.category || ownObjectValue(DEFAULT_MARKER_KINDS, kind) || "info");
   };
 
   const markerCategoryMeta = (category, presentation) => {
     const configured = markerCategoryConfig(category, presentation);
-    const fallback = DEFAULT_MARKER_CATEGORIES[category] || DEFAULT_MARKER_CATEGORIES.info;
+    const fallback = ownObjectValue(DEFAULT_MARKER_CATEGORIES, category) || DEFAULT_MARKER_CATEGORIES.info;
     return {
       singular: String(configured.singular || fallback.singular),
       plural: String(configured.plural || fallback.plural),
@@ -1279,10 +1286,21 @@ const PlayerCore = (() => {
       && typeof presentation.event_rail.icons === "object"
       ? presentation.event_rail.icons
       : null;
-    const configured = icons && typeof icons[kind] === "string" ? icons[kind] : "";
+    const iconValue = ownObjectValue(icons, kind);
+    const configured = typeof iconValue === "string" ? iconValue : "";
     if (configured.trim()) return configured.trim();
     const markerIcon = markerKindConfig(kind, presentation).icon;
     return typeof markerIcon === "string" ? markerIcon.trim() : "";
+  };
+
+  const safeMarkerImage = (value) => {
+    const image = typeof value === "string" ? value.trim() : "";
+    if (/^assets\/markers\/[a-z0-9][a-z0-9-]*\.png$/i.test(image)) return image;
+    if (
+      image !== "data:image/png;base64,"
+      && /^data:image\/png;base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(image)
+    ) return image;
+    return "";
   };
 
   const markerEventText = (marker, presentation) => {
@@ -2061,6 +2079,9 @@ const PlayerCore = (() => {
     audioTrackSelectedRowCount,
     markerStyle,
     markerDigest,
+    ownObjectValue,
+    markerKindConfig,
+    safeMarkerImage,
     normalizeGameReviewSettings,
     reviewMatchEventMarkers,
     reviewTimelineMarkers,

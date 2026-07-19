@@ -210,6 +210,51 @@ fn default_capability_only_targets_main_window() {
 }
 
 #[test]
+fn renderer_capabilities_match_observed_window_operations() {
+    let capability: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json"),
+        )
+        .expect("read default capability"),
+    )
+    .expect("valid default capability JSON");
+    let permissions: Vec<_> = capability["permissions"]
+        .as_array()
+        .expect("capability permissions")
+        .iter()
+        .map(|permission| permission.as_str().expect("string permission"))
+        .collect();
+
+    assert_eq!(
+        permissions,
+        [
+            "core:default",
+            "core:window:allow-toggle-maximize",
+            "core:window:allow-close",
+            "core:window:allow-start-dragging",
+            "autostart:allow-enable",
+            "autostart:allow-disable",
+            "autostart:allow-is-enabled",
+        ]
+    );
+}
+
+#[test]
+fn cloud_pages_and_marker_art_cross_narrow_renderer_boundaries() {
+    let cloud = read_ui_js("cloud.js");
+    let review = read_ui_js("review-player.js");
+    let library = read_ui_js("library.js");
+
+    assert!(
+        cloud.contains("await invoke(\"open_cloud_clip\", { remoteClipId: entry.remote_clip_id })")
+    );
+    assert!(!cloud.contains("invoke(\"open_cloud_clip_url\""));
+    assert!(review.contains("PlayerCore.safeMarkerImage"));
+    assert!(review.contains("PlayerCore.markerKindConfig"));
+    assert!(library.matches("PlayerCore.markerKindConfig").count() >= 2);
+}
+
+#[test]
 fn native_shell_prevents_duplicate_clipline_instances() {
     let manifest = cargo_toml();
     let app = app_rs();
@@ -2868,7 +2913,7 @@ fn library_has_cloud_source_tab() {
         "invoke(\"list_cloud_clips\")",
         "invoke(\"cache_cloud_clip_media\"",
         "invoke(\"cloud_clip_thumbnail\"",
-        "invoke(\"open_cloud_clip_url\"",
+        "invoke(\"open_cloud_clip\"",
         "PlayerCore.cloudLibraryEntries",
         "localClip ? clipCard(localClip) : cloudClipCard(entry)",
         "showCloudClipContextMenu(ev, entry)",
@@ -2934,8 +2979,8 @@ fn library_has_cloud_source_tab() {
         "native command registry must expose list_cloud_clips for the Cloud library tab"
     );
     assert!(
-        app_rs().contains("crate::cloud::open_cloud_clip_url"),
-        "native command registry must expose open_cloud_clip_url for Cloud card links"
+        app_rs().contains("crate::cloud::open_cloud_clip"),
+        "native command registry must expose open_cloud_clip for Cloud card links"
     );
 }
 

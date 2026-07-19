@@ -24,8 +24,8 @@ titlebar behavior.
   public/host origin.
 - [ ] Centralize own-property marker configuration and safe image validation in DOM-free
   `player-core.js`; use it from gallery and review rendering and retain fallbacks for unknown kinds.
-- [ ] Remove unused minimize/maximize/unmaximize grants while retaining toggle-maximize, close,
-  dragging, and resize-dragging permissions observed in the custom titlebar.
+- [ ] Remove unused minimize/maximize/unmaximize/resize-dragging grants while retaining
+  toggle-maximize, close, and dragging permissions observed in the custom titlebar.
 - [ ] Run focused native/player/UI tests, fresh-cache app Clippy, CI-mode workspace tests, and
   warning-denied workspace Clippy.
 - [ ] Rebuild/open the native app and exercise minimize, maximize/restore, drag, close-to-tray,
@@ -43,7 +43,8 @@ titlebar behavior.
 - [ ] A marker image reaches CSS only if it is a simple bundled marker PNG path or canonical PNG
   data URL containing no CSS string delimiters.
 - [ ] Unknown or invalid marker kinds/images fall back to the existing category glyphs.
-- [ ] Renderer window permissions equal the operations invoked by the shipped UI.
+- [ ] Renderer window permissions equal the operations invoked by the shipped UI; direct resize
+  capability is absent because native window chrome handles resize without a frontend call.
 
 ## Commits
 
