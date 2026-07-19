@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): explicit application module boundaries
+
+The combined audit's L-14 is fixed with incremental, compatibility-safe module boundaries. The
+largest application shells now delegate diagnostic-log ownership, media-root probing, clip naming,
+and cloud cache identity to focused Rust modules with narrow parent-only APIs. Tauri command names
+and externally visible behavior remain unchanged, while repository contracts prevent those domains
+from being folded back into the command/service monoliths.
+
+The renderer now enters through `bootstrap.mjs`, which explicitly imports frozen presentation,
+player, and Cloud core surfaces before loading the remaining controller adapter. The classic
+`PlayerCore` and `CloudCore` globals remain only as the Boa/gradual-migration compatibility layer.
+Filename stems, marker-kind labels, month names, clip titles, and gallery day labels now share one
+DOM-free presentation core. Its unified suffix policy strips MP4, MOV, MKV, and WebM consistently,
+closing the observed local/cloud title disagreement.
+
+Plan commit `e859f5d`; implementation commit `6c86a72`. Boa tests cover the shared suffix, marker,
+and calendar policies; UI contracts require the module bootstrap and explicit imports; repository
+contracts enforce all four Rust owners and reject the duplicated helpers. All 421 app tests, 88
+player-core tests, seven repository contracts, 77 UI contracts, CI-mode workspace tests,
+fresh-cache app Clippy, and warning-denied workspace Clippy pass. Computer Use verified the module
+build in the nine-of-nine Library, General and disconnected Cloud Settings, and active review
+playback. No new manual-only item remains.
+
 ## Checkpoint (2026-07-18): consolidated divergence-prone paths
 
 The combined audit's L-15 is fixed. Memory and disk replay rings now share keyframe-window and

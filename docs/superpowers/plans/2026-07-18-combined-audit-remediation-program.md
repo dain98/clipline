@@ -76,6 +76,8 @@ Additional completed findings:
 
 - [ ] L-15 — shared replay planning/storage dispatch, typed capture timeouts, centralized MP4 parsing/writing, and single native folder-picker ownership (`621c6dc`)
 
+- [ ] L-14 — named Rust domain owners, shared renderer presentation policy, and explicit ES-module bootstrap/core surface (`6c86a72`)
+
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
 - [ ] None currently.
