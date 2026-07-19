@@ -203,6 +203,44 @@ fn audio_poll_silence_horizon(until_pts_s: f64) -> Option<f64> {
         .then(|| (until_pts_s - FRAME_DURATION_S).max(0.0))
 }
 
+/// Owns one successful `IAudioCaptureClient::GetBuffer` packet until it is
+/// released back to WASAPI.
+struct WasapiPacket {
+    capture: IAudioCaptureClient,
+    frames: u32,
+    released: bool,
+}
+
+impl WasapiPacket {
+    fn new(capture: &IAudioCaptureClient, frames: u32) -> Self {
+        Self {
+            capture: capture.clone(),
+            frames,
+            released: false,
+        }
+    }
+
+    fn release(mut self) -> windows::core::Result<()> {
+        self.released = true;
+        // SAFETY: this guard is created only after a successful GetBuffer and
+        // owns the matching frame count. Marking it released before the call
+        // prevents Drop from attempting a second release if the API fails.
+        unsafe { self.capture.ReleaseBuffer(self.frames) }
+    }
+}
+
+impl Drop for WasapiPacket {
+    fn drop(&mut self) {
+        if !self.released {
+            self.released = true;
+            // SAFETY: this is the matching release for the successful
+            // GetBuffer that created the guard. Drop makes validation errors
+            // and unwinding release the packet exactly once.
+            let _ = unsafe { self.capture.ReleaseBuffer(self.frames) };
+        }
+    }
+}
+
 struct WasapiPcmCapture {
     client: IAudioClient,
     capture: IAudioCaptureClient,
@@ -387,33 +425,27 @@ impl WasapiPcmCapture {
         self.level.take()
     }
 
-    fn decode_samples(&self, data: *const u8, frames: u32) -> Vec<f32> {
-        let sample_count = frames as usize * self.channels as usize;
-        // SAFETY: WASAPI's buffer is valid until ReleaseBuffer. Callers copy
-        // before releasing, and each branch reads exactly the active frames.
-        unsafe {
-            match self.sample_format {
-                SampleFormat::Float32 => {
-                    std::slice::from_raw_parts(data as *const f32, sample_count).to_vec()
-                }
-                SampleFormat::Pcm16 => std::slice::from_raw_parts(data as *const i16, sample_count)
-                    .iter()
-                    .map(|&s| s as f32 / 32_768.0)
-                    .collect(),
-                SampleFormat::Pcm24 => std::slice::from_raw_parts(data, sample_count * 3)
-                    .chunks_exact(3)
-                    .map(|b| {
-                        let raw = b[0] as i32 | ((b[1] as i32) << 8) | ((b[2] as i32) << 16);
-                        let signed = (raw << 8) >> 8;
-                        signed as f32 / 8_388_608.0
-                    })
-                    .collect(),
-                SampleFormat::Pcm32 => std::slice::from_raw_parts(data as *const i32, sample_count)
-                    .iter()
-                    .map(|&s| s as f32 / 2_147_483_648.0)
-                    .collect(),
-            }
+    fn decode_samples(&self, data: *const u8, frames: u32) -> Result<Vec<f32>, CaptureError> {
+        let sample_count = (frames as usize)
+            .checked_mul(self.channels as usize)
+            .ok_or_else(|| CaptureError::DeviceLost("WASAPI sample count overflow".into()))?;
+        let byte_len = sample_count
+            .checked_mul(self.sample_format.bytes_per_sample())
+            .ok_or_else(|| CaptureError::DeviceLost("WASAPI buffer size overflow".into()))?;
+        if byte_len == 0 {
+            return Ok(Vec::new());
         }
+        if data.is_null() {
+            return Err(CaptureError::DeviceLost(
+                "WASAPI returned a null non-silent buffer".into(),
+            ));
+        }
+        // SAFETY: GetBuffer guarantees `byte_len` readable bytes until
+        // ReleaseBuffer. A u8 slice has alignment one; typed decoding below
+        // copies fixed-size little-endian arrays and never assumes alignment.
+        let bytes = unsafe { std::slice::from_raw_parts(data, byte_len) };
+        decode_sample_bytes(bytes, self.sample_format, sample_count)
+            .map_err(|message| CaptureError::DeviceLost(message.into()))
     }
 
     fn stereo_samples(&mut self, samples: &[f32]) -> Vec<f32> {
@@ -455,16 +487,20 @@ impl WasapiPcmCapture {
                         Some(&mut qpc_100ns),
                     )
                     .map_err(lost)?;
+                let packet = WasapiPacket::new(&self.capture, frames);
                 let timestamp_valid = wasapi_timestamp_valid(flags);
                 let data_discontinuous = wasapi_data_discontinuous(flags);
                 let pts_s = timestamp_valid.then(|| self.clock.pts_s(qpc_100ns as i64));
-                let n = frames as usize * self.channels as usize;
-                let samples: Vec<f32> = if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
-                    vec![0.0; n]
+                let sample_count = (frames as usize)
+                    .checked_mul(self.channels as usize)
+                    .ok_or_else(|| CaptureError::DeviceLost("WASAPI sample count overflow".into()));
+                let samples = if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
+                    sample_count.map(|count| vec![0.0; count])
                 } else {
                     self.decode_samples(data as *const u8, frames)
                 };
-                self.capture.ReleaseBuffer(frames).map_err(lost)?;
+                packet.release().map_err(lost)?;
+                let samples = samples?;
                 let stereo = self.stereo_samples(&samples);
                 if let Some(pts_s) = pts_s {
                     self.assembler.push_chunk(pts_s, &stereo);
@@ -1230,6 +1266,56 @@ fn pcm_sample_format(bits: u16) -> Option<SampleFormat> {
     }
 }
 
+impl SampleFormat {
+    const fn bytes_per_sample(self) -> usize {
+        match self {
+            Self::Float32 | Self::Pcm32 => 4,
+            Self::Pcm16 => 2,
+            Self::Pcm24 => 3,
+        }
+    }
+}
+
+fn decode_sample_bytes(
+    bytes: &[u8],
+    sample_format: SampleFormat,
+    sample_count: usize,
+) -> Result<Vec<f32>, &'static str> {
+    let expected_len = sample_count
+        .checked_mul(sample_format.bytes_per_sample())
+        .ok_or("WASAPI buffer size overflow")?;
+    if bytes.len() != expected_len {
+        return Err("WASAPI buffer length does not match its frame count");
+    }
+    Ok(match sample_format {
+        SampleFormat::Float32 => bytes
+            .chunks_exact(4)
+            .map(|sample| f32::from_le_bytes(sample.try_into().expect("four-byte chunk")))
+            .collect(),
+        SampleFormat::Pcm16 => bytes
+            .chunks_exact(2)
+            .map(|sample| {
+                i16::from_le_bytes(sample.try_into().expect("two-byte chunk")) as f32 / 32_768.0
+            })
+            .collect(),
+        SampleFormat::Pcm24 => bytes
+            .chunks_exact(3)
+            .map(|sample| {
+                let raw = sample[0] as i32 | ((sample[1] as i32) << 8) | ((sample[2] as i32) << 16);
+                let signed = (raw << 8) >> 8;
+                signed as f32 / 8_388_608.0
+            })
+            .collect(),
+        SampleFormat::Pcm32 => bytes
+            .chunks_exact(4)
+            .map(|sample| {
+                i32::from_le_bytes(sample.try_into().expect("four-byte chunk")) as f32
+                    / 2_147_483_648.0
+            })
+            .collect(),
+    })
+}
+
 fn process_loopback_format() -> WAVEFORMATEX {
     const CHANNELS: u16 = 2;
     const BITS_PER_SAMPLE: u16 = 16;
@@ -1262,6 +1348,60 @@ mod tests {
     use super::*;
     use crate::clock::RelativeClock;
     use crate::traits::AudioSource;
+
+    #[test]
+    fn sample_decoder_accepts_misaligned_little_endian_buffers() {
+        fn misaligned(samples: impl IntoIterator<Item = u8>) -> Vec<u8> {
+            std::iter::once(0xAA).chain(samples).collect()
+        }
+
+        let float = misaligned(
+            (-1.0f32)
+                .to_le_bytes()
+                .into_iter()
+                .chain(0.5f32.to_le_bytes()),
+        );
+        assert_eq!(
+            decode_sample_bytes(&float[1..], SampleFormat::Float32, 2).unwrap(),
+            [-1.0, 0.5]
+        );
+
+        let pcm16 = misaligned(
+            i16::MIN
+                .to_le_bytes()
+                .into_iter()
+                .chain(16_384i16.to_le_bytes()),
+        );
+        assert_eq!(
+            decode_sample_bytes(&pcm16[1..], SampleFormat::Pcm16, 2).unwrap(),
+            [-1.0, 0.5]
+        );
+
+        let pcm32 = misaligned(
+            i32::MIN
+                .to_le_bytes()
+                .into_iter()
+                .chain(1_073_741_824i32.to_le_bytes()),
+        );
+        assert_eq!(
+            decode_sample_bytes(&pcm32[1..], SampleFormat::Pcm32, 2).unwrap(),
+            [-1.0, 0.5]
+        );
+
+        let pcm24 = misaligned([0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        let decoded = decode_sample_bytes(&pcm24[1..], SampleFormat::Pcm24, 3).unwrap();
+        assert_eq!(decoded[0], -1.0);
+        assert_eq!(decoded[1], -1.0 / 8_388_608.0);
+        assert!((decoded[2] - 8_388_607.0 / 8_388_608.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn sample_decoder_rejects_truncated_or_extra_bytes() {
+        assert!(decode_sample_bytes(&[0; 3], SampleFormat::Float32, 1).is_err());
+        assert!(decode_sample_bytes(&[0; 3], SampleFormat::Pcm16, 1).is_err());
+        assert!(decode_sample_bytes(&[0; 2], SampleFormat::Pcm24, 1).is_err());
+        assert!(decode_sample_bytes(&[0; 5], SampleFormat::Pcm32, 1).is_err());
+    }
 
     #[test]
     fn fixed_wave_format_storage_is_borrowed() {

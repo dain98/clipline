@@ -5,8 +5,8 @@
 use windows::core::{Error as WinError, Interface, Result as WinResult};
 use windows::Win32::Foundation::{E_FAIL, RECT};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1,
-    ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+    ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext,
+    ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
     D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
     D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
@@ -303,30 +303,120 @@ pub fn read_nv12(device: &ID3D11Device, src: &ID3D11Texture2D) -> WinResult<Vec<
     let source: ID3D11Resource = src.cast()?;
     // SAFETY: trivial getter; the device owns a single immediate context.
     let ctx = unsafe { device.GetImmediateContext()? };
-    let (w, h) = (width as usize, height as usize);
-    let mut out = vec![0u8; w * h * 3 / 2];
-    // SAFETY: dst/source are valid resources of identical NV12 descs; the
-    // staging texture is CPU-readable and mapped for read below. The mapped
-    // pointer is valid until Unmap, which we always call before returning.
+    // SAFETY: dst/source are valid resources of identical NV12 descriptions.
     unsafe {
         ctx.CopyResource(&dst, &source);
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    }
+    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    unsafe {
         ctx.Map(&dst, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
-        let pitch = mapped.RowPitch as usize;
-        let base = mapped.pData as *const u8;
-        for row in 0..h {
-            let src_row = std::slice::from_raw_parts(base.add(row * pitch), w);
-            out[row * w..(row + 1) * w].copy_from_slice(src_row);
-        }
-        let uv_base = base.add(pitch * h);
-        let uv_out = w * h;
-        for row in 0..h / 2 {
-            let src_row = std::slice::from_raw_parts(uv_base.add(row * pitch), w);
-            out[uv_out + row * w..uv_out + (row + 1) * w].copy_from_slice(src_row);
-        }
-        ctx.Unmap(&dst, 0);
+    }
+    let _map = D3d11ReadMap::new(&ctx, &dst);
+    let layout = nv12_readback_layout(width, height, mapped.RowPitch)?;
+    if mapped.pData.is_null() {
+        return Err(WinError::new(E_FAIL, "invalid mapped NV12 texture pointer"));
+    }
+    let mut out = vec![0u8; layout.packed_len];
+    let base = mapped.pData as *const u8;
+    for row in 0..layout.rows {
+        let source_offset = row * layout.pitch;
+        // SAFETY: layout validation proves the complete row lies within the
+        // representable mapped span and `base` is non-null until `_map` drops.
+        let source =
+            unsafe { std::slice::from_raw_parts(base.add(source_offset), layout.row_bytes) };
+        out[row * layout.row_bytes..(row + 1) * layout.row_bytes].copy_from_slice(source);
+    }
+    // SAFETY: `uv_offset` and every following UV row were checked as part of
+    // `mapped_span`; D3D11 places the interleaved UV plane immediately after Y.
+    let uv_base = unsafe { base.add(layout.uv_offset) };
+    for row in 0..layout.uv_rows {
+        let source_offset = row * layout.pitch;
+        let source =
+            unsafe { std::slice::from_raw_parts(uv_base.add(source_offset), layout.row_bytes) };
+        let output_offset = layout.y_len + row * layout.row_bytes;
+        out[output_offset..output_offset + layout.row_bytes].copy_from_slice(source);
     }
     Ok(out)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Nv12ReadbackLayout {
+    row_bytes: usize,
+    rows: usize,
+    uv_rows: usize,
+    pitch: usize,
+    y_len: usize,
+    uv_offset: usize,
+    packed_len: usize,
+    mapped_span: usize,
+}
+
+fn nv12_readback_layout(width: u32, height: u32, row_pitch: u32) -> WinResult<Nv12ReadbackLayout> {
+    if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(WinError::new(
+            E_FAIL,
+            "invalid mapped NV12 texture dimensions",
+        ));
+    }
+    let row_bytes =
+        usize::try_from(width).map_err(|_| WinError::new(E_FAIL, "NV12 row size overflow"))?;
+    let rows =
+        usize::try_from(height).map_err(|_| WinError::new(E_FAIL, "NV12 row count overflow"))?;
+    let uv_rows = rows / 2;
+    let pitch =
+        usize::try_from(row_pitch).map_err(|_| WinError::new(E_FAIL, "NV12 row pitch overflow"))?;
+    if pitch < row_bytes {
+        return Err(WinError::new(E_FAIL, "invalid mapped NV12 row pitch"));
+    }
+    let y_len = row_bytes
+        .checked_mul(rows)
+        .ok_or_else(|| WinError::new(E_FAIL, "NV12 Y-plane size overflow"))?;
+    let uv_len = row_bytes
+        .checked_mul(uv_rows)
+        .ok_or_else(|| WinError::new(E_FAIL, "NV12 UV-plane size overflow"))?;
+    let packed_len = y_len
+        .checked_add(uv_len)
+        .ok_or_else(|| WinError::new(E_FAIL, "NV12 readback size overflow"))?;
+    let uv_offset = pitch
+        .checked_mul(rows)
+        .ok_or_else(|| WinError::new(E_FAIL, "NV12 UV offset overflow"))?;
+    let final_uv_offset = pitch
+        .checked_mul(uv_rows - 1)
+        .and_then(|offset| offset.checked_add(row_bytes))
+        .ok_or_else(|| WinError::new(E_FAIL, "NV12 mapped span overflow"))?;
+    let mapped_span = uv_offset
+        .checked_add(final_uv_offset)
+        .filter(|span| *span <= isize::MAX as usize)
+        .ok_or_else(|| WinError::new(E_FAIL, "NV12 mapped span overflow"))?;
+    Ok(Nv12ReadbackLayout {
+        row_bytes,
+        rows,
+        uv_rows,
+        pitch,
+        y_len,
+        uv_offset,
+        packed_len,
+        mapped_span,
+    })
+}
+
+struct D3d11ReadMap<'a> {
+    context: &'a ID3D11DeviceContext,
+    resource: &'a ID3D11Resource,
+}
+
+impl<'a> D3d11ReadMap<'a> {
+    fn new(context: &'a ID3D11DeviceContext, resource: &'a ID3D11Resource) -> Self {
+        Self { context, resource }
+    }
+}
+
+impl Drop for D3d11ReadMap<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the guard is created exactly once after a successful Map
+        // and owns the corresponding single Unmap on every exit path.
+        unsafe { self.context.Unmap(self.resource, 0) };
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -347,12 +437,16 @@ pub fn read_bgra(device: &ID3D11Device, src: &ID3D11Texture2D) -> WinResult<Bgra
     let dst: ID3D11Resource = staging.cast()?;
     let source: ID3D11Resource = src.cast()?;
     let ctx = unsafe { device.GetImmediateContext()? };
-    let row_bytes = width as usize * 4;
+    let row_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| WinError::new(E_FAIL, "BGRA row size overflow"))?;
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
     unsafe {
         ctx.CopyResource(&dst, &source);
         ctx.Map(&dst, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
     }
+    let _map = D3d11ReadMap::new(&ctx, &dst);
     let result = (|| {
         let pitch = mapped.RowPitch as usize;
         if mapped.pData.is_null() || pitch < row_bytes {
@@ -374,13 +468,36 @@ pub fn read_bgra(device: &ID3D11Device, src: &ID3D11Texture2D) -> WinResult<Bgra
             stride: row_bytes,
         })
     })();
-    unsafe { ctx.Unmap(&dst, 0) };
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nv12_layout_checks_pitch_dimensions_offsets_and_overflow() {
+        let layout = nv12_readback_layout(4, 4, 8).expect("valid padded NV12 layout");
+        assert_eq!(layout.row_bytes, 4);
+        assert_eq!(layout.rows, 4);
+        assert_eq!(layout.uv_rows, 2);
+        assert_eq!(layout.y_len, 16);
+        assert_eq!(layout.uv_offset, 32);
+        assert_eq!(layout.packed_len, 24);
+        assert_eq!(layout.mapped_span, 44);
+
+        for invalid in [
+            nv12_readback_layout(4, 4, 3),
+            nv12_readback_layout(0, 4, 4),
+            nv12_readback_layout(4, 0, 4),
+            nv12_readback_layout(3, 4, 4),
+            nv12_readback_layout(4, 3, 4),
+            nv12_readback_layout(u32::MAX - 1, u32::MAX - 1, u32::MAX - 1),
+            nv12_readback_layout(2, u32::MAX - 1, u32::MAX),
+        ] {
+            assert!(invalid.is_err());
+        }
+    }
 
     #[test]
     fn reads_bgra_texture_on_warp_without_video_processor() {
