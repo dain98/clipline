@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): exact Windows native-resource ownership
+
+The combined audit's L-01 is fixed. WASAPI mix formats now carry an explicit borrowed-stack or
+owned-COM allocation variant. Only the `GetMixFormat` variant calls `CoTaskMemFree`, and RAII frees
+it on unsupported-format, initialization, service, start, and success paths. The fixed process
+loopback format can no longer reach a stack-pointer free. The finding's unused event-handle branch
+had already disappeared with M-14's pull-mode process loopback conversion and was verified absent.
+
+Media Foundation `ProcessOutput` now writes into an owned guard whose `pSample` and `pEvents` fields
+release on every success, stream-change, missing-sample, and arbitrary error branch. Taking a sample
+atomically replaces its owner slot with `None`, so packet conversion errors release the moved sample
+normally while the guard releases only remaining fields.
+
+Plan commit `b3ffca4`; implementation commit `3c5d059`. The capture suite now has 190 unit tests,
+including borrowed/COM wave-format ownership and drop-spy coverage for taken, cleared, and untouched
+`ManuallyDrop` values. Fresh-cache capture Clippy, CI-mode workspace tests (393 app tests), and
+workspace Clippy pass with warnings denied. Computer Use verified normal startup and the nine-clip
+Library. No new manual-only item remains beyond the existing Windows capture lifecycle scenario.
+
 ## Checkpoint (2026-07-18): enforced shared D3D11 synchronization
 
 The combined audit's M-23 is fixed. The Windows D3D wrapper now has one idempotent guard that casts
