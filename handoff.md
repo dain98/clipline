@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): coalesced off-thread memory sampling
+
+The combined audit's L-16 is fixed without changing the displayed metric. `MemorySampler` now owns
+one async mutex and a one-second monotonic cache of either success or failure. The first stale caller
+runs the exact private-resident process-tree walk on Tauri's blocking pool while concurrent callers
+wait; they then reuse the completed result rather than duplicating the address-space scan.
+
+`memory_status` is asynchronous and reads the managed sampler. The renderer keeps its two-second
+visible cadence, skips invokes while the document is hidden, and refreshes immediately on
+`visibilitychange` when shown again. Child-process enumeration, conhost exclusion, and private
+working-set semantics are unchanged.
+
+Plan commit `938b3ea`; implementation commit `fb30ca0`. Async fixtures prove eight concurrent calls
+execute one measurement and that failures are cached then retried after expiry. The UI contract
+requires the async managed sampler, blocking-pool boundary, hidden guard, and visibility refresh.
+All 421 app unit tests, 77 UI contracts, CI-mode workspace tests, fresh app Clippy, and
+warning-denied workspace Clippy pass. Computer Use verified a live RAM value, minimized the rebuilt
+app for three seconds, restored it, and observed sampling resume with the nine-of-nine Library
+healthy. No manual-only item remains.
+
 ## Checkpoint (2026-07-18): transition-only Cloud gallery rendering
 
 The combined audit's L-32 is fixed. Cloud upload progress reconciliation is now DOM-free in

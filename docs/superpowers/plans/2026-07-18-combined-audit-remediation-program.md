@@ -72,6 +72,8 @@ Additional completed findings:
 
 - [ ] L-32 — transition-only Cloud gallery rendering with live constant-size byte progress (`255a8a6`)
 
+- [ ] L-16 — coalesced cached memory sampling on the blocking pool with hidden-window pause (`fb30ca0`)
+
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
 - [ ] None currently.
