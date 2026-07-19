@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): explicit origin-bound plain HTTP consent
+
+The combined audit's L-08 is fixed. Entering a plain-HTTP Clipline Cloud URL now reveals an
+explicit checkbox that names the normalized origin receiving the password. The renderer no longer
+derives `plain_http_confirmed` from the URL scheme. It blocks `cloud_connect` before invocation
+unless the checkbox is checked and its stored origin exactly matches the active normalized origin;
+HTTPS requests continue with the flag false.
+
+The acknowledgment is transient and resets when the scheme, host, or effective port changes.
+Path-only edits on the same origin retain it. Programmatic host replacement is also safe because
+the request-time comparison rejects stale consent even before input-event synchronization. Backend
+validation remains authoritative for the limited loopback/private HTTP hosts Clipline permits.
+
+Plan commit `036c882`; implementation commit `962ba5e`. Five pure CloudCore tests cover checked,
+unchecked, wrong-origin, wrong-port, and empty consent states, while 73 UI contracts pin the
+pre-request guard, explicit control, origin reset, backend flag, and bounded layout. Fresh-cache
+app Clippy, CI-mode workspace tests (398 app tests), and workspace Clippy pass with warnings denied.
+Computer Use verified the normalized warning and visible checkbox, a blocked unconfirmed connect,
+port-change invalidation after consent, and clean wrapping for a long URL. No manual-only item
+remains for this finding.
+
 ## Checkpoint (2026-07-18): cloud auth preserves unsaved settings
 
 The combined audit's L-07 is fixed. Connect and disconnect now snapshot the complete settings form

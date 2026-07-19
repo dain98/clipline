@@ -48,6 +48,7 @@ Additional completed findings:
 - [ ] L-05 — zero, duplicate, and file-range validation for proxy/direct multipart work lists (`b353966`)
 - [ ] L-06 — unique owned poster temps, all-branch cleanup, and atomic stale-poster publication (`509e5cd`)
 - [ ] L-07 — backend-only Cloud auth merge that preserves unrelated settings drafts and preferences (`4ad75ac`)
+- [ ] L-08 — explicit normalized-origin consent before any plain-HTTP password request (`962ba5e`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
