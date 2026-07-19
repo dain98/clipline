@@ -4,6 +4,32 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): bounded large-file transforms and upload
+
+The combined audit's H-05 and M-16 are fixed. File trim and audio-selection remux now load only a
+bounded finalized `moov` box, retain the source file's absolute sample offsets, and copy media with
+a 64 KiB buffer. Multi-track audio mixing decodes one Opus packet per selected track at a time,
+spools encoded mixed packets to a unique file, and muxes source video plus spooled audio without
+materializing the MP4. Clipboard sharing uses these file APIs instead of a source/output `Vec`.
+
+Cloud upload now owns a path/size/checksum payload rather than bytes. SHA-256 is computed in a
+streaming pass, single PUT uses a streaming request body, and resumable proxy/direct uploads seek
+and read only one part at a time. Server part sizes above 64 MiB are rejected before allocation.
+Original uploads use the source directly; selected-audio variants use reserved `.tmp` files that
+are removed on every ordinary exit, while abandoned Clipline-owned temps older than one day are
+reclaimed without touching unrelated or active files.
+
+Every file transform rejects source/target identity through Windows file ids (so distinct hard
+links are safe), writes to a unique `create_new` sibling, flushes/syncs, and publishes with an
+atomic replace only after finalization. Injected late failures preserve the prior target and clean
+the partial output.
+
+Plan commit `aa6e177`; implementation commit `db86efe`. The 100-test MP4 unit suite, 12 cloud
+transport tests, selected-payload/clipboard tests, CI-mode workspace tests, fresh-cache changed-
+crate Clippy, and workspace Clippy all pass with warnings denied. Computer Use verified the rebuilt
+app opens with all nine local clips, Local/Cloud controls, and 6.4 MB idle RAM. No real cloud upload
+or multi-gigabyte user-file operation was performed; those remain on the manual acceptance list.
+
 ## Checkpoint (2026-07-18): remove unsafe full-application elevation
 
 The combined audit's H-01 is fixed by removing the privilege boundary rather than partially
