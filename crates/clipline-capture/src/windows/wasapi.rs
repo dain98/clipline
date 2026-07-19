@@ -44,6 +44,7 @@ use windows::Win32::System::Variant::VT_BLOB;
 use clipline_mp4::AudioTrackConfig;
 
 use crate::clock::RelativeClock;
+use crate::diagnostics::{emit_diagnostic, CaptureDiagnostic, DiagnosticRateLimiter};
 use crate::opus::{OpusFrameEncoder, FRAME_DURATION_S};
 use crate::pcm::{
     apply_gain, extract_mono_centered, extract_stereo, LoopbackAssembler, PcmFrame, StereoResampler,
@@ -77,7 +78,7 @@ pub struct AudioProcessInfo {
 #[derive(Debug, Clone)]
 struct ProcessSnapshotEntry {
     parent_pid: u32,
-    process_path: Option<String>,
+    image_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -253,6 +254,7 @@ struct WasapiPcmCapture {
     resampler: Option<StereoResampler>,
     assembler: LoopbackAssembler,
     queue: std::collections::VecDeque<PcmFrame>,
+    discontinuity_diagnostics: DiagnosticRateLimiter,
 }
 
 pub struct WasapiLoopback {
@@ -417,6 +419,7 @@ impl WasapiPcmCapture {
                     .then(|| StereoResampler::new(mix.sample_rate, OPUS_SAMPLE_RATE)),
                 assembler,
                 queue: std::collections::VecDeque::new(),
+                discontinuity_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
             })
         }
     }
@@ -508,7 +511,13 @@ impl WasapiPcmCapture {
                     self.assembler.push_contiguous_chunk(&stereo);
                 }
                 if data_discontinuous {
-                    eprintln!("WASAPI data discontinuity; audio gap fill capped");
+                    if let Some(suppressed_since_last) =
+                        self.discontinuity_diagnostics.observe(Instant::now())
+                    {
+                        emit_diagnostic(CaptureDiagnostic::WasapiDataDiscontinuity {
+                            suppressed_since_last,
+                        });
+                    }
                 }
             }
         }
@@ -656,7 +665,7 @@ pub fn enumerate_output_processes(
             let session_process_path = process_image_path(pid).or_else(|| {
                 process_snapshot
                     .get(&pid)
-                    .and_then(|entry| entry.process_path.clone())
+                    .and_then(|entry| entry.image_name.clone())
             });
             let capture_pid =
                 process_group_root(pid, session_process_path.as_deref(), &process_snapshot);
@@ -672,7 +681,7 @@ pub fn enumerate_output_processes(
                 .or_else(|| {
                     process_snapshot
                         .get(&capture_pid)
-                        .and_then(|entry| entry.process_path.clone())
+                        .and_then(|entry| entry.image_name.clone())
                 });
             let process_name = process_path
                 .as_deref()
@@ -889,7 +898,7 @@ fn activate_process_loopback_client(pid: u32) -> Result<IAudioClient, CaptureErr
     let operation = match operation {
         Ok(operation) => operation,
         Err(error) => {
-            // SAFETY: clears the owned blob allocated by InitPropVariantFromBuffer.
+            // SAFETY: clears the VT_BLOB payload allocated with CoTaskMemAlloc.
             let _ = unsafe { PropVariantClear(&mut variant) };
             return Err(init(error));
         }
@@ -939,7 +948,7 @@ fn activate_process_loopback_client(pid: u32) -> Result<IAudioClient, CaptureErr
             return Ok(client);
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            // SAFETY: clears the owned blob allocated by InitPropVariantFromBuffer.
+            // SAFETY: clears the VT_BLOB payload allocated with CoTaskMemAlloc.
             let _ = unsafe { PropVariantClear(&mut variant) };
             return Err(CaptureError::Init(format!(
                 "WASAPI process loopback activation timed out for pid {pid}"
@@ -951,7 +960,7 @@ fn activate_process_loopback_client(pid: u32) -> Result<IAudioClient, CaptureErr
             .expect("activation result condvar");
         guard = next_guard;
         if timeout.timed_out() && !*guard {
-            // SAFETY: clears the owned blob allocated by InitPropVariantFromBuffer.
+            // SAFETY: clears the VT_BLOB payload allocated with CoTaskMemAlloc.
             let _ = unsafe { PropVariantClear(&mut variant) };
             return Err(CaptureError::Init(format!(
                 "WASAPI process loopback activation timed out for pid {pid}"
@@ -1001,8 +1010,7 @@ fn process_snapshot() -> std::collections::HashMap<u32, ProcessSnapshotEntry> {
                         pid,
                         ProcessSnapshotEntry {
                             parent_pid: entry.th32ParentProcessID,
-                            process_path: (!fallback_name.trim().is_empty())
-                                .then_some(fallback_name),
+                            image_name: (!fallback_name.trim().is_empty()).then_some(fallback_name),
                         },
                     );
                 }
@@ -1029,7 +1037,7 @@ fn process_group_root(
         .or_else(|| {
             snapshot
                 .get(&pid)
-                .and_then(|entry| entry.process_path.clone())
+                .and_then(|entry| entry.image_name.clone())
         });
 
     for parent_pid in process_parent_pids(pid, snapshot) {
@@ -1039,7 +1047,7 @@ fn process_group_root(
         let Some(parent) = snapshot.get(&parent_pid) else {
             break;
         };
-        let Some(parent_path) = parent.process_path.as_deref() else {
+        let Some(parent_path) = parent.image_name.as_deref() else {
             break;
         };
         if !same_process_image(path, parent_path) {
@@ -1105,8 +1113,8 @@ fn process_images_differ(
     snapshot: &std::collections::HashMap<u32, ProcessSnapshotEntry>,
 ) -> bool {
     match (
-        process_path_for(a.pid, a.process_path.as_deref(), snapshot),
-        process_path_for(b.pid, b.process_path.as_deref(), snapshot),
+        process_image_for(a.pid, a.process_path.as_deref(), snapshot),
+        process_image_for(b.pid, b.process_path.as_deref(), snapshot),
     ) {
         (Some(a_path), Some(b_path)) => !same_process_image(a_path, b_path),
         _ => {
@@ -1121,7 +1129,7 @@ fn process_images_differ(
     }
 }
 
-fn process_path_for<'a>(
+fn process_image_for<'a>(
     pid: u32,
     path: Option<&'a str>,
     snapshot: &'a std::collections::HashMap<u32, ProcessSnapshotEntry>,
@@ -1129,7 +1137,7 @@ fn process_path_for<'a>(
     path.or_else(|| {
         snapshot
             .get(&pid)
-            .and_then(|entry| entry.process_path.as_deref())
+            .and_then(|entry| entry.image_name.as_deref())
     })
 }
 
@@ -1137,7 +1145,7 @@ fn process_identity_name(
     process: &AudioProcessInfo,
     snapshot: &std::collections::HashMap<u32, ProcessSnapshotEntry>,
 ) -> Option<String> {
-    process_path_for(process.pid, process.process_path.as_deref(), snapshot)
+    process_image_for(process.pid, process.process_path.as_deref(), snapshot)
         .and_then(process_name_from_path)
         .or_else(|| {
             process
@@ -1465,21 +1473,21 @@ mod tests {
                 10724,
                 ProcessSnapshotEntry {
                     parent_pid: 1000,
-                    process_path: Some(r"C:\Users\dain\AppData\Local\Discord\Discord.exe".into()),
+                    image_name: Some("Discord.exe".into()),
                 },
             ),
             (
                 18736,
                 ProcessSnapshotEntry {
                     parent_pid: 10724,
-                    process_path: Some(r"C:\Users\dain\AppData\Local\Discord\Discord.exe".into()),
+                    image_name: Some("Discord.exe".into()),
                 },
             ),
             (
                 20732,
                 ProcessSnapshotEntry {
                     parent_pid: 10724,
-                    process_path: Some(r"C:\Users\dain\AppData\Local\Discord\Discord.exe".into()),
+                    image_name: Some("Discord.exe".into()),
                 },
             ),
         ]);
@@ -1509,14 +1517,14 @@ mod tests {
                 10,
                 ProcessSnapshotEntry {
                     parent_pid: 1,
-                    process_path: Some(r"C:\Launchers\Launcher.exe".into()),
+                    image_name: Some("Launcher.exe".into()),
                 },
             ),
             (
                 20,
                 ProcessSnapshotEntry {
                     parent_pid: 10,
-                    process_path: Some(r"C:\Games\Game.exe".into()),
+                    image_name: Some("Game.exe".into()),
                 },
             ),
         ]);
@@ -1534,14 +1542,14 @@ mod tests {
                 10,
                 ProcessSnapshotEntry {
                     parent_pid: 1,
-                    process_path: Some(r"C:\Program Files\Steam\steam.exe".into()),
+                    image_name: Some("steam.exe".into()),
                 },
             ),
             (
                 20,
                 ProcessSnapshotEntry {
                     parent_pid: 10,
-                    process_path: Some(r"C:\Games\SlayTheSpire2.exe".into()),
+                    image_name: Some("SlayTheSpire2.exe".into()),
                 },
             ),
         ]);
@@ -1573,14 +1581,14 @@ mod tests {
                 10,
                 ProcessSnapshotEntry {
                     parent_pid: 1,
-                    process_path: None,
+                    image_name: None,
                 },
             ),
             (
                 20,
                 ProcessSnapshotEntry {
                     parent_pid: 10,
-                    process_path: Some(r"C:\Games\SlayTheSpire2.exe".into()),
+                    image_name: Some("SlayTheSpire2.exe".into()),
                 },
             ),
         ]);

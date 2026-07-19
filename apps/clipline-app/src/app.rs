@@ -20,6 +20,8 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_updater::UpdaterExt;
 
+use clipline_capture::diagnostics::install_diagnostic_handler;
+
 use crate::game_discovery::DetectedGameCandidate;
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
@@ -2125,6 +2127,9 @@ fn save_settings<R: Runtime>(
 }
 
 pub fn run() {
+    if let Err(error) = install_diagnostic_handler(|event| log_diagnostic(event.to_string())) {
+        log_diagnostic(format!("capture diagnostic setup: {error}"));
+    }
     let startup_load = AppSettings::load_for_startup();
     let mut settings = startup_load.settings;
     let mut startup_warnings = startup_load.warnings;

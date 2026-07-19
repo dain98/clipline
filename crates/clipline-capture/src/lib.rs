@@ -3,6 +3,7 @@ pub mod av1;
 pub mod avsync;
 pub mod clock;
 pub mod cpu_video;
+pub mod diagnostics;
 pub mod ffmpeg;
 pub mod ffmpeg_encoder;
 pub mod framing;

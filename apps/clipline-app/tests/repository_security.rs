@@ -122,6 +122,56 @@ fn unsafe_application_platform_helpers_live_under_the_windows_module() {
 }
 
 #[test]
+fn capture_diagnostics_and_snapshot_names_match_production_behavior() {
+    let root = workspace_root();
+    let wasapi_path = root.join("crates/clipline-capture/src/windows/wasapi.rs");
+    let ffmpeg_path = root.join("crates/clipline-capture/src/ffmpeg_encoder.rs");
+    let wasapi = fs::read_to_string(&wasapi_path).expect("read WASAPI source");
+    let ffmpeg = fs::read_to_string(&ffmpeg_path).expect("read FFmpeg encoder source");
+    let wasapi_production = wasapi
+        .rsplit_once("#[cfg(test)]\nmod tests")
+        .expect("WASAPI unit-test boundary")
+        .0;
+    let ffmpeg_production = ffmpeg
+        .split_once("#[cfg(test)]\nmod tests")
+        .expect("FFmpeg unit-test boundary")
+        .0;
+
+    let snapshot = wasapi_production
+        .split_once("struct ProcessSnapshotEntry")
+        .expect("process snapshot entry")
+        .1
+        .split_once('}')
+        .expect("process snapshot fields")
+        .0;
+    assert!(snapshot.contains("image_name:"));
+    assert!(
+        !snapshot.contains("process_path:"),
+        "ToolHelp exposes a bare executable image name, not a full path"
+    );
+    assert!(!wasapi_production.contains("InitPropVariantFromBuffer"));
+    assert!(
+        !wasapi_production.contains("eprintln!"),
+        "production WASAPI diagnostics must use the typed diagnostic route"
+    );
+    assert!(
+        !ffmpeg_production.contains("eprintln!"),
+        "production FFmpeg reader diagnostics must not print ad hoc"
+    );
+
+    let app =
+        fs::read_to_string(root.join("apps/clipline-app/src/app.rs")).expect("read app source");
+    let install = app
+        .find("install_diagnostic_handler(|event|")
+        .expect("capture diagnostic handler installation");
+    let builder = app.find("tauri::Builder").expect("Tauri builder");
+    assert!(
+        install < builder,
+        "capture diagnostics must be routed before capture services can start"
+    );
+}
+
+#[test]
 fn dependency_and_ci_supply_chain_is_reviewable_and_audited() {
     let root = workspace_root();
     let workflows = root.join(".github/workflows");
