@@ -13,7 +13,7 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -38,11 +38,16 @@ struct RawUnit {
     is_keyframe: bool,
 }
 
+enum ReaderMsg {
+    Unit(RawUnit),
+    Error(String),
+}
+
 /// The process-side machinery, shared by every constructor.
 struct Spawned {
     child: Child,
     stdin: ChildStdin,
-    rx: Receiver<RawUnit>,
+    rx: Receiver<ReaderMsg>,
     reader: JoinHandle<()>,
     codec_params: Arc<Mutex<Option<VideoCodecParams>>>,
 }
@@ -50,7 +55,7 @@ struct Spawned {
 pub struct FfmpegVideoEncoder {
     child: Child,
     stdin: Option<ChildStdin>,
-    rx: Receiver<RawUnit>,
+    rx: Receiver<ReaderMsg>,
     reader: Option<JoinHandle<()>>,
     codec_params: Arc<Mutex<Option<VideoCodecParams>>>,
     pending_pts: VecDeque<f64>,
@@ -60,8 +65,6 @@ pub struct FfmpegVideoEncoder {
     width: u16,
     height: u16,
     fps: u32,
-    /// Fallback pts cursor if the encoder ever emits more AUs than frames.
-    next_synth_pts: f64,
     /// BGRA → NV12 conversion for `FrameData::Gpu` (Windows), using either the
     /// video processor or the VM-safe CPU fallback. Pre-NV12 CPU frames leave
     /// this unset and are piped as-is.
@@ -177,10 +180,9 @@ fn spawn_process(
     let codec_params = Arc::new(Mutex::new(None));
     let (tx, rx) = std::sync::mpsc::channel();
     let reader_params = Arc::clone(&codec_params);
-    let gop_frames = crate::replay_gop_frames(fps);
     let reader = std::thread::Builder::new()
         .name("clipline-ffmpeg-reader".into())
-        .spawn(move || run_reader(stdout, codec, gop_frames, reader_params, tx))
+        .spawn(move || run_reader(stdout, codec, reader_params, tx))
         .map_err(|e| EncodeError::Backend(format!("spawn reader: {e}")))?;
 
     Ok(Spawned {
@@ -205,7 +207,6 @@ impl FfmpegVideoEncoder {
             width: width as u16,
             height: height as u16,
             fps,
-            next_synth_pts: 0.0,
             #[cfg(windows)]
             converter: None,
             #[cfg(windows)]
@@ -308,31 +309,24 @@ impl FfmpegVideoEncoder {
         }
     }
 
-    /// Pop the pts for the next emitted AU (FIFO; B-frames disabled). Falls
-    /// back to a synthesized cadence if the encoder ever out-runs input.
-    fn pts_for_next_unit(&mut self) -> f64 {
-        if let Some(pts) = self.pending_pts.pop_front() {
-            self.next_synth_pts = pts + 1.0 / self.fps as f64;
-            pts
-        } else {
-            let pts = self.next_synth_pts;
-            self.next_synth_pts += 1.0 / self.fps as f64;
-            pts
-        }
-    }
-
-    fn drain_ready(&mut self) -> Vec<EncodedPacket> {
+    fn drain_ready(&mut self) -> Result<Vec<EncodedPacket>, EncodeError> {
         let mut out = Vec::new();
-        while let Ok(unit) = self.rx.try_recv() {
-            let pts_s = self.pts_for_next_unit();
-            out.push(EncodedPacket {
-                data: unit.data,
-                pts_s,
-                duration_s: 1.0 / self.fps as f64,
-                is_keyframe: unit.is_keyframe,
-            });
+        loop {
+            match self.rx.try_recv() {
+                Ok(ReaderMsg::Unit(unit)) => {
+                    let pts_s = pop_output_pts(&mut self.pending_pts)?;
+                    out.push(EncodedPacket {
+                        data: unit.data,
+                        pts_s,
+                        duration_s: 1.0 / self.fps as f64,
+                        is_keyframe: unit.is_keyframe,
+                    });
+                }
+                Ok(ReaderMsg::Error(error)) => return Err(EncodeError::Backend(error)),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -347,7 +341,7 @@ impl Encoder for FfmpegVideoEncoder {
             .write_all(&nv12)
             .map_err(|e| EncodeError::Backend(format!("write frame: {e}")))?;
         self.pending_pts.push_back(frame.pts_s);
-        Ok(self.drain_ready())
+        self.drain_ready()
     }
 
     fn track_config(&self) -> VideoTrackConfig {
@@ -387,7 +381,9 @@ impl Encoder for FfmpegVideoEncoder {
         if !status.success() {
             return Err(EncodeError::Backend(format!("ffmpeg exited with {status}")));
         }
-        Ok(self.drain_ready())
+        let packets = self.drain_ready()?;
+        ensure_all_output_pts_consumed(&self.pending_pts)?;
+        Ok(packets)
     }
 }
 
@@ -427,69 +423,98 @@ impl Drop for FfmpegVideoEncoder {
 fn run_reader(
     mut stdout: impl Read,
     codec: Codec,
-    gop_frames: u32,
     params: Arc<Mutex<Option<VideoCodecParams>>>,
-    tx: Sender<RawUnit>,
+    tx: Sender<ReaderMsg>,
 ) {
     let mut framer: Box<dyn AccessUnitFramer> = match codec {
         Codec::H264 => Box::new(AnnexBFramer::h264()),
         Codec::Hevc => Box::new(AnnexBFramer::hevc()),
         Codec::Av1 => Box::new(IvfFramer::new()),
     };
-    let mut frame_index: u64 = 0;
     let mut buf = [0u8; 65536];
-    let emit = |au: Vec<u8>, frame_index: &mut u64| {
-        let (sample, is_keyframe) = finish_unit(codec, &au, gop_frames, *frame_index);
+    let emit = |au: Vec<u8>| -> Result<bool, String> {
+        let (sample, is_keyframe) = finish_unit(codec, &au)?;
         set_params_if_empty(codec, &au, &params);
-        *frame_index += 1;
         // A dropped receiver (encoder gone) just ends the thread.
-        tx.send(RawUnit {
-            data: sample,
-            is_keyframe,
-        })
-        .is_ok()
+        Ok(tx
+            .send(ReaderMsg::Unit(RawUnit {
+                data: sample,
+                is_keyframe,
+            }))
+            .is_ok())
     };
+    let mut failed = false;
     loop {
         match stdout.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 for au in framer.push(&buf[..n]) {
-                    if !emit(au, &mut frame_index) {
-                        return;
+                    if failed {
+                        continue;
+                    }
+                    match emit(au) {
+                        Ok(true) => {}
+                        Ok(false) => return,
+                        Err(error) => {
+                            let _ = tx.send(ReaderMsg::Error(error));
+                            failed = true;
+                        }
                     }
                 }
             }
             Err(e) => {
-                eprintln!("ffmpeg reader: stdout read error: {e}");
+                let _ = tx.send(ReaderMsg::Error(format!(
+                    "ffmpeg reader stdout failed: {e}"
+                )));
                 break;
             }
         }
     }
-    if let Some(au) = framer.flush() {
-        emit(au, &mut frame_index);
+    if !failed {
+        if let Some(au) = framer.flush() {
+            if let Err(error) = emit(au) {
+                let _ = tx.send(ReaderMsg::Error(error));
+            }
+        }
     }
 }
 
 /// Convert one raw access unit to muxer-ready sample bytes and decide
 /// whether it is a keyframe.
-fn finish_unit(codec: Codec, au: &[u8], gop_frames: u32, frame_index: u64) -> (Vec<u8>, bool) {
+fn finish_unit(codec: Codec, au: &[u8]) -> Result<(Vec<u8>, bool), String> {
     match codec {
         Codec::H264 => {
             let is_key = crate::annexb::split_annexb(au)
                 .iter()
                 .any(|n| crate::annexb::nal_type(n) == 5);
-            (crate::annexb::annexb_to_avcc(au), is_key)
+            Ok((crate::annexb::annexb_to_avcc(au), is_key))
         }
-        Codec::Hevc => (
+        Codec::Hevc => Ok((
             crate::hevc::annexb_to_hvcc_samples(au),
             crate::hevc::is_keyframe(au),
-        ),
-        // AV1: IVF gives temporal-unit framing but no keyframe flag; with a
-        // forced fixed GOP and scene-cut disabled, position is authoritative.
-        Codec::Av1 => (
-            crate::av1::obus_to_av01_sample(au),
-            frame_index.is_multiple_of(gop_frames as u64),
-        ),
+        )),
+        Codec::Av1 => {
+            let is_keyframe = crate::av1::frame_is_keyframe(au)
+                .ok_or_else(|| "AV1 temporal unit has no valid frame-type metadata".to_string())?;
+            Ok((crate::av1::obus_to_av01_sample(au), is_keyframe))
+        }
+    }
+}
+
+fn pop_output_pts(pending_pts: &mut VecDeque<f64>) -> Result<f64, EncodeError> {
+    pending_pts.pop_front().ok_or_else(|| {
+        EncodeError::Backend("ffmpeg emitted more pictures than input frames".into())
+    })
+}
+
+fn ensure_all_output_pts_consumed(pending_pts: &VecDeque<f64>) -> Result<(), EncodeError> {
+    if pending_pts.is_empty() {
+        Ok(())
+    } else {
+        Err(EncodeError::Backend(format!(
+            "ffmpeg emitted {} fewer picture(s) than input frames",
+            pending_pts.len()
+        )))
     }
 }
 
@@ -684,36 +709,45 @@ mod tests {
             &[0, 0, 1, 0x65, 0x88][..],
         ]
         .concat();
-        let (_sample, is_key) = finish_unit(Codec::H264, &key, 30, 0);
+        let (_sample, is_key) = finish_unit(Codec::H264, &key).unwrap();
         assert!(is_key);
         let inter = [0, 0, 0, 1, 0x41, 0x9A];
-        let (_s, is_key) = finish_unit(Codec::H264, &inter, 30, 7);
+        let (_s, is_key) = finish_unit(Codec::H264, &inter).unwrap();
         assert!(!is_key);
     }
 
     #[test]
-    fn finish_unit_uses_position_for_av1_keyframes() {
-        let au = [0x12, 0x00]; // arbitrary OBU bytes; framing tested elsewhere
-        assert!(
-            finish_unit(Codec::Av1, &au, 30, 0).1,
-            "frame 0 is a keyframe"
-        );
-        assert!(
-            !finish_unit(Codec::Av1, &au, 30, 15).1,
-            "mid-GOP frame is not"
-        );
-        assert!(finish_unit(Codec::Av1, &au, 30, 30).1, "GOP boundary is");
+    fn finish_unit_uses_av1_frame_header_not_position() {
+        let key = [0x32, 0x01, 0x00];
+        let inter = [0x32, 0x01, 0x20];
+        assert!(finish_unit(Codec::Av1, &key).unwrap().1);
+        assert!(!finish_unit(Codec::Av1, &inter).unwrap().1);
+        assert!(finish_unit(Codec::Av1, &[0x80]).is_err());
+    }
+
+    #[test]
+    fn output_pts_requires_one_queued_input_timestamp() {
+        let mut pending = VecDeque::from([1.25]);
+        assert_eq!(pop_output_pts(&mut pending).unwrap(), 1.25);
+        assert!(pop_output_pts(&mut pending).is_err());
+    }
+
+    #[test]
+    fn finish_rejects_unmatched_input_timestamps() {
+        assert!(ensure_all_output_pts_consumed(&VecDeque::new()).is_ok());
+        let error = ensure_all_output_pts_consumed(&VecDeque::from([1.0, 2.0])).unwrap_err();
+        assert!(error.to_string().contains("2 fewer picture"));
     }
 
     #[test]
     fn finish_unit_classifies_hevc_irap_as_keyframe() {
         // Annex B HEVC: BLA_W_LP (NAL type 16) → keyframe
         let irap = [0x00, 0x00, 0x00, 0x01, 0x20, 0x01]; // NAL type = (0x20 >> 1) & 0x3F = 16
-        let (_sample, is_key) = finish_unit(Codec::Hevc, &irap, 30, 0);
+        let (_sample, is_key) = finish_unit(Codec::Hevc, &irap).unwrap();
         assert!(is_key, "HEVC IRAP should be keyframe");
         // Non-IRAP: TRAIL_R (NAL type 1)
         let inter = [0x00, 0x00, 0x00, 0x01, 0x02, 0x01]; // NAL type = (0x02 >> 1) & 0x3F = 1
-        let (_s, is_key) = finish_unit(Codec::Hevc, &inter, 30, 5);
+        let (_s, is_key) = finish_unit(Codec::Hevc, &inter).unwrap();
         assert!(!is_key, "HEVC TRAIL_R should not be keyframe");
     }
 

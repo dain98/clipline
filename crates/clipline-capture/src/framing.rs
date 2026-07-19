@@ -3,9 +3,8 @@
 //! split that byte stream back into per-frame access units as bytes arrive.
 //! Pure state machines — platform-neutral and unit tested on every OS.
 //!
-//! - [`AnnexBFramer`] splits H.264/HEVC by start codes, ending an access
-//!   unit at each VCL (slice) NAL. It assumes one slice per picture (the
-//!   default for Clipline's hardware encoders at replay resolutions).
+//! - [`AnnexBFramer`] splits H.264/HEVC by start codes, using AUD NALs and
+//!   each picture's first-slice flag to keep multi-slice pictures together.
 //! - [`IvfFramer`] reads the IVF container FFmpeg wraps AV1 in, yielding one
 //!   temporal unit per IVF frame.
 
@@ -23,8 +22,8 @@ pub trait AccessUnitFramer: Send {
 /// long-lived reader thread (an availability guard, not a normal path).
 const MAX_FRAMER_BUFFER: usize = 32 * 1024 * 1024;
 
-/// H.264/HEVC Annex B framer. An access unit is the run of NALs ending at a
-/// VCL NAL; parameter sets / SEI that follow belong to the next unit.
+/// H.264/HEVC Annex B framer. An access unit is the run of NALs belonging to
+/// one picture; parameter sets / SEI that follow belong to the next unit.
 pub struct AnnexBFramer {
     buf: Vec<u8>,
     /// First byte not yet proven unable to begin a three-byte start code.
@@ -33,8 +32,19 @@ pub struct AnnexBFramer {
     au_start: Option<usize>,
     /// Most recent start code; its NAL is incomplete until another arrives.
     pending_code: Option<(usize, usize)>,
-    /// True if the NAL (given its first payload byte) is a VCL/slice NAL.
-    is_vcl: fn(u8) -> bool,
+    pending_classified: bool,
+    current_has_vcl: bool,
+    /// First non-VCL after a completed picture; prefix NALs from here belong
+    /// to the next picture once its first slice arrives.
+    next_au_start: Option<usize>,
+    classify_nal: fn(&[u8], bool) -> Option<NalKind>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NalKind {
+    Aud,
+    Vcl { first_slice: bool },
+    Other,
 }
 
 impl AnnexBFramer {
@@ -44,7 +54,10 @@ impl AnnexBFramer {
             scan_pos: 0,
             au_start: None,
             pending_code: None,
-            is_vcl: h264_is_vcl,
+            pending_classified: false,
+            current_has_vcl: false,
+            next_au_start: None,
+            classify_nal: classify_h264_nal,
         }
     }
 
@@ -54,7 +67,10 @@ impl AnnexBFramer {
             scan_pos: 0,
             au_start: None,
             pending_code: None,
-            is_vcl: hevc_is_vcl,
+            pending_classified: false,
+            current_has_vcl: false,
+            next_au_start: None,
+            classify_nal: classify_hevc_nal,
         }
     }
 
@@ -63,6 +79,53 @@ impl AnnexBFramer {
         self.scan_pos = 0;
         self.au_start = None;
         self.pending_code = None;
+        self.pending_classified = false;
+        self.current_has_vcl = false;
+        self.next_au_start = None;
+    }
+
+    fn apply_nal_kind(&mut self, kind: NalKind, code_start: usize, units: &mut Vec<Vec<u8>>) {
+        match kind {
+            NalKind::Aud => {
+                if self.current_has_vcl {
+                    let start = self.au_start.unwrap_or(code_start);
+                    units.push(self.buf[start..code_start].to_vec());
+                    self.au_start = Some(code_start);
+                }
+                self.current_has_vcl = false;
+                self.next_au_start = None;
+            }
+            NalKind::Vcl { first_slice } => {
+                if first_slice && self.current_has_vcl {
+                    let boundary = self.next_au_start.take().unwrap_or(code_start);
+                    let start = self.au_start.unwrap_or(boundary);
+                    units.push(self.buf[start..boundary].to_vec());
+                    self.au_start = Some(boundary);
+                }
+                self.current_has_vcl = true;
+            }
+            NalKind::Other => {
+                if self.current_has_vcl && self.next_au_start.is_none() {
+                    self.next_au_start = Some(code_start);
+                }
+            }
+        }
+    }
+
+    fn classify_pending(&mut self, end: usize, complete: bool, units: &mut Vec<Vec<u8>>) {
+        if self.pending_classified {
+            return;
+        }
+        let Some((code_start, payload_start)) = self.pending_code else {
+            return;
+        };
+        if let Some(kind) = (self.classify_nal)(
+            self.buf.get(payload_start..end).unwrap_or_default(),
+            complete,
+        ) {
+            self.apply_nal_kind(kind, code_start, units);
+            self.pending_classified = true;
+        }
     }
 
     fn scan_new_start_codes(&mut self) -> Vec<Vec<u8>> {
@@ -79,21 +142,16 @@ impl AnnexBFramer {
                 if self.au_start.is_none() {
                     self.au_start = Some(code_start);
                 }
-                if let Some((_, previous_payload)) = self.pending_code {
-                    let first_byte = self.buf.get(previous_payload).copied().unwrap_or(0);
-                    if (self.is_vcl)(first_byte) {
-                        let start = self.au_start.unwrap_or(code_start);
-                        units.push(self.buf[start..code_start].to_vec());
-                        self.au_start = Some(code_start);
-                    }
-                }
+                self.classify_pending(code_start, true, &mut units);
                 self.pending_code = Some((code_start, payload_start));
+                self.pending_classified = false;
                 i += 3;
             } else {
                 i += 1;
             }
         }
         self.scan_pos = i;
+        self.classify_pending(self.buf.len(), false, &mut units);
 
         // Drop junk before the first code and bytes belonging to units that
         // were already emitted. Keep all state relative to the retained AU.
@@ -104,6 +162,7 @@ impl AnnexBFramer {
             self.pending_code = self
                 .pending_code
                 .map(|(code, payload)| (code - drain_len, payload - drain_len));
+            self.next_au_start = self.next_au_start.map(|start| start - drain_len);
         }
         units
     }
@@ -113,8 +172,50 @@ fn h264_is_vcl(first_byte: u8) -> bool {
     matches!(first_byte & 0x1F, 1..=5)
 }
 
+fn classify_h264_nal(nal: &[u8], complete: bool) -> Option<NalKind> {
+    let Some(&header) = nal.first() else {
+        return complete.then_some(NalKind::Other);
+    };
+    let nal_type = header & 0x1F;
+    if nal_type == 9 {
+        return Some(NalKind::Aud);
+    }
+    if h264_is_vcl(header) {
+        // first_mb_in_slice is the first unsigned Exp-Golomb value in the
+        // slice header. Its value is zero exactly when its first bit is one.
+        let first_slice = match nal.get(1) {
+            Some(byte) => byte & 0x80 != 0,
+            None if complete => true,
+            None => return None,
+        };
+        return Some(NalKind::Vcl { first_slice });
+    }
+    Some(NalKind::Other)
+}
+
 fn hevc_is_vcl(first_byte: u8) -> bool {
     ((first_byte >> 1) & 0x3F) <= 31
+}
+
+fn classify_hevc_nal(nal: &[u8], complete: bool) -> Option<NalKind> {
+    let Some(&header) = nal.first() else {
+        return complete.then_some(NalKind::Other);
+    };
+    let nal_type = (header >> 1) & 0x3F;
+    if nal_type == 35 {
+        return Some(NalKind::Aud);
+    }
+    if hevc_is_vcl(header) {
+        // The first slice-header bit after HEVC's two-byte NAL header is
+        // first_slice_segment_in_pic_flag.
+        let first_slice = match nal.get(2) {
+            Some(byte) => byte & 0x80 != 0,
+            None if complete => true,
+            None => return None,
+        };
+        return Some(NalKind::Vcl { first_slice });
+    }
+    Some(NalKind::Other)
 }
 
 impl AccessUnitFramer for AnnexBFramer {
@@ -140,6 +241,9 @@ impl AccessUnitFramer for AnnexBFramer {
         self.scan_pos = 0;
         self.au_start = None;
         self.pending_code = None;
+        self.pending_classified = false;
+        self.current_has_vcl = false;
+        self.next_au_start = None;
         Some(final_unit)
     }
 }
@@ -221,42 +325,42 @@ mod tests {
         let mut stream = Vec::new();
         stream.extend(sc4(&[0x67, 1]));
         stream.extend(sc4(&[0x68, 2]));
-        stream.extend(sc4(&[0x65, 3])); // IDR → ends AU #1
-        stream.extend(sc4(&[0x41, 4])); // P   → ends AU #2
-        stream.extend(sc4(&[0x41, 5])); // P   (not yet terminated)
+        stream.extend(sc4(&[0x65, 0x80, 3])); // IDR first slice
+        stream.extend(sc4(&[0x41, 0x80, 4])); // P first slice
+        stream.extend(sc4(&[0x41, 0x80, 5])); // P first slice (not terminated)
         let units = f.push(&stream);
         assert_eq!(units.len(), 2, "third slice waits for the next start code");
         // AU #1 carries SPS+PPS+IDR; AU #2 is the lone P slice.
         assert_eq!(
             units[0],
-            [sc4(&[0x67, 1]), sc4(&[0x68, 2]), sc4(&[0x65, 3])].concat()
+            [sc4(&[0x67, 1]), sc4(&[0x68, 2]), sc4(&[0x65, 0x80, 3]),].concat()
         );
-        assert_eq!(units[1], sc4(&[0x41, 4]));
+        assert_eq!(units[1], sc4(&[0x41, 0x80, 4]));
         // flush releases the still-buffered final slice.
-        assert_eq!(f.flush(), Some(sc4(&[0x41, 5])));
+        assert_eq!(f.flush(), Some(sc4(&[0x41, 0x80, 5])));
     }
 
     #[test]
     fn annexb_reassembles_across_chunk_boundaries() {
         let mut f = AnnexBFramer::h264();
         let mut stream = Vec::new();
-        stream.extend(sc4(&[0x65, 0xAA, 0xBB])); // IDR
-        stream.extend(sc4(&[0x41, 0xCC])); // P terminates the IDR's AU
-                                           // Split mid-NAL to exercise the streaming buffer.
+        stream.extend(sc4(&[0x65, 0x80, 0xAA, 0xBB])); // IDR first slice
+        stream.extend(sc4(&[0x41, 0x80, 0xCC])); // P first slice
+                                                 // Split mid-NAL to exercise the streaming buffer.
         let mut out = f.push(&stream[..6]);
         out.extend(f.push(&stream[6..]));
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0], sc4(&[0x65, 0xAA, 0xBB]));
+        assert_eq!(out[0], sc4(&[0x65, 0x80, 0xAA, 0xBB]));
     }
 
     #[test]
     fn annexb_split_start_codes_are_detected_at_every_boundary() {
-        let stream = [sc4(&[0x65, 0xAA]), sc4(&[0x41, 0xBB])].concat();
+        let stream = [sc4(&[0x65, 0x80, 0xAA]), sc4(&[0x41, 0x80, 0xBB])].concat();
         for split in 1..stream.len() {
             let mut framer = AnnexBFramer::h264();
             let mut out = framer.push(&stream[..split]);
             out.extend(framer.push(&stream[split..]));
-            assert_eq!(out, vec![sc4(&[0x65, 0xAA])], "split at {split}");
+            assert_eq!(out, vec![sc4(&[0x65, 0x80, 0xAA])], "split at {split}");
         }
     }
 
@@ -289,11 +393,11 @@ mod tests {
 
         // These bytes would complete a start code only if the discarded zero
         // suffix survived the reset.
-        assert!(framer.push(&[1, 0x65, 0xAA]).is_empty());
-        let valid = [sc4(&[0x65, 0xBB]), sc4(&[0x41, 0xCC])].concat();
+        assert!(framer.push(&[1, 0x65, 0x80, 0xAA]).is_empty());
+        let valid = [sc4(&[0x65, 0x80, 0xBB]), sc4(&[0x41, 0x80, 0xCC])].concat();
         let out = framer.push(&valid);
 
-        assert_eq!(out, vec![sc4(&[0x65, 0xBB])]);
+        assert_eq!(out, vec![sc4(&[0x65, 0x80, 0xBB])]);
     }
 
     #[test]
@@ -301,6 +405,55 @@ mod tests {
         // HEVC type = (byte>>1)&0x3F: 0x26 → 19 (IDR, VCL); 0x40 → 32 (VPS).
         assert!(hevc_is_vcl(0x26));
         assert!(!hevc_is_vcl(0x40));
+    }
+
+    #[test]
+    fn h264_multislice_picture_is_one_access_unit() {
+        let mut framer = AnnexBFramer::h264();
+        let first_picture = [
+            sc4(&[0x67, 1]),
+            sc4(&[0x65, 0x80, 2]), // first_mb_in_slice = 0
+            sc4(&[0x65, 0x40, 3]), // first_mb_in_slice > 0
+        ]
+        .concat();
+        let between = sc4(&[0x06, 4]); // SEI belongs to the next AU
+        let second = sc4(&[0x41, 0x80, 5]);
+        let third = sc4(&[0x41, 0x80, 6]);
+
+        let units = framer.push(
+            &[
+                first_picture.clone(),
+                between.clone(),
+                second.clone(),
+                third,
+            ]
+            .concat(),
+        );
+
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0], first_picture);
+        assert_eq!(units[1], [between, second].concat());
+    }
+
+    #[test]
+    fn hevc_multislice_picture_and_aud_form_picture_boundaries() {
+        let mut framer = AnnexBFramer::hevc();
+        let first_picture = [
+            sc4(&[0x40, 0x01, 1]),
+            sc4(&[0x26, 0x01, 0x80, 2]), // first_slice_segment_in_pic_flag
+            sc4(&[0x26, 0x01, 0x00, 3]), // continuation slice
+        ]
+        .concat();
+        let aud = sc4(&[35 << 1, 0x01, 4]);
+        let second = sc4(&[0x02, 0x01, 0x80, 5]);
+        let third = sc4(&[0x02, 0x01, 0x80, 6]);
+
+        let units =
+            framer.push(&[first_picture.clone(), aud.clone(), second.clone(), third].concat());
+
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0], first_picture);
+        assert_eq!(units[1], [aud, second].concat());
     }
 
     fn ivf_file_header() -> Vec<u8> {

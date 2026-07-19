@@ -62,6 +62,11 @@ fn encode_and_mux(ffmpeg: &std::path::Path, backend: EncoderBackend, codec: Code
     }
     packets.extend(enc.finish().expect("finish"));
 
+    assert_eq!(
+        packets.len(),
+        FRAMES as usize,
+        "{backend:?}/{codec:?}: encoder must emit exactly one picture per input frame"
+    );
     assert!(
         !packets.is_empty(),
         "{backend:?}/{codec:?}: no packets produced"

@@ -9,12 +9,15 @@
 /// OBU types we care about (Section 5 of the AV1 spec).
 const OBU_SEQUENCE_HEADER: u8 = 1;
 const OBU_TEMPORAL_DELIMITER: u8 = 2;
+const OBU_FRAME_HEADER: u8 = 3;
+const OBU_FRAME: u8 = 6;
 
 /// One parsed OBU: its type and the full bytes (header + size field +
 /// payload) as they appeared in the stream.
 struct Obu<'a> {
     obu_type: u8,
     bytes: &'a [u8],
+    payload: &'a [u8],
 }
 
 /// Walk a low-overhead AV1 bitstream into OBUs. Returns `None` if any OBU
@@ -41,6 +44,7 @@ fn walk_obus(data: &[u8]) -> Option<Vec<Obu<'_>>> {
         }
         let (size, consumed) = read_leb128(data.get(pos..)?)?;
         pos += consumed;
+        let payload_start = pos;
         let end = pos.checked_add(size)?;
         if end > data.len() {
             return None;
@@ -49,6 +53,7 @@ fn walk_obus(data: &[u8]) -> Option<Vec<Obu<'_>>> {
         out.push(Obu {
             obu_type,
             bytes: &data[start..end],
+            payload: &data[payload_start..end],
         });
     }
     Some(out)
@@ -93,6 +98,31 @@ pub fn obus_to_av01_sample(data: &[u8]) -> Vec<u8> {
         out.extend_from_slice(obu.bytes);
     }
     out
+}
+
+/// Read the encoded AV1 frame type from a temporal unit. Returns `None` for
+/// malformed units or units without a frame/frame-header OBU; callers must
+/// not guess sync status from configured GOP position.
+pub fn frame_is_keyframe(data: &[u8]) -> Option<bool> {
+    let obus = walk_obus(data)?;
+    let reduced_still_picture = obus
+        .iter()
+        .find(|obu| obu.obu_type == OBU_SEQUENCE_HEADER)
+        .and_then(|obu| obu.payload.first())
+        .is_some_and(|byte| byte & 0x08 != 0);
+    let frame = obus
+        .iter()
+        .find(|obu| matches!(obu.obu_type, OBU_FRAME_HEADER | OBU_FRAME))?;
+    if reduced_still_picture {
+        return Some(true);
+    }
+    let first = *frame.payload.first()?;
+    let show_existing_frame = first & 0x80 != 0;
+    if show_existing_frame {
+        return Some(false);
+    }
+    let frame_type = (first >> 5) & 0x03;
+    Some(frame_type == 0)
 }
 
 #[cfg(test)]
@@ -166,5 +196,25 @@ mod tests {
     fn unparseable_input_passes_through_unchanged() {
         let junk = vec![0x80, 0x12, 0x34];
         assert_eq!(obus_to_av01_sample(&junk), junk);
+    }
+
+    #[test]
+    fn frame_type_comes_from_encoded_frame_header() {
+        assert_eq!(frame_is_keyframe(&obu(6, &[0x00])), Some(true));
+        assert_eq!(frame_is_keyframe(&obu(6, &[0x20])), Some(false));
+        assert_eq!(frame_is_keyframe(&obu(6, &[0x80])), Some(false));
+    }
+
+    #[test]
+    fn reduced_still_picture_sequence_is_a_keyframe() {
+        let mut unit = obu(OBU_SEQUENCE_HEADER, &[0x18]);
+        unit.extend(obu(6, &[0xFF]));
+        assert_eq!(frame_is_keyframe(&unit), Some(true));
+    }
+
+    #[test]
+    fn missing_or_malformed_frame_header_has_no_keyframe_answer() {
+        assert_eq!(frame_is_keyframe(&obu(OBU_SEQUENCE_HEADER, &[0x00])), None);
+        assert_eq!(frame_is_keyframe(&[0x80, 0x00]), None);
     }
 }
