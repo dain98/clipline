@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): validated multipart upload work lists
+
+The combined audit's L-05 is fixed. Before either authenticated proxy upload or direct object-store
+upload reads a chunk, one shared validator now checks the server's complete missing-parts list. Part
+size must be positive and within the 64 MiB client bound, the file-derived part count must fit the
+protocol, and every part number must be nonzero, unique, and within the file-derived range. Valid
+resumable subsets retain their server-provided order. The file reader keeps its per-part checks as a
+second defensive boundary.
+
+The H-05 file-streaming batch had already replaced `saturating_sub(1)` and rejected part zero at the
+reader. This batch closes the remaining list-level gap, preventing duplicate chunks from being sent
+and acknowledged twice and preventing malformed work from reaching either network transport.
+
+Plan commit `6ba62d0`; implementation commit `b353966`. The app suite now has 396 unit tests; new
+fixtures cover zero, duplicate, out-of-range, empty, reordered valid, proxy, and direct work lists.
+Fresh-cache app Clippy, CI-mode workspace tests, and workspace Clippy pass with warnings denied.
+Computer Use verified normal startup and the nine-clip Library. No manual-only item remains for this
+malformed-protocol boundary.
+
 ## Checkpoint (2026-07-18): unified keyboard contracts
 
 The combined audit's L-03 is fixed. Settings parsing now produces one crate-private typed hotkey

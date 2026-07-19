@@ -45,6 +45,7 @@ Additional completed findings:
 - [ ] L-01 — borrowed/COM wave-format ownership and all-branch MFT output cleanup (`3c5d059`); event-handle overlap already closed by M-14
 - [ ] L-03 — shared typed recorder-hotkey parsing, released orphan `KeyF` intent, and data-driven open-dialog keyboard ownership (`cc836fa`)
 - [ ] L-04 — case-insensitive recording-suffix recovery, already closed by the stronger H-02 ownership batch (`234f6af`)
+- [ ] L-05 — zero, duplicate, and file-range validation for proxy/direct multipart work lists (`b353966`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
