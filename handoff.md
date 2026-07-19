@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): bounded runtime diagnostic logging
+
+The combined audit's L-29 is fixed. The process-lifetime diagnostic handle is now a locked writer
+that tracks its active byte count and rotates before the next line would cross 1 MiB. Rotation
+flushes and closes the live Windows handle, replaces one bounded old generation, and reopens the
+active file. An oversized pre-fix log is migrated by retaining only its newest bounded tail, and a
+single UTF-8 message is truncated on a character boundary so it cannot defeat the cap.
+
+Generic window diagnostics now discard high-frequency move and resize events while retaining
+focus, destroy, DPI, drag/drop, theme, and explicit close behavior. The redundant per-line flush is
+gone; `File` writes remain direct and rotation performs the required flush.
+
+Plan commit `7607b11`; implementation commit `d95568f`. Five log fixtures cover repeated
+multi-generation rotation, newest-line retention, UTF-8 truncation, and legacy-tail migration;
+window-event fixtures cover noisy and retained variants. All 413 app tests, CI-mode workspace tests,
+fresh app Clippy, and warning-denied workspace Clippy pass. Computer Use moved the rebuilt window:
+the log gained only the expected focus loss/gain pair, no move/resize lines, and the nine-of-nine
+Library remained healthy. No manual-only item remains.
+
 ## Checkpoint (2026-07-18): collision-safe Riot ID matching
 
 The combined audit's L-26 is fixed. League player names now parse into a normalized game name and

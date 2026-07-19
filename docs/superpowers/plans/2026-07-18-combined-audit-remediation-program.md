@@ -63,6 +63,7 @@ Additional completed findings:
 - [ ] L-24 — bounded jittered direct-PUT backoff with Retry-After and terminal config fallback (`dd896dc`)
 - [ ] L-25 — typed pre-recording clock-anchor rejection before event fetch/watermark mutation (`a4d2ad7`)
 - [ ] L-26 — exact-first normalized Riot ID matching with missing-tagline compatibility (`2c40f15`)
+- [ ] L-29 — in-process bounded diagnostic rotation with noisy window-event filtering (`d95568f`)
 - [ ] L-33 — renderer capability manifest reduced to observed window/autostart operations (`bdff7aa`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
