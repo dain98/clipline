@@ -19,6 +19,7 @@ Additional completed findings:
 
 - [ ] M-01 — same-origin bearer controls, no authenticated redirects, separate token-free object PUT transport (`716b3d3`)
 - [ ] M-02 — transactional settings/runtime side effects and durable credential cleanup (`99d5e7d`, `fc647fb`)
+- [ ] M-03 — last-known-good backup, invalid-file quarantine, overwrite guard, and visible recovery diagnostic (`63dca68`)
 - [ ] M-04 — LocalAppData cache, hard/aggregate/free-space bounds, LRU leases, safe temps/migration (`d54426b`)
 - [ ] M-06 — owned run recovery, cross-run quota accounting, transactional segments, and low-space finalization (`52eb9f4`)
 - [ ] H-05 — bounded file transforms, hashing, upload, and temporary ownership (`db86efe`)

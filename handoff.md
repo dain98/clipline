@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): recoverable settings startup
+
+The combined audit's M-03 is fixed. Startup now distinguishes a first-run missing file from an
+unreadable path and structurally invalid JSON/settings. Every successful replacement first
+publishes the prior valid bytes atomically as `settings.json.bak`. A missing or invalid primary
+recovers that last-known-good copy; proven-invalid files are moved to unique `.corrupt.<pid>.<n>`
+siblings, while unreadable paths are left untouched. If neither generation is usable, Clipline
+uses safe defaults only with an explicit diagnostic naming the preserved/quarantined files.
+
+Normal saves refuse to replace an existing primary that cannot first be read and validated, so a
+transient sharing/permission problem cannot turn a later save into silent data loss. Field-level
+legacy repair remains on the normal path. Recovery diagnostics are held until `frontend_ready`
+and drained once into the persistent renderer error area, avoiding setup-time events emitted
+before WebView listeners exist.
+
+Plan commit `00cf25a`; implementation commit `63dca68`. All 63 focused settings tests, the startup
+warning unit test, and the UI readiness contract pass. Fresh-cache app Clippy, CI-mode workspace
+tests (including 367 app tests), and workspace Clippy pass with warnings denied. Computer Use
+verified normal startup with all nine clips at 6.5 MB, then launched a disposable corrupt profile
+and visibly confirmed both the safe-default warning and its quarantined file before restoring the
+normal profile. No manual-only acceptance test remains for this finding.
+
 ## Checkpoint (2026-07-18): transactional settings and credentials
 
 The combined audit's M-02 is fixed. Backend-owned Cloud and osu! settings now stage a normalized
