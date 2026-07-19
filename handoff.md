@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): typed rate-limited capture diagnostics
+
+The combined audit's L-31 is fixed. ToolHelp snapshot entries now call their fallback executable
+value `image_name`, while `AudioProcessInfo.process_path` remains reserved for a queried full image
+path. Internal image lookup names and fixtures preserve the existing case-insensitive basename/path
+matching and process-tree grouping behavior without implying that ToolHelp supplied a path.
+
+WASAPI discontinuities now emit a typed `CaptureDiagnostic` through a process-wide handler installed
+by the desktop before capture can start. Clipline routes those events into its existing bounded log;
+each capture source emits immediately, suppresses repeats for 30 seconds, then reports the number
+suppressed. Gap fill and packet handling are unchanged. Activation-blob safety comments now name the
+actual `CoTaskMemAlloc` plus `PROPVARIANT`/`PropVariantClear` ownership path. The audit's cited FFmpeg
+print was already absent, and a production-source contract keeps it absent.
+
+Plan commit `c40ac40`; implementation commit `e5c51c2`. Pure tests cover the limiter sequence,
+suppressed counts, typed formatting, and handler delivery; repository contracts enforce snapshot
+naming, comment accuracy, no production WASAPI/FFmpeg `eprintln!`, and early desktop handler
+installation. All 193 capture tests plus integrations, all 419 app tests in the CI-mode workspace,
+fresh capture/app Clippy, and warning-denied workspace Clippy pass. Computer Use verified the
+rebuilt nine-of-nine Library, and the live log received structured discontinuity events. The
+existing Windows capture lifecycle acceptance scenario remains sufficient; no duplicate manual
+item was added.
+
 ## Checkpoint (2026-07-18): centralized Windows platform helpers
 
 The combined audit's L-30 is fixed. Generic Credential Manager ownership, decoding, and

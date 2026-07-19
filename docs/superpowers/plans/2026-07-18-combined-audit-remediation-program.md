@@ -68,6 +68,8 @@ Additional completed findings:
 
 - [ ] L-30 — centralized credential, shell, disk-space, atomic-replace, UTF-16, and wall-clock helpers (`b26b88e`)
 
+- [ ] L-31 — truthful process-image naming, corrected ownership comments, and typed rate-limited capture diagnostics (`e5c51c2`)
+
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
 - [ ] None currently.
