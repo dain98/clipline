@@ -105,6 +105,43 @@ enum EndpointMode {
     InputCapture(WasapiChannelMode),
 }
 
+enum WaveFormatStorage<'a> {
+    Borrowed(&'a mut WAVEFORMATEX),
+    CoTaskMem(*mut WAVEFORMATEX),
+}
+
+impl<'a> WaveFormatStorage<'a> {
+    fn borrowed(format: &'a mut WAVEFORMATEX) -> Self {
+        Self::Borrowed(format)
+    }
+
+    fn co_task_mem(format: *mut WAVEFORMATEX) -> Option<Self> {
+        (!format.is_null()).then_some(Self::CoTaskMem(format))
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut WAVEFORMATEX {
+        match self {
+            Self::Borrowed(format) => *format as *mut WAVEFORMATEX,
+            Self::CoTaskMem(format) => *format,
+        }
+    }
+
+    #[cfg(test)]
+    fn owns_allocation(&self) -> bool {
+        matches!(self, Self::CoTaskMem(_))
+    }
+}
+
+impl Drop for WaveFormatStorage<'_> {
+    fn drop(&mut self) {
+        if let Self::CoTaskMem(format) = self {
+            // SAFETY: this variant is created only from `GetMixFormat`, which
+            // transfers one COM-task allocation to the caller.
+            unsafe { CoTaskMemFree(Some((*format).cast())) };
+        }
+    }
+}
+
 fn wasapi_timestamp_valid(flags: u32) -> bool {
     flags & (AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32) == 0
 }
@@ -282,11 +319,15 @@ impl WasapiPcmCapture {
         // releases the mix-format allocation after Initialize consumes it.
         unsafe {
             let mut fixed_mix_format = fixed_mix_format;
-            let (format_ptr, should_free_format) = if let Some(format) = fixed_mix_format.as_mut() {
-                (format as *mut WAVEFORMATEX, false)
+            let mut format_storage = if let Some(format) = fixed_mix_format.as_mut() {
+                WaveFormatStorage::borrowed(format)
             } else {
-                (client.GetMixFormat().map_err(init)?, true)
+                let format = client.GetMixFormat().map_err(init)?;
+                WaveFormatStorage::co_task_mem(format).ok_or_else(|| {
+                    CaptureError::Init("WASAPI GetMixFormat returned a null format".into())
+                })?
             };
+            let format_ptr = format_storage.as_mut_ptr();
             let format = &*format_ptr;
             // Copy packed fields to locals (references into packed structs are UB).
             let tag = format.wFormatTag;
@@ -294,7 +335,6 @@ impl WasapiPcmCapture {
             let rate = format.nSamplesPerSec;
             let bits = format.wBitsPerSample;
             let Some(mix) = parse_mix_format(format) else {
-                CoTaskMemFree(Some(format_ptr as *const _));
                 return Err(CaptureError::Init(format!(
                     "unsupported mix format: tag {tag} ch {ch} rate {rate} bits {bits} \
                      (need float32 or signed PCM)"
@@ -310,9 +350,6 @@ impl WasapiPcmCapture {
                 format_ptr,
                 None,
             );
-            if should_free_format {
-                CoTaskMemFree(Some(format_ptr as *const _));
-            }
             r.map_err(|e| CaptureError::Init(format!("WASAPI Initialize: {e}")))?;
 
             let capture: IAudioCaptureClient = client
@@ -1225,6 +1262,25 @@ mod tests {
     use super::*;
     use crate::clock::RelativeClock;
     use crate::traits::AudioSource;
+
+    #[test]
+    fn fixed_wave_format_storage_is_borrowed() {
+        let mut format = process_loopback_format();
+        let storage = WaveFormatStorage::borrowed(&mut format);
+
+        assert!(!storage.owns_allocation());
+    }
+
+    #[test]
+    fn com_wave_format_storage_owns_its_allocation() {
+        let allocation = unsafe { CoTaskMemAlloc(size_of::<WAVEFORMATEX>()) } as *mut WAVEFORMATEX;
+        assert!(!allocation.is_null());
+        unsafe { allocation.write(process_loopback_format()) };
+        let storage = WaveFormatStorage::co_task_mem(allocation).expect("COM allocation");
+
+        assert!(storage.owns_allocation());
+        drop(storage);
+    }
 
     #[test]
     fn audio_poll_horizon_leaves_one_opus_frame_for_delivery() {
