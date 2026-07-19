@@ -4,7 +4,12 @@
 //! uploads are used only when discovery and the create-upload response both
 //! advertise the required capability.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{hash_map::DefaultHasher, BTreeSet},
+    hash::{Hash, Hasher},
+    path::Path,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use bytes::Bytes;
 use clipline_cloud_api::{
@@ -21,6 +26,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
 const DIRECT_PUT_MAX_ATTEMPTS: usize = 3;
+const DIRECT_PUT_BACKOFF_BASE: Duration = Duration::from_millis(250);
+const DIRECT_PUT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 const MAX_UPLOAD_PART_BYTES: u64 = 64 * 1024 * 1024;
 
 pub async fn upload_mp4_file_with_progress<F>(
@@ -396,7 +403,7 @@ async fn upload_direct_part(
     templates: DirectPartTemplates<'_>,
 ) -> Result<PartUploadResponse, DirectUploadError> {
     let mut last_retryable_error = None;
-    for _ in 0..DIRECT_PUT_MAX_ATTEMPTS {
+    for attempt in 1..=DIRECT_PUT_MAX_ATTEMPTS {
         let presign = request_direct_presign(
             transport.client,
             transport.authenticated_control,
@@ -425,8 +432,22 @@ async fn upload_direct_part(
                 )
                 .await;
             }
-            Err(DirectPutError::Retryable(message)) => {
+            Err(DirectPutError::Retryable {
+                message,
+                retry_after,
+            }) => {
                 last_retryable_error = Some(message);
+                if attempt < DIRECT_PUT_MAX_ATTEMPTS {
+                    let delay = direct_put_retry_delay(
+                        &upload.upload_id,
+                        part_number,
+                        attempt,
+                        retry_after,
+                    );
+                    // Tokio's timer is cancellation-safe: aborting or dropping
+                    // the upload future cancels this wait immediately.
+                    tokio::time::sleep(delay).await;
+                }
             }
             Err(DirectPutError::Fallback(message)) => {
                 return Err(DirectUploadError::Fallback(message));
@@ -526,12 +547,20 @@ async fn put_presigned_part(
         .timeout(crate::bounded_http::upload_timeout(chunk_len))
         .send()
         .await
-        .map_err(|e| DirectPutError::Retryable(format!("direct S3 PUT request failed: {e}")))?;
+        .map_err(classify_direct_put_transport_error)?;
     let status = response.status();
     if !status.is_success() {
         let message = format!("direct S3 PUT failed with {status}");
         if is_retryable_direct_put_status(status) {
-            return Err(DirectPutError::Retryable(message));
+            let retry_after = response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| parse_retry_after(value, SystemTime::now()));
+            return Err(DirectPutError::Retryable {
+                message,
+                retry_after,
+            });
         }
         return Err(DirectPutError::Fallback(message));
     }
@@ -737,6 +766,51 @@ fn is_retryable_direct_put_status(status: StatusCode) -> bool {
         || status.is_server_error()
 }
 
+fn classify_direct_put_transport_error(error: reqwest::Error) -> DirectPutError {
+    let message = format!("direct S3 PUT request failed: {error}");
+    if error.is_builder() || error.is_redirect() {
+        DirectPutError::Fallback(message)
+    } else {
+        DirectPutError::Retryable {
+            message,
+            retry_after: None,
+        }
+    }
+}
+
+fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let timestamp = chrono::DateTime::parse_from_rfc2822(value)
+        .ok()?
+        .timestamp();
+    let timestamp = u64::try_from(timestamp).ok()?;
+    let target = UNIX_EPOCH.checked_add(Duration::from_secs(timestamp))?;
+    Some(target.duration_since(now).unwrap_or(Duration::ZERO))
+}
+
+fn direct_put_retry_delay(
+    upload_id: &str,
+    part_number: u16,
+    failed_attempt: usize,
+    retry_after: Option<Duration>,
+) -> Duration {
+    let exponent = u32::try_from(failed_attempt.saturating_sub(1).min(16)).unwrap_or(16);
+    let exponential = DIRECT_PUT_BACKOFF_BASE.saturating_mul(1_u32 << exponent);
+    let jitter_window_ms = u64::try_from((exponential / 2).as_millis()).unwrap_or(u64::MAX);
+    let mut hasher = DefaultHasher::new();
+    upload_id.hash(&mut hasher);
+    part_number.hash(&mut hasher);
+    failed_attempt.hash(&mut hasher);
+    let jitter_ms = hasher.finish() % jitter_window_ms.saturating_add(1);
+    let local_delay = exponential.saturating_add(Duration::from_millis(jitter_ms));
+    local_delay
+        .max(retry_after.unwrap_or(Duration::ZERO))
+        .min(DIRECT_PUT_BACKOFF_MAX)
+}
+
 async fn validate_upload_request_matches_file(
     request: &CreateUploadRequest,
     path: &Path,
@@ -907,7 +981,10 @@ impl DirectUploadError {
 
 #[derive(Debug)]
 enum DirectPutError {
-    Retryable(String),
+    Retryable {
+        message: String,
+        retry_after: Option<Duration>,
+    },
     Fallback(String),
     Terminal(CloudApiError),
 }
@@ -923,6 +1000,52 @@ mod tests {
     use httpmock::prelude::*;
     use httpmock::Mock;
     use serde_json::json;
+
+    #[test]
+    fn direct_put_retry_delay_is_exponential_jittered_and_bounded() {
+        let first = direct_put_retry_delay("upload-1", 7, 1, None);
+        let first_again = direct_put_retry_delay("upload-1", 7, 1, None);
+        let second = direct_put_retry_delay("upload-1", 7, 2, None);
+
+        assert_eq!(first, first_again, "jitter must be deterministic per part");
+        assert!(first >= DIRECT_PUT_BACKOFF_BASE);
+        assert!(first < DIRECT_PUT_BACKOFF_BASE * 2);
+        assert!(second >= DIRECT_PUT_BACKOFF_BASE * 2);
+        assert!(second < DIRECT_PUT_BACKOFF_BASE * 4);
+        assert_eq!(
+            direct_put_retry_delay("upload-1", 7, 1, Some(Duration::from_secs(3))),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            direct_put_retry_delay("upload-1", 7, 1, Some(Duration::from_secs(3_600))),
+            DIRECT_PUT_BACKOFF_MAX
+        );
+    }
+
+    #[test]
+    fn retry_after_parser_accepts_seconds_and_http_dates() {
+        let date = chrono::DateTime::parse_from_rfc2822("Wed, 21 Oct 2015 07:28:00 GMT").unwrap();
+        let date_time =
+            std::time::UNIX_EPOCH + Duration::from_secs(u64::try_from(date.timestamp()).unwrap());
+        let five_seconds_earlier = date_time - Duration::from_secs(5);
+
+        assert_eq!(
+            parse_retry_after("7", five_seconds_earlier),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(
+            parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT", five_seconds_earlier),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            parse_retry_after(
+                "Wed, 21 Oct 2015 07:28:00 GMT",
+                date_time + Duration::from_secs(1)
+            ),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(parse_retry_after("later", five_seconds_earlier), None);
+    }
 
     #[tokio::test]
     async fn file_hash_and_part_reads_are_seekable_and_bounded() {
