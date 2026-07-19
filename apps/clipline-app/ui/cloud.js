@@ -244,6 +244,9 @@ async function loadCloudClips({ force = false } = {}) {
     const result = await invoke("list_cloud_clips");
     if (!isCurrent()) return;
     cloudClipsCache = result && Array.isArray(result.clips) ? result.clips : [];
+    cloudClipsError = result && result.truncated
+      ? "Showing the first 10,000 unique cloud clips; refine the library on the server to see older items."
+      : "";
     cloudClipsLoaded = true;
   } catch (error) {
     if (!isCurrent()) return;

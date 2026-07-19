@@ -1,7 +1,7 @@
 //! Clipline Cloud desktop integration: connection state, OS credential storage,
 //! and per-clip uploads through the first-party API client.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -12,11 +12,13 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Utc};
+use clipline_cloud_api::types::{CreateDeviceTokenRequest, CreateDeviceTokenResponse};
 use clipline_cloud_api::{
     sha256_hex, ClipDetailResponse, ClipSummaryResponse, CloudApiError, CloudClient,
-    CreateUploadRequest, ListClipsRequest,
+    CreateUploadRequest, DiscoveryResponse, ListClipsRequest, MeResponse, UpdateVisibilityRequest,
 };
 use clipline_events::ClipMarkers;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::io::AsyncWriteExt;
@@ -40,6 +42,8 @@ const READY_POLL_DELAY: Duration = Duration::from_secs(1);
 const READY_MEDIA_PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_MEDIA_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOUD_LIBRARY_PAGE_SIZE: i64 = 100;
+const CLOUD_LIBRARY_MAX_PAGES: i64 = 100;
+const CLOUD_LIBRARY_MAX_CLIPS: usize = 10_000;
 const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
 const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
@@ -162,6 +166,7 @@ pub struct CloudLibraryClip {
 #[derive(Debug, Serialize)]
 pub struct CloudLibraryListResult {
     pub clips: Vec<CloudLibraryClip>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,31 +255,52 @@ pub async fn list_cloud_clips(
 
     let mut page = 1;
     let mut clips = Vec::new();
-    loop {
-        let response = client
-            .list_clips(&ListClipsRequest {
-                sort: Some("uploaded_at_desc".to_string()),
-                page: Some(page),
-                page_size: Some(CLOUD_LIBRARY_PAGE_SIZE),
-                ..Default::default()
-            })
-            .await
-            .map_err(cloud_error)?;
+    let mut remote_ids = BTreeSet::new();
+    let mut truncated = false;
+    while page <= CLOUD_LIBRARY_MAX_PAGES && clips.len() < CLOUD_LIBRARY_MAX_CLIPS {
+        let request = ListClipsRequest {
+            sort: Some("uploaded_at_desc".to_string()),
+            page: Some(page),
+            page_size: Some(CLOUD_LIBRARY_PAGE_SIZE),
+            ..Default::default()
+        };
+        let response: clipline_cloud_api::ClipListResponse = bounded_cloud_json(
+            cloud_request(
+                client.base_url(),
+                Some(&token),
+                reqwest::Method::GET,
+                "api/v1/clips",
+            )?
+            .query(&request),
+            "list cloud clips",
+        )
+        .await
+        .map_err(cloud_error)?;
         let clip_count = response.clips.len();
         for clip in response.clips {
+            if !remote_ids.insert(clip.id.clone()) {
+                continue;
+            }
             let local_record = clip
                 .client_clip_id
                 .as_deref()
                 .and_then(|local_clip_id| cloud.uploads.get(local_clip_id));
             clips.push(cloud_library_clip_from_summary(&cloud, &clip, local_record));
+            if clips.len() >= CLOUD_LIBRARY_MAX_CLIPS {
+                truncated = true;
+                break;
+            }
         }
         if clip_count < CLOUD_LIBRARY_PAGE_SIZE as usize {
             break;
         }
         page += 1;
+        if page > CLOUD_LIBRARY_MAX_PAGES {
+            truncated = true;
+        }
     }
 
-    Ok(CloudLibraryListResult { clips })
+    Ok(CloudLibraryListResult { clips, truncated })
 }
 
 #[tauri::command]
@@ -339,7 +365,9 @@ pub async fn cloud_user_avatar(
     let cache_key = cloud_user_avatar_cache_key(&cloud)?;
     let cached = cached_cloud_user_avatar(&cache_key);
     let url = cloud_user_avatar_url(&cloud)?;
-    let mut request = reqwest::Client::new().get(url).bearer_auth(token);
+    let mut request = crate::bounded_http::authenticated_stream_client()?
+        .get(url)
+        .bearer_auth(token);
     if let Some(etag) = cached.as_ref().and_then(|avatar| avatar.etag.as_deref()) {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
@@ -357,7 +385,8 @@ pub async fn cloud_user_avatar(
         return Ok(cached.map(|avatar| avatar.data_url));
     }
     if !status.is_success() {
-        let message = response.text().await.unwrap_or_else(|_| status.to_string());
+        let message =
+            crate::bounded_http::response_error_message(response, status, "cloud avatar").await;
         return Err(format!(
             "download cloud avatar failed with {status}: {message}"
         ));
@@ -379,10 +408,9 @@ pub async fn cloud_user_avatar(
         .get(reqwest::header::ETAG)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("read cloud avatar: {e}"))?;
+    let bytes =
+        crate::bounded_http::response_bytes_limited(response, MAX_AVATAR_BYTES, "cloud avatar")
+            .await?;
     let data_url = cloud_user_avatar_data_url(content_type.as_deref(), &bytes)?;
     store_cached_cloud_user_avatar(CachedCloudUserAvatar {
         key: cache_key,
@@ -398,7 +426,17 @@ pub async fn cloud_user_profile(
 ) -> Result<CloudUserProfile, String> {
     let (cloud, token) = cloud_asset_context(&state)?;
     let client = connected_client(&cloud, &token)?;
-    let response = client.me().await.map_err(cloud_error)?;
+    let response: MeResponse = bounded_cloud_json(
+        cloud_request(
+            client.base_url(),
+            Some(&token),
+            reqwest::Method::GET,
+            "api/v1/auth/me",
+        )?,
+        "load cloud profile",
+    )
+    .await
+    .map_err(cloud_error)?;
     let profile = cloud_user_profile_from_response(&cloud, &response.user)?;
     let profile_for_settings = profile.clone();
     let _settings = state.update_cloud(|cloud| {
@@ -493,7 +531,7 @@ async fn download_cloud_asset_to_cache(
             .map_err(|e| format!("create cloud cache: {e}"))?;
     }
 
-    let response = reqwest::Client::new()
+    let response = crate::bounded_http::authenticated_stream_client()?
         .get(url)
         .bearer_auth(token)
         .send()
@@ -504,7 +542,12 @@ async fn download_cloud_asset_to_cache(
         return Ok(None);
     }
     if !status.is_success() {
-        let message = response.text().await.unwrap_or_else(|_| status.to_string());
+        let message = crate::bounded_http::response_error_message(
+            response,
+            status,
+            &format!("cloud {}", request.asset),
+        )
+        .await;
         return Err(format!(
             "download cloud {} failed with {status}: {message}",
             request.asset
@@ -1203,7 +1246,7 @@ pub async fn sync_cloud_clip_status(
     let token = read_credential(&token_target)?;
     let client = connected_client(&cloud, &token)?;
 
-    match client.get_clip(&remote_clip_id).await {
+    match bounded_cloud_get_clip(&client, &token, &remote_clip_id).await {
         Ok(clip) => {
             let mut updated = record;
             apply_remote_clip_to_record(&cloud, &mut updated, &clip);
@@ -1264,47 +1307,76 @@ pub async fn cloud_connect(
         .unwrap_or(DEFAULT_DEVICE_NAME)
         .to_string();
 
-    let connected = clipline_cloud_api::connect_with_device_token(
+    let base_url = clipline_cloud_api::validate_cloud_host(
         request.host_url.trim(),
-        request.username.trim().to_string(),
-        request.password,
-        device_name,
         request.plain_http_confirmed,
+    )
+    .map_err(cloud_error)?;
+    let discovery: DiscoveryResponse = bounded_cloud_json(
+        cloud_request(
+            &base_url,
+            None,
+            reqwest::Method::GET,
+            ".well-known/clipline-cloud",
+        )?,
+        "discover Clipline Cloud",
+    )
+    .await
+    .map_err(cloud_error)?;
+    clipline_cloud_api::ensure_compatible_discovery(&discovery).map_err(cloud_error)?;
+    let device_token: CreateDeviceTokenResponse = bounded_cloud_json(
+        cloud_request(
+            &base_url,
+            None,
+            reqwest::Method::POST,
+            "api/v1/auth/device-token",
+        )?
+        .json(&CreateDeviceTokenRequest {
+            username: request.username.trim().to_string(),
+            password: request.password,
+            name: device_name,
+        }),
+        "create cloud device token",
+    )
+    .await
+    .map_err(cloud_error)?;
+    let me: MeResponse = bounded_cloud_json(
+        cloud_request(
+            &base_url,
+            Some(&device_token.token),
+            reqwest::Method::GET,
+            "api/v1/auth/me",
+        )?,
+        "load connected cloud identity",
     )
     .await
     .map_err(cloud_error)?;
 
-    let host_url = connected
-        .client
-        .base_url()
-        .as_str()
-        .trim_end_matches('/')
-        .to_string();
-    let public_url = connected
-        .discovery
+    let host_url = base_url.as_str().trim_end_matches('/').to_string();
+    let public_url = discovery
         .public_url
         .trim()
         .trim_end_matches('/')
         .to_string();
-    let target = credential_target(&host_url, &connected.user.id);
+    let target = credential_target(&host_url, &me.user.id);
     let old_target = state.settings().cloud.credential_target;
     let previous_target_secret = read_credential(&target).ok();
     let settings = crate::credential_transaction::write_then_persist(
         &target,
-        &connected.user.username,
-        &connected.token,
+        &me.user.username,
+        &device_token.token,
         previous_target_secret.as_deref(),
         write_credential,
         delete_credential_if_present,
         || {
             state.update_cloud(|cloud| {
                 let identity_changed = cloud.host_url != host_url
-                    || cloud.connected_user_id.as_deref() != Some(connected.user.id.as_str());
+                    || cloud.connected_user_id.as_deref() != Some(me.user.id.as_str());
                 cloud.host_url = host_url.clone();
                 cloud.public_url = Some(public_url.clone());
-                cloud.connected_user_id = Some(connected.user.id.clone());
-                cloud.connected_username = Some(connected.user.username.clone());
-                cloud.connected_display_name = connected
+                cloud.connected_user_id = Some(me.user.id.clone());
+                cloud.connected_username = Some(me.user.username.clone());
+                cloud.connected_display_name = me
                     .user
                     .display_name
                     .as_deref()
@@ -1502,7 +1574,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         None,
     );
 
-    let clip = match wait_for_ready_clip(&client, &progress.clip_id).await {
+    let clip = match wait_for_ready_clip(&client, &token, &progress.clip_id).await {
         Ok(ReadyClipOutcome::Ready(clip)) => clip,
         Ok(ReadyClipOutcome::Failed(clip)) => {
             apply_remote_clip_to_record(&cloud, &mut record, &clip);
@@ -1536,7 +1608,25 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     let clip = if visibility == "private" {
         clip
     } else {
-        match client.set_visibility(&clip.id, visibility.clone()).await {
+        let update = cloud_clip_request(
+            client.base_url(),
+            &token,
+            reqwest::Method::POST,
+            &clip.id,
+            Some("visibility"),
+        )
+        .map(|request| {
+            request.json(&UpdateVisibilityRequest {
+                visibility: visibility.clone(),
+            })
+        });
+        match match update {
+            Ok(request) => {
+                bounded_cloud_json::<ClipDetailResponse>(request, "update cloud clip visibility")
+                    .await
+            }
+            Err(error) => Err(CloudApiError::InvalidUpload(error)),
+        } {
             Ok(updated) if updated.status == "ready" => updated,
             Ok(updated) => {
                 apply_remote_clip_to_record(&cloud, &mut record, &updated);
@@ -1622,6 +1712,81 @@ fn connected_client(cloud: &CloudSettings, token: &str) -> Result<CloudClient, S
     let base_url =
         clipline_cloud_api::validate_cloud_host(&cloud.host_url, true).map_err(cloud_error)?;
     Ok(CloudClient::with_device_token(base_url, token))
+}
+
+fn cloud_request(
+    base_url: &reqwest::Url,
+    token: Option<&str>,
+    method: reqwest::Method,
+    path: &str,
+) -> Result<reqwest::RequestBuilder, String> {
+    let url = base_url
+        .join(path.trim_start_matches('/'))
+        .map_err(|error| format!("build cloud request URL: {error}"))?;
+    let request = crate::bounded_http::control_client()?.request(method, url);
+    Ok(match token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    })
+}
+
+fn cloud_clip_request(
+    base_url: &reqwest::Url,
+    token: &str,
+    method: reqwest::Method,
+    clip_id: &str,
+    suffix: Option<&str>,
+) -> Result<reqwest::RequestBuilder, String> {
+    let mut url = base_url
+        .join("api/v1/clips/")
+        .map_err(|error| format!("build cloud clip URL: {error}"))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "build cloud clip URL path".to_string())?;
+        segments.pop_if_empty().push(clip_id);
+        if let Some(suffix) = suffix {
+            segments.push(suffix);
+        }
+    }
+    Ok(crate::bounded_http::control_client()?
+        .request(method, url)
+        .bearer_auth(token))
+}
+
+async fn bounded_cloud_json<T: DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    context: &str,
+) -> Result<T, CloudApiError> {
+    let response = request.send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        let message = crate::bounded_http::response_error_message(response, status, context).await;
+        return Err(CloudApiError::Api { status, message });
+    }
+    crate::bounded_http::response_json_limited(
+        response,
+        crate::bounded_http::CONTROL_JSON_MAX_BYTES,
+        context,
+    )
+    .await
+    .map_err(|message| CloudApiError::Api { status, message })
+}
+
+async fn bounded_cloud_get_clip(
+    client: &CloudClient,
+    token: &str,
+    clip_id: &str,
+) -> Result<ClipDetailResponse, CloudApiError> {
+    let request = cloud_clip_request(
+        client.base_url(),
+        token,
+        reqwest::Method::GET,
+        clip_id,
+        None,
+    )
+    .map_err(CloudApiError::InvalidUpload)?;
+    bounded_cloud_json(request, "get cloud clip").await
 }
 
 struct UploadRequestInput<'a> {
@@ -2119,19 +2284,28 @@ fn emit_upload_progress<R: Runtime>(
 
 async fn wait_for_ready_clip(
     client: &CloudClient,
+    token: &str,
     clip_id: &str,
 ) -> Result<ReadyClipOutcome, CloudApiError> {
-    wait_for_ready_clip_with_policy(client, clip_id, READY_POLL_ATTEMPTS, READY_POLL_DELAY).await
+    wait_for_ready_clip_with_policy(
+        client,
+        token,
+        clip_id,
+        READY_POLL_ATTEMPTS,
+        READY_POLL_DELAY,
+    )
+    .await
 }
 
 async fn wait_for_ready_clip_with_policy(
     client: &CloudClient,
+    token: &str,
     clip_id: &str,
     attempts: usize,
     delay: Duration,
 ) -> Result<ReadyClipOutcome, CloudApiError> {
     for attempt in 0..attempts {
-        match client.get_clip(clip_id).await {
+        match bounded_cloud_get_clip(client, token, clip_id).await {
             Ok(clip) if clip.status == "ready" => return Ok(ReadyClipOutcome::Ready(clip)),
             Ok(clip) if clip.status == "failed" => return Ok(ReadyClipOutcome::Failed(clip)),
             Ok(_)
@@ -2498,6 +2672,7 @@ mod tests {
 
         let outcome = wait_for_ready_clip_with_policy(
             &test_cloud_client(&server),
+            "token",
             "remote-1",
             3,
             Duration::ZERO,
@@ -2522,6 +2697,7 @@ mod tests {
 
         let outcome = wait_for_ready_clip_with_policy(
             &test_cloud_client(&server),
+            "token",
             "remote-1",
             3,
             Duration::ZERO,
@@ -2546,6 +2722,7 @@ mod tests {
 
         let outcome = wait_for_ready_clip_with_policy(
             &test_cloud_client(&server),
+            "token",
             "remote-1",
             3,
             Duration::ZERO,

@@ -13,6 +13,8 @@ fn main() {
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod bounded_http;
+#[cfg(windows)]
 mod cloud;
 #[cfg(windows)]
 mod cloud_upload;

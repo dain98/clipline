@@ -279,9 +279,9 @@ async fn fetch_recent_scores(
     config: &OsuApiConfig,
     stop_before_unix: Option<i64>,
 ) -> Result<OsuRecentFetch, String> {
-    let token = request_app_token(config).await?;
-    let client = reqwest::Client::new();
-    let resolved_user = resolve_osu_user(&client, &token, &config.user).await?;
+    let client = crate::bounded_http::control_client()?;
+    let token = request_app_token(client, config).await?;
+    let resolved_user = resolve_osu_user(client, &token, &config.user).await?;
     let mut offset = 0usize;
     let mut scores = Vec::new();
     let mut failed_count = 0usize;
@@ -291,7 +291,7 @@ async fn fetch_recent_scores(
     let mut pagination_ceiling_reached = false;
 
     while offset < RECENT_SCORE_CEILING {
-        let raw = request_recent_page(&client, &token, &resolved_user.id, offset).await?;
+        let raw = request_recent_page(client, &token, &resolved_user.id, offset).await?;
         if raw.is_empty() {
             break;
         }
@@ -392,27 +392,23 @@ async fn resolve_osu_user(
         .await
         .map_err(|e| format!("resolve osu! user: {e}"))?;
     let status = response.status();
-    if !status.is_success() {
-        let message = response.text().await.unwrap_or_else(|_| status.to_string());
-        return Err(format!("resolve osu! user failed with {status}: {message}"));
-    }
-    let user: UserResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("parse osu! user lookup response: {e}"))?;
+    let user: UserResponse = osu_json_response(response, status, "resolve osu! user").await?;
     Ok(ResolvedOsuUser {
         id: user.id.to_string(),
         username: user.username,
     })
 }
 
-async fn request_app_token(config: &OsuApiConfig) -> Result<String, String> {
+async fn request_app_token(
+    client: &reqwest::Client,
+    config: &OsuApiConfig,
+) -> Result<String, String> {
     #[derive(Deserialize)]
     struct TokenResponse {
         access_token: String,
     }
 
-    let response = reqwest::Client::new()
+    let response = client
         .post(OSU_TOKEN_URL)
         .form(&[
             ("client_id", config.client_id.as_str()),
@@ -424,16 +420,7 @@ async fn request_app_token(config: &OsuApiConfig) -> Result<String, String> {
         .await
         .map_err(|e| format!("request osu! token: {e}"))?;
     let status = response.status();
-    if !status.is_success() {
-        let message = response.text().await.unwrap_or_else(|_| status.to_string());
-        return Err(format!(
-            "request osu! token failed with {status}: {message}"
-        ));
-    }
-    let token: TokenResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("parse osu! token response: {e}"))?;
+    let token: TokenResponse = osu_json_response(response, status, "request osu! token").await?;
     Ok(token.access_token)
 }
 
@@ -465,16 +452,24 @@ async fn request_recent_page(
         .await
         .map_err(|e| format!("fetch osu! recent scores: {e}"))?;
     let status = response.status();
+    osu_json_response(response, status, "fetch osu! recent scores").await
+}
+
+async fn osu_json_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    status: reqwest::StatusCode,
+    context: &str,
+) -> Result<T, String> {
     if !status.is_success() {
-        let message = response.text().await.unwrap_or_else(|_| status.to_string());
-        return Err(format!(
-            "fetch osu! recent scores failed with {status}: {message}"
-        ));
+        let message = crate::bounded_http::response_error_message(response, status, context).await;
+        return Err(format!("{context} failed with {status}: {message}"));
     }
-    response
-        .json()
-        .await
-        .map_err(|e| format!("parse osu! recent scores: {e}"))
+    crate::bounded_http::response_json_limited(
+        response,
+        crate::bounded_http::CONTROL_JSON_MAX_BYTES,
+        context,
+    )
+    .await
 }
 
 #[derive(Debug, Deserialize)]

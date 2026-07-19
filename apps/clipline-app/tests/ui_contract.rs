@@ -941,6 +941,8 @@ fn review_player_owns_all_controls() {
             && app_rs().contains("crate::cloud::sync_cloud_clip_status")
             && app_rs().contains("crate::library::prepare_clip_audio_sidecars")
             && main_js().contains("sync_cloud_clip_status")
+            && main_js().contains("result.truncated")
+            && main_js().contains("first 10,000 unique cloud clips")
             && styles_css().contains(".cloud-connect-grid")
             && styles_css().contains(".cloud-connect-fields")
             && styles_css().contains(".cloud-connect-fields[hidden] { display: none; }")

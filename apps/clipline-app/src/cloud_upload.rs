@@ -11,7 +11,7 @@ use clipline_cloud_api::{
     sha256_hex,
     types::{DirectPartUploadAckRequest, DirectPartUploadUrlResponse},
     CloudApiError, CloudApiResult, CloudClient, CreateUploadRequest, CreateUploadResponse,
-    PartUploadResponse, UploadProgressResponse,
+    DiscoveryResponse, PartUploadResponse, UploadProgressResponse,
 };
 use reqwest::{header, StatusCode};
 use serde::Deserialize;
@@ -35,23 +35,26 @@ where
     F: FnMut(&UploadProgressResponse),
 {
     validate_upload_request_matches_file(request, path).await?;
-    let direct_s3_available = client
-        .discover()
+    let authenticated_control =
+        crate::bounded_http::control_client().map_err(CloudApiError::InvalidUpload)?;
+    let authenticated_stream =
+        crate::bounded_http::authenticated_stream_client().map_err(CloudApiError::InvalidUpload)?;
+    let object_http =
+        crate::bounded_http::object_stream_client().map_err(CloudApiError::InvalidUpload)?;
+    let direct_s3_available = discover_direct_s3(client, authenticated_control)
         .await
-        .map(|discovery| discovery.features.direct_s3_upload)
         .unwrap_or(false);
-    let authenticated_http = authenticated_upload_client()?;
-    let object_http = reqwest::Client::new();
     let transport = UploadTransport {
         client,
-        authenticated_http: &authenticated_http,
-        object_http: &object_http,
+        authenticated_control,
+        authenticated_stream,
+        object_http,
         device_token,
     };
 
     let upload = create_upload(
         client,
-        &authenticated_http,
+        authenticated_control,
         device_token,
         request,
         description,
@@ -70,7 +73,7 @@ where
         Err(DirectUploadError::Fallback(_reason)) => {
             let upload = create_upload(
                 client,
-                &authenticated_http,
+                authenticated_control,
                 device_token,
                 request,
                 description,
@@ -187,7 +190,8 @@ where
     match upload.mode.as_str() {
         "single_put" => upload_single(
             transport.client,
-            transport.authenticated_http,
+            transport.authenticated_control,
+            transport.authenticated_stream,
             transport.device_token,
             upload,
             path,
@@ -196,28 +200,55 @@ where
         .await
         .map_err(DirectUploadError::Cloud),
         "chunked" => {
-            let progress = transport
-                .client
-                .get_upload(&upload.upload_id)
-                .await
-                .map_err(DirectUploadError::Cloud)?;
+            let progress = get_upload_progress(
+                transport.client,
+                transport.authenticated_control,
+                transport.device_token,
+                &upload.upload_id,
+            )
+            .await
+            .map_err(DirectUploadError::Cloud)?;
             on_progress(&progress);
 
             let Some(presign_template) = upload.direct_part_presign_url_template.as_deref() else {
-                return upload_chunked_proxy(transport.client, upload, path, progress, on_progress)
-                    .await
-                    .map_err(DirectUploadError::Cloud);
+                return upload_chunked_proxy(
+                    transport.client,
+                    transport.authenticated_control,
+                    transport.device_token,
+                    upload,
+                    path,
+                    progress,
+                    on_progress,
+                )
+                .await
+                .map_err(DirectUploadError::Cloud);
             };
             let Some(ack_template) = upload.direct_part_ack_url_template.as_deref() else {
-                return upload_chunked_proxy(transport.client, upload, path, progress, on_progress)
-                    .await
-                    .map_err(DirectUploadError::Cloud);
+                return upload_chunked_proxy(
+                    transport.client,
+                    transport.authenticated_control,
+                    transport.device_token,
+                    upload,
+                    path,
+                    progress,
+                    on_progress,
+                )
+                .await
+                .map_err(DirectUploadError::Cloud);
             };
 
             if !direct_s3_available {
-                return upload_chunked_proxy(transport.client, upload, path, progress, on_progress)
-                    .await
-                    .map_err(DirectUploadError::Cloud);
+                return upload_chunked_proxy(
+                    transport.client,
+                    transport.authenticated_control,
+                    transport.device_token,
+                    upload,
+                    path,
+                    progress,
+                    on_progress,
+                )
+                .await
+                .map_err(DirectUploadError::Cloud);
             }
 
             let templates = DirectPartTemplates {
@@ -234,7 +265,8 @@ where
 
 async fn upload_single<F>(
     client: &CloudClient,
-    http: &reqwest::Client,
+    control_http: &reqwest::Client,
+    stream_http: &reqwest::Client,
     device_token: &str,
     upload: &CreateUploadResponse,
     path: &Path,
@@ -243,7 +275,8 @@ async fn upload_single<F>(
 where
     F: FnMut(&UploadProgressResponse),
 {
-    let progress = client.get_upload(&upload.upload_id).await?;
+    let progress =
+        get_upload_progress(client, control_http, device_token, &upload.upload_id).await?;
     if progress.status == "completed" {
         on_progress(&progress);
         return Ok(progress);
@@ -260,11 +293,12 @@ where
         .await
         .map_err(|error| upload_file_error("read upload metadata", path, error))?
         .len();
-    let response = http
+    let response = stream_http
         .put(url)
         .bearer_auth(device_token)
         .header(header::CONTENT_LENGTH, file_size)
         .body(reqwest::Body::wrap_stream(ReaderStream::new(file)))
+        .timeout(crate::bounded_http::upload_timeout(file_size))
         .send()
         .await?;
     let progress = parse_json_response(response).await?;
@@ -274,6 +308,8 @@ where
 
 async fn upload_chunked_proxy<F>(
     client: &CloudClient,
+    http: &reqwest::Client,
+    device_token: &str,
     upload: &CreateUploadResponse,
     path: &Path,
     progress: UploadProgressResponse,
@@ -289,13 +325,19 @@ where
     for part_number in progress.missing_parts {
         let chunk =
             read_chunk_for_part(path, file_size, upload.part_size_bytes, part_number).await?;
-        client
-            .put_part(&upload.upload_id, part_number, chunk)
-            .await?;
-        let progress = client.get_upload(&upload.upload_id).await?;
+        put_proxy_part(
+            client,
+            http,
+            device_token,
+            &upload.upload_id,
+            part_number,
+            chunk,
+        )
+        .await?;
+        let progress = get_upload_progress(client, http, device_token, &upload.upload_id).await?;
         on_progress(&progress);
     }
-    let progress = client.complete_upload(&upload.upload_id).await?;
+    let progress = complete_upload(client, http, device_token, &upload.upload_id).await?;
     on_progress(&progress);
     Ok(progress)
 }
@@ -321,18 +363,24 @@ where
             .await
             .map_err(DirectUploadError::Cloud)?;
         upload_direct_part(transport, upload, part_number, &chunk, templates).await?;
-        let progress = transport
-            .client
-            .get_upload(&upload.upload_id)
-            .await
-            .map_err(DirectUploadError::Cloud)?;
-        on_progress(&progress);
-    }
-    let progress = transport
-        .client
-        .complete_upload(&upload.upload_id)
+        let progress = get_upload_progress(
+            transport.client,
+            transport.authenticated_control,
+            transport.device_token,
+            &upload.upload_id,
+        )
         .await
         .map_err(DirectUploadError::Cloud)?;
+        on_progress(&progress);
+    }
+    let progress = complete_upload(
+        transport.client,
+        transport.authenticated_control,
+        transport.device_token,
+        &upload.upload_id,
+    )
+    .await
+    .map_err(DirectUploadError::Cloud)?;
     on_progress(&progress);
     Ok(progress)
 }
@@ -348,7 +396,7 @@ async fn upload_direct_part(
     for _ in 0..DIRECT_PUT_MAX_ATTEMPTS {
         let presign = request_direct_presign(
             transport.client,
-            transport.authenticated_http,
+            transport.authenticated_control,
             transport.device_token,
             templates.presign,
             part_number,
@@ -366,7 +414,7 @@ async fn upload_direct_part(
                 };
                 return ack_direct_part(
                     transport.client,
-                    transport.authenticated_http,
+                    transport.authenticated_control,
                     transport.device_token,
                     templates.ack,
                     part_number,
@@ -453,6 +501,7 @@ async fn put_presigned_part(
     presign: &DirectPartUploadUrlResponse,
     chunk: Bytes,
 ) -> Result<String, DirectPutError> {
+    let chunk_len = chunk.len() as u64;
     let mut request = http.put(&presign.url).body(chunk);
     for header in &presign.headers {
         let name = header::HeaderName::from_bytes(header.name.as_bytes()).map_err(|e| {
@@ -471,6 +520,7 @@ async fn put_presigned_part(
     }
 
     let response = request
+        .timeout(crate::bounded_http::upload_timeout(chunk_len))
         .send()
         .await
         .map_err(|e| DirectPutError::Retryable(format!("direct S3 PUT request failed: {e}")))?;
@@ -514,10 +564,85 @@ fn upload_url(client: &CloudClient, template: &str, part_number: u16) -> CloudAp
     Ok(url.to_string())
 }
 
-fn authenticated_upload_client() -> CloudApiResult<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?)
+async fn discover_direct_s3(client: &CloudClient, http: &reqwest::Client) -> CloudApiResult<bool> {
+    let url = client.base_url().join(".well-known/clipline-cloud")?;
+    let response = http.get(url).send().await?;
+    let discovery: DiscoveryResponse = parse_json_response(response).await?;
+    clipline_cloud_api::ensure_compatible_discovery(&discovery)?;
+    Ok(discovery.features.direct_s3_upload)
+}
+
+fn upload_control_url(
+    client: &CloudClient,
+    upload_id: &str,
+    suffix: Option<&str>,
+) -> CloudApiResult<reqwest::Url> {
+    let mut url = client.base_url().join("api/v1/uploads/")?;
+    {
+        let mut segments = url.path_segments_mut().map_err(|_| {
+            CloudApiError::InvalidUpload("build cloud upload control URL".to_string())
+        })?;
+        segments.pop_if_empty().push(upload_id);
+        if let Some(suffix) = suffix {
+            segments.push(suffix);
+        }
+    }
+    Ok(url)
+}
+
+async fn get_upload_progress(
+    client: &CloudClient,
+    http: &reqwest::Client,
+    device_token: &str,
+    upload_id: &str,
+) -> CloudApiResult<UploadProgressResponse> {
+    let response = http
+        .get(upload_control_url(client, upload_id, None)?)
+        .bearer_auth(device_token)
+        .send()
+        .await?;
+    parse_json_response(response).await
+}
+
+async fn complete_upload(
+    client: &CloudClient,
+    http: &reqwest::Client,
+    device_token: &str,
+    upload_id: &str,
+) -> CloudApiResult<UploadProgressResponse> {
+    let response = http
+        .post(upload_control_url(client, upload_id, Some("complete"))?)
+        .bearer_auth(device_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await?;
+    parse_json_response(response).await
+}
+
+async fn put_proxy_part(
+    client: &CloudClient,
+    http: &reqwest::Client,
+    device_token: &str,
+    upload_id: &str,
+    part_number: u16,
+    chunk: Bytes,
+) -> CloudApiResult<PartUploadResponse> {
+    let checksum = sha256_hex(&chunk);
+    let size = chunk.len() as u64;
+    let mut url = upload_control_url(client, upload_id, Some("parts"))?;
+    url.path_segments_mut()
+        .map_err(|_| CloudApiError::InvalidUpload("build cloud upload part URL".to_string()))?
+        .push(&part_number.to_string());
+    let response = http
+        .put(url)
+        .bearer_auth(device_token)
+        .header(header::CONTENT_TYPE, "video/mp4")
+        .header("x-clipline-part-sha256", checksum)
+        .body(chunk)
+        .timeout(crate::bounded_http::upload_timeout(size))
+        .send()
+        .await?;
+    parse_json_response(response).await
 }
 
 async fn post_json_with_auth<T, B>(
@@ -556,15 +681,27 @@ where
     T: serde::de::DeserializeOwned,
 {
     let status = response.status();
+    let bytes = crate::bounded_http::response_bytes_limited(
+        response,
+        if status.is_success() {
+            crate::bounded_http::CONTROL_JSON_MAX_BYTES
+        } else {
+            crate::bounded_http::ERROR_BODY_MAX_BYTES
+        },
+        "cloud upload control",
+    )
+    .await
+    .map_err(CloudApiError::InvalidUpload)?;
     if !status.is_success() {
-        let message = response
-            .json::<ErrorResponse>()
-            .await
+        let message = serde_json::from_slice::<ErrorResponse>(&bytes)
             .map(|body| body.error)
             .unwrap_or_else(|_| status.to_string());
         return Err(CloudApiError::Api { status, message });
     }
-    Ok(response.json::<T>().await?)
+    serde_json::from_slice::<T>(&bytes).map_err(|error| CloudApiError::Api {
+        status,
+        message: format!("parse upload response: {error}"),
+    })
 }
 
 fn classify_direct_control_error(error: CloudApiError) -> DirectUploadError {
@@ -693,7 +830,8 @@ fn upload_file_error(action: &str, path: &Path, error: std::io::Error) -> CloudA
 #[derive(Clone, Copy)]
 struct UploadTransport<'a> {
     client: &'a CloudClient,
-    authenticated_http: &'a reqwest::Client,
+    authenticated_control: &'a reqwest::Client,
+    authenticated_stream: &'a reqwest::Client,
     object_http: &'a reqwest::Client,
     device_token: &'a str,
 }
@@ -845,9 +983,9 @@ mod tests {
                 .header("Location", format!("{}/stolen", target.base_url()));
         });
         let client = test_client(&cloud);
-        let http = authenticated_upload_client().unwrap();
+        let http = crate::bounded_http::control_client().unwrap();
 
-        let error = create_upload(&client, &http, TOKEN, &upload_request(b"abc"), None)
+        let error = create_upload(&client, http, TOKEN, &upload_request(b"abc"), None)
             .await
             .expect_err("redirect must not be followed");
 

@@ -10,6 +10,7 @@ use crate::raw::{EventData, PlayerItemEntry, PlayerListEntry, PlayerSummonerSpel
 
 /// Riot's local Live Client Data endpoint (ddoc §5a).
 const DEFAULT_BASE: &str = "https://127.0.0.1:2999";
+const MAX_LIVE_CLIENT_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -17,6 +18,10 @@ pub enum Error {
     Http(#[from] reqwest::Error),
     #[error("refusing to disable certificate validation for non-loopback URL: {0}")]
     NotLoopback(String),
+    #[error("live client response is invalid: {0}")]
+    InvalidResponse(String),
+    #[error("live client JSON is invalid: {0}")]
+    InvalidJson(#[from] serde_json::Error),
 }
 
 /// Client for the League Live Client Data API. The real endpoint serves a
@@ -49,6 +54,8 @@ impl LiveClient {
         }
         let http = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
+            .connect_timeout(Duration::from_secs(1))
+            .read_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(2))
             .build()?;
         Ok(Self { base, http })
@@ -60,16 +67,16 @@ impl LiveClient {
     }
 
     pub async fn event_data(&self) -> Result<EventData, Error> {
-        Ok(self.get_json("/liveclientdata/eventdata").await?)
+        self.get_json("/liveclientdata/eventdata").await
     }
 
     pub async fn player_list(&self) -> Result<Vec<PlayerListEntry>, Error> {
-        Ok(self.get_json("/liveclientdata/playerlist").await?)
+        self.get_json("/liveclientdata/playerlist").await
     }
 
     /// Riot returns the active player's name as a bare JSON string.
     pub async fn active_player_name(&self) -> Result<String, Error> {
-        Ok(self.get_json("/liveclientdata/activeplayername").await?)
+        self.get_json("/liveclientdata/activeplayername").await
     }
 
     pub async fn player_summary(&self, local_player: &str) -> Result<Option<PlayerSummary>, Error> {
@@ -88,17 +95,42 @@ impl LiveClient {
         Ok(stats.game_time)
     }
 
-    async fn get_json<T: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-    ) -> Result<T, reqwest::Error> {
-        self.http
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
+        let mut response = self
+            .http
             .get(format!("{}{}", self.base, path))
             .send()
             .await?
-            .error_for_status()?
-            .json::<T>()
-            .await
+            .error_for_status()?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_LIVE_CLIENT_JSON_BYTES as u64)
+        {
+            return Err(Error::InvalidResponse(format!(
+                "body exceeds {} bytes",
+                MAX_LIVE_CLIENT_JSON_BYTES
+            )));
+        }
+        let mut body = Vec::with_capacity(
+            response
+                .content_length()
+                .unwrap_or(0)
+                .min(MAX_LIVE_CLIENT_JSON_BYTES as u64) as usize,
+        );
+        while let Some(chunk) = response.chunk().await? {
+            let total = body
+                .len()
+                .checked_add(chunk.len())
+                .ok_or_else(|| Error::InvalidResponse("body size overflow".to_string()))?;
+            if total > MAX_LIVE_CLIENT_JSON_BYTES {
+                return Err(Error::InvalidResponse(format!(
+                    "body exceeds {} bytes",
+                    MAX_LIVE_CLIENT_JSON_BYTES
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(serde_json::from_slice(&body)?)
     }
 }
 
@@ -260,6 +292,7 @@ pub fn player_summary_from_list_with_game_time(
 mod tests {
     use super::*;
     use crate::raw::{PlayerListEntry, PlayerScores, PlayerSummonerSpells};
+    use httpmock::prelude::*;
 
     #[test]
     fn is_loopback_url_accepts_loopback_variants() {
@@ -285,6 +318,23 @@ mod tests {
     fn new_rejects_non_loopback_url() {
         let err = LiveClient::new("https://example.com:2999").unwrap_err();
         assert!(matches!(err, Error::NotLoopback(_)));
+    }
+
+    #[tokio::test]
+    async fn live_client_rejects_oversized_json_before_deserialization() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/liveclientdata/eventdata");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body("x".repeat(MAX_LIVE_CLIENT_JSON_BYTES + 1));
+        });
+        let client = LiveClient::new(server.base_url()).unwrap();
+
+        let error = client.event_data().await.unwrap_err();
+
+        assert!(matches!(error, Error::InvalidResponse(_)));
+        assert!(error.to_string().contains("exceeds"));
     }
 
     fn player(
