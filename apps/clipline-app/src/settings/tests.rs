@@ -222,6 +222,140 @@ fn legacy_global_game_recording_mode_migrates_to_custom_games() {
 }
 
 #[test]
+fn legacy_custom_game_ids_migrate_out_of_the_built_in_namespace() {
+    let settings = AppSettings::load_from_object(
+        serde_json::json!({
+            "games": {
+                "custom_games": [
+                    {
+                        "id": "osu",
+                        "name": "My Rhythm Tool",
+                        "exe_name": "rhythm.exe",
+                        "icon": "data:image/png;base64,aWNvbg=="
+                    },
+                    {
+                        "id": "league_of_legends",
+                        "name": "Spreadsheet League",
+                        "exe_name": "sheets.exe"
+                    },
+                    {
+                        "id": "My Old Game!",
+                        "name": "Old Game",
+                        "exe_name": "old.exe"
+                    }
+                ]
+            }
+        })
+        .as_object()
+        .unwrap(),
+    );
+
+    let games = &settings.games.custom_games;
+    assert_eq!(games[0].id, "custom-migrated-osu");
+    assert_eq!(games[1].id, "custom-migrated-league-of-legends");
+    assert_eq!(games[2].id, "custom-migrated-my-old-game");
+    assert_eq!(games[0].legacy_ids, ["osu"]);
+    assert_eq!(games[1].legacy_ids, ["league_of_legends"]);
+    assert_eq!(games[2].legacy_ids, ["My Old Game!"]);
+    assert_eq!(games[0].name, "My Rhythm Tool");
+    assert_eq!(
+        games[0].icon.as_deref(),
+        Some("data:image/png;base64,aWNvbg==")
+    );
+    assert!(settings.validate().is_ok());
+}
+
+#[test]
+fn legacy_custom_game_id_migration_is_unique_and_idempotent() {
+    let mut games = GameSettings {
+        custom_games: vec![
+            CustomGameSettings {
+                id: "osu".into(),
+                legacy_ids: Vec::new(),
+                name: "First".into(),
+                enabled: true,
+                exe_name: "first.exe".into(),
+                process_path: None,
+                window_title: String::new(),
+                recording_mode: GameRecordingMode::ReplaysOnly,
+                icon: None,
+            },
+            CustomGameSettings {
+                id: "OSU".into(),
+                legacy_ids: Vec::new(),
+                name: "Second".into(),
+                enabled: true,
+                exe_name: "second.exe".into(),
+                process_path: None,
+                window_title: String::new(),
+                recording_mode: GameRecordingMode::ReplaysOnly,
+                icon: None,
+            },
+            CustomGameSettings {
+                id: "custom-migrated-osu".into(),
+                legacy_ids: Vec::new(),
+                name: "Existing".into(),
+                enabled: true,
+                exe_name: "existing.exe".into(),
+                process_path: None,
+                window_title: String::new(),
+                recording_mode: GameRecordingMode::ReplaysOnly,
+                icon: None,
+            },
+        ],
+        ..GameSettings::default()
+    };
+
+    games.normalize();
+    let first = games
+        .custom_games
+        .iter()
+        .map(|game| game.id.clone())
+        .collect::<Vec<_>>();
+    games.normalize();
+    let second = games
+        .custom_games
+        .iter()
+        .map(|game| game.id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        first,
+        vec![
+            "custom-migrated-osu-2",
+            "custom-migrated-osu-3",
+            "custom-migrated-osu"
+        ]
+    );
+    assert_eq!(second, first);
+}
+
+#[test]
+fn validation_rejects_custom_ids_outside_the_custom_namespace() {
+    for id in ["osu", "league_of_legends", "plain-legacy-id", "custom-Bad"] {
+        let settings = AppSettings {
+            games: GameSettings {
+                custom_games: vec![CustomGameSettings {
+                    id: id.into(),
+                    legacy_ids: Vec::new(),
+                    name: "Impostor".into(),
+                    enabled: true,
+                    exe_name: "impostor.exe".into(),
+                    process_path: None,
+                    window_title: String::new(),
+                    recording_mode: GameRecordingMode::ReplaysOnly,
+                    icon: None,
+                }],
+                ..GameSettings::default()
+            },
+            ..AppSettings::default()
+        };
+
+        assert!(settings.validate().is_err(), "{id:?} must be rejected");
+    }
+}
+
+#[test]
 fn supported_game_review_settings_round_trip_json() {
     let json = r#"{
             "games": {
@@ -921,6 +1055,7 @@ fn settings_round_trip_json() {
             )]),
             custom_games: vec![CustomGameSettings {
                 id: "custom-notepad".into(),
+                legacy_ids: Vec::new(),
                 name: "Notepad".into(),
                 enabled: true,
                 exe_name: "notepad.exe".into(),
@@ -947,6 +1082,7 @@ fn validation_rejects_custom_game_without_match_identity() {
             plugins: BTreeMap::new(),
             custom_games: vec![CustomGameSettings {
                 id: "custom-empty".into(),
+                legacy_ids: Vec::new(),
                 name: "Mystery".into(),
                 enabled: true,
                 exe_name: " ".into(),

@@ -1142,6 +1142,7 @@ mod tests {
     fn dedupes_against_existing_custom_games() {
         let existing = CustomGameSettings {
             id: "custom-factorio".into(),
+            legacy_ids: Vec::new(),
             name: "factorio".into(),
             enabled: true,
             exe_name: "factorio.exe".into(),
@@ -1170,6 +1171,7 @@ mod tests {
     fn keeps_candidate_when_existing_custom_game_has_same_exe_but_different_path() {
         let existing = CustomGameSettings {
             id: "custom-game-a".into(),
+            legacy_ids: Vec::new(),
             name: "Game A".into(),
             enabled: true,
             exe_name: "game.exe".into(),
@@ -1202,6 +1204,7 @@ mod tests {
     fn keeps_candidate_when_existing_custom_game_has_same_name_but_different_path() {
         let existing = CustomGameSettings {
             id: "custom-hades-epic".into(),
+            legacy_ids: Vec::new(),
             name: "Hades".into(),
             enabled: true,
             exe_name: "Hades.exe".into(),
@@ -1266,6 +1269,7 @@ mod tests {
     fn still_dedupes_existing_custom_game_by_exe_when_existing_path_is_missing() {
         let existing = CustomGameSettings {
             id: "custom-game".into(),
+            legacy_ids: Vec::new(),
             name: "Configured Game".into(),
             enabled: true,
             exe_name: "game.exe".into(),

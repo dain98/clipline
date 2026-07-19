@@ -1304,6 +1304,24 @@ fn review_player_owns_all_controls() {
 }
 
 #[test]
+fn custom_game_ids_use_a_reserved_namespace_and_migrated_icons_do_not_become_plugins() {
+    let js = main_js();
+
+    assert!(
+        js.contains("return `custom-${slug}-${Date.now()}`")
+            && js.contains("for (const plugin of gamePlugins) usedIds.add(plugin.id)"),
+        "new custom games must stay in the custom namespace and reserve catalog ids"
+    );
+    assert!(
+        js.contains("function customGameForRecordedGame(recordedGame)")
+            && js.contains("custom.name === recordedGame.name")
+            && js.contains("custom.legacy_ids.includes(recordedGame.id)")
+            && js.contains("if (clip && customGameForRecordedGame(clip.game)) return null"),
+        "historical collision aliases must retain custom icons without enabling plugin presentation"
+    );
+}
+
+#[test]
 fn keyboard_shortcuts_document_j_l_frame_step_and_arrows_seek() {
     let html = index_html();
 

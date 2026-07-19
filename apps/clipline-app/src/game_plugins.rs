@@ -18,9 +18,8 @@ use crate::settings::{
     GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings,
 };
 
-pub const LEAGUE_OF_LEGENDS_ID: &str = "league_of_legends";
+pub use crate::game_identity::{LEAGUE_OF_LEGENDS_ID, OSU_ID};
 pub const LEAGUE_LIVE_CLIENT_EVENT_SOURCE: &str = "league_live_client";
-pub const OSU_ID: &str = "osu";
 pub const GAME_PROFILE_SCHEMA_VERSION: u32 = 1;
 
 pub type EventSourceSpawner = fn(GameEventSourceContext) -> Receiver<PollerMsg>;
@@ -385,15 +384,11 @@ pub fn catalog() -> &'static [GamePluginInfo] {
         .as_slice()
 }
 
-pub fn contains(id: &str) -> bool {
-    all().iter().any(|profile| profile.id() == id)
-}
-
 pub fn plugin_id_for_game_id(game_id: GameId) -> &'static str {
     match game_id {
         GameId::LeagueOfLegends => LEAGUE_OF_LEGENDS_ID,
-        GameId::Valorant => "valorant",
-        GameId::Cs2 => "cs2",
+        GameId::Valorant => crate::game_identity::VALORANT_ID,
+        GameId::Cs2 => crate::game_identity::CS2_ID,
         GameId::Osu => OSU_ID,
     }
 }

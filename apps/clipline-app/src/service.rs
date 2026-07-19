@@ -508,7 +508,7 @@ pub enum Event {
 /// alongside saved clips so the library can show its icon.
 #[derive(Clone, Debug)]
 pub struct ActiveGame {
-    pub id: String,
+    pub identity: crate::game_identity::GameIdentity,
     pub name: String,
 }
 
@@ -516,10 +516,7 @@ pub struct ServiceOptions {
     pub capture_source: CaptureSource,
     /// Screen-capture backend preference for display/region capture.
     pub capture_backend: CaptureBackend,
-    /// Built-in game plugin id for the active capture target, if any.
-    pub active_game_plugin_id: Option<String>,
-    /// Active game (plugin or custom) for clip attribution. Unlike
-    /// `active_game_plugin_id`, this is set for custom games too.
+    /// Active built-in or custom game identity for policy and clip attribution.
     pub active_game: Option<ActiveGame>,
     /// Root folder for saved media.
     pub media_dir: PathBuf,
@@ -557,7 +554,6 @@ impl Default for ServiceOptions {
         Self {
             capture_source: CaptureSource::PrimaryMonitor,
             capture_backend: CaptureBackend::Auto,
-            active_game_plugin_id: None,
             active_game: None,
             media_dir: default_clips_dir(),
             recover_abandoned_recordings: true,
@@ -638,7 +634,11 @@ impl PlayerSummaryState {
 }
 
 fn marker_source_kind(opts: &ServiceOptions) -> MarkerSourceKind {
-    if crate::game_plugins::has_event_source(opts.active_game_plugin_id.as_deref()) {
+    let plugin_id = opts
+        .active_game
+        .as_ref()
+        .and_then(|game| game.identity.plugin_id());
+    if crate::game_plugins::has_event_source(plugin_id) {
         MarkerSourceKind::Plugin
     } else {
         MarkerSourceKind::LegacyLeaguePoller
@@ -652,7 +652,11 @@ fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver
     };
     match marker_source_kind(opts) {
         MarkerSourceKind::Plugin => {
-            crate::game_plugins::spawn_event_source(opts.active_game_plugin_id.as_deref(), context)
+            let plugin_id = opts
+                .active_game
+                .as_ref()
+                .and_then(|game| game.identity.plugin_id());
+            crate::game_plugins::spawn_event_source(plugin_id, context)
                 .expect("marker source kind checked plugin event source")
         }
         MarkerSourceKind::LegacyLeaguePoller => {
@@ -1757,7 +1761,7 @@ fn write_session_game_meta(session_dir: &Path, active_game: Option<&ActiveGame>)
     if meta_path.exists() {
         return;
     }
-    let doc = serde_json::json!({ "id": game.id, "name": game.name });
+    let doc = serde_json::json!({ "id": game.identity.id(), "name": game.name });
     match serde_json::to_string(&doc) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&meta_path, json) {
@@ -1978,7 +1982,13 @@ struct FullSessionRecording {
 
 fn minimum_full_session_duration_s(active_game: Option<&ActiveGame>) -> f64 {
     match active_game {
-        Some(game) if game.id == crate::game_plugins::OSU_ID => 10.0,
+        Some(game)
+            if game
+                .identity
+                .is_built_in_plugin(crate::game_plugins::OSU_ID) =>
+        {
+            10.0
+        }
         _ => 0.0,
     }
 }
@@ -2716,7 +2726,13 @@ mod tests {
     #[test]
     fn marker_source_uses_active_plugin_event_source_when_available() {
         let opts = ServiceOptions {
-            active_game_plugin_id: Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into()),
+            active_game: Some(ActiveGame {
+                identity: crate::game_identity::GameIdentity::built_in_plugin(
+                    crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+                )
+                .unwrap(),
+                name: "League of Legends".into(),
+            }),
             ..ServiceOptions::default()
         };
 
@@ -2724,9 +2740,14 @@ mod tests {
     }
 
     #[test]
-    fn marker_source_falls_back_for_unknown_plugin_id() {
+    fn custom_identity_cannot_enable_a_built_in_marker_source() {
         let opts = ServiceOptions {
-            active_game_plugin_id: Some("community_game_without_source".into()),
+            active_game: Some(ActiveGame {
+                identity: crate::game_identity::GameIdentity::custom(
+                    crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+                ),
+                name: "Community game".into(),
+            }),
             ..ServiceOptions::default()
         };
 
@@ -3525,18 +3546,36 @@ mod tests {
     #[test]
     fn osu_full_session_duration_policy_discards_boot_transients_only() {
         let osu = ActiveGame {
-            id: crate::game_plugins::OSU_ID.into(),
+            identity: crate::game_identity::GameIdentity::built_in_plugin(
+                crate::game_plugins::OSU_ID,
+            )
+            .unwrap(),
             name: "osu!".into(),
         };
         let league = ActiveGame {
-            id: crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+            identity: crate::game_identity::GameIdentity::built_in_plugin(
+                crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+            )
+            .unwrap(),
             name: "League of Legends".into(),
+        };
+        let custom_osu_impostor = ActiveGame {
+            identity: crate::game_identity::GameIdentity::custom(crate::game_plugins::OSU_ID),
+            name: "Unrelated custom game".into(),
         };
 
         assert_eq!(minimum_full_session_duration_s(Some(&osu)), 10.0);
         assert!(should_discard_full_session_duration(Some(&osu), 9.9));
         assert!(!should_discard_full_session_duration(Some(&osu), 10.0));
         assert_eq!(minimum_full_session_duration_s(Some(&league)), 0.0);
+        assert_eq!(
+            minimum_full_session_duration_s(Some(&custom_osu_impostor)),
+            0.0
+        );
+        assert!(!should_discard_full_session_duration(
+            Some(&custom_osu_impostor),
+            3.0
+        ));
         assert!(!should_discard_full_session_duration(Some(&league), 3.0));
         assert!(!should_discard_full_session_duration(None, 3.0));
     }

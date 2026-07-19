@@ -25,6 +25,8 @@ mod game_discovery;
 #[cfg(windows)]
 mod game_icon;
 #[cfg(windows)]
+mod game_identity;
+#[cfg(windows)]
 mod game_plugins;
 #[cfg(windows)]
 mod games;

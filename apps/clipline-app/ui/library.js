@@ -140,16 +140,26 @@ function gamePlaceholderEl() {
   return el;
 }
 
+function customGameForRecordedGame(recordedGame) {
+  if (!recordedGame || !recordedGame.id) return null;
+  const exact = customGames.find((custom) => custom.id === recordedGame.id);
+  if (exact) return exact;
+  return customGames.find((custom) =>
+    custom.name === recordedGame.name &&
+    Array.isArray(custom.legacy_ids) && custom.legacy_ids.includes(recordedGame.id)
+  ) || null;
+}
+
 // Resolve a clip's recorded game to an icon, reusing the icons shown in
-// settings: a plugin's bundled icon, or a custom game's extracted icon.
-// Returns null for clips with no game, or a game no longer configured.
+// settings. Migrated custom records win by their old id plus name so an old
+// built-in collision keeps its custom icon without gaining plugin behavior.
 function clipGameIcon(clip) {
   const g = clip && clip.game;
   if (!g || !g.id) return null;
+  const custom = customGameForRecordedGame(g);
+  if (custom && custom.icon) return { url: custom.icon, label: custom.name };
   const plugin = gamePlugins.find((p) => p.id === g.id);
   if (plugin && plugin.icon) return { url: plugin.icon, label: plugin.name };
-  const custom = customGames.find((c) => c.id === g.id);
-  if (custom && custom.icon) return { url: custom.icon, label: custom.name };
   return null;
 }
 
@@ -159,6 +169,7 @@ function pluginForGameId(gameId) {
 
 function pluginForClip(clip) {
   const gameId = clip && clip.game && clip.game.id;
+  if (clip && customGameForRecordedGame(clip.game)) return null;
   return gameId ? pluginForGameId(gameId) : null;
 }
 

@@ -625,13 +625,8 @@ impl RuntimeState {
                 title: game.window_title.clone(),
             };
             opts.recording_mode = game.recording_mode.into();
-            if crate::game_plugins::contains(&game.id) {
-                opts.active_game_plugin_id = Some(game.id.clone());
-            }
-            // Tag clips with the active game (plugin or custom) so the library
-            // can show its icon; this is independent of the plugin-only id above.
             opts.active_game = Some(service::ActiveGame {
-                id: game.id.clone(),
+                identity: game.identity.clone(),
                 name: game.name.clone(),
             });
         }
@@ -1027,7 +1022,10 @@ fn record_osu_title_event(inner: &mut RuntimeInner, detected: Option<&DetectedGa
     let Some(game) = detected else {
         return;
     };
-    if game.id != crate::game_plugins::OSU_ID {
+    if !game
+        .identity
+        .is_built_in_plugin(crate::game_plugins::OSU_ID)
+    {
         return;
     }
     let title = game.window_title.trim();
@@ -1075,7 +1073,9 @@ fn preserve_backend_owned_settings_fields(settings: &mut AppSettings, backend: &
 
 fn same_game_window(current: Option<&DetectedGame>, next: Option<&DetectedGame>) -> bool {
     match (current, next) {
-        (Some(current), Some(next)) => current.id == next.id && current.hwnd == next.hwnd,
+        (Some(current), Some(next)) => {
+            current.identity == next.identity && current.hwnd == next.hwnd
+        }
         (None, None) => true,
         _ => false,
     }
@@ -1093,13 +1093,19 @@ fn game_recording_mode_changed(
 
 fn active_game_still_configured(settings: &AppSettings, active: Option<&DetectedGame>) -> bool {
     let Some(active) = active else { return true };
-    settings.games.auto_detect
-        && (crate::games::built_in_game_still_configured(&settings.games, &active.id)
-            || settings
-                .games
-                .custom_games
-                .iter()
-                .any(|game| game.enabled && game.id == active.id))
+    if !settings.games.auto_detect {
+        return false;
+    }
+    match &active.identity {
+        crate::game_identity::GameIdentity::BuiltInPlugin(_) => {
+            crate::games::built_in_game_still_configured(&settings.games, &active.identity)
+        }
+        crate::game_identity::GameIdentity::Custom(id) => settings
+            .games
+            .custom_games
+            .iter()
+            .any(|game| game.enabled && game.id == *id),
+    }
 }
 
 #[tauri::command]
@@ -1726,6 +1732,7 @@ fn save_settings<R: Runtime>(
         Some(raw) if !raw.trim().is_empty() => Some(crate::settings::normalize_hotkey(raw)?),
         _ => None,
     };
+    settings.games.normalize();
     settings.validate()?;
     let media_dir = settings.media_dir_path()?;
     std::fs::create_dir_all(&media_dir)
@@ -2795,7 +2802,20 @@ mod tests {
 
     fn detected_game(id: &str, name: &str, hwnd: isize) -> DetectedGame {
         DetectedGame {
-            id: id.into(),
+            identity: crate::game_identity::GameIdentity::custom(id),
+            name: name.into(),
+            hwnd,
+            window_title: format!("{name} Window"),
+            process_id: hwnd as u32,
+            exe_name: format!("{name}.exe"),
+            recording_mode: GameRecordingMode::FullSession,
+        }
+    }
+
+    fn detected_built_in_game(id: &str, name: &str, hwnd: isize) -> DetectedGame {
+        DetectedGame {
+            identity: crate::game_identity::GameIdentity::built_in_plugin(id)
+                .expect("test built-in id"),
             name: name.into(),
             hwnd,
             window_title: format!("{name} Window"),
@@ -2866,7 +2886,7 @@ mod tests {
         let (initial_tx, _initial_rx) = mpsc::channel();
         let state = RuntimeState::with_sender(initial_tx, AppSettings::default(), None);
         {
-            state.0.lock().unwrap().active_game = Some(detected_game(
+            state.0.lock().unwrap().active_game = Some(detected_built_in_game(
                 crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
                 "League",
                 41,
@@ -2883,7 +2903,11 @@ mod tests {
         let mut committed_options = None;
         let committed = {
             let mut inner = state.0.lock().unwrap();
-            inner.active_game = Some(detected_game(crate::game_plugins::OSU_ID, "osu!", 84));
+            inner.active_game = Some(detected_built_in_game(
+                crate::game_plugins::OSU_ID,
+                "osu!",
+                84,
+            ));
             RuntimeState::install_recording_sender(&mut inner, newer_tx);
             RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |options| {
                 committed_options = Some(options);
@@ -2902,7 +2926,7 @@ mod tests {
             }
         );
         assert_eq!(
-            options.active_game.as_ref().map(|game| game.id.as_str()),
+            options.active_game.as_ref().map(|game| game.identity.id()),
             Some(crate::game_plugins::OSU_ID)
         );
         committed.old_tx.unwrap().send(Cmd::Save).unwrap();
@@ -3170,7 +3194,7 @@ mod tests {
             settings: invalid_disk_replay_settings(),
             lol_url: None,
             active_game: Some(DetectedGame {
-                id: "custom-game".into(),
+                identity: crate::game_identity::GameIdentity::custom("custom-game"),
                 name: "Game".into(),
                 hwnd: 42,
                 window_title: "Game".into(),
@@ -3304,7 +3328,7 @@ mod tests {
     #[test]
     fn detected_game_identity_ignores_volatile_window_title() {
         let current = DetectedGame {
-            id: "custom-game".into(),
+            identity: crate::game_identity::GameIdentity::custom("custom-game"),
             name: "Game".into(),
             hwnd: 42,
             window_title: "Loading".into(),
@@ -3340,7 +3364,7 @@ mod tests {
     #[test]
     fn detected_game_recording_mode_change_requires_service_restart() {
         let current = DetectedGame {
-            id: "custom-game".into(),
+            identity: crate::game_identity::GameIdentity::custom("custom-game"),
             name: "Game".into(),
             hwnd: 42,
             window_title: "Game".into(),
@@ -3382,7 +3406,10 @@ mod tests {
             decodable_codecs: vec![service::Codec::H264],
         };
         let osu = DetectedGame {
-            id: crate::game_plugins::OSU_ID.into(),
+            identity: crate::game_identity::GameIdentity::built_in_plugin(
+                crate::game_plugins::OSU_ID,
+            )
+            .unwrap(),
             name: "osu!".into(),
             hwnd: 42,
             window_title: "osu! - xi - Blue Zenith [FOUR DIMENSIONS]".into(),
@@ -3391,7 +3418,10 @@ mod tests {
             recording_mode: GameRecordingMode::FullSession,
         };
         let league = DetectedGame {
-            id: crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+            identity: crate::game_identity::GameIdentity::built_in_plugin(
+                crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+            )
+            .unwrap(),
             name: "League of Legends".into(),
             window_title: "League".into(),
             exe_name: "League of Legends.exe".into(),
@@ -3401,6 +3431,17 @@ mod tests {
         record_osu_title_event(&mut inner, Some(&osu), 100);
         record_osu_title_event(&mut inner, Some(&osu), 101);
         record_osu_title_event(&mut inner, Some(&league), 102);
+        record_osu_title_event(
+            &mut inner,
+            Some(&DetectedGame {
+                identity: crate::game_identity::GameIdentity::custom(crate::game_plugins::OSU_ID),
+                name: "Custom impostor".into(),
+                window_title: "must not be tracked".into(),
+                exe_name: "impostor.exe".into(),
+                ..osu.clone()
+            }),
+            102,
+        );
         record_osu_title_event(
             &mut inner,
             Some(&DetectedGame {
@@ -3462,7 +3503,10 @@ mod tests {
     #[test]
     fn built_in_league_profile_counts_as_active_game_configuration() {
         let active = DetectedGame {
-            id: crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+            identity: crate::game_identity::GameIdentity::built_in_plugin(
+                crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+            )
+            .unwrap(),
             name: "League of Legends".into(),
             hwnd: 42,
             window_title: "League of Legends (TM) Client".into(),
@@ -3712,7 +3756,9 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             settings: AppSettings::default(),
             lol_url: None,
             active_game: Some(DetectedGame {
-                id: "custom-game".into(),
+                identity: crate::game_identity::GameIdentity::custom(
+                    crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+                ),
                 name: "Game".into(),
                 hwnd: 42,
                 window_title: "Game Window".into(),
@@ -3727,7 +3773,12 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
 
         let opts = RuntimeState::options(&inner).unwrap();
 
-        assert_eq!(opts.active_game_plugin_id, None);
+        assert_eq!(
+            opts.active_game
+                .as_ref()
+                .and_then(|game| game.identity.plugin_id()),
+            None
+        );
         assert_eq!(opts.recording_mode, service::RecordingMode::FullSession);
         assert_eq!(
             opts.capture_source,
@@ -3747,7 +3798,10 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             settings: AppSettings::default(),
             lol_url: Some("http://mock".into()),
             active_game: Some(DetectedGame {
-                id: crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+                identity: crate::game_identity::GameIdentity::built_in_plugin(
+                    crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+                )
+                .unwrap(),
                 name: "League of Legends".into(),
                 hwnd: 42,
                 window_title: "League".into(),
@@ -3763,7 +3817,9 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         let opts = RuntimeState::options(&inner).unwrap();
 
         assert_eq!(
-            opts.active_game_plugin_id.as_deref(),
+            opts.active_game
+                .as_ref()
+                .and_then(|game| game.identity.plugin_id()),
             Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID)
         );
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
