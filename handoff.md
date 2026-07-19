@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): centralized Windows platform helpers
+
+The combined audit's L-30 is fixed. Generic Credential Manager ownership, decoding, and
+write/read/delete behavior now live behind one safe `CredentialStore`; Cloud and osu! keep only
+their domain labels and transactional adapters. Successful Win32 calls that return a null
+credential, malformed nonempty blobs, invalid UTF-8, and embedded-NUL target/user strings all fail
+safely, while the single owned credential wrapper guarantees `CredFree` on every branch.
+
+Shell opening, free-space queries, atomic file replacement, null-terminated UTF-16 conversion, and
+Windows error conversion are likewise centralized under `src/windows/`. Settings, poster, and osu!
+enrichment publication share the replacement helper; game-icon and shell paths share the UTF-16
+boundary. Neutral wall-clock helpers now live in `util`, removing the app/service/osu!/media clock
+copies without changing their signed or unsigned call-site types.
+
+Plan commit `5f69751`; implementation commit `b26b88e`. Seven Windows helper tests cover credential
+decoding/labels, UTF-16, shell result boundaries, and the existing elevation/instance wrappers; a
+signed-time boundary and a recursive repository contract prevent the duplicated APIs and clocks
+from returning. All 419 app tests, CI-mode workspace tests, fresh app Clippy, and warning-denied
+workspace Clippy pass. Computer Use verified the rebuilt nine-of-nine Library and opened the local
+osu! API setup guide in Chrome through the centralized shell helper. The existing real credential
+transaction acceptance scenario remains sufficient, so no duplicate manual item was added.
+
 ## Checkpoint (2026-07-18): bounded runtime diagnostic logging
 
 The combined audit's L-29 is fixed. The process-lifetime diagnostic handle is now a locked writer

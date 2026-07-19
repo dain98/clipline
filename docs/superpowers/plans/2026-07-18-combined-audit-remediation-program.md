@@ -66,6 +66,8 @@ Additional completed findings:
 - [ ] L-29 — in-process bounded diagnostic rotation with noisy window-event filtering (`d95568f`)
 - [ ] L-33 — renderer capability manifest reduced to observed window/autostart operations (`bdff7aa`)
 
+- [ ] L-30 — centralized credential, shell, disk-space, atomic-replace, UTF-16, and wall-clock helpers (`b26b88e`)
+
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
 - [ ] None currently.
