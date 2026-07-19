@@ -38,6 +38,7 @@ Additional completed findings:
 - [ ] L-27 — reserved HEVC temporal-layer counts rejected before hvcC serialization (`ec6f373`)
 - [ ] L-28 — malformed public segment sample metadata returns `InvalidData` instead of panicking (`ec6f373`)
 - [ ] M-18 — real Clipline HWND ownership, bounded busy retry, `EmptyClipboard`, and exact `CF_HDROP` allocation transfer (`68bbc82`)
+- [ ] M-20 — reserved custom-ID namespace, deterministic legacy collision aliases, and typed built-in/custom runtime identity (`2d0a33f`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
 

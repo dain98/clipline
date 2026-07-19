@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): scoped built-in and custom game identities
+
+The combined audit's M-20 is fixed. Built-in IDs now live in one reserved catalog and runtime game
+identity is explicitly `BuiltInPlugin` or `Custom`; detection, event-source selection, osu! title
+tracking, active-rule continuity, session metadata, and the osu! minimum-duration policy no longer
+infer privileges from an unscoped string. A custom identity cannot become a plugin even if an
+adversarial test gives it the text `osu` or `league_of_legends`.
+
+Persisted custom IDs must use a bounded canonical `custom-` slug namespace. Settings normalization
+deterministically migrates built-in collisions, empty IDs, and legacy/malformed IDs to unique
+`custom-migrated-…` values before they reach runtime. Each migrated record retains a bounded legacy
+ID alias alongside its name and embedded icon. Historical session metadata resolves that exact
+alias plus name to the custom icon and is explicitly excluded from built-in plugin presentation.
+New frontend IDs reserve the live built-in catalog as an additional defense.
+
+Plan commit `0e07f88`; implementation commit `2d0a33f`. The app suite now has 390 unit tests and 69
+UI contracts, including deterministic collision migration/idempotence, namespace validation,
+custom-impostor event/title/duration isolation, and historical icon routing. Fresh-cache app
+Clippy, CI-mode workspace tests, and workspace Clippy pass with warnings denied. Computer Use
+verified the nine-clip library and Settings > Games with League of Legends and osu! isolated from
+the empty custom-game list. No manual-only acceptance item remains for this finding.
+
 ## Checkpoint (2026-07-18): owned and retryable Windows file clipboard
 
 The combined audit's M-18 is fixed. Clipboard file-copy commands now derive a real native owner
