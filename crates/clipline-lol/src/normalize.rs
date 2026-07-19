@@ -31,18 +31,18 @@ pub fn normalize(raw: &RawEvent, local_player: &str) -> GameEvent {
         .or_else(|| raw.recipient.clone())
         .unwrap_or_default();
 
-    let local_player_key = player_name_key(local_player);
-    let actor_is_local = player_matches_key(&actor, &local_player_key);
+    let local_player_identity = PlayerNameIdentity::new(local_player);
+    let actor_is_local = local_player_identity.matches(&actor);
     let local_assister = raw
         .assisters
         .iter()
-        .find(|assister| player_matches_key(assister, &local_player_key))
+        .find(|assister| local_player_identity.matches(assister))
         .cloned();
     let local_player_assisted = local_assister.is_some();
     let local_player_was_victim = raw
         .victim_name
         .as_deref()
-        .is_some_and(|victim| player_matches_key(victim, &local_player_key));
+        .is_some_and(|victim| local_player_identity.matches(victim));
 
     // The Live Client API only emits ChampionKill for any champion death. We
     // split local involvement so the review timeline can distinguish the local
@@ -97,17 +97,61 @@ pub fn normalize(raw: &RawEvent, local_player: &str) -> GameEvent {
     }
 }
 
-pub(crate) fn player_matches_key(name: &str, local_player_key: &str) -> bool {
-    !local_player_key.is_empty() && player_name_key(name) == local_player_key
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlayerNameIdentity {
+    game_name: String,
+    full_riot_id: Option<String>,
 }
 
-pub(crate) fn player_name_key(name: &str) -> String {
-    let trimmed = name.trim();
-    let without_tagline = trimmed
-        .split_once('#')
-        .map_or(trimmed, |(game_name, _)| game_name)
-        .trim();
-    without_tagline.to_lowercase()
+impl PlayerNameIdentity {
+    pub(crate) fn new(name: &str) -> Self {
+        let trimmed = name.trim();
+        let (game_name, tagline) = trimmed
+            .split_once('#')
+            .map_or((trimmed, None), |(game_name, tagline)| {
+                (game_name.trim(), Some(tagline.trim()))
+            });
+        let game_name = game_name.to_lowercase();
+        let full_riot_id = tagline
+            .filter(|tagline| {
+                !game_name.is_empty() && !tagline.is_empty() && !tagline.contains('#')
+            })
+            .map(|tagline| format!("{game_name}#{}", tagline.to_lowercase()));
+        Self {
+            game_name,
+            full_riot_id,
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.game_name.is_empty()
+    }
+
+    pub(crate) fn has_tagline(&self) -> bool {
+        self.full_riot_id.is_some()
+    }
+
+    pub(crate) fn exact_match(&self, candidate: &str) -> bool {
+        let candidate = Self::new(candidate);
+        matches!(
+            (&self.full_riot_id, &candidate.full_riot_id),
+            (Some(local), Some(candidate)) if local == candidate
+        )
+    }
+
+    pub(crate) fn matches(&self, candidate: &str) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        let candidate = Self::new(candidate);
+        if candidate.is_empty() {
+            return false;
+        }
+        match (&self.full_riot_id, &candidate.full_riot_id) {
+            (Some(local), Some(candidate)) => local == candidate,
+            _ => self.game_name == candidate.game_name,
+        }
+    }
 }
 
 fn base_importance(kind: EventKind) -> u8 {
@@ -198,6 +242,27 @@ mod tests {
                  "KillerName": " dain ", "VictimName": "Them", "Assisters": [] }"#,
         );
         assert!(normalize(&r, "Dain#NA1").involves_local_player);
+    }
+
+    #[test]
+    fn local_player_matching_distinguishes_present_riot_taglines() {
+        let foreign = raw(
+            r#"{ "EventID": 2, "EventName": "ChampionKill", "EventTime": 10.0,
+                 "KillerName": " dain # EUW ", "VictimName": "Them", "Assisters": [] }"#,
+        );
+        assert!(
+            !normalize(&foreign, "Dain#NA1").involves_local_player,
+            "two present taglines must not collapse to the same game-name key"
+        );
+
+        let legacy = raw(
+            r#"{ "EventID": 3, "EventName": "ChampionKill", "EventTime": 11.0,
+                 "KillerName": " DAIN ", "VictimName": "Them", "Assisters": [] }"#,
+        );
+        assert!(
+            normalize(&legacy, " dain # na1 ").involves_local_player,
+            "an untagged event payload must retain the compatibility fallback"
+        );
     }
 
     #[test]

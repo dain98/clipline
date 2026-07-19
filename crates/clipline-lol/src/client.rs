@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use clipline_events::{PlayerItem, PlayerParticipant, PlayerSummary, PlayerSummonerSpell};
 
-use crate::normalize::player_name_key;
+use crate::normalize::PlayerNameIdentity;
 use crate::raw::{EventData, PlayerItemEntry, PlayerListEntry, PlayerSummonerSpellEntry};
 
 /// Riot's local Live Client Data endpoint (ddoc §5a).
@@ -249,17 +249,29 @@ pub fn player_summary_from_list_with_game_time(
     local_player: &str,
     game_time_s: Option<f64>,
 ) -> Option<PlayerSummary> {
-    let local_key = player_name_key(local_player);
-    if local_key.is_empty() {
+    let local_identity = PlayerNameIdentity::new(local_player);
+    if local_identity.is_empty() {
         return None;
     }
-    let player = players.iter().find(|player| {
-        player_name_key(&player.summoner_name) == local_key
-            || player
-                .riot_id
-                .as_deref()
-                .is_some_and(|riot_id| player_name_key(riot_id) == local_key)
-    })?;
+    let player = players
+        .iter()
+        .find(|player| {
+            local_identity.exact_match(&player.summoner_name)
+                || player
+                    .riot_id
+                    .as_deref()
+                    .is_some_and(|riot_id| local_identity.exact_match(riot_id))
+        })
+        .or_else(|| {
+            players.iter().find(|player| {
+                let preferred_name = player
+                    .riot_id
+                    .as_deref()
+                    .filter(|riot_id| PlayerNameIdentity::new(riot_id).has_tagline())
+                    .unwrap_or(&player.summoner_name);
+                local_identity.matches(preferred_name)
+            })
+        })?;
     let champion_name = player.champion_name.trim();
     if champion_name.is_empty() {
         return None;
@@ -465,6 +477,19 @@ mod tests {
         let by_summoner =
             player_summary_from_list_with_game_time(&players, " DAIN ", None).unwrap();
         assert_eq!(by_summoner.champion_name, "Nautilus");
+    }
+
+    #[test]
+    fn player_summary_prefers_exact_riot_id_over_same_name_fallback() {
+        let players = [
+            player("dain", Some("Dain#EUW"), "Ahri", 1, 2, 3),
+            player("dain", Some(" dAiN # nA1 "), "Nautilus", 3, 4, 23),
+        ];
+
+        let summary = player_summary_from_list_with_game_time(&players, "Dain#NA1", None).unwrap();
+
+        assert_eq!(summary.champion_name, "Nautilus");
+        assert_eq!((summary.kills, summary.deaths, summary.assists), (3, 4, 23));
     }
 
     #[test]
