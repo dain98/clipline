@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): full-session writer backpressure
+
+The combined audit's M-10 is fixed. Full-session output no longer receives deep-cloned GOPs through
+an unbounded channel. Sealed segments are immutable `Arc<Segment>` values shared with the memory
+replay ring; disk replay serializes the same value by reference. The writer channel holds at most
+eight messages and reserves at most 128 MiB of exact video-plus-audio payload, including the
+segment currently blocked in the writer. Capture uses `try_send`, so a slow or stalled output can
+never block the capture loop.
+
+If either queue limit is reached, Clipline stops accepting only full-session segments, continues
+replay capture, finalizes the segments already accepted when Stop arrives, and returns a clear
+full-session error to the app. Failed sends release their byte reservation. Writer-thread spawn
+failure now propagates from `start_full_session` instead of panicking.
+
+Plan commit `350db09`; implementation commit `5c3b810`. Focused tests cover exact byte reservation,
+shared allocation identity, an over-budget segment, and a deliberately stalled writer filling a
+one-slot queue while all replay GOPs continue buffering. CI-mode `cargo test --workspace` and
+fresh-cache changed-crate plus workspace clippy pass with warnings denied. The live primary-monitor
+WGC smoke timed out twice waiting for a desktop frame in this automation session; the other live
+WGC/DXGI/MFT/WASAPI device tests passed on the first non-CI workspace run. Computer Use verified
+the rebuilt native app opens with the nine-item library, hotkey rail, and 6.8 MB idle RAM; this VM
+still cannot start a recording because no video encoder can be opened.
+
 ## Checkpoint (2026-07-18): recorder control and hotkey readiness
 
 The combined audit's H-04 and M-19 are fixed. Runtime state now records the user's desired
