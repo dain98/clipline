@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): authenticated upload origin boundary
+
+The combined audit's M-01 is fixed. Every server-provided URL that receives the Clipline Cloud
+bearer token—single-PUT content, direct-S3 presign control, and direct-S3 acknowledgement—must now
+match the configured cloud's normalized scheme, host, and port. Cross-origin URLs, port changes,
+HTTPS-to-HTTP downgrades, and embedded URL credentials are rejected before a request is sent.
+
+Authenticated upload requests use a dedicated HTTP client with redirects disabled, so the cloud
+cannot redirect a token-bearing create/control request elsewhere. Token-free presigned object
+storage PUTs retain a separate client and remain cross-origin capable; the existing two-server S3
+test proves that intended path still works.
+
+Plan commit `0d9561f`; implementation commit `716b3d3`. All 15 upload transport tests pass,
+including a real redirect target that receives zero requests and same-origin/cross-origin/port/
+scheme cases. Fresh-cache app Clippy, CI-mode workspace tests, and workspace Clippy pass with
+warnings denied. Computer Use verified the rebuilt native app renders all nine clips and
+Local/Cloud controls at 6.7 MB idle RAM. A normal upload against the real configured cloud remains
+covered by the existing manual cloud-upload acceptance test.
+
 ## Checkpoint (2026-07-18): replay-cache lifecycle safety
 
 The combined audit's M-06 is fixed. Disk replay segments now publish through owned temporary and
