@@ -16,7 +16,10 @@ pub fn walk(buf: &[u8]) -> Vec<BoxInfo> {
 
 /// Parse the children of a pure container box (moov/trak/moof/…).
 pub fn children(buf: &[u8], parent: &BoxInfo) -> Vec<BoxInfo> {
-    walk_range(buf, parent.payload_offset, parent.offset + parent.size)
+    let Some(end) = parent.offset.checked_add(parent.size) else {
+        return Vec::new();
+    };
+    walk_range(buf, parent.payload_offset, end)
 }
 
 /// First box with the given fourcc, if any.
@@ -51,13 +54,28 @@ pub fn movie_duration_s(buf: &[u8]) -> Option<f64> {
 
 fn walk_range(buf: &[u8], mut pos: u64, end: u64) -> Vec<BoxInfo> {
     let mut out = Vec::new();
-    while pos + 8 <= end && (pos + 8) as usize <= buf.len() {
-        let p = pos as usize;
+    let end = end.min(buf.len() as u64);
+    while let Some(header_end) = pos.checked_add(8) {
+        let Ok(header_end_usize) = usize::try_from(header_end) else {
+            break;
+        };
+        if header_end > end || header_end_usize > buf.len() {
+            break;
+        }
+        let Ok(p) = usize::try_from(pos) else {
+            break;
+        };
         let size32 = u32::from_be_bytes(buf[p..p + 4].try_into().unwrap());
         let mut fourcc = [0u8; 4];
         fourcc.copy_from_slice(&buf[p + 4..p + 8]);
         let (size, header) = if size32 == 1 {
-            if (pos + 16) as usize > buf.len() {
+            let Some(large_header_end) = pos.checked_add(16) else {
+                break;
+            };
+            let Ok(large_header_end_usize) = usize::try_from(large_header_end) else {
+                break;
+            };
+            if large_header_end > end || large_header_end_usize > buf.len() {
                 break;
             }
             let large = u64::from_be_bytes(buf[p + 8..p + 16].try_into().unwrap());
@@ -67,16 +85,22 @@ fn walk_range(buf: &[u8], mut pos: u64, end: u64) -> Vec<BoxInfo> {
         } else {
             (size32 as u64, 8u64)
         };
-        if size < header || pos + size > end {
+        let Some(box_end) = pos.checked_add(size) else {
+            break;
+        };
+        let Some(payload_offset) = pos.checked_add(header) else {
+            break;
+        };
+        if size < header || box_end > end {
             break; // truncated/corrupt — stop, return what we have
         }
         out.push(BoxInfo {
             fourcc,
             offset: pos,
             size,
-            payload_offset: pos + header,
+            payload_offset,
         });
-        pos += size;
+        pos = box_end;
     }
     out
 }
@@ -114,6 +138,28 @@ mod tests {
         assert_eq!(&boxes[0].fourcc, b"mdat");
         assert_eq!(boxes[0].size, 20);
         assert_eq!(boxes[0].payload_offset, 16);
+    }
+
+    #[test]
+    fn overflowing_largesize_stops_without_emitting_a_box() {
+        let mut buf = vec![0_u8; 24];
+        buf[8..12].copy_from_slice(&1_u32.to_be_bytes());
+        buf[12..16].copy_from_slice(b"free");
+        buf[16..24].copy_from_slice(&u64::MAX.to_be_bytes());
+
+        assert!(walk_range(&buf, 8, buf.len() as u64).is_empty());
+    }
+
+    #[test]
+    fn overflowing_parent_bounds_have_no_children() {
+        let parent = BoxInfo {
+            fourcc: *b"moov",
+            offset: u64::MAX - 4,
+            size: 8,
+            payload_offset: u64::MAX - 4,
+        };
+
+        assert!(children(&[], &parent).is_empty());
     }
 
     #[test]

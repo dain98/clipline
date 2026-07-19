@@ -18,6 +18,10 @@ use crate::{
 /// reader will load into memory. Real Clipline sample tables are far smaller;
 /// this rejects corrupt or hostile declarations before allocation.
 const MAX_FINALIZED_MOOV_BYTES: u64 = 64 * 1024 * 1024;
+/// Upper bound for per-track sample metadata. At 60 FPS this still permits
+/// more than 18 hours of video while preventing tiny hostile tables from
+/// expanding into multi-gigabyte allocations.
+const MAX_PARSED_SAMPLES: usize = 4_000_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrimInfo {
@@ -928,17 +932,10 @@ fn parse_av1c(input: &[u8], av1c: &BoxInfo) -> Result<Vec<u8>, TrimError> {
 }
 
 fn parse_sample_table(input: &[u8], stbl: &BoxInfo) -> Result<Vec<SampleRecord>, TrimError> {
-    let stts = require_child(input, stbl, b"stts")?;
-    let durations = parse_stts(input, &stts)?;
     let stsz = require_child(input, stbl, b"stsz")?;
     let sizes = parse_stsz(input, &stsz)?;
-    if durations.len() != sizes.len() {
-        return Err(TrimError::Corrupt(format!(
-            "stts/stsz sample count mismatch: {} vs {}",
-            durations.len(),
-            sizes.len()
-        )));
-    }
+    let stts = require_child(input, stbl, b"stts")?;
+    let durations = parse_stts(input, &stts, sizes.len())?;
     let sync = match child(input, stbl, b"stss") {
         Some(stss) => parse_stss(input, &stss, sizes.len())?,
         None => vec![true; sizes.len()],
@@ -961,20 +958,38 @@ fn parse_sample_table(input: &[u8], stbl: &BoxInfo) -> Result<Vec<SampleRecord>,
     )
 }
 
-fn parse_stts(input: &[u8], stts: &BoxInfo) -> Result<Vec<u32>, TrimError> {
+fn parse_stts(
+    input: &[u8],
+    stts: &BoxInfo,
+    expected_sample_count: usize,
+) -> Result<Vec<u32>, TrimError> {
     let p = stts.payload_offset as usize;
     let count = read_u32(input, p + 4)? as usize;
     let end = box_end(stts)?;
     let mut pos = p + 8;
-    let mut out = Vec::new();
+    validate_table_entries(count, pos, end, 8, "stts")?;
+    validate_sample_count(expected_sample_count, "stts")?;
+    let mut out = Vec::with_capacity(expected_sample_count);
     for _ in 0..count {
-        if pos + 8 > end {
-            return Err(TrimError::Corrupt("truncated stts".into()));
-        }
-        let sample_count = read_u32(input, pos)?;
+        let sample_count = read_u32(input, pos)? as usize;
         let delta = read_u32(input, pos + 4)?;
-        out.extend(std::iter::repeat_n(delta, sample_count as usize));
+        let expanded = out
+            .len()
+            .checked_add(sample_count)
+            .ok_or_else(|| TrimError::Corrupt("stts sample count overflow".into()))?;
+        if expanded > expected_sample_count || expanded > MAX_PARSED_SAMPLES {
+            return Err(TrimError::Corrupt(
+                "stts sample count exceeds limit or stsz count".into(),
+            ));
+        }
+        out.extend(std::iter::repeat_n(delta, sample_count));
         pos += 8;
+    }
+    if out.len() != expected_sample_count {
+        return Err(TrimError::Corrupt(format!(
+            "stts/stsz sample count mismatch: {} vs {expected_sample_count}",
+            out.len()
+        )));
     }
     Ok(out)
 }
@@ -983,16 +998,15 @@ fn parse_stsz(input: &[u8], stsz: &BoxInfo) -> Result<Vec<u32>, TrimError> {
     let p = stsz.payload_offset as usize;
     let sample_size = read_u32(input, p + 4)?;
     let sample_count = read_u32(input, p + 8)? as usize;
+    validate_sample_count(sample_count, "stsz")?;
     if sample_size != 0 {
         return Ok(vec![sample_size; sample_count]);
     }
     let end = box_end(stsz)?;
     let mut pos = p + 12;
+    validate_table_entries(sample_count, pos, end, 4, "stsz")?;
     let mut out = Vec::with_capacity(sample_count);
     for _ in 0..sample_count {
-        if pos + 4 > end {
-            return Err(TrimError::Corrupt("truncated stsz".into()));
-        }
         out.push(read_u32(input, pos)?);
         pos += 4;
     }
@@ -1004,11 +1018,14 @@ fn parse_stss(input: &[u8], stss: &BoxInfo, sample_count: usize) -> Result<Vec<b
     let entry_count = read_u32(input, p + 4)? as usize;
     let end = box_end(stss)?;
     let mut pos = p + 8;
+    validate_table_entries(entry_count, pos, end, 4, "stss")?;
+    if entry_count > sample_count {
+        return Err(TrimError::Corrupt(
+            "stss entry count exceeds sample count".into(),
+        ));
+    }
     let mut sync = vec![false; sample_count];
     for _ in 0..entry_count {
-        if pos + 4 > end {
-            return Err(TrimError::Corrupt("truncated stss".into()));
-        }
         let n = read_u32(input, pos)? as usize;
         if n == 0 || n > sample_count {
             return Err(TrimError::Corrupt("stss sample number out of range".into()));
@@ -1024,11 +1041,10 @@ fn parse_co64(input: &[u8], co64: &BoxInfo) -> Result<Vec<u64>, TrimError> {
     let count = read_u32(input, p + 4)? as usize;
     let end = box_end(co64)?;
     let mut pos = p + 8;
+    validate_sample_count(count, "co64")?;
+    validate_table_entries(count, pos, end, 8, "co64")?;
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
-        if pos + 8 > end {
-            return Err(TrimError::Corrupt("truncated co64".into()));
-        }
         out.push(read_u64(input, pos)?);
         pos += 8;
     }
@@ -1040,11 +1056,10 @@ fn parse_stco(input: &[u8], stco: &BoxInfo) -> Result<Vec<u64>, TrimError> {
     let count = read_u32(input, p + 4)? as usize;
     let end = box_end(stco)?;
     let mut pos = p + 8;
+    validate_sample_count(count, "stco")?;
+    validate_table_entries(count, pos, end, 4, "stco")?;
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
-        if pos + 4 > end {
-            return Err(TrimError::Corrupt("truncated stco".into()));
-        }
         out.push(read_u32(input, pos)? as u64);
         pos += 4;
     }
@@ -1059,11 +1074,10 @@ fn parse_stsc(input: &[u8], stsc: &BoxInfo, chunk_count: usize) -> Result<Vec<u3
     }
     let end = box_end(stsc)?;
     let mut pos = p + 8;
+    validate_sample_count(entry_count, "stsc")?;
+    validate_table_entries(entry_count, pos, end, 12, "stsc")?;
     let mut entries = Vec::with_capacity(entry_count);
     for _ in 0..entry_count {
-        if pos + 12 > end {
-            return Err(TrimError::Corrupt("truncated stsc".into()));
-        }
         let first_chunk = read_u32(input, pos)?;
         let samples_per_chunk = read_u32(input, pos + 4)?;
         if first_chunk == 0 || samples_per_chunk == 0 {
@@ -1290,8 +1304,39 @@ fn read_box_bytes<R: Read + Seek>(reader: &mut R, b: &BoxInfo) -> Result<Vec<u8>
 }
 
 fn box_end(b: &BoxInfo) -> Result<usize, TrimError> {
-    usize::try_from(b.offset + b.size)
-        .map_err(|_| TrimError::Corrupt("box end offset too large".into()))
+    let end = b
+        .offset
+        .checked_add(b.size)
+        .ok_or_else(|| TrimError::Corrupt("box end offset overflow".into()))?;
+    usize::try_from(end).map_err(|_| TrimError::Corrupt("box end offset too large".into()))
+}
+
+fn validate_sample_count(count: usize, table: &str) -> Result<(), TrimError> {
+    if count > MAX_PARSED_SAMPLES {
+        return Err(TrimError::Corrupt(format!(
+            "{table} sample count exceeds limit of {MAX_PARSED_SAMPLES}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_table_entries(
+    count: usize,
+    start: usize,
+    end: usize,
+    entry_size: usize,
+    table: &str,
+) -> Result<(), TrimError> {
+    let byte_len = count
+        .checked_mul(entry_size)
+        .ok_or_else(|| TrimError::Corrupt(format!("{table} entry byte count overflow")))?;
+    let required_end = start
+        .checked_add(byte_len)
+        .ok_or_else(|| TrimError::Corrupt(format!("{table} entry range overflow")))?;
+    if required_end > end {
+        return Err(TrimError::Corrupt(format!("truncated {table}")));
+    }
+    Ok(())
 }
 
 fn read_slice(input: &[u8], offset: usize, len: usize, limit: usize) -> Result<&[u8], TrimError> {
@@ -1731,6 +1776,60 @@ mod tests {
                 .contains("outside the clip's 2 audio tracks"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn stts_rejects_an_excessive_expanded_sample_count() {
+        let mut payload = vec![0_u8; 4];
+        payload.extend(1_u32.to_be_bytes());
+        payload.extend(4_000_001_u32.to_be_bytes());
+        payload.extend(1_500_u32.to_be_bytes());
+        let input = crate::boxes::mp4_box(*b"stts", payload);
+        let info = walk(&input).remove(0);
+
+        let err = parse_stts(&input, &info, 4_000_000).unwrap_err();
+        assert!(err.to_string().contains("sample count exceeds limit"));
+    }
+
+    #[test]
+    fn fixed_stsz_rejects_an_excessive_sample_count() {
+        let mut payload = vec![0_u8; 4];
+        payload.extend(1_u32.to_be_bytes());
+        payload.extend(4_000_001_u32.to_be_bytes());
+        let input = crate::boxes::mp4_box(*b"stsz", payload);
+        let info = walk(&input).remove(0);
+
+        let err = parse_stsz(&input, &info).unwrap_err();
+        assert!(err.to_string().contains("sample count exceeds limit"));
+    }
+
+    #[test]
+    fn offset_and_chunk_tables_reject_excessive_entry_counts() {
+        fn table(fourcc: [u8; 4]) -> (Vec<u8>, BoxInfo) {
+            let mut payload = vec![0_u8; 4];
+            payload.extend(4_000_001_u32.to_be_bytes());
+            let input = crate::boxes::mp4_box(fourcc, payload);
+            let info = walk(&input).remove(0);
+            (input, info)
+        }
+
+        let (co64, co64_info) = table(*b"co64");
+        assert!(parse_co64(&co64, &co64_info)
+            .unwrap_err()
+            .to_string()
+            .contains("sample count exceeds limit"));
+
+        let (stco, stco_info) = table(*b"stco");
+        assert!(parse_stco(&stco, &stco_info)
+            .unwrap_err()
+            .to_string()
+            .contains("sample count exceeds limit"));
+
+        let (stsc, stsc_info) = table(*b"stsc");
+        assert!(parse_stsc(&stsc, &stsc_info, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("sample count exceeds limit"));
     }
 
     #[test]

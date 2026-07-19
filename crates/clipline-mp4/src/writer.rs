@@ -3,7 +3,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use crate::boxes::{full_box, mp4_box, Payload};
 use crate::fragment::{
     fragment_moof_multi, fragment_multi, mdat_header, FragSample, FragSampleInfo, FragSampleRef,
-    TrackRun, TrackRunInfo,
+    FragmentError, TrackRun, TrackRunInfo,
 };
 use crate::init::{
     audio_trak_with_tables, free_placeholder, ftyp, moov_init_multi, mvhd, video_trak_with_tables,
@@ -104,24 +104,37 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
             })
             .collect();
 
-        let frag = fragment_multi(self.next_sequence, &runs);
+        let frag = fragment_multi(self.next_sequence, &runs).map_err(fragment_io_error)?;
         let frag_start = self.w.stream_position()?;
-        let total_payload: usize = runs
-            .iter()
-            .flat_map(|r| r.samples.iter())
-            .map(|s| s.data.len())
-            .sum();
-        let moof_len = frag.len() - (8 + total_payload);
+        let total_payload =
+            runs.iter()
+                .flat_map(|r| r.samples.iter())
+                .try_fold(0_usize, |total, sample| {
+                    total.checked_add(sample.data.len()).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "fragment payload size overflow",
+                        )
+                    })
+                })?;
+        let mdat_header_len = mdat_header(total_payload as u64).len();
+        let moof_len = frag
+            .len()
+            .checked_sub(mdat_header_len + total_payload)
+            .expect("fragment layout includes its moof and mdat header");
         self.w.write_all(&frag)?;
 
         // Record chunk offsets in run order (the mdat layout order).
-        let mut sample_offset = frag_start + moof_len as u64 + 8;
+        let mut sample_offset = frag_start + moof_len as u64 + mdat_header_len as u64;
         for run in &runs {
             let idx = (run.track_id - 1) as usize;
             let state = &mut self.tracks[idx];
             state.chunks.push((sample_offset, run.samples.len() as u32));
             for s in run.samples {
-                state.sizes.push(s.data.len() as u32);
+                state.sizes.push(
+                    u32::try_from(s.data.len())
+                        .map_err(|_| fragment_io_error(FragmentError::SampleSizeExceedsU32))?,
+                );
                 state.durations.push(s.duration);
                 state.sync.push(s.is_sync);
                 state.next_decode_time += s.duration as u64;
@@ -157,14 +170,18 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
             .map(|samples| {
                 samples
                     .iter()
-                    .map(|s| FragSampleInfo {
-                        size: s.data.len() as u32,
-                        duration: s.duration,
-                        is_sync: s.is_sync,
+                    .map(|s| {
+                        Ok(FragSampleInfo {
+                            size: u32::try_from(s.data.len()).map_err(|_| {
+                                fragment_io_error(FragmentError::SampleSizeExceedsU32)
+                            })?,
+                            duration: s.duration,
+                            is_sync: s.is_sync,
+                        })
                     })
-                    .collect()
+                    .collect::<io::Result<_>>()
             })
-            .collect();
+            .collect::<io::Result<_>>()?;
         let runs: Vec<TrackRunInfo<'_>> = info_storage
             .iter()
             .enumerate()
@@ -177,12 +194,18 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
             .collect();
 
         let frag_start = self.w.stream_position()?;
-        let total_payload: u64 = per_track
+        let total_payload = per_track
             .iter()
             .flat_map(|samples| samples.iter())
-            .map(|s| s.data.len() as u64)
-            .sum();
-        let moof = fragment_moof_multi(self.next_sequence, &runs);
+            .try_fold(0_u64, |total, sample| {
+                total.checked_add(sample.data.len() as u64).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "fragment payload size overflow",
+                    )
+                })
+            })?;
+        let moof = fragment_moof_multi(self.next_sequence, &runs).map_err(fragment_io_error)?;
         self.w.write_all(&moof)?;
         let mdat_header = mdat_header(total_payload);
         self.w.write_all(&mdat_header)?;
@@ -256,14 +279,21 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
             .collect();
 
         let frag_start = self.w.stream_position()?;
-        let total_payload: u64 = per_track
+        let total_payload = per_track
             .iter()
             .flat_map(|samples| samples.iter())
-            .map(|s| s.size as u64)
-            .sum();
-        let moof = fragment_moof_multi(self.next_sequence, &runs);
+            .try_fold(0_u64, |total, sample| {
+                total.checked_add(sample.size as u64).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "fragment payload size overflow",
+                    )
+                })
+            })?;
+        let moof = fragment_moof_multi(self.next_sequence, &runs).map_err(fragment_io_error)?;
+        let mdat_header = mdat_header(total_payload);
         self.w.write_all(&moof)?;
-        self.w.write_all(&mdat_header(total_payload))?;
+        self.w.write_all(&mdat_header)?;
 
         let mut copy_buf = vec![0u8; 64 * 1024];
         for run in &runs {
@@ -274,8 +304,7 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
             }
         }
 
-        let mut sample_offset =
-            frag_start + moof.len() as u64 + mdat_header(total_payload).len() as u64;
+        let mut sample_offset = frag_start + moof.len() as u64 + mdat_header.len() as u64;
         for run in &runs {
             let idx = (run.track_id - 1) as usize;
             let state = &mut self.tracks[idx];
@@ -344,6 +373,10 @@ fn copy_exact<R: Read, W: Write>(
         remaining -= n as u64;
     }
     Ok(())
+}
+
+fn fragment_io_error(error: FragmentError) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, error)
 }
 
 fn rescale_duration(duration: u64, source_timescale: u32, target_timescale: u32) -> u64 {
