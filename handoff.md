@@ -4,6 +4,31 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): replay-cache lifecycle safety
+
+The combined audit's M-06 is fixed. Disk replay segments now publish through owned temporary and
+final-file guards, commit bookkeeping only after required eviction succeeds, and keep bookkeeping
+consistent when an eviction fails partway through. Dropping a disk ring removes its entire unique
+Clipline-owned run directory, including orphaned temporary files and its ownership record.
+
+Each disk-cache run records the Windows process-instance identity (PID plus creation time) and its
+creation timestamp. Startup scans only structurally valid Clipline run names, skips links/reparse
+points, immediately removes definitively dead/reused instances, and gives missing, corrupt, or
+unqueryable identities a 24-hour safety window. Bytes in every preserved run reduce the new ring's
+quota. A prepared run remains under an RAII cleanup guard until recorder construction succeeds.
+
+The periodic 2 GiB free-space check now passes through `finish_stream` and full-session
+finalization before the recorder reports its primary low-space error; any secondary finish error
+is retained in the report. Capture failures use the same path, and all fallible media-folder setup
+now happens before recorder ownership begins.
+
+Plan commit `c180bf2`; implementation commit `52eb9f4`. Sixteen buffer tests and 42 focused service
+tests pass, including publication/eviction failures, live/stale/ambiguous run recovery, quota
+accounting, constructor rollback, and low-space finalization. Fresh-cache Clippy for both changed
+crates, CI-mode workspace tests, and workspace Clippy pass with warnings denied. Computer Use
+verified the rebuilt native app renders all nine clips and Local/Cloud controls at 6.6 MB idle RAM.
+Crossing the 2 GiB reserve during a real disk/full-session recording remains on the manual list.
+
 ## Checkpoint (2026-07-18): bounded cloud media cache
 
 The combined audit's M-04 is fixed. Bulk cloud media now lives under LocalAppData rather than the
