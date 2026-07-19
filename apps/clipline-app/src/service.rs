@@ -2955,6 +2955,24 @@ mod tests {
     }
 
     #[test]
+    fn cadenced_capture_propagates_target_closure_instead_of_duplicating() {
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![7, 8, 9]),
+        };
+        let source = ScriptedTimedSource {
+            outcomes: VecDeque::from([Ok(None)]),
+            requested_timeouts: Vec::new(),
+        };
+        let mut capture = CadencedCapture::new(source, 60, &seed);
+
+        assert!(capture
+            .next_frame()
+            .expect("closed source is not an error")
+            .is_none());
+    }
+
+    #[test]
     fn cadenced_capture_suppresses_stale_real_frame_after_timeout_duplicate() {
         let fps = 60;
         let interval_s = 1.0 / fps as f64;

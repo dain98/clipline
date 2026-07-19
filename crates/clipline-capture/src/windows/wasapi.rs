@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use windows::core::{implement, Interface, Ref, Result as WindowsResult, HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, RPC_E_CHANGED_MODE};
+use windows::Win32::Foundation::{CloseHandle, RPC_E_CHANGED_MODE};
 use windows::Win32::Media::Audio::{
     eCapture, eConsole, eRender, ActivateAudioInterfaceAsync, AudioSessionStateExpired, EDataFlow,
     IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
@@ -17,8 +17,8 @@ use windows::Win32::Media::Audio::{
     IAudioSessionControl2, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
     MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
     AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-    AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
     AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
     DEVICE_STATE_ACTIVE, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
     VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVE_FORMAT_PCM,
@@ -37,8 +37,7 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
-    CreateEventW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::System::Variant::VT_BLOB;
 
@@ -52,6 +51,7 @@ use crate::pcm::{
 use crate::traits::{AudioPacket, AudioSource, CaptureError};
 
 const OPUS_SAMPLE_RATE: u32 = 48_000;
+const POLLING_BUFFER_DURATION_100NS: i64 = 10_000_000; // One second.
 
 #[derive(Debug, Clone)]
 pub struct AudioDeviceInfo {
@@ -169,7 +169,6 @@ fn audio_poll_silence_horizon(until_pts_s: f64) -> Option<f64> {
 struct WasapiPcmCapture {
     client: IAudioClient,
     capture: IAudioCaptureClient,
-    event_handle: Option<HANDLE>,
     clock: RelativeClock,
     channels: u16,
     sample_format: SampleFormat,
@@ -214,15 +213,14 @@ impl WasapiPcmCapture {
     ) -> Result<Self, CaptureError> {
         init_com()?;
         let client = activate_process_loopback_client(pid)?;
+        let (streamflags, buffer_duration_100ns) = process_loopback_stream_config();
         Self::start_client(
             clock,
             client,
-            AUDCLNT_STREAMFLAGS_LOOPBACK
-                | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-                | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+            streamflags,
             volume,
             EndpointMode::OutputLoopback,
-            0,
+            buffer_duration_100ns,
             Some(process_loopback_format()),
         )
     }
@@ -259,7 +257,15 @@ impl WasapiPcmCapture {
             let device = endpoint_device(&enumerator, dataflow, device_id).map_err(init)?;
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(init)?;
 
-            Self::start_client(clock, client, streamflags, volume, mode, 10_000_000, None)
+            Self::start_client(
+                clock,
+                client,
+                streamflags,
+                volume,
+                mode,
+                POLLING_BUFFER_DURATION_100NS,
+                None,
+            )
         }
     }
 
@@ -309,20 +315,6 @@ impl WasapiPcmCapture {
             }
             r.map_err(|e| CaptureError::Init(format!("WASAPI Initialize: {e}")))?;
 
-            let event_handle = if streamflags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK != 0 {
-                let handle = CreateEventW(None, false, false, PCWSTR::null())
-                    .map_err(|e| CaptureError::Init(format!("WASAPI CreateEventW: {e}")))?;
-                if let Err(error) = client.SetEventHandle(handle) {
-                    let _ = CloseHandle(handle);
-                    return Err(CaptureError::Init(format!(
-                        "WASAPI SetEventHandle: {error}"
-                    )));
-                }
-                Some(handle)
-            } else {
-                None
-            };
-
             let capture: IAudioCaptureClient = client
                 .GetService()
                 .map_err(|e| CaptureError::Init(format!("WASAPI GetService: {e}")))?;
@@ -340,7 +332,6 @@ impl WasapiPcmCapture {
             Ok(Self {
                 client,
                 capture,
-                event_handle,
                 clock,
                 channels: mix.channels,
                 sample_format: mix.sample_format,
@@ -472,10 +463,14 @@ impl Drop for WasapiPcmCapture {
     fn drop(&mut self) {
         // SAFETY: Stop on a started client is always valid.
         let _ = unsafe { self.client.Stop() };
-        if let Some(handle) = self.event_handle.take() {
-            let _ = unsafe { CloseHandle(handle) };
-        }
     }
+}
+
+fn process_loopback_stream_config() -> (u32, i64) {
+    (
+        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+        POLLING_BUFFER_DURATION_100NS,
+    )
 }
 
 impl WasapiLoopback {
@@ -1427,6 +1422,43 @@ mod tests {
         assert_eq!(sample_rate, 44_100);
         assert_eq!(bits, 16);
         assert_eq!(block_align, 4);
+    }
+
+    #[test]
+    fn process_loopback_uses_pull_mode_with_one_second_of_headroom() {
+        let (flags, buffer_duration_100ns) = process_loopback_stream_config();
+
+        assert_ne!(flags & AUDCLNT_STREAMFLAGS_LOOPBACK, 0);
+        assert_ne!(flags & AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, 0);
+        assert_eq!(
+            flags & windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            0,
+            "pull mode must not register an event that no capture thread waits on"
+        );
+        assert_eq!(buffer_duration_100ns, 10_000_000);
+    }
+
+    #[test]
+    fn process_loopback_pull_mode_starts_polls_and_stops() {
+        if std::env::var_os("CI").is_some() || !process_loopback_available() {
+            eprintln!("SKIP: process loopback needs a supported interactive Windows session");
+            return;
+        }
+        let clock = RelativeClock::new(crate::windows::qpc_now_ticks_100ns().unwrap());
+        let mut source = match WasapiLoopback::start_process_output(clock, std::process::id(), 1.0)
+        {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!("SKIP: process loopback unavailable: {error}");
+                return;
+            }
+        };
+
+        std::thread::sleep(Duration::from_millis(100));
+        source
+            .poll_packets(f64::MAX)
+            .expect("pull-mode process loopback poll");
+        drop(source);
     }
 
     /// Real loopback against the default render endpoint. CI-skipped (no

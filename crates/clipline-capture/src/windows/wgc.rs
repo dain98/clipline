@@ -72,8 +72,12 @@ struct QueuedFrame {
 }
 
 pub struct WgcCapture {
+    item: GraphicsCaptureItem,
     session: GraphicsCaptureSession,
     frame_pool: Direct3D11CaptureFramePool,
+    frame_arrived_token: i64,
+    closed_token: i64,
+    queue: FrameSender,
     rx: FrameReceiver,
     clock: RelativeClock,
 }
@@ -200,16 +204,31 @@ impl WgcCapture {
 
         let (tx, rx) = bounded_frame_channel(FRAME_QUEUE_CAPACITY);
         let state = Arc::new(Mutex::new(FramePoolState { size }));
-        frame_pool
+        let frame_arrived_token = frame_pool
             .FrameArrived(&TypedEventHandler::new(on_frame_arrived(
-                device, context, state, tx, copy_mode,
+                device,
+                context,
+                state,
+                tx.clone(),
+                copy_mode,
             )))
+            .map_err(init)?;
+        let closed_queue = tx.clone();
+        let closed_token = item
+            .Closed(&TypedEventHandler::new(move |_, _| {
+                closed_queue.close();
+                Ok(())
+            }))
             .map_err(init)?;
         session.StartCapture().map_err(init)?;
 
         Ok(Self {
+            item,
             session,
             frame_pool,
+            frame_arrived_token,
+            closed_token,
+            queue: tx,
             rx,
             clock,
         })
@@ -242,6 +261,9 @@ impl CaptureEngine for WgcCapture {
 
 impl Drop for WgcCapture {
     fn drop(&mut self) {
+        self.queue.close();
+        let _ = self.frame_pool.RemoveFrameArrived(self.frame_arrived_token);
+        let _ = self.item.RemoveClosed(self.closed_token);
         let _ = self.session.Close();
         let _ = self.frame_pool.Close();
     }
@@ -401,14 +423,22 @@ struct FrameReceiver {
 }
 
 struct FrameQueueInner {
-    queue: Mutex<VecDeque<QueuedFrame>>,
+    state: Mutex<FrameQueueState>,
     ready: Condvar,
     capacity: usize,
 }
 
+struct FrameQueueState {
+    queue: VecDeque<QueuedFrame>,
+    closed: bool,
+}
+
 fn bounded_frame_channel(capacity: usize) -> (FrameSender, FrameReceiver) {
     let inner = Arc::new(FrameQueueInner {
-        queue: Mutex::new(VecDeque::new()),
+        state: Mutex::new(FrameQueueState {
+            queue: VecDeque::new(),
+            closed: false,
+        }),
         ready: Condvar::new(),
         capacity: capacity.max(1),
     });
@@ -422,14 +452,27 @@ fn bounded_frame_channel(capacity: usize) -> (FrameSender, FrameReceiver) {
 
 impl FrameSender {
     fn send_drop_oldest(&self, frame: QueuedFrame) {
-        let Ok(mut queue) = self.inner.queue.lock() else {
+        let Ok(mut state) = self.inner.state.lock() else {
             return;
         };
-        if queue.len() >= self.inner.capacity {
-            queue.pop_front();
+        if state.closed {
+            return;
         }
-        queue.push_back(frame);
+        if state.queue.len() >= self.inner.capacity {
+            state.queue.pop_front();
+        }
+        state.queue.push_back(frame);
         self.inner.ready.notify_one();
+    }
+
+    fn close(&self) {
+        let Ok(mut state) = self.inner.state.lock() else {
+            self.inner.ready.notify_all();
+            return;
+        };
+        state.closed = true;
+        state.queue.clear();
+        self.inner.ready.notify_all();
     }
 }
 
@@ -442,13 +485,16 @@ impl Drop for FrameSender {
 impl FrameReceiver {
     fn recv_timeout(&self, timeout: Duration) -> Result<QueuedFrame, RecvTimeoutError> {
         let deadline = Instant::now() + timeout;
-        let mut queue = self
+        let mut state = self
             .inner
-            .queue
+            .state
             .lock()
             .map_err(|_| RecvTimeoutError::Disconnected)?;
         loop {
-            if let Some(frame) = queue.pop_front() {
+            if state.closed {
+                return Err(RecvTimeoutError::Disconnected);
+            }
+            if let Some(frame) = state.queue.pop_front() {
                 return Ok(frame);
             }
             if Arc::strong_count(&self.inner) == 1 {
@@ -459,14 +505,14 @@ impl FrameReceiver {
                 return Err(RecvTimeoutError::Timeout);
             }
             let remaining = deadline.saturating_duration_since(now);
-            let (next_queue, result) = self
+            let (next_state, result) = self
                 .inner
                 .ready
-                .wait_timeout(queue, remaining)
+                .wait_timeout(state, remaining)
                 .map_err(|_| RecvTimeoutError::Disconnected)?;
-            queue = next_queue;
-            if result.timed_out() && queue.is_empty() {
-                return if Arc::strong_count(&self.inner) == 1 {
+            state = next_state;
+            if result.timed_out() && state.queue.is_empty() {
+                return if state.closed || Arc::strong_count(&self.inner) == 1 {
                     Err(RecvTimeoutError::Disconnected)
                 } else {
                     Err(RecvTimeoutError::Timeout)
@@ -628,6 +674,44 @@ mod tests {
 
         assert!(matches!(
             rx.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn explicit_target_close_disconnects_with_callback_senders_still_alive() {
+        let (device, _) = crate::windows::d3d11::create_device_for_tests().expect("device");
+        let texture = crate::windows::d3d11::create_bgra_texture(&device, 2, 2).expect("texture");
+        let (tx, rx) = bounded_frame_channel(2);
+        let callback_sender = tx.clone();
+        tx.send_drop_oldest(QueuedFrame {
+            texture: texture.clone(),
+            ticks_100ns: 1,
+        });
+
+        tx.close();
+        callback_sender.send_drop_oldest(QueuedFrame {
+            texture,
+            ticks_100ns: 2,
+        });
+
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Disconnected)
+        ));
+        drop(callback_sender);
+    }
+
+    #[test]
+    fn explicit_target_close_wakes_a_blocked_receiver() {
+        let (tx, rx) = bounded_frame_channel(2);
+        let waiter = std::thread::spawn(move || rx.recv_timeout(Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_millis(10));
+
+        tx.close();
+
+        assert!(matches!(
+            waiter.join().expect("receiver thread"),
             Err(RecvTimeoutError::Disconnected)
         ));
     }
