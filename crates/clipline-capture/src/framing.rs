@@ -27,6 +27,12 @@ const MAX_FRAMER_BUFFER: usize = 32 * 1024 * 1024;
 /// VCL NAL; parameter sets / SEI that follow belong to the next unit.
 pub struct AnnexBFramer {
     buf: Vec<u8>,
+    /// First byte not yet proven unable to begin a three-byte start code.
+    scan_pos: usize,
+    /// Start of the access unit currently being accumulated.
+    au_start: Option<usize>,
+    /// Most recent start code; its NAL is incomplete until another arrives.
+    pending_code: Option<(usize, usize)>,
     /// True if the NAL (given its first payload byte) is a VCL/slice NAL.
     is_vcl: fn(u8) -> bool,
 }
@@ -35,6 +41,9 @@ impl AnnexBFramer {
     pub fn h264() -> Self {
         Self {
             buf: Vec::new(),
+            scan_pos: 0,
+            au_start: None,
+            pending_code: None,
             is_vcl: h264_is_vcl,
         }
     }
@@ -42,8 +51,61 @@ impl AnnexBFramer {
     pub fn hevc() -> Self {
         Self {
             buf: Vec::new(),
+            scan_pos: 0,
+            au_start: None,
+            pending_code: None,
             is_vcl: hevc_is_vcl,
         }
+    }
+
+    fn reset(&mut self) {
+        self.buf.clear();
+        self.scan_pos = 0;
+        self.au_start = None;
+        self.pending_code = None;
+    }
+
+    fn scan_new_start_codes(&mut self) -> Vec<Vec<u8>> {
+        let mut units = Vec::new();
+        let mut i = self.scan_pos.min(self.buf.len());
+        while i + 2 < self.buf.len() {
+            if self.buf[i] == 0 && self.buf[i + 1] == 0 && self.buf[i + 2] == 1 {
+                let code_start = if i > 0 && self.buf[i - 1] == 0 {
+                    i - 1
+                } else {
+                    i
+                };
+                let payload_start = i + 3;
+                if self.au_start.is_none() {
+                    self.au_start = Some(code_start);
+                }
+                if let Some((_, previous_payload)) = self.pending_code {
+                    let first_byte = self.buf.get(previous_payload).copied().unwrap_or(0);
+                    if (self.is_vcl)(first_byte) {
+                        let start = self.au_start.unwrap_or(code_start);
+                        units.push(self.buf[start..code_start].to_vec());
+                        self.au_start = Some(code_start);
+                    }
+                }
+                self.pending_code = Some((code_start, payload_start));
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        self.scan_pos = i;
+
+        // Drop junk before the first code and bytes belonging to units that
+        // were already emitted. Keep all state relative to the retained AU.
+        if let Some(drain_len) = self.au_start.filter(|start| *start > 0) {
+            self.buf.drain(..drain_len);
+            self.scan_pos = self.scan_pos.saturating_sub(drain_len);
+            self.au_start = Some(0);
+            self.pending_code = self
+                .pending_code
+                .map(|(code, payload)| (code - drain_len, payload - drain_len));
+        }
+        units
     }
 }
 
@@ -55,58 +117,30 @@ fn hevc_is_vcl(first_byte: u8) -> bool {
     ((first_byte >> 1) & 0x3F) <= 31
 }
 
-/// Start-code scan: each entry is (code_start, payload_start), handling both
-/// 3- and 4-byte start codes (a 4-byte code is a 3-byte code preceded by 0).
-fn start_codes(buf: &[u8]) -> Vec<(usize, usize)> {
-    let mut codes = Vec::new();
-    let mut i = 0;
-    while i + 2 < buf.len() {
-        if buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 1 {
-            let code_start = if i > 0 && buf[i - 1] == 0 { i - 1 } else { i };
-            codes.push((code_start, i + 3));
-            i += 3;
-        } else {
-            i += 1;
-        }
-    }
-    codes
-}
-
 impl AccessUnitFramer for AnnexBFramer {
     fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        if self
+            .buf
+            .len()
+            .checked_add(bytes.len())
+            .is_none_or(|total| total > MAX_FRAMER_BUFFER)
+        {
+            self.reset();
+            return Vec::new();
+        }
         self.buf.extend_from_slice(bytes);
-        let codes = start_codes(&self.buf);
-        let mut units = Vec::new();
-        // The current access unit begins at the first start code in the buffer.
-        let mut au_start = match codes.first() {
-            Some(&(code_start, _)) => code_start,
-            None => return units,
-        };
-        // A NAL is complete only once the *next* start code is in the buffer,
-        // so we never frame a half-received slice. Walk complete NALs.
-        for w in codes.windows(2) {
-            let (_, payload_start) = w[0];
-            let (next_code_start, _) = w[1];
-            let first_byte = self.buf.get(payload_start).copied().unwrap_or(0);
-            if (self.is_vcl)(first_byte) {
-                units.push(self.buf[au_start..next_code_start].to_vec());
-                au_start = next_code_start;
-            }
-        }
-        if au_start > 0 {
-            self.buf.drain(..au_start);
-        }
-        if self.buf.len() > MAX_FRAMER_BUFFER {
-            self.buf.clear(); // malformed: no AU boundary in a huge window
-        }
-        units
+        self.scan_new_start_codes()
     }
 
     fn flush(&mut self) -> Option<Vec<u8>> {
         if self.buf.is_empty() {
             return None;
         }
-        Some(std::mem::take(&mut self.buf))
+        let final_unit = std::mem::take(&mut self.buf);
+        self.scan_pos = 0;
+        self.au_start = None;
+        self.pending_code = None;
+        Some(final_unit)
     }
 }
 
@@ -213,6 +247,53 @@ mod tests {
         out.extend(f.push(&stream[6..]));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0], sc4(&[0x65, 0xAA, 0xBB]));
+    }
+
+    #[test]
+    fn annexb_split_start_codes_are_detected_at_every_boundary() {
+        let stream = [sc4(&[0x65, 0xAA]), sc4(&[0x41, 0xBB])].concat();
+        for split in 1..stream.len() {
+            let mut framer = AnnexBFramer::h264();
+            let mut out = framer.push(&stream[..split]);
+            out.extend(framer.push(&stream[split..]));
+            assert_eq!(out, vec![sc4(&[0x65, 0xAA])], "split at {split}");
+        }
+    }
+
+    #[test]
+    fn annexb_delimiter_free_input_is_scanned_incrementally_and_bounded() {
+        let mut framer = AnnexBFramer::h264();
+        let chunk = vec![0xFF; 1024];
+        for expected_chunks in 1..=32 {
+            assert!(framer.push(&chunk).is_empty());
+            assert!(
+                framer.scan_pos >= expected_chunks * chunk.len() - 2,
+                "cursor should remain at the unscanned suffix"
+            );
+        }
+
+        assert!(framer
+            .push(&vec![0xFF; MAX_FRAMER_BUFFER - framer.buf.len() + 1])
+            .is_empty());
+        assert!(framer.buf.is_empty(), "oversized generation is discarded");
+        assert_eq!(framer.scan_pos, 0);
+    }
+
+    #[test]
+    fn annexb_reset_does_not_merge_discarded_suffix_into_a_start_code() {
+        let mut framer = AnnexBFramer::h264();
+        let mut malformed = vec![0xFF; MAX_FRAMER_BUFFER + 1];
+        let end = malformed.len();
+        malformed[end - 2..].copy_from_slice(&[0, 0]);
+        assert!(framer.push(&malformed).is_empty());
+
+        // These bytes would complete a start code only if the discarded zero
+        // suffix survived the reset.
+        assert!(framer.push(&[1, 0x65, 0xAA]).is_empty());
+        let valid = [sc4(&[0x65, 0xBB]), sc4(&[0x41, 0xCC])].concat();
+        let out = framer.push(&valid);
+
+        assert_eq!(out, vec![sc4(&[0x65, 0xBB])]);
     }
 
     #[test]
