@@ -826,36 +826,66 @@ impl RuntimeState {
     where
         F: FnOnce(&mut crate::settings::CloudSettings),
     {
+        self.update_cloud_with(update, AppSettings::save)
+    }
+
+    fn update_cloud_with<F>(
+        &self,
+        update: F,
+        save: impl FnOnce(&AppSettings) -> Result<(), String>,
+    ) -> Result<AppSettings, String>
+    where
+        F: FnOnce(&mut crate::settings::CloudSettings),
+    {
         // Serialize cloud settings saves so concurrent uploads preserve their
         // read-modify-write order without holding runtime state during disk I/O.
         let _save_guard = CLOUD_SETTINGS_SAVE_LOCK
             .lock()
             .map_err(|_| "cloud settings save lock poisoned")?;
-        let next = {
-            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            update(&mut inner.settings.cloud);
-            inner.settings.cloud.normalize();
-            inner.settings.clone()
-        };
-        next.save()?;
-        Ok(next)
+        let mut next = self
+            .0
+            .lock()
+            .map_err(|_| "runtime state lock poisoned")?
+            .settings
+            .clone();
+        update(&mut next.cloud);
+        next.cloud.normalize();
+        save(&next)?;
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        inner.settings.cloud = next.cloud;
+        Ok(inner.settings.clone())
     }
 
     pub(crate) fn update_osu<F>(&self, update: F) -> Result<AppSettings, String>
     where
         F: FnOnce(&mut crate::settings::OsuApiSettings),
     {
+        self.update_osu_with(update, AppSettings::save)
+    }
+
+    fn update_osu_with<F>(
+        &self,
+        update: F,
+        save: impl FnOnce(&AppSettings) -> Result<(), String>,
+    ) -> Result<AppSettings, String>
+    where
+        F: FnOnce(&mut crate::settings::OsuApiSettings),
+    {
         let _save_guard = CLOUD_SETTINGS_SAVE_LOCK
             .lock()
             .map_err(|_| "settings save lock poisoned")?;
-        let next = {
-            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            update(&mut inner.settings.osu);
-            inner.settings.osu.normalize();
-            inner.settings.clone()
-        };
-        next.save()?;
-        Ok(next)
+        let mut next = self
+            .0
+            .lock()
+            .map_err(|_| "runtime state lock poisoned")?
+            .settings
+            .clone();
+        update(&mut next.osu);
+        next.osu.normalize();
+        save(&next)?;
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        inner.settings.osu = next.osu;
+        Ok(inner.settings.clone())
     }
 
     fn lock_cloud_settings_save() -> Result<MutexGuard<'static, ()>, String> {
@@ -1162,16 +1192,33 @@ where
             }
         }
     }
+    let mut removed = Vec::new();
     for shortcut in old {
         if new.contains(shortcut) || !is_registered(*shortcut) {
             continue;
         }
         if let Err(e) = unregister(*shortcut) {
-            for shortcut in added {
-                let _ = unregister(shortcut);
+            let mut rollback_errors = Vec::new();
+            for shortcut in removed.into_iter().rev() {
+                if let Err(rollback) = register(shortcut) {
+                    rollback_errors.push(format!("re-register {shortcut}: {rollback}"));
+                }
             }
-            return Err(format!("replace hotkey: {e}"));
+            for shortcut in added {
+                if let Err(rollback) = unregister(shortcut) {
+                    rollback_errors.push(format!("unregister {shortcut}: {rollback}"));
+                }
+            }
+            let mut message = format!("replace hotkey: {e}");
+            if !rollback_errors.is_empty() {
+                message.push_str(&format!(
+                    "; rollback incomplete: {}",
+                    rollback_errors.join(", ")
+                ));
+            }
+            return Err(message);
         }
+        removed.push(*shortcut);
     }
     Ok(warnings)
 }
@@ -2245,6 +2292,42 @@ mod tests {
     }
 
     #[test]
+    fn failed_cloud_settings_save_leaves_live_state_unchanged() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+
+        let error = state
+            .update_cloud_with(
+                |cloud| cloud.host_url = "https://new.example".into(),
+                |candidate| {
+                    assert_eq!(candidate.cloud.host_url, "https://new.example");
+                    Err("disk full".into())
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error, "disk full");
+        assert!(state.settings().cloud.host_url.is_empty());
+    }
+
+    #[test]
+    fn failed_osu_settings_save_leaves_live_state_unchanged() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+
+        let error = state
+            .update_osu_with(
+                |osu| osu.client_id = Some("1234".into()),
+                |candidate| {
+                    assert_eq!(candidate.osu.client_id.as_deref(), Some("1234"));
+                    Err("settings denied".into())
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error, "settings denied");
+        assert!(state.settings().osu.client_id.is_none());
+    }
+
+    #[test]
     fn sync_global_hotkeys_skips_unregister_when_old_shortcut_is_stale() {
         let old_shortcut = parse_hotkey("Alt+F10").unwrap();
         let new_shortcut = parse_hotkey("Ctrl+F8").unwrap();
@@ -2341,6 +2424,60 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(unregistered, vec![removed, secondary]);
+    }
+
+    #[test]
+    fn sync_global_hotkeys_restores_earlier_removals_when_a_later_one_fails() {
+        let first = parse_hotkey("Alt+F10").unwrap();
+        let second = parse_hotkey("Ctrl+F8").unwrap();
+        let mut registered = Vec::new();
+        let mut unregistered = Vec::new();
+
+        let result = sync_global_hotkeys(
+            &[first, second],
+            &[],
+            |_| true,
+            |shortcut| {
+                registered.push(shortcut);
+                Ok::<_, &'static str>(())
+            },
+            |shortcut| {
+                unregistered.push(shortcut);
+                if shortcut == second {
+                    Err("second removal failed")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(unregistered, vec![first, second]);
+        assert_eq!(registered, vec![first]);
+    }
+
+    #[test]
+    fn sync_global_hotkeys_surfaces_rollback_failures() {
+        let first = parse_hotkey("Alt+F10").unwrap();
+        let second = parse_hotkey("Ctrl+F8").unwrap();
+
+        let error = sync_global_hotkeys(
+            &[first, second],
+            &[],
+            |_| true,
+            |_| Err::<(), _>("restore failed"),
+            |shortcut| {
+                if shortcut == second {
+                    Err("second removal failed")
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("rollback incomplete"), "{error}");
+        assert!(error.contains("restore failed"), "{error}");
     }
 
     #[test]
