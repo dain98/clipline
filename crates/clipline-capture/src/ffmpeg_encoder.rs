@@ -16,13 +16,19 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use clipline_mp4::{VideoCodecParams, VideoTrackConfig};
 
-use crate::ffmpeg::encoder_name;
+use crate::ffmpeg::{encoder_name, wait_for_child, ChildWait};
 use crate::framing::{AccessUnitFramer, AnnexBFramer, IvfFramer};
 use crate::probe::{Codec, EncoderBackend};
 use crate::traits::{EncodeError, EncodedPacket, Encoder, Frame, FrameData};
+
+/// B-frames are disabled and FFmpeg normally has at most a small tail to
+/// flush. Thirty seconds still accommodates slow software AV1 on loaded
+/// machines while placing a finite ceiling on recorder/app shutdown.
+const ENCODER_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(windows)]
 use crate::cpu_video::{CpuCropRect, CpuVideoConverter};
@@ -168,22 +174,33 @@ fn spawn_process(
         .spawn()
         .map_err(|e| EncodeError::Backend(format!("spawn ffmpeg: {e}")))?;
 
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| EncodeError::Backend("ffmpeg stdin missing".into()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| EncodeError::Backend("ffmpeg stdout missing".into()))?;
+    let Some(stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(EncodeError::Backend("ffmpeg stdin missing".into()));
+    };
+    let Some(stdout) = child.stdout.take() else {
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(EncodeError::Backend("ffmpeg stdout missing".into()));
+    };
 
     let codec_params = Arc::new(Mutex::new(None));
     let (tx, rx) = std::sync::mpsc::channel();
     let reader_params = Arc::clone(&codec_params);
-    let reader = std::thread::Builder::new()
+    let reader = match std::thread::Builder::new()
         .name("clipline-ffmpeg-reader".into())
         .spawn(move || run_reader(stdout, codec, reader_params, tx))
-        .map_err(|e| EncodeError::Backend(format!("spawn reader: {e}")))?;
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            drop(stdin);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(EncodeError::Backend(format!("spawn reader: {error}")));
+        }
+    };
 
     Ok(Spawned {
         child,
@@ -328,6 +345,37 @@ impl FfmpegVideoEncoder {
         }
         Ok(out)
     }
+
+    fn finish_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Vec<EncodedPacket>, EncodeError> {
+        // Closing stdin signals EOF. The existing reader keeps stdout drained
+        // while FFmpeg flushes, so neither side can block on a full pipe.
+        drop(self.stdin.take());
+        let wait = wait_for_child(&mut self.child, timeout);
+        let reader = self.reader.take().map(|reader| reader.join());
+
+        let wait = wait
+            .map_err(|error| EncodeError::Backend(format!("await ffmpeg during flush: {error}")))?;
+        if matches!(wait, ChildWait::TimedOut) {
+            return Err(EncodeError::Backend(format!(
+                "ffmpeg did not flush within {timeout:?}; the encoded tail was discarded"
+            )));
+        }
+        if reader.is_some_and(|result| result.is_err()) {
+            return Err(EncodeError::Backend("ffmpeg reader thread panicked".into()));
+        }
+        let ChildWait::Exited(status) = wait else {
+            unreachable!("timeout handled above")
+        };
+        if !status.success() {
+            return Err(EncodeError::Backend(format!("ffmpeg exited with {status}")));
+        }
+        let packets = self.drain_ready()?;
+        ensure_all_output_pts_consumed(&self.pending_pts)?;
+        Ok(packets)
+    }
 }
 
 impl Encoder for FfmpegVideoEncoder {
@@ -364,26 +412,7 @@ impl Encoder for FfmpegVideoEncoder {
     }
 
     fn finish(&mut self) -> Result<Vec<EncodedPacket>, EncodeError> {
-        // Closing stdin signals EOF; the child flushes and the reader frames
-        // the tail, then exits when stdout closes.
-        drop(self.stdin.take());
-        if let Some(reader) = self.reader.take() {
-            reader
-                .join()
-                .map_err(|_| EncodeError::Backend("ffmpeg reader thread panicked".into()))?;
-        }
-        // A non-zero ffmpeg exit means the elementary stream is incomplete;
-        // surface it rather than letting the muxer finalize truncated output.
-        let status = self
-            .child
-            .wait()
-            .map_err(|e| EncodeError::Backend(format!("await ffmpeg: {e}")))?;
-        if !status.success() {
-            return Err(EncodeError::Backend(format!("ffmpeg exited with {status}")));
-        }
-        let packets = self.drain_ready()?;
-        ensure_all_output_pts_consumed(&self.pending_pts)?;
-        Ok(packets)
+        self.finish_with_timeout(ENCODER_FLUSH_TIMEOUT)
     }
 }
 
@@ -409,12 +438,15 @@ fn empty_params(codec: Codec) -> VideoCodecParams {
 
 impl Drop for FfmpegVideoEncoder {
     fn drop(&mut self) {
-        // If finish() was not called, don't leak the child.
+        if self.stdin.is_none() && self.reader.is_none() {
+            return;
+        }
+        // If finish() was not called, don't leak the child or wait forever.
         drop(self.stdin.take());
+        let _ = wait_for_child(&mut self.child, ENCODER_FLUSH_TIMEOUT);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
-        let _ = self.child.wait();
     }
 }
 
@@ -649,6 +681,92 @@ fn backend_rate_control(backend: EncoderBackend, bitrate_bps: u32, bufsize: u64)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ENCODER_CHILD_MODE: &str = "CLIPLINE_FFMPEG_ENCODER_CHILD_MODE";
+
+    #[test]
+    fn encoder_subprocess_helper() {
+        match std::env::var(ENCODER_CHILD_MODE).as_deref() {
+            Ok("hang") => std::thread::sleep(Duration::from_secs(60)),
+            Ok("h264_tail") => {
+                let mut input = Vec::new();
+                std::io::stdin()
+                    .read_to_end(&mut input)
+                    .expect("read encoder stdin");
+                std::io::stdout()
+                    .write_all(&[0, 0, 0, 1, 0x65, 0x80, 1, 0, 0, 0, 1, 0x41, 0x80, 2])
+                    .expect("write encoded tail");
+                std::io::stdout().flush().expect("flush encoded tail");
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    }
+
+    fn helper_encoder_for_test(mode: &str) -> FfmpegVideoEncoder {
+        let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+        command
+            .args([
+                "--exact",
+                "ffmpeg_encoder::tests::encoder_subprocess_helper",
+                "--nocapture",
+            ])
+            .env(ENCODER_CHILD_MODE, mode)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        crate::ffmpeg::suppress_console(&mut command);
+        let mut child = command.spawn().expect("spawn stalled helper");
+        let stdin = child.stdin.take().expect("helper stdin");
+        let stdout = child.stdout.take().expect("helper stdout");
+        let codec_params = Arc::new(Mutex::new(None));
+        let reader_params = Arc::clone(&codec_params);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            run_reader(stdout, Codec::H264, reader_params, tx);
+        });
+
+        FfmpegVideoEncoder::assemble(
+            Spawned {
+                child,
+                stdin,
+                rx,
+                reader,
+                codec_params,
+            },
+            Codec::H264,
+            16,
+            16,
+            30,
+        )
+    }
+
+    #[test]
+    fn encoder_flush_timeout_kills_before_joining_stdout_reader() {
+        let mut encoder = helper_encoder_for_test("hang");
+        let started = std::time::Instant::now();
+
+        let error = encoder
+            .finish_with_timeout(Duration::from_millis(100))
+            .expect_err("stalled encoder must time out");
+
+        assert!(error.to_string().contains("encoded tail was discarded"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn normal_flush_preserves_tail_packets_before_joining_reader() {
+        let mut encoder = helper_encoder_for_test("h264_tail");
+        encoder.pending_pts.extend([0.0, 1.0 / 30.0]);
+
+        let packets = encoder
+            .finish_with_timeout(Duration::from_secs(2))
+            .expect("normal helper flush");
+
+        assert_eq!(packets.len(), 2);
+        assert!(packets[0].is_keyframe);
+        assert!(!packets[1].is_keyframe);
+    }
 
     #[test]
     fn args_set_nv12_input_gop_and_output_format() {
