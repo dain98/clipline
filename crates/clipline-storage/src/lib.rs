@@ -5,7 +5,7 @@ mod sessions;
 pub use sessions::{session_label, SessionTracker};
 
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -37,8 +37,64 @@ pub struct RecordingRecoveryReport {
 }
 
 pub fn storage_status(dir: &Path, quota_bytes: Option<u64>) -> io::Result<StorageStatus> {
-    let clips = inventory(dir)?;
+    let clips = inventory(dir, None)?;
     Ok(status_from_clips(&clips, quota_bytes))
+}
+
+/// Return the metadata sidecar that proves Clipline owns `path`.
+///
+/// Recording paths use the marker belonging to their eventual final MP4 so
+/// the same proof survives recovery and finalization.
+pub fn clip_ownership_marker_path(path: &Path) -> io::Result<PathBuf> {
+    let clip = if is_recording_mp4(path) {
+        recording_final_path(path)
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "invalid recording name"))?
+    } else {
+        path.to_path_buf()
+    };
+    if !is_mp4(&clip) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "clip ownership markers require an MP4 path",
+        ));
+    }
+    Ok(clip.with_extension("clipline.json"))
+}
+
+/// Atomically create a valid empty Clipline metadata document for a new clip.
+/// Returns `true` when this call created the marker and `false` when a regular
+/// marker file already existed. Existing metadata is never overwritten.
+pub fn ensure_clip_owned(path: &Path) -> io::Result<bool> {
+    let marker = clip_ownership_marker_path(path)?;
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(mut file) => {
+            if let Err(error) = file.write_all(b"{}") {
+                drop(file);
+                let _ = fs::remove_file(&marker);
+                return Err(error);
+            }
+            Ok(true)
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            if fs::metadata(&marker)?.is_file() {
+                Ok(false)
+            } else {
+                Err(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    format!("clip ownership marker is not a file: {marker:?}"),
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub fn remove_clip_ownership_marker(path: &Path) -> io::Result<()> {
+    remove_file_if_exists(&clip_ownership_marker_path(path)?)
 }
 
 pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport> {
@@ -53,19 +109,40 @@ pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport
             if !is_recording_mp4(&path) {
                 continue;
             }
+            if !is_managed_clip(&path) {
+                continue;
+            }
             let meta = entry.metadata()?;
             if !meta.is_file() {
                 continue;
             }
             if meta.len() == 0 {
                 remove_file_if_exists(&path)?;
+                remove_clip_ownership_marker(&path)?;
                 report.deleted_empty += 1;
                 continue;
             }
+            let old_marker = clip_ownership_marker_path(&path)?;
             let final_path = recording_final_path(&path)
-                .map(|candidate| unique_recovered_path(&candidate))
+                .map(|candidate| unique_recovered_path(&candidate, &old_marker))
                 .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "invalid recording name"))?;
+            let final_marker = clip_ownership_marker_path(&final_path)?;
             fs::rename(&path, &final_path)?;
+            if old_marker != final_marker {
+                if let Err(marker_error) = fs::rename(&old_marker, &final_marker) {
+                    if let Err(rollback_error) = fs::rename(&final_path, &path) {
+                        return Err(io::Error::new(
+                            marker_error.kind(),
+                            format!(
+                                "move recovery marker {old_marker:?} to {final_marker:?}: \
+                                 {marker_error}; restore recording {final_path:?} to {path:?}: \
+                                 {rollback_error}"
+                            ),
+                        ));
+                    }
+                    return Err(marker_error);
+                }
+            }
             report.recovered.push(final_path);
         }
         Ok(())
@@ -86,7 +163,7 @@ pub fn enforce_quota(
         });
     };
 
-    let mut clips = inventory(dir)?;
+    let mut clips = inventory(dir, protect)?;
     let mut total_bytes = clips.iter().map(ClipFile::total_bytes).sum::<u64>();
     let mut deleted_clips = 0usize;
     let mut freed_bytes = 0u64;
@@ -138,7 +215,7 @@ pub fn enforce_quota(
     Ok(GcReport {
         deleted_clips,
         freed_bytes,
-        status: storage_status(dir, quota_bytes)?,
+        status: status_from_clips(&inventory(dir, protect)?, quota_bytes),
     })
 }
 
@@ -167,18 +244,24 @@ impl ClipFile {
 }
 
 /// Clips live at the root (legacy) or one level down in session folders.
-fn inventory(dir: &Path) -> io::Result<Vec<ClipFile>> {
+fn inventory(dir: &Path, include: Option<&Path>) -> io::Result<Vec<ClipFile>> {
     let mut clips = Vec::new();
-    visit_media_dirs(dir, |media_dir| collect_clips(media_dir, &mut clips))?;
+    visit_media_dirs(dir, |media_dir| {
+        collect_clips(media_dir, include, &mut clips)
+    })?;
     Ok(clips)
 }
 
-fn collect_clips(dir: &Path, clips: &mut Vec<ClipFile>) -> io::Result<()> {
+fn collect_clips(dir: &Path, include: Option<&Path>, clips: &mut Vec<ClipFile>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         let recording = is_recording_mp4(&path);
         if !is_mp4(&path) && !recording {
+            continue;
+        }
+        if !is_managed_clip(&path) && !include.is_some_and(|candidate| same_path(&path, candidate))
+        {
             continue;
         }
         let meta = entry.metadata()?;
@@ -224,12 +307,38 @@ fn is_recording_mp4(path: &Path) -> bool {
 
 fn recording_final_path(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?;
-    let final_name = name.strip_suffix(".recording")?;
+    const SUFFIX: &str = ".recording";
+    let split = name.len().checked_sub(SUFFIX.len())?;
+    let suffix = name.get(split..)?;
+    if !suffix.eq_ignore_ascii_case(SUFFIX) {
+        return None;
+    }
+    let final_name = name.get(..split)?;
     Some(path.with_file_name(final_name))
 }
 
-fn unique_recovered_path(candidate: &Path) -> PathBuf {
-    if !candidate.exists() {
+fn is_managed_clip(path: &Path) -> bool {
+    let Ok(marker) = clip_ownership_marker_path(path) else {
+        return false;
+    };
+    if marker.is_file() {
+        return true;
+    }
+    // A crash occurs before ordinary clip sidecars are written, so only the
+    // ownership marker can safely identify a temporary recording. This also
+    // avoids adopting an unrelated temp file because a same-stem JSON file
+    // happens to exist.
+    if is_recording_mp4(path) {
+        return false;
+    }
+    // Conservative legacy signals. Poster files are deliberately excluded:
+    // merely previewing an unrelated MP4 can create one.
+    path.with_extension("markers.json").is_file()
+        || path.with_extension("osu-enrichment.json").is_file()
+}
+
+fn unique_recovered_path(candidate: &Path, current_marker: &Path) -> PathBuf {
+    if recovery_destination_available(candidate, current_marker) {
         return candidate.to_path_buf();
     }
     let parent = candidate.parent().unwrap_or_else(|| Path::new(""));
@@ -244,7 +353,7 @@ fn unique_recovered_path(candidate: &Path) -> PathBuf {
             format!("{stem}_recovered_{attempt}.mp4")
         };
         let recovered = parent.join(name);
-        if !recovered.exists() {
+        if recovery_destination_available(&recovered, current_marker) {
             return recovered;
         }
     }
@@ -255,6 +364,12 @@ fn unique_recovered_path(candidate: &Path) -> PathBuf {
             .unwrap_or_default()
             .as_nanos()
     ))
+}
+
+fn recovery_destination_available(path: &Path, current_marker: &Path) -> bool {
+    !path.exists()
+        && clip_ownership_marker_path(path)
+            .is_ok_and(|marker| marker == current_marker || !marker.exists())
 }
 
 fn sidecar_path(path: &Path) -> PathBuf {
@@ -339,13 +454,23 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
     }
 
+    fn mark_owned(path: &Path) {
+        std::fs::write(clip_ownership_marker_path(path).unwrap(), b"").unwrap();
+    }
+
+    fn write_owned(dir: &TestDir, relative: &str, bytes: usize) -> PathBuf {
+        let path = dir.write(relative, bytes);
+        mark_owned(&path);
+        path
+    }
+
     #[test]
     fn status_counts_clip_metadata_and_other_sidecars() {
         let dir = TestDir::new("clipline-storage", "status-counts");
         dir.write("a.mp4", 10);
         dir.write("a.markers.json", 3);
         dir.write("a.clipline.json", 5);
-        dir.write("b.mp4", 7);
+        write_owned(&dir, "b.mp4", 7);
 
         let status = storage_status(dir.path(), Some(100)).unwrap();
 
@@ -358,8 +483,9 @@ mod tests {
     #[test]
     fn status_counts_recording_bytes_without_counting_a_clip() {
         let dir = TestDir::new("clipline-storage", "status-recording");
-        dir.write("saved.mp4", 10);
-        dir.write("session.mp4.recording", 90);
+        write_owned(&dir, "saved.mp4", 10);
+        let recording = dir.write("session.mp4.recording", 90);
+        mark_owned(&recording);
 
         let status = storage_status(dir.path(), Some(100)).unwrap();
 
@@ -371,7 +497,7 @@ mod tests {
     fn inventory_ignores_non_mp4_files() {
         let dir = TestDir::new("clipline-storage", "ignore-non-mp4");
         dir.write("notes.txt", 99);
-        dir.write("clip.mp4", 4);
+        write_owned(&dir, "clip.mp4", 4);
 
         let status = storage_status(dir.path(), None).unwrap();
 
@@ -380,13 +506,60 @@ mod tests {
     }
 
     #[test]
+    fn status_ignores_unmarked_mp4_files_in_root_and_child_directories() {
+        let dir = TestDir::new("clipline-storage", "ignore-unowned-mp4");
+        dir.write("unrelated.mp4", 90);
+        dir.write("Movies/also-unrelated.mp4", 80);
+        dir.write("2026-07-18 12-00/owned.mp4", 10);
+        dir.write("2026-07-18 12-00/owned.clipline.json", 2);
+
+        let status = storage_status(dir.path(), None).unwrap();
+
+        assert_eq!(status.clip_count, 1);
+        assert_eq!(status.total_bytes, 12);
+    }
+
+    #[test]
+    fn enforce_quota_never_deletes_unmarked_mp4_files() {
+        let dir = TestDir::new("clipline-storage", "preserve-unowned-mp4");
+        let unrelated = dir.write("unrelated.mp4", 90);
+        let nested_unrelated = dir.write("Movies/also-unrelated.mp4", 80);
+        let owned = dir.write("2026-07-18 12-00/owned.mp4", 10);
+        let owned_marker = dir.write("2026-07-18 12-00/owned.clipline.json", 2);
+
+        let report = enforce_quota(dir.path(), Some(0), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(unrelated.exists());
+        assert!(nested_unrelated.exists());
+        assert!(!owned.exists());
+        assert!(!owned_marker.exists());
+        assert_eq!(report.status.total_bytes, 0);
+    }
+
+    #[test]
+    fn enforce_quota_counts_an_explicitly_protected_new_clip() {
+        let dir = TestDir::new("clipline-storage", "protect-new-unmarked");
+        dir.write("unrelated.mp4", 90);
+        let fresh = dir.write("2026-07-18 12-00/fresh.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(5), Some(&fresh)).unwrap();
+
+        assert_eq!(report.deleted_clips, 0);
+        assert_eq!(report.status.clip_count, 1);
+        assert_eq!(report.status.total_bytes, 10);
+        assert!(report.status.is_over_quota());
+        assert!(fresh.exists());
+    }
+
+    #[test]
     fn enforce_quota_deletes_oldest_until_under_budget() {
         let dir = TestDir::new("clipline-storage", "oldest-first");
-        let a = dir.write("a.mp4", 10);
+        let a = write_owned(&dir, "a.mp4", 10);
         tick_mtime();
-        let b = dir.write("b.mp4", 10);
+        let b = write_owned(&dir, "b.mp4", 10);
         tick_mtime();
-        let c = dir.write("c.mp4", 10);
+        let c = write_owned(&dir, "c.mp4", 10);
 
         let report = enforce_quota(dir.path(), Some(15), None).unwrap();
 
@@ -404,7 +577,7 @@ mod tests {
         let old = dir.write("old.mp4", 10);
         let sidecar = dir.write("old.markers.json", 2);
         tick_mtime();
-        let keep = dir.write("keep.mp4", 10);
+        let keep = write_owned(&dir, "keep.mp4", 10);
 
         let report = enforce_quota(dir.path(), Some(10), None).unwrap();
 
@@ -423,7 +596,7 @@ mod tests {
         let markers = dir.write("old.markers.json", 2);
         let poster = dir.write("old.poster.jpg", 4);
         tick_mtime();
-        let keep = dir.write("keep.mp4", 10);
+        let keep = write_owned(&dir, "keep.mp4", 10);
 
         let report = enforce_quota(dir.path(), Some(10), None).unwrap();
 
@@ -442,7 +615,7 @@ mod tests {
         let old = dir.write("old.mp4", 10);
         let pending = dir.write("old.osu-enrichment.json", 6);
         tick_mtime();
-        let keep = dir.write("keep.mp4", 10);
+        let keep = write_owned(&dir, "keep.mp4", 10);
 
         let report = enforce_quota(dir.path(), Some(10), None).unwrap();
 
@@ -460,7 +633,7 @@ mod tests {
         let old = dir.write("old.mp4", 10);
         let metadata = dir.write("old.clipline.json", 6);
         tick_mtime();
-        let keep = dir.write("keep.mp4", 10);
+        let keep = write_owned(&dir, "keep.mp4", 10);
 
         let report = enforce_quota(dir.path(), Some(10), None).unwrap();
 
@@ -475,7 +648,7 @@ mod tests {
     #[test]
     fn enforce_quota_leaves_library_when_protected_clip_alone_exceeds_budget() {
         let dir = TestDir::new("clipline-storage", "protect-fresh");
-        let old = dir.write("old.mp4", 10);
+        let old = write_owned(&dir, "old.mp4", 10);
         tick_mtime();
         let fresh = dir.write("fresh.mp4", 20);
 
@@ -492,11 +665,12 @@ mod tests {
     #[test]
     fn enforce_quota_counts_active_recording_but_never_deletes_it() {
         let dir = TestDir::new("clipline-storage", "recording-quota");
-        let old = dir.write("old.mp4", 10);
+        let old = write_owned(&dir, "old.mp4", 10);
         tick_mtime();
         let recording = dir.write("session.mp4.recording", 12);
+        mark_owned(&recording);
         tick_mtime();
-        let keep = dir.write("keep.mp4", 5);
+        let keep = write_owned(&dir, "keep.mp4", 5);
 
         let report = enforce_quota(dir.path(), Some(20), None).unwrap();
 
@@ -513,6 +687,8 @@ mod tests {
         let dir = TestDir::new("clipline-storage", "recording-recovery");
         let recording = dir.write("2026-06-13 15-04/session_1.mp4.recording", 10);
         let empty = dir.write("empty.mp4.recording", 0);
+        mark_owned(&recording);
+        mark_owned(&empty);
 
         let report = recover_recording_files(dir.path()).unwrap();
 
@@ -530,9 +706,58 @@ mod tests {
     }
 
     #[test]
+    fn recovery_ignores_unmarked_recording_files() {
+        let dir = TestDir::new("clipline-storage", "ignore-unowned-recording");
+        let unrelated = dir.write("unrelated.mp4.recording", 10);
+        let owned = dir.write("2026-07-18 12-00/session_1.mp4.recording", 10);
+        dir.write("2026-07-18 12-00/session_1.clipline.json", 2);
+
+        let report = recover_recording_files(dir.path()).unwrap();
+
+        assert!(unrelated.exists());
+        assert!(!owned.exists());
+        assert_eq!(report.recovered.len(), 1);
+        assert_eq!(
+            report.recovered[0]
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("session_1.mp4")
+        );
+    }
+
+    #[test]
+    fn recovery_handles_mixed_case_recording_suffixes() {
+        let dir = TestDir::new("clipline-storage", "mixed-case-recording");
+        let recording = dir.write("Session.MP4.RECORDING", 10);
+        dir.write("Session.clipline.json", 2);
+
+        let report = recover_recording_files(dir.path()).unwrap();
+
+        assert!(!recording.exists());
+        assert_eq!(report.recovered, vec![dir.path().join("Session.MP4")]);
+        assert!(report.recovered[0].exists());
+    }
+
+    #[test]
+    fn recovery_moves_ownership_marker_to_a_unique_destination() {
+        let dir = TestDir::new("clipline-storage", "recovery-marker-collision");
+        let recording = dir.write("session.mp4.recording", 10);
+        mark_owned(&recording);
+        dir.write("session.mp4", 5);
+
+        let report = recover_recording_files(dir.path()).unwrap();
+
+        let recovered = dir.path().join("session_recovered.mp4");
+        assert_eq!(report.recovered, vec![recovered.clone()]);
+        assert!(recovered.exists());
+        assert!(recovered.with_extension("clipline.json").exists());
+        assert!(!dir.path().join("session.clipline.json").exists());
+    }
+
+    #[test]
     fn status_counts_clips_inside_session_folders() {
         let dir = TestDir::new("clipline-storage", "session-status");
-        dir.write("legacy.mp4", 10);
+        write_owned(&dir, "legacy.mp4", 10);
         dir.write("2026-06-12 14-30/clip.mp4", 7);
         dir.write("2026-06-12 14-30/clip.markers.json", 3);
 
@@ -550,9 +775,9 @@ mod tests {
         let old_poster = dir.write("2026-06-11 09-00/old.poster.jpg", 4);
         let old_metadata = dir.write("2026-06-11 09-00/old.clipline.json", 0);
         tick_mtime();
-        let legacy = dir.write("legacy.mp4", 10);
+        let legacy = write_owned(&dir, "legacy.mp4", 10);
         tick_mtime();
-        let fresh = dir.write("2026-06-12 14-30/fresh.mp4", 10);
+        let fresh = write_owned(&dir, "2026-06-12 14-30/fresh.mp4", 10);
 
         let report = enforce_quota(dir.path(), Some(20), None).unwrap();
 
@@ -573,9 +798,9 @@ mod tests {
     #[test]
     fn enforce_quota_keeps_session_dirs_that_still_hold_clips() {
         let dir = TestDir::new("clipline-storage", "session-keep");
-        let old = dir.write("2026-06-12 14-30/old.mp4", 10);
+        let old = write_owned(&dir, "2026-06-12 14-30/old.mp4", 10);
         tick_mtime();
-        let new = dir.write("2026-06-12 14-30/new.mp4", 10);
+        let new = write_owned(&dir, "2026-06-12 14-30/new.mp4", 10);
 
         let report = enforce_quota(dir.path(), Some(10), None).unwrap();
 
@@ -588,7 +813,7 @@ mod tests {
     #[test]
     fn disabled_quota_does_not_delete() {
         let dir = TestDir::new("clipline-storage", "disabled");
-        let clip = dir.write("clip.mp4", 10);
+        let clip = write_owned(&dir, "clip.mp4", 10);
 
         let report = enforce_quota(dir.path(), None, None).unwrap();
 

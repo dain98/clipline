@@ -29,7 +29,10 @@ use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
 };
 use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
-use clipline_storage::{enforce_quota, recover_recording_files, storage_status, StorageStatus};
+use clipline_storage::{
+    clip_ownership_marker_path, enforce_quota, ensure_clip_owned, recover_recording_files,
+    remove_clip_ownership_marker, storage_status, StorageStatus,
+};
 use clipline_storage::{session_label, SessionTracker};
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
@@ -1590,6 +1593,7 @@ fn begin_full_session_recording(
         };
     if let Err(e) = rec.start_full_session(file) {
         let _ = std::fs::remove_file(&temp_path);
+        let _ = remove_clip_ownership_marker(&temp_path);
         warn_user(
             events,
             format!("full-session recording unavailable; start writer: {e}"),
@@ -1618,7 +1622,7 @@ fn finish_full_session_recording(
                 ctx.events,
                 "full session ended before any footage was written".into(),
             );
-            let _ = std::fs::remove_file(&recording.temp_path);
+            remove_discarded_clip(&recording.temp_path);
         }
         Ok(Some(summary))
             if should_discard_full_session_for_min_duration(
@@ -1633,7 +1637,7 @@ fn finish_full_session_recording(
                     summary.duration_s
                 ),
             );
-            let _ = std::fs::remove_file(&recording.temp_path);
+            remove_discarded_clip(&recording.temp_path);
         }
         Ok(Some(summary)) => {
             let seconds = if summary.duration_s.is_finite() {
@@ -1677,7 +1681,7 @@ fn finish_full_session_recording(
                 ctx.events,
                 "full session ended before any footage was written".into(),
             );
-            let _ = std::fs::remove_file(&recording.temp_path);
+            remove_discarded_clip(&recording.temp_path);
         }
         Err(error) => {
             handle_full_session_finish_error(&recording.temp_path, ctx.events, &error.to_string());
@@ -1688,7 +1692,7 @@ fn finish_full_session_recording(
 fn handle_full_session_finish_error(temp_path: &Path, events: &Sender<Event>, error: &str) {
     match std::fs::metadata(temp_path) {
         Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {
-            let _ = std::fs::remove_file(temp_path);
+            remove_discarded_clip(temp_path);
             warn_user(events, format!("finish full session: {error}"));
         }
         Ok(_) => warn_user(
@@ -1696,6 +1700,7 @@ fn handle_full_session_finish_error(temp_path: &Path, events: &Sender<Event>, er
             format!("finish full session: {error}; recoverable recording kept at {temp_path:?}"),
         ),
         Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
+            let _ = remove_clip_ownership_marker(temp_path);
             warn_user(events, format!("finish full session: {error}"));
         }
         Err(metadata_error) => warn_user(
@@ -1743,8 +1748,13 @@ fn discard_full_session_recording(
     if let Err(e) = rec.finish_full_session() {
         warn_user(events, format!("stop full-session writer: {e}"));
     }
-    let _ = std::fs::remove_file(&recording.temp_path);
+    remove_discarded_clip(&recording.temp_path);
     warn_user(events, reason.to_string());
+}
+
+fn remove_discarded_clip(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = remove_clip_ownership_marker(path);
 }
 
 struct FullSessionRecording {
@@ -1792,7 +1802,9 @@ fn unique_media_path_at(session_dir: &Path, prefix: &str, stamp: u64) -> PathBuf
             format!("{prefix}_{stamp}_{attempt}.mp4")
         };
         let candidate = session_dir.join(name);
-        if !candidate.exists() {
+        let marker_exists =
+            clip_ownership_marker_path(&candidate).is_ok_and(|marker| marker.exists());
+        if !candidate.exists() && !marker_exists {
             return candidate;
         }
     }
@@ -1832,13 +1844,37 @@ where
             format!("{prefix}_{stamp}_{attempt}.mp4")
         };
         let final_path = session_dir.join(name);
-        if final_path.try_exists()? {
+        if final_path.try_exists()? || clip_ownership_marker_path(&final_path)?.try_exists()? {
             continue;
         }
         let temp_path = final_path.with_extension("mp4.recording");
         match reserve_temp(&final_path, &temp_path) {
             Ok(file) => match final_path.try_exists() {
-                Ok(false) => return Ok((final_path, temp_path, file)),
+                Ok(false) => match ensure_clip_owned(&temp_path) {
+                    Ok(true) => match final_path.try_exists() {
+                        Ok(false) => return Ok((final_path, temp_path, file)),
+                        Ok(true) => {
+                            drop(file);
+                            remove_discarded_clip(&temp_path);
+                            continue;
+                        }
+                        Err(check_error) => {
+                            drop(file);
+                            remove_discarded_clip(&temp_path);
+                            return Err(check_error);
+                        }
+                    },
+                    Ok(false) => {
+                        drop(file);
+                        std::fs::remove_file(&temp_path)?;
+                        continue;
+                    }
+                    Err(marker_error) => {
+                        drop(file);
+                        let _ = std::fs::remove_file(&temp_path);
+                        return Err(marker_error);
+                    }
+                },
                 Ok(true) => {
                     drop(file);
                     std::fs::remove_file(&temp_path)?;
@@ -1958,14 +1994,22 @@ fn save(
     path: &Path,
     window_s: f64,
 ) -> Result<(f64, f64), String> {
+    let marker_created =
+        ensure_clip_owned(path).map_err(|e| format!("mark Clipline-owned clip {path:?}: {e}"))?;
     let saved_from = rec
         .save_window_bounds(window_s, None)
         .map(|(start, _)| start);
-    let file = std::fs::File::create(path).map_err(|e| format!("create {path:?}: {e}"))?;
-    let (_, end) = rec
-        .save_replay(file, window_s, None)
-        .map_err(|e| format!("save: {e}"))?;
-    Ok((end, end - saved_from.unwrap_or(end)))
+    let result = (|| {
+        let file = std::fs::File::create(path).map_err(|e| format!("create {path:?}: {e}"))?;
+        let (_, end) = rec
+            .save_replay(file, window_s, None)
+            .map_err(|e| format!("save: {e}"))?;
+        Ok((end, end - saved_from.unwrap_or(end)))
+    })();
+    if result.is_err() && marker_created {
+        let _ = remove_clip_ownership_marker(path);
+    }
+    result
 }
 
 fn crop_for_region(
@@ -2885,6 +2929,39 @@ mod tests {
         assert!((second_end - 4.0).abs() < 1e-6);
         assert!((first_seconds - 2.0).abs() < 1e-6);
         assert!((second_seconds - 2.0).abs() < 1e-6);
+        assert_eq!(
+            std::fs::read(first_path.with_extension("clipline.json")).unwrap(),
+            b"{}"
+        );
+        assert_eq!(
+            std::fs::read(second_path.with_extension("clipline.json")).unwrap(),
+            b"{}"
+        );
+    }
+
+    #[test]
+    fn failed_replay_save_removes_only_a_new_ownership_marker() {
+        let dir = TestDir::new("clipline-service", "failed-save-marker-cleanup");
+        let mut rec = Recorder::new(
+            MockCapture::new(1, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        );
+        rec.run_to_end().unwrap();
+
+        let newly_marked = dir.path().join("new.mp4");
+        std::fs::create_dir(&newly_marked).unwrap();
+        assert!(save(&rec, &newly_marked, 1.0).is_err());
+        assert!(!newly_marked.with_extension("clipline.json").exists());
+
+        let already_marked = dir.path().join("existing.mp4");
+        std::fs::create_dir(&already_marked).unwrap();
+        ensure_clip_owned(&already_marked).unwrap();
+        assert!(save(&rec, &already_marked, 1.0).is_err());
+        assert_eq!(
+            std::fs::read(already_marked.with_extension("clipline.json")).unwrap(),
+            b"{}"
+        );
     }
 
     #[test]
@@ -2962,6 +3039,27 @@ mod tests {
             temp_path,
             dir.path().join(format!("session_{stamp}_2.mp4.recording"))
         );
+        assert_eq!(
+            std::fs::read(final_path.with_extension("clipline.json")).unwrap(),
+            b"{}"
+        );
+    }
+
+    #[test]
+    fn media_path_reservation_skips_orphaned_ownership_markers() {
+        let dir = TestDir::new("clipline-service", "ownership-marker-reservation");
+        let stamp = 1_725_000_002;
+        let occupied = dir.path().join(format!("clip_{stamp}.mp4"));
+        ensure_clip_owned(&occupied).unwrap();
+
+        let replay = unique_media_path_at(dir.path(), "clip", stamp);
+        let (session, temp, _file) =
+            reserve_full_session_path_at(dir.path(), "session", stamp).unwrap();
+
+        assert_eq!(replay, dir.path().join(format!("clip_{stamp}_1.mp4")));
+        assert_eq!(session, dir.path().join(format!("session_{stamp}.mp4")));
+        assert!(temp.exists());
+        assert!(session.with_extension("clipline.json").is_file());
     }
 
     #[test]
@@ -3053,13 +3151,17 @@ mod tests {
         let empty = dir.path().join("empty.mp4.recording");
         std::fs::write(&recoverable, b"hybrid mp4").unwrap();
         std::fs::write(&empty, b"").unwrap();
+        ensure_clip_owned(&recoverable).unwrap();
+        ensure_clip_owned(&empty).unwrap();
         let (tx, rx) = mpsc::channel();
 
         handle_full_session_finish_error(&recoverable, &tx, "writer failed");
         handle_full_session_finish_error(&empty, &tx, "writer failed");
 
         assert!(recoverable.exists());
+        assert!(clip_ownership_marker_path(&recoverable).unwrap().exists());
         assert!(!empty.exists());
+        assert!(!clip_ownership_marker_path(&empty).unwrap().exists());
         let Event::Error { message } = rx.try_recv().unwrap() else {
             panic!("expected recovery warning");
         };
