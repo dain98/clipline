@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): bounded pending audio and clock discontinuities
+
+The combined audit's M-13 is fixed. The recorder now reserves encoded payload bytes for every
+pending audio track as well as the current video GOP and any pre-keyframe video. Lead-in removal
+and each segment seal recalculate the retained audio reservation, so old tracks do not accumulate
+against later GOPs. The shared pending ceiling remains the smaller of the replay budget and 64 MiB.
+A broken encoder that fails to close a GOP for ten seconds now stops with an explicit keyframe/GOP
+duration error even when its encoded payload remains small.
+
+Large positive WASAPI timestamp gaps still allocate at most five seconds of silence, but the PCM
+assembler now records a monotonic timeline anchor at the absolute stereo-pair boundary where the
+source resumes. The bounded silence is shortened by at most one 20 ms frame to end on an Opus
+packet boundary. The first resumed packet lands on the new source timestamp and subsequent packets
+continue at 20 ms cadence instead of remaining permanently behind by the discarded clock gap.
+
+Plan commit `d2e6517`; implementation commit `05152fd`. The 174 capture unit tests include
+combined audio/video pressure, per-GOP reservation release, duration failure, one-hour clock jumps,
+post-jump cadence, and a discontinuity after partial PCM. Fresh-cache capture Clippy, CI-mode
+workspace tests (384 app tests), and workspace Clippy pass with warnings denied. Computer Use
+verified normal startup with all nine clips at 6.4 MB. No manual-only acceptance item remains for
+these deterministic resource and timeline state machines.
+
 ## Checkpoint (2026-07-18): bitstream-authored picture and sync boundaries
 
 The combined audit's M-12 is fixed. H.264 and HEVC Annex-B framing now uses access-unit
