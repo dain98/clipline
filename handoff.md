@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): live extracted plugin icons
+
+The combined audit's L-22 is fixed. Parsed profiles and resolved immutable catalog presentation
+remain `OnceLock`-cached, while each `list_game_plugins` command gets an owned snapshot and overlays
+only extraction-backed icons from the current cache file. A missing file is therefore not memoized:
+if detection extracts it later, the next catalog request observes it in the same process. Manifests
+with either explicit `extracted` icon mode or no bundled icon share this behavior.
+
+Game detection finishes synchronous icon extraction before emitting its active-game event. The
+renderer now refreshes the catalog on that event, updating supported-game rows, rail/cards, and an
+open plugin settings dialog without an app restart. File reading/base64 work stays at startup and
+game-change command boundaries rather than render paths.
+
+Plan commit `91b1ada`; implementation commit `ea11121`. A temporary cache test proves missing-then-
+created icon visibility in one process; catalog tests preserve immutable-cache identity while
+requiring independent dynamic snapshots, and the detection refresh has a UI contract. After a
+fresh app-crate clean, all 407 app tests, CI-mode workspace tests, JavaScript syntax, and
+warning-denied workspace Clippy pass. Computer Use verified the rebuilt nine-clip Library and both
+bundled League of Legends/osu! icons in Supported games. No manual-only item remains.
+
 ## Checkpoint (2026-07-18): partial local Library scans
 
 The combined audit's L-21 is fixed. Local Library enumeration now returns a typed result with

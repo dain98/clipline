@@ -59,6 +59,7 @@ Additional completed findings:
 - [ ] L-19 — alignment-safe WASAPI decoding and validated, lifecycle-safe D3D readback (`bd2d617`)
 - [ ] L-20 — generation-serialized microphone tests with disconnect shutdown and stale-event gating (`065c9a7`)
 - [ ] L-21 — partial child-session Library scans with request-gated visible warnings (`5e69249`)
+- [ ] L-22 — immutable catalog base with live extracted-icon overlays and detection refresh (`ea11121`)
 - [ ] L-33 — renderer capability manifest reduced to observed window/autostart operations (`bdff7aa`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
