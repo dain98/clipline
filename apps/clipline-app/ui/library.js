@@ -76,17 +76,34 @@ function invalidateLocalClipsRefresh() {
   localClipsRequestGate.invalidate();
 }
 
+function applyLocalLibraryWarnings(warnings) {
+  const error = $("error");
+  if (localLibraryWarning && error.textContent === localLibraryWarning) {
+    error.textContent = "";
+  }
+  const normalized = Array.isArray(warnings)
+    ? warnings.map((warning) => String(warning || "").trim()).filter(Boolean)
+    : [];
+  localLibraryWarning = normalized.join(" ");
+  if (localLibraryWarning) {
+    error.textContent = localLibraryWarning;
+  }
+}
+
 async function refreshClips(preferredCurrentPath = null) {
   const request = localClipsRequestGate.begin("local-library");
   const isCurrent = () => localClipsRequestGate.isCurrent(request, "local-library");
   let freshClips;
+  let result;
   try {
-    freshClips = await invoke("list_clips");
+    result = await invoke("list_clips");
+    freshClips = Array.isArray(result.clips) ? result.clips : [];
   } catch (error) {
     if (!isCurrent()) return false;
     throw error;
   }
   if (!isCurrent()) return false;
+  applyLocalLibraryWarnings(result.warnings);
   clipsCache = freshClips;
   if (currentClip) {
     const currentPath = preferredCurrentPath || currentClip.path;

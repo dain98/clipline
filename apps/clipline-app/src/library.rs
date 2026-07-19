@@ -109,6 +109,12 @@ pub struct ClipInfo {
 }
 
 #[derive(serde::Serialize)]
+pub struct LocalClipScan {
+    pub clips: Vec<ClipInfo>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
 pub struct StorageInfo {
     pub clip_count: usize,
     pub total_bytes: u64,
@@ -228,7 +234,7 @@ pub struct CopyClipToClipboardRequest {
 pub async fn list_clips<R: Runtime>(
     app: AppHandle<R>,
     settings: tauri::State<'_, StorageSettings>,
-) -> Result<Vec<ClipInfo>, String> {
+) -> Result<LocalClipScan, String> {
     let dir = settings.clips_dir()?;
     let retry_root = dir.clone();
     let enrichment_app = app.clone();
@@ -239,27 +245,57 @@ pub async fn list_clips<R: Runtime>(
         }
     });
     let scope_root = dir.clone();
-    let clips = tauri::async_runtime::spawn_blocking(move || list_clips_from_dir(dir))
+    let scan = tauri::async_runtime::spawn_blocking(move || list_clips_from_dir(dir))
         .await
         .map_err(|e| format!("list clips task: {e}"))??;
-    for clip in &clips {
+    for clip in &scan.clips {
         allow_local_clip_asset(&app, &scope_root, Path::new(&clip.path))?;
     }
-    Ok(clips)
+    Ok(scan)
 }
 
-fn list_clips_from_dir(dir: PathBuf) -> Result<Vec<ClipInfo>, String> {
+fn list_clips_from_dir(dir: PathBuf) -> Result<LocalClipScan, String> {
+    list_clips_from_dir_with_child_reader(dir, push_clips_from)
+}
+
+fn list_clips_from_dir_with_child_reader(
+    dir: PathBuf,
+    mut read_child: impl FnMut(&Path, Option<String>, &mut Vec<ClipInfo>) -> Result<(), String>,
+) -> Result<LocalClipScan, String> {
     let mut clips = Vec::new();
+    let mut warnings = Vec::new();
     push_clips_from(&dir, None, &mut clips)?;
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
-        let Ok(entry) = entry else { continue };
-        if entry.metadata().map(|m| m.is_dir()).unwrap_or(false) {
-            let session = entry.file_name().to_string_lossy().into_owned();
-            push_clips_from(&entry.path(), Some(session), &mut clips)?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warnings.push(format!("Skipped an unreadable Library entry: {error}"));
+                continue;
+            }
+        };
+        let session = entry.file_name().to_string_lossy().into_owned();
+        let is_dir = match entry.metadata() {
+            Ok(metadata) => metadata.is_dir(),
+            Err(error) => {
+                warnings.push(format!(
+                    "Skipped Library entry \"{session}\" because its metadata is unavailable: {error}"
+                ));
+                continue;
+            }
+        };
+        if is_dir {
+            if let Err(error) = read_child(&entry.path(), Some(session.clone()), &mut clips) {
+                warnings.push(format!(
+                    "Skipped Library session \"{session}\" because it could not be read: {error}"
+                ));
+            }
         }
     }
+    for warning in &warnings {
+        eprintln!("partial Library scan: {warning}");
+    }
     clips.sort_by_key(|c| std::cmp::Reverse(c.modified_unix));
-    Ok(clips)
+    Ok(LocalClipScan { clips, warnings })
 }
 
 fn push_clips_from(
@@ -3233,11 +3269,44 @@ mod tests {
         )
         .unwrap();
 
-        let clips = list_clips_from_dir(media).unwrap();
+        let clips = list_clips_from_dir(media).unwrap().clips;
 
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].duration_s, Some(42.5));
         assert_eq!(clips[0].markers.as_ref().unwrap().markers.len(), 1);
+    }
+
+    #[test]
+    fn local_library_scan_keeps_readable_sessions_and_warns_about_denied_children() {
+        let dir = TestDir::new("clipline-library", "partial-session-scan");
+        let media = dir.path().join("media");
+        let readable = media.join("readable-session");
+        let denied = media.join("denied-session");
+        touch_mp4(&readable.join("kept.mp4"));
+        std::fs::create_dir_all(&denied).unwrap();
+
+        let result = list_clips_from_dir_with_child_reader(media, |path, session, clips| {
+            if path.ends_with("denied-session") {
+                Err("access denied by test".into())
+            } else {
+                push_clips_from(path, session, clips)
+            }
+        })
+        .unwrap();
+
+        assert_eq!(result.clips.len(), 1);
+        assert_eq!(result.clips[0].name, "kept.mp4");
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("denied-session"));
+        assert!(result.warnings[0].contains("access denied by test"));
+    }
+
+    #[test]
+    fn local_library_scan_keeps_root_failures_fatal() {
+        let dir = TestDir::new("clipline-library", "missing-root-scan");
+        let missing = dir.path().join("missing");
+
+        assert!(list_clips_from_dir(missing).is_err());
     }
 
     #[test]
@@ -3408,7 +3477,7 @@ mod tests {
         assert_eq!(result.kind, "session");
         assert!(clip.exists(), "display title rename must not move the MP4");
 
-        let clips = list_clips_from_dir(root).unwrap();
+        let clips = list_clips_from_dir(root).unwrap().clips;
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].name, "session_123.mp4");
         assert_eq!(clips[0].title.as_deref(), Some("Ranked win vs Lux"));
@@ -3444,7 +3513,7 @@ mod tests {
         assert!(!crate::poster::poster_path(&source).exists());
         assert!(crate::poster::poster_path(&target).exists());
 
-        let clips = list_clips_from_dir(root).unwrap();
+        let clips = list_clips_from_dir(root).unwrap().clips;
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].name, "Ranked win.mp4");
         assert_eq!(clips[0].title, None);

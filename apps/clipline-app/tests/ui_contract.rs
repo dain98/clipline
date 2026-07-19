@@ -1436,11 +1436,17 @@ fn local_library_refresh_rejects_stale_snapshots_and_reports_event_errors() {
         app_core.contains("var localClipsRequestGate = CloudCore.createRequestGate();"),
         "local Library reads need a latest-request generation gate"
     );
+    assert!(
+        app_core.contains("var localLibraryWarning = \"\";"),
+        "the UI must remember which visible error belongs to a partial Library scan"
+    );
     for required in [
         "const request = localClipsRequestGate.begin(\"local-library\");",
         "const isCurrent = () => localClipsRequestGate.isCurrent(request, \"local-library\");",
         "if (!isCurrent()) return false;",
-        "freshClips = await invoke(\"list_clips\");",
+        "result = await invoke(\"list_clips\");",
+        "freshClips = Array.isArray(result.clips) ? result.clips : [];",
+        "applyLocalLibraryWarnings(result.warnings);",
         "clipsCache = freshClips;",
     ] {
         assert!(
@@ -1450,9 +1456,23 @@ fn local_library_refresh_rejects_stale_snapshots_and_reports_event_errors() {
     }
     assert!(
         refresh_clips.find("if (!isCurrent()) return false;")
-            < refresh_clips.find("clipsCache = freshClips;"),
-        "a stale response must be rejected before it mutates the local cache"
+            < refresh_clips.find("applyLocalLibraryWarnings(result.warnings);")
+            && refresh_clips.find("applyLocalLibraryWarnings(result.warnings);")
+                < refresh_clips.find("clipsCache = freshClips;"),
+        "a stale response must be rejected before it mutates warnings or the local cache"
     );
+    let apply_warnings = js_function_body(&library, "applyLocalLibraryWarnings");
+    for required in [
+        "error.textContent === localLibraryWarning",
+        "error.textContent = \"\";",
+        "localLibraryWarning = normalized.join(\" \");",
+        "error.textContent = localLibraryWarning;",
+    ] {
+        assert!(
+            apply_warnings.contains(required),
+            "Library warnings must use safe, scoped notice handling: `{required}`"
+        );
+    }
     assert!(
         library.contains("function invalidateLocalClipsRefresh()")
             && js_function_body(&library, "replaceClipInCache")
