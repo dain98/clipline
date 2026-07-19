@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): narrow renderer authority
+
+The combined audit's L-17, L-18, and L-33 are fixed. The renderer no longer sends an external URL
+to the native shell. It sends only `remote_clip_id`; native code validates the same conservative ID
+alphabet used for Cloud assets, constructs one encoded path segment from the saved public/host URL,
+and launches that configured origin. Private deployments and a distinct public frontend remain
+supported without granting arbitrary renderer-selected navigation.
+
+Marker presentation now uses shared own-property lookup, so inherited keys such as `constructor`
+and `__proto__` cannot become kinds/categories/icons. CSS marker art accepts only a simple bundled
+`assets/markers/*.png` path or canonical PNG data URL; invalid art falls back to the existing SVG
+glyph. Gallery/review call the same DOM-free helper. The main-window capability now retains only
+core defaults, toggle-maximize, close, drag, and the three used autostart operations; direct
+minimize remains a native command, while direct maximize/unmaximize/resize grants are gone.
+
+Plan commit `b80fff3`; implementation commit `bdff7aa`. Focused native/player/UI contracts passed,
+including inherited-object and CSS-delimiter fixtures. After a fresh app-crate clean, all CI-mode
+workspace tests and warning-denied workspace Clippy passed (401 app, 87 player-core, 76 UI-contract
+tests). Computer Use verified the rebuilt nine-clip Library and exercised maximize/restore,
+minimize/reopen, titlebar dragging, close-to-tray, and single-instance restoration. The app remains
+open for testing. Only a real-account Cloud page-origin check remains on the final manual list.
+
 ## Checkpoint (2026-07-18): verified FFmpeg release staging
 
 The combined audit's L-13 is fixed. Release staging no longer accepts an arbitrary directory or
