@@ -442,10 +442,29 @@ fn memory_status() -> Result<crate::memory::MemoryStatus, String> {
 }
 
 #[tauri::command]
-fn frontend_ready() {
+fn frontend_ready(startup_warnings: tauri::State<StartupWarnings>) -> Vec<String> {
     let was_ready = FRONTEND_READY.swap(true, Ordering::AcqRel);
     if !was_ready {
         log_diagnostic("frontend_ready received");
+    }
+    startup_warnings.take()
+}
+
+#[derive(Default)]
+struct StartupWarnings(Mutex<Vec<String>>);
+
+impl StartupWarnings {
+    fn new(warnings: Vec<String>) -> Self {
+        Self(Mutex::new(warnings))
+    }
+
+    fn take(&self) -> Vec<String> {
+        match self.0.lock() {
+            Ok(mut warnings) => std::mem::take(&mut *warnings),
+            Err(error) => vec![format!(
+                "startup diagnostics could not be read because their lock was poisoned: {error}"
+            )],
+        }
     }
 }
 
@@ -1842,7 +1861,13 @@ fn save_settings<R: Runtime>(
 }
 
 pub fn run() {
-    let mut settings = AppSettings::load_or_default();
+    let startup_load = AppSettings::load_for_startup();
+    let mut settings = startup_load.settings;
+    let mut startup_warnings = startup_load.warnings;
+    for warning in &startup_warnings {
+        log_diagnostic(format!("settings recovery: {warning}"));
+        eprintln!("{warning}");
+    }
     let args: Vec<String> = std::env::args().collect();
     log_diagnostic(format!(
         "run start version={} args={args:?} log_path={:?}",
@@ -1875,8 +1900,12 @@ pub fn run() {
         }
     }
     if let Err(e) = settings.validate() {
-        log_diagnostic(format!("settings invalid; using defaults: {e}"));
-        eprintln!("invalid settings, using defaults: {e}");
+        let warning = format!(
+            "Clipline started with safe defaults because command-line settings were invalid: {e}"
+        );
+        log_diagnostic(&warning);
+        eprintln!("{warning}");
+        startup_warnings.push(warning);
         settings = AppSettings::default();
     }
 
@@ -1893,6 +1922,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(RuntimeState::new(settings.clone(), lol_url))
+        .manage(StartupWarnings::new(startup_warnings))
         .manage(MicTestState::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
@@ -2408,6 +2438,14 @@ mod tests {
     fn quota_parser_rejects_negative_or_non_numeric_values() {
         assert!(parse_quota_gb("-1").is_err());
         assert!(parse_quota_gb("nope").is_err());
+    }
+
+    #[test]
+    fn startup_warnings_are_delivered_once_after_frontend_readiness() {
+        let warnings = StartupWarnings::new(vec!["settings recovered".into()]);
+
+        assert_eq!(warnings.take(), vec!["settings recovered"]);
+        assert!(warnings.take().is_empty());
     }
 
     #[test]

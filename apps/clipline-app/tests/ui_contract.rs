@@ -338,12 +338,14 @@ fn frontend_reports_webview_readiness_to_native_shell() {
     let js = main_js();
 
     assert!(
-        app.contains("fn frontend_ready()") && app.contains("frontend_ready,"),
-        "Rust shell must expose a lightweight frontend_ready command"
+        app.contains("fn frontend_ready(startup_warnings:") && app.contains("frontend_ready,"),
+        "Rust shell must expose frontend_ready with durable startup diagnostics"
     );
     assert!(
-        js.contains("invoke(\"frontend_ready\")"),
-        "main.js must report readiness once the frontend JavaScript boots"
+        js.contains("invoke(\"frontend_ready\")")
+            && js.contains("Array.isArray(warnings)")
+            && js.contains("warnings.join(\" \")"),
+        "main.js must report readiness and render queued startup diagnostics"
     );
 }
 

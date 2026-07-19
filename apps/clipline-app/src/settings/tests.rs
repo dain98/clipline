@@ -1117,6 +1117,127 @@ fn temporary_settings_paths_are_unique_per_save_attempt() {
 }
 
 #[test]
+fn startup_defaults_quietly_only_when_primary_and_backup_are_missing() {
+    let dir = TestDir::new("clipline-settings", "startup-first-run");
+    let path = dir.path().join("settings.json");
+
+    let loaded = AppSettings::load_for_startup_from(&path);
+
+    assert_eq!(loaded.settings, AppSettings::default());
+    assert!(loaded.warnings.is_empty());
+}
+
+#[test]
+fn save_preserves_previous_valid_settings_as_last_known_good_backup() {
+    let dir = TestDir::new("clipline-settings", "last-known-good");
+    let path = dir.path().join("settings.json");
+    let backup = dir.path().join("settings.json.bak");
+    let previous = AppSettings {
+        close_to_tray: false,
+        ..AppSettings::default()
+    };
+    let current = AppSettings {
+        minimize_to_tray: true,
+        ..previous.clone()
+    };
+    previous.save_to(&path).unwrap();
+
+    current.save_to(&path).unwrap();
+
+    assert_eq!(AppSettings::load_from(&path).unwrap(), current);
+    assert_eq!(AppSettings::load_from(&backup).unwrap(), previous);
+}
+
+#[test]
+fn startup_quarantines_invalid_primary_and_recovers_last_known_good_backup() {
+    let dir = TestDir::new("clipline-settings", "recover-backup");
+    let path = dir.path().join("settings.json");
+    let recovered = AppSettings {
+        close_to_tray: false,
+        ..AppSettings::default()
+    };
+    recovered.save_to(&path).unwrap();
+    AppSettings {
+        minimize_to_tray: true,
+        ..recovered.clone()
+    }
+    .save_to(&path)
+    .unwrap();
+    std::fs::write(&path, "{ definitely not JSON").unwrap();
+
+    let loaded = AppSettings::load_for_startup_from(&path);
+
+    assert_eq!(loaded.settings, recovered);
+    assert_eq!(loaded.warnings.len(), 1);
+    assert!(loaded.warnings[0].contains("recovered"));
+    assert!(!path.exists());
+    assert!(std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("settings.json.corrupt.")
+    }));
+}
+
+#[test]
+fn startup_quarantines_invalid_primary_before_using_visible_safe_defaults() {
+    let dir = TestDir::new("clipline-settings", "recover-defaults");
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, "[]").unwrap();
+
+    let loaded = AppSettings::load_for_startup_from(&path);
+
+    assert_eq!(loaded.settings, AppSettings::default());
+    assert_eq!(loaded.warnings.len(), 1);
+    assert!(loaded.warnings[0].contains("safe defaults"));
+    assert!(loaded.warnings[0].contains("preserved"));
+    assert!(!path.exists());
+}
+
+#[test]
+fn startup_leaves_unreadable_primary_untouched_while_recovering_backup() {
+    let dir = TestDir::new("clipline-settings", "unreadable-primary");
+    let path = dir.path().join("settings.json");
+    let backup = dir.path().join("settings.json.bak");
+    std::fs::create_dir(&path).unwrap();
+    let recovered = AppSettings {
+        minimize_to_tray: true,
+        ..AppSettings::default()
+    };
+    recovered.save_to(&backup).unwrap();
+
+    let loaded = AppSettings::load_for_startup_from(&path);
+
+    assert_eq!(loaded.settings, recovered);
+    assert_eq!(loaded.warnings.len(), 1);
+    assert!(loaded.warnings[0].contains("left untouched"));
+    assert!(path.is_dir());
+}
+
+#[test]
+fn save_refuses_to_overwrite_invalid_existing_primary_or_backup() {
+    let dir = TestDir::new("clipline-settings", "block-invalid-overwrite");
+    let path = dir.path().join("settings.json");
+    let backup = dir.path().join("settings.json.bak");
+    let last_known_good = AppSettings {
+        close_to_tray: false,
+        ..AppSettings::default()
+    };
+    last_known_good.save_to(&backup).unwrap();
+    std::fs::write(&path, "broken but recoverable").unwrap();
+
+    let error = AppSettings::default().save_to(&path).unwrap_err();
+
+    assert!(error.contains("refusing to overwrite"));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "broken but recoverable"
+    );
+    assert_eq!(AppSettings::load_from(&backup).unwrap(), last_known_good);
+}
+
+#[test]
 fn uploaded_processing_status_survives_cloud_settings_normalization() {
     let mut cloud = CloudSettings::default();
     cloud.uploads.insert(

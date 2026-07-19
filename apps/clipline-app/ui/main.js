@@ -612,7 +612,13 @@ syncPlayState();
 syncVolume();
 syncAllRangeProgress();
 function reportFrontendReady() {
-  invoke("frontend_ready").catch((e) => console.warn("frontend_ready failed:", e));
+  invoke("frontend_ready")
+    .then((warnings) => {
+      if (Array.isArray(warnings) && warnings.length) {
+        $("error").textContent = warnings.join(" ");
+      }
+    })
+    .catch((e) => console.warn("frontend_ready failed:", e));
 }
 async function loadInitialSettings() {
   await loadGamePlugins();
