@@ -14,7 +14,7 @@ standalone release from silently shipping a stale or mismatched WebView2 Fixed V
 - [ ] Extend the repository-security contract to reject `audiopus_sys` 0.1, require every allowed
   duplicate major to name its owner, rationale, review date, and removal condition, and require a
   WebView2 runtime manifest whose version matches both standalone Tauri paths; run it red.
-- [ ] Upgrade all first-party `audiopus` users together to the maintained sys binding and retain the
+- [ ] Upgrade all first-party Opus users together to a maintained binding and retain the
   existing Opus encode/decode, MP4 mux, mix, trim, and capture regression coverage.
 - [ ] Record the two `reqwest` majors as a narrow temporary exception: first-party and the pinned
   cloud API stay on 0.12 while Tauri's updater owns 0.13, with a quarterly review and a concrete
@@ -32,7 +32,7 @@ standalone release from silently shipping a stale or mismatched WebView2 Fixed V
 ## Invariants
 
 - [ ] No selected package depends on unmaintained `audiopus_sys` 0.1.x.
-- [ ] One reviewed `audiopus` release is selected everywhere and its encode/decode API remains
+- [ ] One reviewed Opus binding is selected everywhere and its encode/decode API remains
   compatible with Clipline's 48 kHz stereo Opus-in-MP4 pipeline.
 - [ ] Duplicate dependency majors are never silent: each has an owner, rationale, review deadline,
   upstream/removal condition, and only the exact allowed major versions.

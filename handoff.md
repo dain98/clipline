@@ -4,6 +4,34 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): owned dependency and fixed-runtime maintenance
+
+The combined audit's L-12 is fixed. The abandoned `audiopus`/`audiopus_sys` pair is gone. Capture,
+MP4 mixing/remux, and app fixtures now share `shiguredo_opus` 2026.1.0 with libopus 1.6.1. Clipline
+carries a narrow Apache-2.0 controlled fork because that release publishes `opus.lib` for Windows
+while its build script expects `libopus.a`. The fork chooses the correct platform filename and
+embeds the reviewed Windows plus Ubuntu 22.04/24.04 artifact hashes; it refuses unknown targets or
+changed artifacts. Provenance, exact patches, owner, review deadline, and removal conditions are
+recorded beside the fork and in `docs/dependency-policy.json`.
+
+The two `reqwest` release lines cannot safely converge in this repository today: Clipline and the
+pinned cloud API use 0.12, while `tauri-plugin-updater` owns 0.13. The exact split is now a quarterly
+expiring exception with an upstream convergence trigger. Moving one first-party caller alone would
+retain both stacks; downgrading the updater would discard current fixes.
+
+The standalone WebView2 runtime now has a machine-readable version/review manifest and a release
+preflight. The script rejects manifest/Tauri path drift, review windows beyond 30 days, overdue
+reviews, and a missing staged `msedgewebview2.exe`. The repository contract also expires the review
+automatically in CI. Every standalone release must review the official Fixed Version release and
+regress H.264/Opus playback plus HEVC/AV1 capability detection.
+
+Plan commit `c6aae09`; implementation commit `706d329`. The fresh build passed 401 app tests, 190
+capture tests, 109 MP4 tests, all remaining workspace tests, and warning-denied workspace Clippy.
+RustSec reports zero vulnerabilities and 18 informational unmaintained warnings, down from 19.
+Computer Use verified the rebuilt nine-clip Library and active H.264/Opus playback advancing from
+0:00 to 0:09. The final acceptance list contains the standalone installer/runtime/update test that
+requires release staging; existing real capture/export tests cover the new Opus codec boundary.
+
 ## Checkpoint (2026-07-18): reproducible dependency security gates
 
 The combined audit's L-11 is fixed. `anyhow` is locked to 1.0.103, clearing
@@ -1106,7 +1134,7 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
 2. **MFT H.264 encoder** — async hardware MFT (AMF on the dev box), GPU NV12 path, AVCC out
-3. **WASAPI loopback audio** — system audio → real Opus (audiopus), silence gap fill
+3. **WASAPI loopback audio** — system audio → real Opus (`shiguredo_opus`), silence gap fill
 4. **A/V sync hardening** — stamp-derived MP4 timeline, one shared clock, `avsync` validator
    (real-engine test: −8.3 ms total drift)
 5. **Tauri shell** — `apps/clipline-app`: tray app, replay-buffer service thread, **Alt+F10**
@@ -1628,7 +1656,7 @@ Recent fixes (2026-06-25):
   silent uploads or missing mic audio. Cloud uploads now replace two-or-more selected audio tracks
   with one native mixed Opus track while stream-copying video, and clipboard copy uses the same
   selected-audio compatibility export under `%APPDATA%\Clipline\share-exports` before setting
-  CF_HDROP. This is native `audiopus` decode/mix/re-encode inside `clipline-mp4`; users do not
+  CF_HDROP. This is native `shiguredo_opus` decode/mix/re-encode inside `clipline-mp4`; users do not
   need FFmpeg installed for multi-track upload/share audio. The mixer preserves the source Opus
   pre-skip, averages overlapping tracks to avoid hard clipping, and streams slot-by-slot instead of
   buffering all decoded PCM. Share-preview/export cache writes use unique sibling temp files and
