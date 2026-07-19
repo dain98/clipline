@@ -4,7 +4,7 @@
 //! uploads are used only when discovery and the create-upload response both
 //! advertise the required capability.
 
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path};
 
 use bytes::Bytes;
 use clipline_cloud_api::{
@@ -322,6 +322,7 @@ where
         .await
         .map_err(|error| upload_file_error("read upload metadata", path, error))?
         .len();
+    validate_missing_parts(&progress.missing_parts, file_size, upload.part_size_bytes)?;
     for part_number in progress.missing_parts {
         let chunk =
             read_chunk_for_part(path, file_size, upload.part_size_bytes, part_number).await?;
@@ -358,6 +359,8 @@ where
         .map_err(|error| upload_file_error("read upload metadata", path, error))
         .map_err(DirectUploadError::Cloud)?
         .len();
+    validate_missing_parts(&progress.missing_parts, file_size, upload.part_size_bytes)
+        .map_err(DirectUploadError::Cloud)?;
     for part_number in progress.missing_parts {
         let chunk = read_chunk_for_part(path, file_size, upload.part_size_bytes, part_number)
             .await
@@ -823,6 +826,51 @@ async fn read_chunk_for_part(
     Ok(Bytes::from(bytes))
 }
 
+fn validate_missing_parts(
+    missing_parts: &[u16],
+    file_size: u64,
+    part_size_bytes: u64,
+) -> CloudApiResult<()> {
+    if part_size_bytes == 0 {
+        return Err(CloudApiError::InvalidUpload(
+            "part size must be positive".to_string(),
+        ));
+    }
+    if part_size_bytes > MAX_UPLOAD_PART_BYTES {
+        return Err(CloudApiError::InvalidUpload(format!(
+            "server part size {part_size_bytes} exceeds the {} byte client limit",
+            MAX_UPLOAD_PART_BYTES
+        )));
+    }
+
+    let total_parts = file_size.div_ceil(part_size_bytes);
+    if total_parts > u64::from(u16::MAX) {
+        return Err(CloudApiError::InvalidUpload(format!(
+            "upload requires {total_parts} parts, exceeding the protocol limit"
+        )));
+    }
+
+    let mut seen = BTreeSet::new();
+    for &part_number in missing_parts {
+        if part_number == 0 {
+            return Err(CloudApiError::InvalidUpload(
+                "part numbers start at 1".to_string(),
+            ));
+        }
+        if u64::from(part_number) > total_parts {
+            return Err(CloudApiError::InvalidUpload(format!(
+                "part {part_number} starts beyond the upload file"
+            )));
+        }
+        if !seen.insert(part_number) {
+            return Err(CloudApiError::InvalidUpload(format!(
+                "server returned duplicate part {part_number}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn upload_file_error(action: &str, path: &Path, error: std::io::Error) -> CloudApiError {
     CloudApiError::InvalidUpload(format!("{action} {path:?}: {error}"))
 }
@@ -898,6 +946,30 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("exceeds"), "{error}");
+    }
+
+    #[test]
+    fn multipart_work_list_rejects_zero_duplicates_and_out_of_range_parts() {
+        let zero = validate_missing_parts(&[0], 6, 3).unwrap_err();
+        assert!(zero.to_string().contains("start at 1"), "{zero}");
+
+        let duplicate = validate_missing_parts(&[1, 2, 1], 6, 3).unwrap_err();
+        assert!(
+            duplicate.to_string().contains("duplicate part 1"),
+            "{duplicate}"
+        );
+
+        let out_of_range = validate_missing_parts(&[3], 6, 3).unwrap_err();
+        assert!(
+            out_of_range.to_string().contains("beyond"),
+            "{out_of_range}"
+        );
+    }
+
+    #[test]
+    fn multipart_work_list_preserves_valid_resumable_subset() {
+        validate_missing_parts(&[3, 1], 7, 3).unwrap();
+        validate_missing_parts(&[], 7, 3).unwrap();
     }
 
     const TOKEN: &str = "device-token";
