@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): backend-owned filesystem authority
+
+The combined audit's L-09 is fixed. Changing the media root now requires an exact, transient
+authorization issued by the native folder picker; renderer text alone cannot grant a new root.
+The picker starts from the persisted backend setting rather than a renderer-provided path, and
+validation rejects filesystem/drive roots plus the Windows profile, Windows, ProgramData, and
+Program Files roots. Authorization remains retryable after an unrelated save failure and is
+consumed only after the settings/runtime/storage transaction commits.
+
+The asset protocol no longer has static or runtime recursive directory grants. Library MP4s,
+generated poster JPEGs, Cloud cache files, and audio previews are canonicalized, containment- and
+extension-checked, then granted one exact file at a time. Custom-game icon extraction now accepts a
+process id, re-enumerates running windows in the backend, and only passes an existing canonical
+local `.exe` to Windows Shell APIs; renderer paths, UNC paths, and device paths are rejected.
+
+Plan commit `03a8776`; implementation commit `f80117b`. The app suite has 401 tests and 74 UI
+contracts, including native-folder authorization, sensitive-root rejection, local executable path
+validation, and exact-scope ownership. Fresh-cache app Clippy, CI-mode workspace tests, and
+workspace Clippy pass with warnings denied. Computer Use verified all nine local posters, live clip
+playback, the backend-rooted native folder picker with cancellation, and backend-enumerated custom
+game windows without modifying settings or media.
+
 ## Checkpoint (2026-07-18): explicit origin-bound plain HTTP consent
 
 The combined audit's L-08 is fixed. Entering a plain-HTTP Clipline Cloud URL now reveals an
