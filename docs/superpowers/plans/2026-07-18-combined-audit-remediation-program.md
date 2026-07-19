@@ -41,6 +41,7 @@ Additional completed findings:
 - [ ] M-20 — reserved custom-ID namespace, deterministic legacy collision aliases, and typed built-in/custom runtime identity (`2d0a33f`)
 - [ ] M-21 — durable unique-file media-root probe, verified fallback, and resolved Library/playback scope (`410a7da`)
 - [ ] M-22 — latest-generation local snapshots, mutation invalidation, and caught event refresh failures (`9cebaf5`)
+- [ ] M-23 — verified multithread protection at every caller-provided shared D3D11 boundary (`fe55590`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
 

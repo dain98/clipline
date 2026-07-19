@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): enforced shared D3D11 synchronization
+
+The combined audit's M-23 is fixed. The Windows D3D wrapper now has one idempotent guard that casts
+to `ID3D10Multithread`, enables protection when absent, and verifies the device reports protection
+before returning. Clipline-created hardware and WARP devices use that same guard instead of a
+separate unchecked setter.
+
+Every safe boundary that accepts and then shares a caller-provided D3D11 device now establishes the
+invariant before immediate-context work: WGC and DXGI capture construction, D3D video-processor
+conversion, NV12/BGRA readback, GPU and CPU FFmpeg encoder construction, and the D3D-aware Media
+Foundation encoder. Query/enable failures propagate through the existing capture, Windows, or
+encoder error type instead of proceeding with an undocumented concurrency precondition.
+
+Plan commit `fe22cca`; implementation commit `fe55590`. The capture suite now has 187 unit tests.
+A WARP test starts from deliberately disabled protection and covers enable/idempotence; the public
+BGRA readback test proves that boundary repairs the same device. On the real interactive desktop,
+the caller-provided WGC constructor also restored deliberately disabled protection and captured a
+frame. Fresh-cache capture Clippy, CI-mode workspace tests (393 app tests), and workspace Clippy pass
+with warnings denied. Computer Use verified normal startup with all nine clips visible. No new
+manual-only item remains beyond the existing Windows capture lifecycle acceptance scenario.
+
 ## Checkpoint (2026-07-18): generation-safe local Library refreshes
 
 The combined audit's M-22 is fixed. Every local `list_clips` request now owns a monotonically newer
