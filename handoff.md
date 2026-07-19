@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): Windows capture lifecycle contracts
+
+The combined audit's M-14 is fixed. Per-process WASAPI loopback no longer requests event-callback
+mode and then ignores the registered event. It now uses the supported shared pull model with
+loopback/autoconversion flags and a one-second device buffer, matching Clipline's endpoint polling
+headroom. The existing recorder cadence drains it every video step, including duplicate frames for
+an idle WGC source. Unused event creation, registration, handle storage, and teardown are removed.
+
+WGC now registers `GraphicsCaptureItem.Closed` and retains both the `Closed` and `FrameArrived`
+tokens. Target closure atomically marks the bounded queue closed, discards queued stale textures,
+wakes a blocked receiver, and rejects later frame callbacks even though their sender clones remain
+alive. The handlers are revoked during teardown. `next_frame_timeout` reports the closed channel as
+end-of-stream, which `CadencedCapture` propagates instead of manufacturing another frozen frame.
+
+Plan commit `4a8112e`; implementation commit `e3190a0`. The 178 capture tests include pull-mode
+configuration, a real process-loopback start/poll/drop smoke, explicit queue close with retained
+callback senders, and blocked-receiver wakeup; the app suite adds cadence closure propagation for
+385 tests. Fresh-cache capture/app Clippy, CI-mode workspace tests, and workspace Clippy pass with
+warnings denied. Computer Use verified normal startup with all nine clips at 6.4 MB. Continuous
+real process audio during a static image and closing a live captured window are on the final manual
+acceptance list because they require actual Windows audio and capture-item events.
+
 ## Checkpoint (2026-07-18): bounded pending audio and clock discontinuities
 
 The combined audit's M-13 is fixed. The recorder now reserves encoded payload bytes for every
