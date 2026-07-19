@@ -416,11 +416,12 @@ fn elevated_game_hotkey_warning_offers_opt_in_restart_once_per_process() {
     }
     assert!(
         js.contains("elevated_hotkeys_blocked")
+            && warning.contains("game.process_instance_id")
             && js.contains("warnedElevatedGameProcesses")
             && js.contains("invoke(\"restart_as_administrator\")")
             && warning.contains("if (dialog.open && !elevationRestartInFlight) dialog.close();")
             && js.contains("addEventListener(\"close\", () => maybeWarnElevatedGame(activeDetectedGame))"),
-        "game detection must warn once per elevated PID, close stale warnings, and invoke only the explicit restart command"
+        "game detection must warn once per process instance, close stale warnings, and invoke only the explicit restart command"
     );
     assert!(
         css.contains("#elevation-dialog"),
@@ -439,8 +440,8 @@ fn cancelled_uac_restart_keeps_elevation_dialog_open_for_retry() {
     let catch_body = &restart[catch_start..];
 
     assert!(
-        warning.contains("warnedElevatedGameProcesses.has(processId)"),
-        "elevation warnings must remain once-per-PID after an intentional dismiss"
+        warning.contains("warnedElevatedGameProcesses.has(processInstanceId)"),
+        "elevation warnings must remain once per process instance after an intentional dismiss"
     );
     assert!(
         catch_body.contains("button.disabled = false")
@@ -469,9 +470,9 @@ fn elevation_restart_restores_retry_if_dialog_closed_during_uac() {
     );
     assert!(
         catch_body.contains("if (!dialog.open)")
-            && catch_body.contains("warnedElevatedGameProcesses.delete(processId)")
+            && catch_body.contains("warnedElevatedGameProcesses.delete(processInstanceId)")
             && catch_body.contains("maybeWarnElevatedGame(activeDetectedGame)"),
-        "if the elevation dialog was closed while UAC was showing, failure must clear the warned PID and re-offer the warning"
+        "if the elevation dialog was closed while UAC was showing, failure must clear the warned process instance and re-offer the warning"
     );
 }
 

@@ -602,11 +602,11 @@ function maybeWarnElevatedGame(game) {
     if (dialog.open && !elevationRestartInFlight) dialog.close();
     return;
   }
-  const processId = Number(game.process_id);
-  if (!Number.isFinite(processId) || warnedElevatedGameProcesses.has(processId)) return;
+  const processInstanceId = String(game.process_instance_id || "");
+  if (!processInstanceId || warnedElevatedGameProcesses.has(processInstanceId)) return;
   if (dialog.open) return;
 
-  warnedElevatedGameProcesses.add(processId);
+  warnedElevatedGameProcesses.add(processInstanceId);
   $("elevation-game-name").textContent = game.name || game.exe_name || "This game";
   dialog.showModal();
 }
@@ -636,8 +636,10 @@ async function restartAsAdministrator() {
     button.textContent = "Restart as Administrator";
     $("error").textContent = String(error);
     if (!dialog.open) {
-      const processId = Number(activeDetectedGame && activeDetectedGame.process_id);
-      if (Number.isFinite(processId)) warnedElevatedGameProcesses.delete(processId);
+      const processInstanceId = String(
+        (activeDetectedGame && activeDetectedGame.process_instance_id) || "",
+      );
+      if (processInstanceId) warnedElevatedGameProcesses.delete(processInstanceId);
     }
   } finally {
     elevationRestartInFlight = false;

@@ -4,18 +4,27 @@ use std::ffi::{c_void, OsStr};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, FILETIME, HANDLE,
+};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, WaitForSingleObject, INFINITE, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetProcessTimes, OpenProcess, OpenProcessToken, WaitForSingleObject, INFINITE,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 const ELEVATED_AFTER_ARGUMENT: &str = "--clipline-elevated-after";
 const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProcessIdentity {
+    process_id: u32,
+    creation_time: u64,
+}
 
 struct OwnedHandle(HANDLE);
 
@@ -68,19 +77,29 @@ pub fn process_is_elevated(process_id: u32) -> Result<bool, String> {
     Ok(elevation.TokenIsElevated != 0)
 }
 
+pub fn process_instance_id(process_id: u32) -> Result<String, String> {
+    let identity = query_process_identity(process_id)?;
+    Ok(format!(
+        "{}:{}",
+        identity.process_id, identity.creation_time
+    ))
+}
+
 /// Launch the current executable through the UAC `runas` verb. The elevated
-/// child waits for `parent_process_id` before starting Tauri, so the existing
-/// single-instance owner is gone before the replacement claims it.
+/// child verifies and waits for that exact process instance before starting
+/// Tauri, so the existing single-instance owner is gone before the replacement
+/// claims it.
 pub fn launch_elevated_after(parent_process_id: u32) -> Result<(), String> {
     let executable = std::env::current_exe()
         .map_err(|e| format!("locate Clipline executable for administrator restart: {e}"))?;
-    launch_elevated_executable(&executable, parent_process_id)
+    let parent = query_process_identity(parent_process_id)?;
+    launch_elevated_executable(&executable, parent)
 }
 
-fn launch_elevated_executable(executable: &Path, parent_process_id: u32) -> Result<(), String> {
+fn launch_elevated_executable(executable: &Path, parent: ProcessIdentity) -> Result<(), String> {
     let verb = wide("runas");
     let executable = wide_os(executable.as_os_str());
-    let parameters = wide(&elevation_restart_parameters(parent_process_id));
+    let parameters = wide(&elevation_restart_parameters(parent));
     let result = unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
@@ -101,13 +120,13 @@ fn launch_elevated_executable(executable: &Path, parent_process_id: u32) -> Resu
 }
 
 pub fn wait_for_elevation_parent_from_args() -> Result<(), String> {
-    let Some(parent_process_id) = elevation_parent_from_args(std::env::args())? else {
+    let Some(parent) = elevation_parent_from_args(std::env::args())? else {
         return Ok(());
     };
-    wait_for_process_exit(parent_process_id)
+    wait_for_process_exit(parent)
 }
 
-fn elevation_parent_from_args<I>(args: I) -> Result<Option<u32>, String>
+fn elevation_parent_from_args<I>(args: I) -> Result<Option<ProcessIdentity>, String>
 where
     I: IntoIterator,
     I::Item: AsRef<str>,
@@ -124,21 +143,44 @@ where
             .as_ref()
             .parse::<u32>()
             .map_err(|_| format!("invalid parent process id: {}", raw.as_ref()))?;
-        return Ok(Some(process_id));
+        let raw_creation_time = args
+            .next()
+            .ok_or_else(|| format!("{ELEVATED_AFTER_ARGUMENT} requires a creation timestamp"))?;
+        let creation_time = raw_creation_time.as_ref().parse::<u64>().map_err(|_| {
+            format!(
+                "invalid parent process creation timestamp: {}",
+                raw_creation_time.as_ref()
+            )
+        })?;
+        return Ok(Some(ProcessIdentity {
+            process_id,
+            creation_time,
+        }));
     }
     Ok(None)
 }
 
-fn wait_for_process_exit(process_id: u32) -> Result<(), String> {
-    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, process_id) };
+fn wait_for_process_exit(parent: ProcessIdentity) -> Result<(), String> {
+    let process = unsafe {
+        OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            parent.process_id,
+        )
+    };
     if process.is_null() {
-        return parent_open_failure(process_id, unsafe { GetLastError() });
+        return parent_open_failure(parent.process_id, unsafe { GetLastError() });
     }
     let process = OwnedHandle(process);
+    let actual = process_identity_from_handle(parent.process_id, process.0)?;
+    if !process_identity_matches(parent, actual) {
+        return Ok(());
+    }
     let result = unsafe { WaitForSingleObject(process.0, INFINITE) };
     if result == u32::MAX {
         return Err(last_error(format!(
-            "wait for Clipline process {process_id}"
+            "wait for Clipline process {}",
+            parent.process_id
         )));
     }
     Ok(())
@@ -156,8 +198,44 @@ fn parent_open_failure(process_id: u32, error_code: u32) -> Result<(), String> {
     }
 }
 
-fn elevation_restart_parameters(parent_process_id: u32) -> String {
-    format!("{ELEVATED_AFTER_ARGUMENT} {parent_process_id}")
+fn elevation_restart_parameters(parent: ProcessIdentity) -> String {
+    format!(
+        "{ELEVATED_AFTER_ARGUMENT} {} {}",
+        parent.process_id, parent.creation_time
+    )
+}
+
+fn query_process_identity(process_id: u32) -> Result<ProcessIdentity, String> {
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if process.is_null() {
+        return Err(last_error(format!("open process {process_id}")));
+    }
+    let process = OwnedHandle(process);
+    process_identity_from_handle(process_id, process.0)
+}
+
+fn process_identity_from_handle(
+    process_id: u32,
+    process: HANDLE,
+) -> Result<ProcessIdentity, String> {
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    if unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+        return Err(last_error(format!(
+            "query process creation time {process_id}"
+        )));
+    }
+    Ok(ProcessIdentity {
+        process_id,
+        creation_time: (u64::from(creation.dwHighDateTime) << 32)
+            | u64::from(creation.dwLowDateTime),
+    })
+}
+
+fn process_identity_matches(expected: ProcessIdentity, actual: ProcessIdentity) -> bool {
+    expected == actual
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -178,12 +256,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn elevated_restart_argument_round_trips_parent_process() {
-        let parameters = elevation_restart_parameters(4242);
+    fn elevated_restart_argument_round_trips_parent_process_instance() {
+        let parent = ProcessIdentity {
+            process_id: 4242,
+            creation_time: 987_654_321,
+        };
+        let parameters = elevation_restart_parameters(parent);
         let args = ["clipline-app.exe", parameters.as_str()]
             .into_iter()
             .flat_map(str::split_whitespace);
-        assert_eq!(elevation_parent_from_args(args).unwrap(), Some(4242));
+        assert_eq!(elevation_parent_from_args(args).unwrap(), Some(parent));
+    }
+
+    #[test]
+    fn recycled_parent_pid_does_not_match_original_process_instance() {
+        let original = ProcessIdentity {
+            process_id: 4242,
+            creation_time: 100,
+        };
+        let recycled = ProcessIdentity {
+            process_id: 4242,
+            creation_time: 200,
+        };
+
+        assert!(!process_identity_matches(original, recycled));
     }
 
     #[test]
@@ -197,6 +293,14 @@ mod tests {
     #[test]
     fn current_process_elevation_is_queryable() {
         current_process_is_elevated().expect("query this test process token");
+    }
+
+    #[test]
+    fn current_process_instance_is_queryable() {
+        let identity = query_process_identity(std::process::id())
+            .expect("query this test process creation time");
+        assert_eq!(identity.process_id, std::process::id());
+        assert_ne!(identity.creation_time, 0);
     }
 
     #[test]

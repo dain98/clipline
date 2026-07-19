@@ -70,6 +70,7 @@ struct GameDetectionEvent {
     name: Option<String>,
     window_title: Option<String>,
     process_id: Option<u32>,
+    process_instance_id: Option<String>,
     exe_name: Option<String>,
     recording_mode: Option<GameRecordingMode>,
     elevated_hotkeys_blocked: bool,
@@ -90,27 +91,48 @@ struct UpdateCheckResult {
 
 impl GameDetectionEvent {
     fn from_detected(detected: Option<&DetectedGame>) -> Self {
-        Self::from_detected_with_elevation(
+        Self::from_detected_with_process_queries(
             detected,
             crate::windows::current_process_is_elevated(),
             crate::windows::process_is_elevated,
+            crate::windows::process_instance_id,
         )
     }
 
+    #[cfg(test)]
     fn from_detected_with_elevation(
         detected: Option<&DetectedGame>,
         clipline_elevated: Result<bool, String>,
         game_is_elevated: impl FnOnce(u32) -> Result<bool, String>,
     ) -> Self {
+        Self::from_detected_with_process_queries(
+            detected,
+            clipline_elevated,
+            game_is_elevated,
+            |process_id| Ok(format!("{process_id}:test")),
+        )
+    }
+
+    fn from_detected_with_process_queries(
+        detected: Option<&DetectedGame>,
+        clipline_elevated: Result<bool, String>,
+        game_is_elevated: impl FnOnce(u32) -> Result<bool, String>,
+        process_instance_id: impl FnOnce(u32) -> Result<String, String>,
+    ) -> Self {
         match detected {
             Some(game) => {
                 let elevated_hotkeys_blocked = matches!(clipline_elevated, Ok(false))
                     && game_is_elevated(game.process_id).unwrap_or(true);
+                let process_instance_id = elevated_hotkeys_blocked.then(|| {
+                    process_instance_id(game.process_id)
+                        .unwrap_or_else(|_| format!("{}:window:{}", game.process_id, game.hwnd))
+                });
                 Self {
                     active: true,
                     name: Some(game.name.clone()),
                     window_title: Some(game.window_title.clone()),
                     process_id: Some(game.process_id),
+                    process_instance_id,
                     exe_name: Some(game.exe_name.clone()),
                     recording_mode: Some(game.recording_mode),
                     elevated_hotkeys_blocked,
@@ -121,6 +143,7 @@ impl GameDetectionEvent {
                 name: None,
                 window_title: None,
                 process_id: None,
+                process_instance_id: None,
                 exe_name: None,
                 recording_mode: None,
                 elevated_hotkeys_blocked: false,
@@ -2458,6 +2481,20 @@ mod tests {
         let inactive =
             GameDetectionEvent::from_detected_with_elevation(None, Ok(false), |_| Ok(true));
         assert!(!inactive.elevated_hotkeys_blocked);
+    }
+
+    #[test]
+    fn elevated_game_warning_carries_process_instance_identity() {
+        let game = detected_game("endfield", "Arknights: Endfield", 42);
+
+        let event = GameDetectionEvent::from_detected_with_process_queries(
+            Some(&game),
+            Ok(false),
+            |_| Ok(true),
+            |process_id| Ok(format!("{process_id}:987654321")),
+        );
+
+        assert_eq!(event.process_instance_id.as_deref(), Some("42:987654321"));
     }
 
     #[test]
