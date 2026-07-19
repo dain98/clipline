@@ -28,14 +28,18 @@ so standalone installs never update into the Evergreen installer.
 For now, publish Nightly manually from a Windows checkout:
 
 ```powershell
-# One-time per machine (and when bumping the pinned runtime): download the
-# WebView2 Fixed Version runtime and extract it where
-# tauri.standalone.conf.json expects it. Get the current x64 .cab URL from
-# https://developer.microsoft.com/en-us/microsoft-edge/webview2/ (Fixed
-# Version section), then:
+# For every standalone release, review Microsoft's current WebView2 Fixed
+# Version release even when the pinned version does not change. Update
+# webview2-fixed-runtime.json (reviewed_on/review_due_on and version when
+# needed), then download the reviewed x64 .cab from the official Fixed Version
+# section:
+# https://developer.microsoft.com/en-us/microsoft-edge/webview2/
 #   expand.exe -F:* <runtime>.cab apps\clipline-app\webview2-fixed
 # Keep the folder name (with version) in sync with tauri.standalone.conf.json
-# — both the resources glob and the webviewInstallMode path.
+# — both the resources glob and the webviewInstallMode path. The preflight
+# rejects a review older than 30 days, config drift, and a missing runtime
+# executable in the staged payload.
+.\scripts\verify-webview2-runtime.ps1 -RequirePayload
 
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content .local-secrets\clipline-updater.key -Raw
 
@@ -63,8 +67,13 @@ gh release create nightly <bundle assets> --prerelease --title "Clipline Nightly
 ```
 
 The release must include both updater metadata assets (`latest.json`,
-`latest-standalone.json`). When bumping the pinned WebView2 runtime, update
-the version in `tauri.standalone.conf.json` and re-download the runtime.
+`latest-standalone.json`). A WebView2 Fixed Version review is required for
+every standalone release and at least every 30 days. Compare the official
+release notes with the pinned version, update `webview2-fixed-runtime.json`,
+update both paths in `tauri.standalone.conf.json` when the version changes,
+stage the matching runtime, and run the preflight above. Before publication,
+play an H.264/Opus clip through its end in the standalone build and confirm the
+HEVC/AV1 capability probes still enable only codecs that the runtime can play.
 When bumping or replacing FFmpeg, update the source bundle staged by
 `scripts\stage-ffmpeg-resource.ps1`; `apps/clipline-app/ffmpeg/` is a build
 staging directory and its binaries are intentionally git-ignored.

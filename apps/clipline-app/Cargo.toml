@@ -56,7 +56,7 @@ windows-sys = { version = "0.61", features = [
 tauri-build = { version = "2", features = [] }
 
 [dev-dependencies]
-audiopus = "0.2"
+shiguredo_opus = { workspace = true }
 boa_engine = "0.21.1"
 clipline-test-utils = { path = "../../crates/clipline-test-utils" }
 httpmock = { workspace = true }

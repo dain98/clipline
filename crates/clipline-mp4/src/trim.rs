@@ -7,8 +7,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use audiopus::coder::Encoder;
-use audiopus::{Application, Channels, SampleRate};
+use shiguredo_opus::{Decoder, DecoderConfig, Encoder, EncoderConfig};
 
 use crate::walker::{children, find, walk, BoxInfo};
 use crate::{
@@ -643,18 +642,18 @@ fn mix_selected_opus_audio_tracks_to_spool<R: Read + Seek, W: Write + Seek>(
         ensure_mixable_audio_track(track)?;
     }
     let source_pre_skip = common_source_pre_skip(selected_audio_tracks)?;
-    let encoder = Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio)
+    let mut encoder = Encoder::new(EncoderConfig::new(48_000, 2))
         .map_err(|e| TrimError::Unsupported(format!("create Opus encoder for audio mix: {e}")))?;
     let encoder_pre_skip = encoder
-        .lookahead()
+        .get_lookahead()
         .map_err(|e| TrimError::Unsupported(format!("read Opus lookahead: {e}")))?;
     let pre_skip = source_pre_skip
-        .checked_add(encoder_pre_skip)
+        .checked_add(u32::from(encoder_pre_skip))
         .and_then(|value| u16::try_from(value).ok())
         .ok_or_else(|| TrimError::Unsupported("mixed Opus pre-skip is too large".into()))?;
     let mut decoders = (0..selected_audio_tracks.len())
         .map(|_| {
-            audiopus::coder::Decoder::new(SampleRate::Hz48000, Channels::Stereo).map_err(|e| {
+            Decoder::new(DecoderConfig::new(48_000, 2)).map_err(|e| {
                 TrimError::Unsupported(format!("create Opus decoder for audio mix: {e}"))
             })
         })
@@ -692,11 +691,9 @@ fn mix_selected_opus_audio_tracks_to_spool<R: Read + Seek, W: Write + Seek>(
             TrimError::Unsupported("audio mix cursor did not decode a frame".into())
         })?;
         let mixed = mix_optional_frames(&frames, duration as usize * 2)?;
-        let mut data = vec![0_u8; 4000];
-        let len = encoder
-            .encode_float(&mixed, &mut data)
+        let data = encoder
+            .encode_f32(&mixed)
             .map_err(|e| TrimError::Unsupported(format!("encode mixed Opus audio: {e}")))?;
-        data.truncate(len);
         let offset = spool.stream_position()?;
         spool.write_all(&data)?;
         samples.push(SourceSample {
@@ -728,18 +725,18 @@ fn mix_selected_opus_audio_tracks(
     }
     let source_pre_skip = common_source_pre_skip(selected_audio_tracks)?;
 
-    let encoder = Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio)
+    let mut encoder = Encoder::new(EncoderConfig::new(48_000, 2))
         .map_err(|e| TrimError::Unsupported(format!("create Opus encoder for audio mix: {e}")))?;
     let encoder_pre_skip = encoder
-        .lookahead()
+        .get_lookahead()
         .map_err(|e| TrimError::Unsupported(format!("read Opus lookahead: {e}")))?;
     let pre_skip = source_pre_skip
-        .checked_add(encoder_pre_skip)
+        .checked_add(u32::from(encoder_pre_skip))
         .and_then(|value| u16::try_from(value).ok())
         .ok_or_else(|| TrimError::Unsupported("mixed Opus pre-skip is too large".into()))?;
     let mut decoders = (0..selected_audio_tracks.len())
         .map(|_| {
-            audiopus::coder::Decoder::new(SampleRate::Hz48000, Channels::Stereo).map_err(|e| {
+            Decoder::new(DecoderConfig::new(48_000, 2)).map_err(|e| {
                 TrimError::Unsupported(format!("create Opus decoder for audio mix: {e}"))
             })
         })
@@ -777,11 +774,9 @@ fn mix_selected_opus_audio_tracks(
             TrimError::Unsupported("audio mix cursor did not decode a frame".into())
         })?;
         let mixed = mix_optional_frames(&frames, duration as usize * 2)?;
-        let mut data = vec![0u8; 4000];
-        let len = encoder
-            .encode_float(&mixed, &mut data)
+        let data = encoder
+            .encode_f32(&mixed)
             .map_err(|e| TrimError::Unsupported(format!("encode mixed Opus audio: {e}")))?;
-        data.truncate(len);
         out.push(FragSample {
             data,
             duration,
@@ -851,21 +846,18 @@ fn common_source_pre_skip(selected_audio_tracks: &[&ParsedTrack]) -> Result<u32,
 fn decode_opus_sample(
     input: &[u8],
     sample: &SampleRecord,
-    decoder: &mut audiopus::coder::Decoder,
+    decoder: &mut Decoder,
 ) -> Result<Vec<f32>, TrimError> {
     let packet = sample.to_frag_sample(input)?;
-    let mut pcm = vec![0.0f32; 5760 * 2];
-    let frames = decoder
-        .decode_float(Some(packet.data.as_slice()), pcm.as_mut_slice(), false)
-        .map_err(|e| TrimError::Unsupported(format!("decode Opus audio for mix: {e}")))?;
-    pcm.truncate(frames * 2);
-    Ok(pcm)
+    decoder
+        .decode_f32(packet.data.as_slice())
+        .map_err(|e| TrimError::Unsupported(format!("decode Opus audio for mix: {e}")))
 }
 
 fn decode_opus_sample_reader<R: Read + Seek>(
     input: &mut R,
     sample: &SampleRecord,
-    decoder: &mut audiopus::coder::Decoder,
+    decoder: &mut Decoder,
 ) -> Result<Vec<f32>, TrimError> {
     if sample.size > MAX_OPUS_PACKET_BYTES {
         return Err(TrimError::Corrupt(format!(
@@ -876,12 +868,9 @@ fn decode_opus_sample_reader<R: Read + Seek>(
     let mut packet = vec![0_u8; sample.size as usize];
     input.seek(SeekFrom::Start(sample.offset as u64))?;
     input.read_exact(&mut packet)?;
-    let mut pcm = vec![0.0_f32; 5760 * 2];
-    let frames = decoder
-        .decode_float(Some(&packet), &mut pcm, false)
-        .map_err(|e| TrimError::Unsupported(format!("decode Opus audio for mix: {e}")))?;
-    pcm.truncate(frames * 2);
-    Ok(pcm)
+    decoder
+        .decode_f32(&packet)
+        .map_err(|e| TrimError::Unsupported(format!("decode Opus audio for mix: {e}")))
 }
 
 fn mix_optional_frames(
@@ -2273,8 +2262,7 @@ fn fourcc_str(fourcc: &[u8; 4]) -> String {
 mod tests {
     use super::*;
     use crate::{AudioTrackConfig, VideoTrackConfig};
-    use audiopus::coder::{Decoder, Encoder};
-    use audiopus::{Application, Channels, SampleRate};
+    use shiguredo_opus::{Decoder, DecoderConfig, Encoder, EncoderConfig};
     use std::io::{Read, Seek, SeekFrom};
 
     #[test]
@@ -2332,8 +2320,7 @@ mod tests {
     }
 
     fn opus_audio_packets(amplitude: f32) -> Vec<FragSample> {
-        let encoder =
-            Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio).unwrap();
+        let mut encoder = Encoder::new(EncoderConfig::new(48_000, 2)).unwrap();
         (0..50)
             .map(|frame_idx| {
                 let mut pcm = Vec::with_capacity(960 * 2);
@@ -2342,9 +2329,7 @@ mod tests {
                     let sample = (t * 440.0 * std::f32::consts::TAU).sin() * amplitude;
                     pcm.extend([sample, sample]);
                 }
-                let mut encoded = vec![0u8; 4000];
-                let len = encoder.encode_float(&pcm, &mut encoded).unwrap();
-                encoded.truncate(len);
+                let encoded = encoder.encode_f32(&pcm).unwrap();
                 FragSample {
                     data: encoded,
                     duration: 960,
@@ -2375,15 +2360,11 @@ mod tests {
             TrackConfig::Audio(cfg) => cfg,
             TrackConfig::Video(_) => unreachable!("selected audio track"),
         };
-        let mut decoder = Decoder::new(SampleRate::Hz48000, Channels::Stereo).unwrap();
+        let mut decoder = Decoder::new(DecoderConfig::new(48_000, 2)).unwrap();
         let mut pcm = Vec::new();
         for sample in &audio.samples {
             let sample = sample.to_frag_sample(input).unwrap();
-            let mut decoded = vec![0.0f32; 5760 * 2];
-            let frames = decoder
-                .decode_float(Some(sample.data.as_slice()), decoded.as_mut_slice(), false)
-                .unwrap();
-            decoded.truncate(frames * 2);
+            let decoded = decoder.decode_f32(sample.data.as_slice()).unwrap();
             pcm.extend(decoded);
         }
         let skip = cfg.pre_skip as usize * cfg.channels as usize;
@@ -3301,9 +3282,8 @@ mod tests {
 
         let out = remux_with_mixed_audio_track(&input, &[0, 1]).unwrap();
         let mixed = first_audio_config(&out);
-        let encoder =
-            Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio).unwrap();
-        let expected_pre_skip = 312 + encoder.lookahead().unwrap() as u16;
+        let encoder = Encoder::new(EncoderConfig::new(48_000, 2)).unwrap();
+        let expected_pre_skip = 312 + encoder.get_lookahead().unwrap();
 
         assert_eq!(mixed.pre_skip, expected_pre_skip);
     }

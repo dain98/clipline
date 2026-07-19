@@ -396,25 +396,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "audiopus"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3743519567e9135cf6f9f1a509851cb0c8e4cb9d66feb286668afb1923bec458"
-dependencies = [
- "audiopus_sys",
-]
-
-[[package]]
-name = "audiopus_sys"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "927791de46f70facea982dbfaf19719a41ce6064443403be631a85de6a58fff9"
-dependencies = [
- "log",
- "pkg-config",
-]
-
-[[package]]
 name = "auto-launch"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -464,6 +445,8 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "itertools 0.11.0",
+ "log",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
@@ -916,7 +899,6 @@ dependencies = [
 name = "clipline-app"
 version = "0.1.36"
 dependencies = [
- "audiopus",
  "base64 0.22.1",
  "boa_engine",
  "bytes",
@@ -936,6 +918,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shiguredo_opus",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
@@ -959,10 +942,10 @@ dependencies = [
 name = "clipline-capture"
 version = "0.1.0"
 dependencies = [
- "audiopus",
  "clipline-buffer",
  "clipline-mp4",
  "clipline-test-utils",
+ "shiguredo_opus",
  "thiserror 2.0.18",
  "windows 0.62.2",
  "windows-core 0.62.2",
@@ -1018,7 +1001,7 @@ dependencies = [
 name = "clipline-mp4"
 version = "0.1.0"
 dependencies = [
- "audiopus",
+ "shiguredo_opus",
  "windows-sys 0.61.2",
 ]
 
@@ -1032,6 +1015,15 @@ dependencies = [
 [[package]]
 name = "clipline-test-utils"
 version = "0.1.0"
+
+[[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "combine"
@@ -4762,6 +4754,31 @@ dependencies = [
  "cpufeatures",
  "digest",
 ]
+
+[[package]]
+name = "shiguredo_cmake"
+version = "4.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ebe8d4ddac00dfb93edcd3edc678a743cb61601a8b5431df23d18d37f9c0d63"
+dependencies = [
+ "cmake",
+ "shiguredo_toml",
+]
+
+[[package]]
+name = "shiguredo_opus"
+version = "2026.1.0"
+dependencies = [
+ "bindgen",
+ "shiguredo_cmake",
+ "shiguredo_toml",
+]
+
+[[package]]
+name = "shiguredo_toml"
+version = "2026.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b475c218cf15d056ed3e48c9e98693135b261b79530881e63b162650b236fdec"
 
 [[package]]
 name = "shlex"

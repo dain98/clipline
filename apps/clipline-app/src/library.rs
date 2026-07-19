@@ -2086,13 +2086,12 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    use audiopus::coder::Encoder;
-    use audiopus::{Application, Channels, SampleRate};
     use clipline_events::{ClipAudioTrack, ClipPlay, EventKind, GameEvent, GameId, PlayerSummary};
     use clipline_mp4::{
         AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
     };
     use clipline_test_utils::TestDir;
+    use shiguredo_opus::{Encoder, EncoderConfig};
 
     fn marker(t_s: f64) -> ClipMarker {
         marker_with(t_s, EventKind::ChampionKill, true)
@@ -3941,8 +3940,7 @@ mod tests {
     }
 
     fn opus_audio_packets(amplitude: f32) -> Vec<FragSample> {
-        let encoder =
-            Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio).unwrap();
+        let mut encoder = Encoder::new(EncoderConfig::new(48_000, 2)).unwrap();
         (0..50)
             .map(|frame_idx| {
                 let mut pcm = Vec::with_capacity(960 * 2);
@@ -3951,9 +3949,7 @@ mod tests {
                     let sample = (t * 440.0 * std::f32::consts::TAU).sin() * amplitude;
                     pcm.extend([sample, sample]);
                 }
-                let mut encoded = vec![0u8; 4000];
-                let len = encoder.encode_float(&pcm, &mut encoded).unwrap();
-                encoded.truncate(len);
+                let encoded = encoder.encode_f32(&pcm).unwrap();
                 FragSample {
                     data: encoded,
                     duration: 960,

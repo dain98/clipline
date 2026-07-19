@@ -2,9 +2,8 @@
 //! before shipping). Fixed 20 ms stereo frames at 48 kHz — the shape both
 //! the muxer (dOps) and the WASAPI assembler agree on.
 
-use audiopus::coder::Encoder;
-use audiopus::{Application, Channels, SampleRate};
 use clipline_mp4::AudioTrackConfig;
+use shiguredo_opus::{Encoder, EncoderConfig};
 
 /// Samples per channel in one 20 ms frame at 48 kHz.
 pub const FRAME_SAMPLES: usize = 960;
@@ -18,18 +17,15 @@ pub struct OpusFrameEncoder {
 }
 
 impl OpusFrameEncoder {
-    pub fn new() -> Result<Self, audiopus::Error> {
-        let encoder = Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio)?;
-        let pre_skip = encoder.lookahead()? as u16;
+    pub fn new() -> Result<Self, shiguredo_opus::Error> {
+        let encoder = Encoder::new(EncoderConfig::new(48_000, 2))?;
+        let pre_skip = encoder.get_lookahead()?;
         Ok(Self { encoder, pre_skip })
     }
 
     /// Encode one interleaved stereo frame (`FRAME_LEN` floats).
-    pub fn encode_frame(&mut self, interleaved: &[f32]) -> Result<Vec<u8>, audiopus::Error> {
-        let mut out = vec![0u8; 4000];
-        let n = self.encoder.encode_float(interleaved, &mut out)?;
-        out.truncate(n);
-        Ok(out)
+    pub fn encode_frame(&mut self, interleaved: &[f32]) -> Result<Vec<u8>, shiguredo_opus::Error> {
+        self.encoder.encode_f32(interleaved)
     }
 
     /// Encoder lookahead in 48 kHz samples (dOps PreSkip).
