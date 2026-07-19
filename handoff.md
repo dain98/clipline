@@ -17,10 +17,10 @@ scan could grant that path.
 `export_clip` now receives the application handle, retains the validated configured media root,
 and exact-scopes the completed MP4 before returning it to the renderer. A focused UI contract first
 reproduced the missing command invariant and now requires that grant. The Library unit-test group
-passes. Plan commit `d8226f6`; all workspace tests, warning-denied workspace Clippy, and clean-cache
-warning-denied app Clippy pass. Retest by exporting a trim and opening its card immediately without
-refreshing or restarting; confirm metadata, playback, seeking, and a second reopen all work and the
-source remains playable.
+passes. Plan commit `d8226f6`; implementation commit `23f7aef`. All workspace tests,
+warning-denied workspace Clippy, and clean-cache warning-denied app Clippy pass. Retest by exporting
+a trim and opening its card immediately without refreshing or restarting; confirm metadata,
+playback, seeking, and a second reopen all work and the source remains playable.
 
 ## Checkpoint (2026-07-18): explicit application module boundaries
 
