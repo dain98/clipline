@@ -33,12 +33,14 @@ Additional completed findings:
 - [ ] M-15 — concurrent bounded probe drainage, shared child deadlines, finite encoder flush/drop, and kill-before-reader-join teardown (`8ff611e`)
 - [ ] H-05 — bounded file transforms, hashing, upload, and temporary ownership (`db86efe`)
 - [ ] M-16 — hard-link identity checks and atomic MP4 publication (`db86efe`)
+- [ ] M-17 — exact per-track fragment/edit-list timing, integer trim/remux boundaries, complete AVC/HEVC parameter arrays, and capture PTS retention (`ec6f373`)
+- [ ] L-02 — bounded MP4 scalar parsing plus release-mode public writer/config validation (`ec6f373`)
+- [ ] L-27 — reserved HEVC temporal-layer counts rejected before hvcC serialization (`ec6f373`)
+- [ ] L-28 — malformed public segment sample metadata returns `InvalidData` instead of panicking (`ec6f373`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
-- [ ] L-02 — MP4 scalar/configuration boundaries
-- [ ] L-27 — HEVC layer-count representation
-- [ ] L-28 — public segment sample slicing
+- [ ] None currently.
 
 ## Phase 1: remaining high severity
 
@@ -79,3 +81,4 @@ Accumulate only tests that require a real account, hardware, elevated game, slow
 - Credential transaction: using real Clipline Cloud and osu! credentials, connect, reconnect to a different account/user, disconnect, and restart. Confirm `settings.json` never contains a secret, Windows Credential Manager retains only the current referenced targets, and any obsolete target that could not be removed is cleaned by the next status check/startup.
 - Remote integration continuity: with real accounts and a League match, load the Cloud library/profile/avatar, run the osu! connection test and recent-play enrichment, and record League markers. Briefly interrupt networking or the local League endpoint during each flow; confirm commands fail within their documented timeout instead of hanging, retry succeeds after recovery, large uploads/downloads continue while making progress, and the Cloud library reports truncation if the server exposes more than 10,000 unique clips. Keep the League interruption under twenty seconds and confirm it neither splits the match/session nor duplicates earlier markers, then start another match after `GameEnd` and confirm its low event IDs are accepted into a new session.
 - Windows capture lifecycle: configure split per-process output audio for a windowed app/game that can keep playing sound while its image is static. Record at least one minute of that idle visual, save a replay, and confirm the selected process audio is continuous with no dropouts. Start another recording of that window, close the target, and confirm recording stops promptly instead of extending a frozen last frame; then reopen the target and confirm a fresh recording starts normally.
+- Delayed/gapped audio export: record four or more seconds from an app whose sound starts after the video, stops for at least one second, then resumes. Save a replay, export it with that audio track selected, and trim across both silent intervals. In each result, confirm playback begins silently, sound starts at the same visual moment as the source, the middle silence remains the same length, resumed sound stays synchronized, and no click or early packet is pulled to the trim boundary.

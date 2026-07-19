@@ -4,6 +4,36 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): lossless MP4 track timing and codec arrays
+
+The combined audit's M-17 is fixed, along with the pending L-02/L-27/L-28 overlaps. The hybrid
+writer now accepts checked absolute per-track decode times, emits those times in fragmented
+`tfdt` boxes, and records presentation runs separately from contiguous media samples. Finalized
+files use versioned edit lists for leading and internal silence/blank spans; the 720 kHz movie
+clock exactly represents Clipline's 90 kHz video and 48 kHz Opus clocks. Track and movie durations
+cover the real presentation end while `mdhd` continues to describe encoded media duration.
+
+Finalized-file parsing maps supported version-0/1 edit lists back to integer presentation ticks and
+rejects rate-adjusted, negative, overlapping, backward, or mid-sample edits. Trim snaps and selects
+on integer/rational boundaries, rebases each retained track to the aligned video origin, and keeps
+later gaps. All in-memory, file-backed, selected-audio, and mixed-audio remux paths write contiguous
+runs at their original times. Replay segments now retain each audio track's first packet PTS in RAM
+and disk storage; replay and full-session output use those stamps, including audio-empty GOPs and
+later discontinuities. Cumulative endpoint quantization prevents per-frame rounding drift.
+
+H.264 and HEVC configs now retain every SPS/PPS/VPS entry through `avcC`/`hvcC` parse, trim, and
+remux while singleton encoder constructors stay ergonomic. Writer configuration is validated before
+output mutation, scalar reads cannot borrow bytes from sibling boxes, reserved eight-layer HEVC
+metadata is rejected, and malformed public sample metadata returns `InvalidData` instead of
+panicking.
+
+Plan commit `d694c69`; implementation commit `ec6f373`. Focused results: 109 MP4 tests, 17 buffer
+tests, and 186 capture tests. CI-mode workspace tests (385 app tests) and fresh/workspace Clippy pass
+with warnings denied. Deterministic fixtures cover delayed onset, an empty audio GOP, an internal
+gap, replay/full-session edit lists, integer trim rebasing, malformed edits, complete multi-parameter
+arrays, and Opus pre-skip continuity. One real playback acceptance item was added for delayed/gapped
+audio export.
+
 ## Checkpoint (2026-07-18): bounded FFmpeg subprocess lifecycle
 
 The combined audit's M-15 is fixed. Probe commands now start a named stdout reader immediately,
@@ -1517,10 +1547,12 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   repeated relative seeks on the queued target rather than stale `video.currentTime`.
 - **Long finalized MP4s need version-1 duration boxes:** `mvhd`, `tkhd`, and each `mdhd` must switch
   independently when its duration exceeds `u32::MAX`; use a `u128` intermediate when rescaling.
-- The MP4 timeline is **duration-cumulative**: video durations are re-derived from capture
-  stamps at GOP seal; audio gaps become silence (`pcm.rs`); audio recorded before the first
-  video packet is dropped (engine-init lead-in shifted video ~63 ms early before the fix —
-  `avsync::validate_timeline` caught it on its first real run).
+- MP4 sample tables keep encoded media contiguous, while per-track presentation gaps are explicit:
+  fragments carry absolute `tfdt` values and finalized tracks use `elst` empty/media runs. The
+  720 kHz movie clock exactly covers the 90 kHz video and 48 kHz Opus clocks. Video durations are
+  re-derived from capture stamps and quantized by cumulative endpoints; each audio segment retains
+  its first packet PTS. Audio before the first video packet remains engine-init lead-in and is
+  dropped.
 - WASAPI loopback requires a **48 kHz float mix format** (resampler is a follow-up); loopback
   goes quiet when nothing renders — that's why the gap fill exists.
 - One D3D device and one `RelativeClock` must be shared across capture/encode/audio —
@@ -1549,10 +1581,10 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 - AMF **rejects tiny resolutions** (`Init() failed with error 5` at 128×72) — the probe
   test-encodes at 640×360. SVT-AV1 **errors on `-maxrate`/`-bufsize`** (exit -22): CBR capping is
   hardware-only; SVT-AV1 gets `-b:v` + `-preset 8` (VBR-ish; the ring evicts by bytes anyway).
-- Access-unit framing assumes **one slice per picture** (the hardware-encoder default at our
-  resolutions). H.264/HEVC keyframes are detected from the bitstream (IDR / IRAP); **AV1 keyframes
-  are positional** (`frame_index % gop_frames == 0`) because IVF carries no keyframe flag — so
-  scene-cut keyframes must stay disabled (they are: fixed `-g`, no scenecut flags).
+- Access-unit framing recognizes first-slice and AUD boundaries so multi-slice H.264/HEVC pictures
+  remain one sample; keyframes come from IDR/IRAP NALs. AV1 keyframe state comes from the encoded
+  frame header rather than output position. Input/output timestamp cardinality is strict for every
+  codec.
 - `EncoderBackend::MfSoftware` is modeled by the probe but **not instantiable** — `MftH264Encoder`
   only enumerates hardware MFTs. The candidate walk skips it; wiring the sync software MFT (CPU
   input, no D3D manager) is a follow-up. With no hardware H.264 and no ffmpeg, recording errors
