@@ -56,6 +56,7 @@ Additional completed findings:
 - [ ] L-13 — immutable hashed FFmpeg archive, exact runtime allowlist, verified LGPL configuration, and bundled provenance (`2890d0a`)
 - [ ] L-17 — opaque remote clip identity with native configured-origin page construction (`bdff7aa`)
 - [ ] L-18 — validated own-property marker presentation and allowlisted CSS marker images (`bdff7aa`)
+- [ ] L-19 — alignment-safe WASAPI decoding and validated, lifecycle-safe D3D readback (`bd2d617`)
 - [ ] L-33 — renderer capability manifest reduced to observed window/autostart operations (`bdff7aa`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:

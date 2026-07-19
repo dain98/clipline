@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): validated capture readback boundaries
+
+The combined audit's L-19 is fixed. WASAPI buffers are now viewed only as alignment-one byte
+slices and decoded with fixed-size little-endian copies, avoiding typed-slice alignment
+assumptions for float32 and PCM16/24/32. Frame/sample/byte arithmetic is checked, truncated or
+extra buffers are rejected, and non-silent null buffers fail safely. A packet guard pairs every
+successful `GetBuffer` with exactly one `ReleaseBuffer`, including validation errors and unwinding.
+
+NV12 readback validates nonzero even dimensions, row pitch, allocation sizes, plane offsets, and
+the complete addressable mapped span before allocation or pointer arithmetic. Null mapped pointers
+are rejected. The shared D3D read-map guard now guarantees exactly one `Unmap` on every return and
+unwind path for both NV12 and BGRA staging reads.
+
+Plan commit `efac254`; implementation commit `bd2d617`. Misaligned and malformed audio fixtures plus
+NV12 dimension/pitch/overflow layout tests pass. Capture has 193 unit, four end-to-end, and one
+FFmpeg roundtrip test green; CI-mode workspace tests and warning-denied workspace Clippy also pass
+after a fresh capture-crate clean. The current adapter lacks a video processor, so the real NV12
+converter device test self-skipped; the existing Windows capture lifecycle acceptance scenario
+covers the hardware path and no additional manual-only item is needed.
+
 ## Checkpoint (2026-07-18): narrow renderer authority
 
 The combined audit's L-17, L-18, and L-33 are fixed. The renderer no longer sends an external URL
