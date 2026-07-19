@@ -265,6 +265,8 @@ impl FfmpegVideoEncoder {
         fps: u32,
         bitrate_bps: u32,
     ) -> Result<Self, EncodeError> {
+        crate::windows::d3d11::ensure_multithread_protected(device)
+            .map_err(|e| EncodeError::Backend(format!("D3D11 multithread protection: {e}")))?;
         let converter = VideoConverter::new_with_crop(device, in_w, in_h, out_w, out_h, crop)
             .map_err(|e| EncodeError::Backend(format!("nv12 converter: {e}")))?;
         let spawned = spawn_process(ffmpeg, backend, codec, out_w, out_h, fps, bitrate_bps)?;
@@ -293,6 +295,8 @@ impl FfmpegVideoEncoder {
         fps: u32,
         bitrate_bps: u32,
     ) -> Result<Self, EncodeError> {
+        crate::windows::d3d11::ensure_multithread_protected(device)
+            .map_err(|e| EncodeError::Backend(format!("D3D11 multithread protection: {e}")))?;
         let converter = CpuFrameConverter::new(in_w, in_h, crop, out_w, out_h)?;
         let spawned = spawn_process(ffmpeg, backend, codec, out_w, out_h, fps, bitrate_bps)?;
         let mut enc = Self::assemble(spawned, codec, out_w, out_h, fps);

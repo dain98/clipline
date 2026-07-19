@@ -110,6 +110,7 @@ impl VideoConverter {
         out_h: u32,
         crop: Option<CropRect>,
     ) -> WinResult<Self> {
+        d3d11::ensure_multithread_protected(device)?;
         let video_device: ID3D11VideoDevice = device.cast()?;
         // SAFETY: trivial getter on a valid device.
         let video_context: ID3D11VideoContext = unsafe { device.GetImmediateContext()? }.cast()?;
@@ -295,6 +296,7 @@ fn configure_video_processor_color_spaces(
 /// Dimensions come from `src` itself so the packed size can't drift from the
 /// texture the caller actually produced.
 pub fn read_nv12(device: &ID3D11Device, src: &ID3D11Texture2D) -> WinResult<Vec<u8>> {
+    d3d11::ensure_multithread_protected(device)?;
     let (width, height) = d3d11::texture_size(src);
     let staging = d3d11::create_nv12_staging(device, width, height)?;
     let dst: ID3D11Resource = staging.cast()?;
@@ -339,6 +341,7 @@ pub struct BgraReadback {
 /// the core D3D11 device/context APIs and therefore works on WARP and Microsoft's
 /// Basic Display Adapter without `ID3D11VideoDevice`.
 pub fn read_bgra(device: &ID3D11Device, src: &ID3D11Texture2D) -> WinResult<BgraReadback> {
+    d3d11::ensure_multithread_protected(device)?;
     let (width, height) = d3d11::texture_size(src);
     let staging = d3d11::create_bgra_staging(device, width, height)?;
     let dst: ID3D11Resource = staging.cast()?;
@@ -381,7 +384,11 @@ mod tests {
 
     #[test]
     fn reads_bgra_texture_on_warp_without_video_processor() {
-        let (device, context) = crate::windows::d3d11::create_device_for_tests().unwrap();
+        let (device, context) =
+            crate::windows::d3d11::create_unprotected_device_for_tests().unwrap();
+        let multithread: windows::Win32::Graphics::Direct3D10::ID3D10Multithread =
+            device.cast().unwrap();
+        assert!(!unsafe { multithread.GetMultithreadProtected() }.as_bool());
         let texture = crate::windows::d3d11::create_bgra_texture(&device, 2, 2).unwrap();
         let resource: ID3D11Resource = texture.cast().unwrap();
         let pixels = [
@@ -394,6 +401,7 @@ mod tests {
 
         let readback = read_bgra(&device, &texture).unwrap();
 
+        assert!(unsafe { multithread.GetMultithreadProtected() }.as_bool());
         assert_eq!((readback.width, readback.height), (2, 2));
         assert_eq!(readback.stride, 8);
         assert_eq!(readback.bytes, pixels);

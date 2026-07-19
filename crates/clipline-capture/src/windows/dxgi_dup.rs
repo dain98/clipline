@@ -122,6 +122,7 @@ impl DxgiDuplicationCapture {
             return Err(CaptureError::Init("invalid monitor handle".into()));
         }
         let init = |e: windows::core::Error| CaptureError::Init(e.to_string());
+        crate::windows::d3d11::ensure_multithread_protected(&device).map_err(init)?;
         // SAFETY: trivial getter on a valid device.
         let context = unsafe { device.GetImmediateContext() }.map_err(init)?;
         let output = find_output_for_monitor(&device, monitor)?;

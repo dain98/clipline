@@ -185,6 +185,7 @@ impl WgcCapture {
         init_winrt()?;
         let init = |e: windows::core::Error| CaptureError::Init(e.to_string());
 
+        d3d11::ensure_multithread_protected(&device).map_err(init)?;
         // SAFETY: trivial getter on a valid device.
         let context = unsafe { device.GetImmediateContext() }.map_err(init)?;
         let winrt_device = winrt_device(&device).map_err(init)?;
@@ -609,6 +610,10 @@ mod tests {
             return;
         }
         let (device, _ctx) = crate::windows::d3d11::create_device().expect("device");
+        let multithread: windows::Win32::Graphics::Direct3D10::ID3D10Multithread =
+            device.cast().expect("ID3D10Multithread");
+        let _ = unsafe { multithread.SetMultithreadProtected(false) };
+        assert!(!unsafe { multithread.GetMultithreadProtected() }.as_bool());
         let clock = WgcCapture::new_clock().expect("clock");
         let mut cap = match WgcCapture::primary_monitor_on(device.clone(), clock) {
             Ok(cap) => cap,
@@ -617,6 +622,7 @@ mod tests {
                 return;
             }
         };
+        assert!(unsafe { multithread.GetMultithreadProtected() }.as_bool());
         let frame = cap
             .next_frame_timeout(Duration::from_secs(5))
             .expect("frame")

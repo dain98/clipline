@@ -148,6 +148,7 @@ impl MftH264Encoder {
         cfg: MftConfig,
         crop: Option<CropRect>,
     ) -> Result<Self, EncodeError> {
+        crate::windows::d3d11::ensure_multithread_protected(device).map_err(backend)?;
         mft_probe::ensure_mf_started().map_err(backend)?;
 
         let activates = mft_probe::enum_activates(
