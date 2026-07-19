@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): bounded incremental Annex-B framing
+
+The combined audit's M-11 is fixed. `AnnexBFramer` no longer allocates a complete start-code list
+or rescans its accumulated buffer on every FFmpeg stdout chunk. It retains one incremental scan
+cursor, the current access-unit start, and the most recent incomplete NAL boundary. A NAL is
+classified exactly once when the following start code arrives, and all offsets are adjusted when
+emitted prefixes are drained.
+
+The 32 MiB ceiling is checked with overflow-safe `current + incoming` arithmetic before extending
+the buffer, including the no-start-code path that previously returned before its guard. Exceeding
+the limit clears the entire framing generation and every cursor/boundary field; no suffix is kept,
+so discarded zero bytes cannot combine with a future chunk into a synthetic delimiter. Valid
+three- and four-byte start codes remain recognized across every reader split point.
+
+Plan commit `1f8d1f4`; implementation commit `725a310`. All eight framing tests pass, including
+incremental delimiter-free scanning, cap/reset, every four-byte-code split, and post-reset
+non-merging. Fresh-cache capture Clippy, CI-mode workspace tests (384 app tests), and workspace
+Clippy pass with warnings denied. Computer Use verified normal startup with all nine clips at
+6.4 MB. No manual-only acceptance test remains for this pure byte-stream boundary.
+
 ## Checkpoint (2026-07-18): durable single-flight osu! enrichment
 
 The combined audit's M-09 is fixed. Startup, library refresh, connection tests, and completed-save
