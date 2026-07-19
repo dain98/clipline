@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -524,19 +524,106 @@ fn same_path(left: &Path, right: &Path) -> bool {
 }
 
 #[derive(Default)]
-struct MicTestState(Mutex<Option<Sender<()>>>);
+struct MicTestState(Mutex<MicTestInner>);
+
+#[derive(Default)]
+struct MicTestInner {
+    last_generation: u64,
+    active: Option<MicTestSession>,
+}
+
+struct MicTestSession {
+    generation: u64,
+    stop: Sender<()>,
+}
 
 impl MicTestState {
+    fn begin(&self) -> Result<(u64, Receiver<()>), String> {
+        let (stop, receiver) = mpsc::channel();
+        let mut inner = self
+            .0
+            .lock()
+            .map_err(|_| "mic test state lock poisoned".to_string())?;
+        inner.last_generation = inner.last_generation.wrapping_add(1).max(1);
+        let generation = inner.last_generation;
+        let previous = inner.active.replace(MicTestSession { generation, stop });
+        if let Some(previous) = previous {
+            // Sending is non-blocking for this unbounded control channel. Keep
+            // replacement and stop notification in one critical section so a
+            // concurrent start cannot create an untracked interval.
+            let _ = previous.stop.send(());
+        }
+        Ok((generation, receiver))
+    }
+
+    #[cfg(test)]
+    fn is_active(&self, generation: u64) -> bool {
+        self.0
+            .lock()
+            .map(|inner| {
+                inner
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.generation == generation)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Run a publication while this generation still owns the session lock.
+    /// Replacement cannot install a newer generation between the ownership
+    /// check and the event, which keeps event order authoritative for the UI.
+    fn publish_if_active(&self, generation: u64, publish: impl FnOnce()) -> bool {
+        let Ok(inner) = self.0.lock() else {
+            return false;
+        };
+        if inner
+            .active
+            .as_ref()
+            .is_none_or(|active| active.generation != generation)
+        {
+            return false;
+        }
+        publish();
+        true
+    }
+
+    fn finish_if_active_with(&self, generation: u64, finish: impl FnOnce()) -> bool {
+        let Ok(mut inner) = self.0.lock() else {
+            return false;
+        };
+        if inner
+            .active
+            .as_ref()
+            .is_none_or(|active| active.generation != generation)
+        {
+            return false;
+        }
+        inner.active.take();
+        finish();
+        true
+    }
+
+    fn finish_if_active(&self, generation: u64) -> bool {
+        self.finish_if_active_with(generation, || {})
+    }
+
     fn stop(&self) {
         match self.0.lock() {
-            Ok(mut guard) => {
-                if let Some(tx) = guard.take() {
+            Ok(mut inner) => {
+                if let Some(session) = inner.active.take() {
                     // Receiver gone means the test thread already exited — not an error.
-                    let _ = tx.send(());
+                    let _ = session.stop.send(());
                 }
             }
             Err(e) => eprintln!("mic test state lock poisoned: {e}"),
         }
+    }
+}
+
+fn mic_test_should_stop(receiver: &Receiver<()>) -> bool {
+    match receiver.try_recv() {
+        Ok(()) | Err(TryRecvError::Disconnected) => true,
+        Err(TryRecvError::Empty) => false,
     }
 }
 
@@ -1623,60 +1710,72 @@ fn start_microphone_test<R: Runtime>(
     volume: f64,
     mono: bool,
 ) -> Result<(), String> {
-    state.stop();
     let channels = if mono {
         clipline_capture::windows::wasapi::WasapiChannelMode::Mono
     } else {
         clipline_capture::windows::wasapi::WasapiChannelMode::Stereo
     };
-    let (stop_tx, stop_rx) = mpsc::channel();
-    {
-        let mut guard = state.0.lock().map_err(|_| "mic test state lock poisoned")?;
-        *guard = Some(stop_tx);
-    }
-    std::thread::spawn(move || {
-        let run = || -> Result<(), String> {
-            let clock = clipline_capture::clock::RelativeClock::new(
-                clipline_capture::windows::qpc_now_ticks_100ns().map_err(|e| e.to_string())?,
-            );
-            let mut source = clipline_capture::windows::wasapi::WasapiLoopback::start_microphone(
-                clock,
-                device_id.as_deref(),
-                volume,
-                channels,
-            )
-            .map_err(|e| e.to_string())?;
-            loop {
-                if stop_rx.try_recv().is_ok() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(30));
-                let chunk = source.poll_monitor_chunk().map_err(|e| e.to_string())?;
-                let samples = chunk
-                    .samples
-                    .into_iter()
-                    .map(|sample| {
-                        let scaled = (sample.clamp(-1.0, 1.0) * 32_768.0).round();
-                        scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16
-                    })
-                    .collect();
-                let _ = app.emit(
-                    "mic-test",
-                    MicMonitorEvent {
-                        rms: chunk.level.rms,
-                        peak: chunk.level.peak,
-                        sample_count: chunk.level.sample_count,
-                        samples,
-                    },
+    let (generation, stop_rx) = state.begin()?;
+    let worker_app = app.clone();
+    let worker = std::thread::Builder::new()
+        .name(format!("clipline-mic-test-{generation}"))
+        .spawn(move || {
+            let run = || -> Result<(), String> {
+                let clock = clipline_capture::clock::RelativeClock::new(
+                    clipline_capture::windows::qpc_now_ticks_100ns().map_err(|e| e.to_string())?,
                 );
+                let mut source =
+                    clipline_capture::windows::wasapi::WasapiLoopback::start_microphone(
+                        clock,
+                        device_id.as_deref(),
+                        volume,
+                        channels,
+                    )
+                    .map_err(|e| e.to_string())?;
+                loop {
+                    if mic_test_should_stop(&stop_rx) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(30));
+                    if mic_test_should_stop(&stop_rx) {
+                        break;
+                    }
+                    let chunk = source.poll_monitor_chunk().map_err(|e| e.to_string())?;
+                    let samples = chunk
+                        .samples
+                        .into_iter()
+                        .map(|sample| {
+                            let scaled = (sample.clamp(-1.0, 1.0) * 32_768.0).round();
+                            scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                        })
+                        .collect();
+                    let mic_state = worker_app.state::<MicTestState>();
+                    mic_state.publish_if_active(generation, || {
+                        let _ = worker_app.emit(
+                            "mic-test",
+                            MicMonitorEvent {
+                                rms: chunk.level.rms,
+                                peak: chunk.level.peak,
+                                sample_count: chunk.level.sample_count,
+                                samples,
+                            },
+                        );
+                    });
+                }
+                Ok(())
+            };
+            if let Err(e) = run() {
+                let mic_state = worker_app.state::<MicTestState>();
+                mic_state.finish_if_active_with(generation, || {
+                    let _ = worker_app.emit("mic-test-error", e);
+                    let _ = worker_app.emit("mic-test-stopped", ());
+                });
             }
-            Ok(())
-        };
-        if let Err(e) = run() {
-            let _ = app.emit("mic-test-error", e);
-            let _ = app.emit("mic-test-stopped", ());
-        }
-    });
+        });
+    if let Err(error) = worker {
+        state.finish_if_active(generation);
+        return Err(format!("could not start microphone test thread: {error}"));
+    }
     Ok(())
 }
 
@@ -2494,6 +2593,73 @@ mod tests {
 
         assert_eq!(warnings.take(), vec!["settings recovered"]);
         assert!(warnings.take().is_empty());
+    }
+
+    #[test]
+    fn microphone_test_stop_channel_treats_disconnect_as_shutdown() {
+        let (sender, receiver) = mpsc::channel();
+        assert!(!mic_test_should_stop(&receiver));
+        sender.send(()).unwrap();
+        assert!(mic_test_should_stop(&receiver));
+
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        assert!(mic_test_should_stop(&receiver));
+    }
+
+    #[test]
+    fn concurrent_microphone_test_starts_leave_one_tracked_generation() {
+        const STARTS: usize = 12;
+        let state = std::sync::Arc::new(MicTestState::default());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(STARTS));
+        let workers = (0..STARTS)
+            .map(|_| {
+                let state = state.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    state.begin().expect("session replacement")
+                })
+            })
+            .collect::<Vec<_>>();
+        let sessions = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+
+        let active = sessions
+            .iter()
+            .filter(|(generation, _)| state.is_active(*generation))
+            .count();
+        assert_eq!(active, 1);
+        for (generation, receiver) in &sessions {
+            assert_eq!(
+                mic_test_should_stop(receiver),
+                !state.is_active(*generation),
+                "every superseded receiver must observe shutdown"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_microphone_test_cannot_publish_or_finish_active_generation() {
+        let state = MicTestState::default();
+        let (old_generation, _old_receiver) = state.begin().unwrap();
+        let (active_generation, _active_receiver) = state.begin().unwrap();
+        let published = std::sync::atomic::AtomicUsize::new(0);
+
+        assert!(!state.publish_if_active(old_generation, || {
+            published.fetch_add(1, Ordering::Relaxed);
+        }));
+        assert!(state.publish_if_active(active_generation, || {
+            published.fetch_add(1, Ordering::Relaxed);
+        }));
+        assert_eq!(published.load(Ordering::Relaxed), 1);
+
+        assert!(!state.finish_if_active(old_generation));
+        assert!(state.is_active(active_generation));
+        assert!(state.finish_if_active(active_generation));
+        assert!(!state.is_active(active_generation));
     }
 
     #[test]
