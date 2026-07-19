@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): bounded cloud media cache
+
+The combined audit's M-04 is fixed. Bulk cloud media now lives under LocalAppData rather than the
+roaming settings tree. The first cache use migrates only valid 16-hex account namespace
+directories from the legacy roaming root, skips reparse-linked directories, and leaves unrelated
+legacy files untouched.
+
+Cloud media is capped at 4 GiB per file, the cache at 10 GiB aggregate, and downloads reserve a
+2 GiB free-space floor before allocating. Completed entries and their `.ok` markers are accounted
+and evicted together in least-recently-used order. Cache hits refresh recency. In-flight and
+returned playback targets receive 24-hour process leases; if only leased media could satisfy
+pressure, the download fails clearly instead of invalidating playback.
+
+Download temporaries use unique `create_new` paths and an ownership guard. Pruning deletes only
+Clipline-patterned temps older than one day, never an active or arbitrary `.tmp`, and recursive
+accounting refuses symlinks/reparse points. Publication and capacity accounting are serialized.
+
+Plan commit `dddb9cd`; implementation commit `d54426b`. Forty focused cloud tests, fresh-cache app
+Clippy, CI-mode workspace tests, and workspace Clippy pass with warnings denied. Computer Use
+verified the rebuilt app renders all nine clips and Local/Cloud controls at 6.4 MB idle RAM. A real
+multi-clip cloud eviction/playback run remains on the manual acceptance list.
+
 ## Checkpoint (2026-07-18): bounded large-file transforms and upload
 
 The combined audit's H-05 and M-16 are fixed. File trim and audio-selection remux now load only a
