@@ -460,6 +460,47 @@ fn validation_rejects_relative_media_folder() {
 }
 
 #[test]
+fn validation_rejects_filesystem_and_sensitive_media_roots() {
+    let current = std::env::current_dir().unwrap();
+    let filesystem_root = current.ancestors().last().unwrap();
+    let root_settings = AppSettings {
+        media_dir: filesystem_root.display().to_string(),
+        ..AppSettings::default()
+    };
+    assert!(root_settings.validate().is_err());
+
+    for variable in [
+        "USERPROFILE",
+        "SystemRoot",
+        "ProgramData",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+    ] {
+        let Some(root) = std::env::var_os(variable).map(PathBuf::from) else {
+            continue;
+        };
+        if !root.is_absolute() {
+            continue;
+        }
+        let settings = AppSettings {
+            media_dir: root.display().to_string(),
+            ..AppSettings::default()
+        };
+        assert!(
+            settings.validate().is_err(),
+            "{variable} root must be rejected"
+        );
+    }
+
+    let nested = std::env::temp_dir().join("clipline-media-scope-test");
+    let settings = AppSettings {
+        media_dir: nested.display().to_string(),
+        ..AppSettings::default()
+    };
+    assert!(settings.validate().is_ok());
+}
+
+#[test]
 fn load_heals_invalid_media_folder_without_resetting_settings() {
     let dir = TestDir::new("clipline-settings", "heal-media-folder");
     let path = dir.path().join("settings.json");

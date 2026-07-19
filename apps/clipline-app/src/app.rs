@@ -479,6 +479,51 @@ struct MicMonitorEvent {
 }
 
 #[derive(Default)]
+struct NativeMediaFolderAuthorization(Mutex<Option<PathBuf>>);
+
+impl NativeMediaFolderAuthorization {
+    fn authorize(&self, path: PathBuf) {
+        if let Ok(mut pending) = self.0.lock() {
+            *pending = Some(path);
+        }
+    }
+
+    fn validate_change(&self, current: &Path, requested: &Path) -> Result<(), String> {
+        if same_path(current, requested) {
+            return Ok(());
+        }
+        let pending = self
+            .0
+            .lock()
+            .map_err(|_| "native media-folder authorization is unavailable".to_string())?;
+        if pending
+            .as_deref()
+            .is_some_and(|authorized| same_path(authorized, requested))
+        {
+            Ok(())
+        } else {
+            Err("choose a new media folder with the native folder picker first".into())
+        }
+    }
+
+    fn commit(&self, path: &Path) {
+        if let Ok(mut pending) = self.0.lock() {
+            if pending
+                .as_deref()
+                .is_some_and(|authorized| same_path(authorized, path))
+            {
+                *pending = None;
+            }
+        }
+    }
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    crate::settings::validation::same_or_nested_path(left, right)
+        && crate::settings::validation::same_or_nested_path(right, left)
+}
+
+#[derive(Default)]
 struct MicTestState(Mutex<Option<Sender<()>>>);
 
 impl MicTestState {
@@ -1422,39 +1467,48 @@ fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
 #[tauri::command]
 async fn choose_media_folder(
     state: tauri::State<'_, RuntimeState>,
-    current: Option<String>,
+    authorization: tauri::State<'_, NativeMediaFolderAuthorization>,
 ) -> Result<Option<String>, String> {
-    let current_dir = current
-        .as_deref()
-        .and_then(|path| crate::settings::normalize_media_dir(path).ok())
+    let current_dir = state
+        .settings()
+        .media_dir_path()
+        .ok()
         .filter(|path| path.exists())
-        .or_else(|| state.settings().media_dir_path().ok())
         .unwrap_or_else(service::default_clips_dir);
 
     // Run the native modal off the main thread so recorder status and other
     // IPC keep flowing while the picker is open.
-    tauri::async_runtime::spawn_blocking(move || {
+    let selected = tauri::async_runtime::spawn_blocking(move || {
         let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Media Folder");
         if current_dir.exists() {
             dialog = dialog.set_directory(current_dir);
         }
-        dialog.pick_folder().map(|path| path.display().to_string())
+        dialog.pick_folder()
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let selected = crate::settings::normalize_media_dir(&selected.display().to_string())?;
+    let selected = selected
+        .canonicalize()
+        .map_err(|e| format!("resolve selected media folder {selected:?}: {e}"))?;
+    authorization.authorize(selected.clone());
+    Ok(Some(selected.display().to_string()))
 }
 
 #[tauri::command]
 async fn choose_replay_cache_folder(
     state: tauri::State<'_, RuntimeState>,
-    current: Option<String>,
 ) -> Result<Option<String>, String> {
-    let current_dir = current
-        .as_deref()
-        .and_then(|path| crate::settings::normalize_replay_cache_dir(path).ok())
-        .filter(|path| path.exists())
-        .or_else(|| state.settings().media_dir_path().ok())
-        .unwrap_or_else(service::default_clips_dir);
+    let settings = state.settings();
+    let current_dir =
+        crate::settings::normalize_replay_cache_dir(&settings.replay_storage.disk_dir)
+            .ok()
+            .filter(|path| path.exists())
+            .or_else(|| settings.media_dir_path().ok())
+            .unwrap_or_else(service::default_clips_dir);
 
     tauri::async_runtime::spawn_blocking(move || {
         let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Replay Cache Folder");
@@ -1540,8 +1594,12 @@ fn detect_installed_games(
 /// Extract an executable's icon as a PNG `data:` URL for the custom-games UI.
 /// Returns `None` when the path has no usable icon.
 #[tauri::command]
-fn extract_window_icon(exe_path: String) -> Option<String> {
-    crate::game_icon::extract_exe_icon_data_url(&exe_path)
+fn extract_window_icon(process_id: u32) -> Option<String> {
+    let path = crate::games::list_game_windows()
+        .into_iter()
+        .find(|window| window.process_id == process_id)?
+        .exe_path?;
+    crate::game_icon::extract_exe_icon_data_url(&path)
 }
 
 #[tauri::command]
@@ -1725,6 +1783,7 @@ fn save_settings<R: Runtime>(
     state: tauri::State<RuntimeState>,
     tray_items: tauri::State<TrayItems<R>>,
     storage_settings: tauri::State<crate::library::StorageSettings>,
+    media_folder_authorization: tauri::State<NativeMediaFolderAuthorization>,
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
     settings.hotkey = crate::settings::normalize_hotkey(&settings.hotkey)?;
@@ -1735,16 +1794,12 @@ fn save_settings<R: Runtime>(
     settings.games.normalize();
     settings.validate()?;
     let media_dir = settings.media_dir_path()?;
-    service::prepare_writable_media_directory(&media_dir)?;
-    // Extend the asset-protocol scope to the (possibly custom) root so the
-    // webview can play clips from it, without granting the whole disk.
-    app.asset_protocol_scope()
-        .allow_directory(&media_dir, true)
-        .map_err(|e| format!("scope media folder for playback: {e}"))?;
-
     let cloud_save_guard = RuntimeState::lock_cloud_settings_save()?;
     let old = state.settings();
     preserve_backend_owned_settings_fields(&mut settings, &old);
+    let old_media_dir = old.media_dir_path()?;
+    media_folder_authorization.validate_change(&old_media_dir, &media_dir)?;
+    service::prepare_writable_media_directory(&media_dir)?;
 
     // Apply the autostart registry change before persisting so settings.json
     // can never say "enabled" while the Run key update failed. Debug builds
@@ -1862,7 +1917,8 @@ fn save_settings<R: Runtime>(
         let _ = app.emit("error", message);
     }
     storage_settings.set_quota_bytes(quota_bytes);
-    storage_settings.set_media_dir(media_dir);
+    storage_settings.set_media_dir(media_dir.clone());
+    media_folder_authorization.commit(&media_dir);
     Ok(settings)
 }
 
@@ -1920,9 +1976,7 @@ pub fn run() {
     let media_dir = settings
         .media_dir_path()
         .unwrap_or_else(|_| service::default_clips_dir());
-    let scope_dir = media_dir.clone();
     let media_dir_for_setup = media_dir.clone();
-    let audio_preview_scope_dir = crate::settings::audio_preview_cache_dir();
     let startup_global_hotkeys =
         global_hotkeys(&settings).unwrap_or_else(|_| vec![parse_hotkey("Alt+F10").unwrap()]);
 
@@ -1930,6 +1984,7 @@ pub fn run() {
         .manage(RuntimeState::new(settings.clone(), lol_url))
         .manage(StartupWarnings::new(startup_warnings))
         .manage(MicTestState::default())
+        .manage(NativeMediaFolderAuthorization::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             let launched_by_autostart = args.iter().any(|arg| arg == "--autostart");
@@ -2039,24 +2094,6 @@ pub fn run() {
                 let message = format!("low-level save hotkey unavailable: {e}");
                 eprintln!("{message}");
                 let _ = app.handle().emit("error", message);
-            }
-            // Bound the asset protocol to the configured media folder so clips
-            // under a custom root play back, while the static config scope stays
-            // narrow (the default Videos/Clipline location).
-            if let Err(e) = app.asset_protocol_scope().allow_directory(&scope_dir, true) {
-                eprintln!("could not scope media folder {scope_dir:?} for playback: {e}");
-            }
-            if let Err(e) = std::fs::create_dir_all(&audio_preview_scope_dir) {
-                eprintln!(
-                    "could not create audio preview cache {audio_preview_scope_dir:?}: {e}"
-                );
-            } else if let Err(e) = app
-                .asset_protocol_scope()
-                .allow_directory(&audio_preview_scope_dir, true)
-            {
-                eprintln!(
-                    "could not scope audio preview cache {audio_preview_scope_dir:?} for playback: {e}"
-                );
             }
             if let Err(e) = crate::library::prune_audio_preview_cache_on_startup() {
                 eprintln!("could not prune audio preview cache on startup: {e}");
@@ -2321,18 +2358,7 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
                 let media_root = PathBuf::from(path);
                 handle
                     .state::<crate::library::StorageSettings>()
-                    .set_media_dir(media_root.clone());
-                if let Err(error) = handle
-                    .asset_protocol_scope()
-                    .allow_directory(&media_root, true)
-                {
-                    let message = format!(
-                        "scope resolved media folder {} for playback: {error}",
-                        media_root.display()
-                    );
-                    eprintln!("{message}");
-                    let _ = handle.emit("error", message);
-                }
+                    .set_media_dir(media_root);
             }
             if let Event::Status {
                 recording: false, ..
@@ -3840,5 +3866,25 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID)
         );
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
+    }
+
+    #[test]
+    fn native_media_folder_authorization_is_exact_retryable_and_consumed_on_commit() {
+        let authorization = NativeMediaFolderAuthorization::default();
+        let old = PathBuf::from(r"C:\Users\tester\Videos\Clipline");
+        let selected = PathBuf::from(r"D:\Recordings\Clipline");
+        let other = PathBuf::from(r"D:\Other");
+
+        assert!(authorization.validate_change(&old, &old).is_ok());
+        assert!(authorization.validate_change(&old, &selected).is_err());
+
+        authorization.authorize(selected.clone());
+        assert!(authorization.validate_change(&old, &selected).is_ok());
+        assert!(authorization.validate_change(&old, &selected).is_ok());
+        assert!(authorization.validate_change(&old, &other).is_err());
+
+        authorization.commit(&selected);
+        assert!(authorization.validate_change(&old, &selected).is_err());
+        assert!(authorization.validate_change(&selected, &selected).is_ok());
     }
 }

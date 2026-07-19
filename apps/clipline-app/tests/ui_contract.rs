@@ -463,6 +463,11 @@ fn library_rs() -> String {
     fs::read_to_string(path).expect("read src/library.rs")
 }
 
+fn cloud_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cloud.rs");
+    fs::read_to_string(path).expect("read src/cloud.rs")
+}
+
 fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let prefix = format!("{name}=\"");
     let start = tag.find(&prefix)? + prefix.len();
@@ -1332,16 +1337,46 @@ fn custom_game_ids_use_a_reserved_namespace_and_migrated_icons_do_not_become_plu
 #[test]
 fn resolved_recorder_media_root_updates_library_and_playback_scope() {
     let app = app_rs();
+    let library = library_rs();
 
     assert!(
         app.contains("Event::MediaRootResolved")
             && app.contains("StorageSettings>()")
             && app.contains("set_media_dir")
-            && app.contains("asset_protocol_scope()")
-            && app.contains("allow_directory")
+            && library.contains("allow_local_clip_asset")
+            && library.contains("allow_file")
             && app.contains("service::prepare_writable_media_directory(&media_dir)?"),
-        "recorder fallback must publish the actual media root to library and playback state"
+        "recorder fallback must publish the actual media root and Library results must exact-scope playback files"
     );
+}
+
+#[test]
+fn renderer_filesystem_authority_is_exact_and_backend_owned() {
+    let app = app_rs();
+    let cloud = cloud_rs();
+    let library = library_rs();
+    let settings_js = read_ui_js("settings.js");
+    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+    let static_scope = config["app"]["security"]["assetProtocol"]["scope"]
+        .as_array()
+        .expect("asset protocol scope array");
+
+    assert!(
+        static_scope.is_empty(),
+        "asset scope must be granted per validated file"
+    );
+    assert!(!app.contains(".allow_directory("));
+    assert!(!cloud.contains(".allow_directory("));
+    assert!(library.contains(".allow_file("));
+    assert!(cloud.contains(".allow_file("));
+    assert!(app.contains("NativeMediaFolderAuthorization"));
+    assert!(app.contains("validate_change(&old_media_dir, &media_dir)"));
+    assert!(app.contains("fn extract_window_icon(process_id: u32)"));
+    assert!(app.contains("crate::games::list_game_windows()"));
+    assert!(settings_js.contains("processId: win.process_id"));
+    assert!(!settings_js.contains("exePath: win.exe_path"));
 }
 
 #[test]
@@ -1713,7 +1748,9 @@ fn library_refresh_starts_osu_enrichment_retry() {
     assert!(
         library.contains("pub async fn list_clips<R: Runtime>")
             && library.contains("app: AppHandle<R>")
-            && library.contains("crate::osu_api::retry_pending_enrichment(&app, retry_root).await"),
+            && library.contains(
+                "crate::osu_api::retry_pending_enrichment(&enrichment_app, retry_root).await",
+            ),
         "list_clips should kick off the async osu! retry path during library refresh"
     );
 }
@@ -3499,6 +3536,9 @@ fn cloud_auth_refresh_preserves_the_unsaved_settings_draft() {
         let invoke = body
             .find("await invoke(")
             .unwrap_or_else(|| panic!("{name} must invoke its backend command"));
-        assert!(snapshot < invoke, "{name} must preserve edits before awaiting auth");
+        assert!(
+            snapshot < invoke,
+            "{name} must preserve edits before awaiting auth"
+        );
     }
 }

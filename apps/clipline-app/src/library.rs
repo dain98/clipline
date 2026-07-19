@@ -231,14 +231,21 @@ pub async fn list_clips<R: Runtime>(
 ) -> Result<Vec<ClipInfo>, String> {
     let dir = settings.clips_dir()?;
     let retry_root = dir.clone();
+    let enrichment_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = crate::osu_api::retry_pending_enrichment(&app, retry_root).await {
+        if let Err(e) = crate::osu_api::retry_pending_enrichment(&enrichment_app, retry_root).await
+        {
             eprintln!("retry osu! enrichment on library refresh: {e}");
         }
     });
-    tauri::async_runtime::spawn_blocking(move || list_clips_from_dir(dir))
+    let scope_root = dir.clone();
+    let clips = tauri::async_runtime::spawn_blocking(move || list_clips_from_dir(dir))
         .await
-        .map_err(|e| format!("list clips task: {e}"))?
+        .map_err(|e| format!("list clips task: {e}"))??;
+    for clip in &clips {
+        allow_local_clip_asset(&app, &scope_root, Path::new(&clip.path))?;
+    }
+    Ok(clips)
 }
 
 fn list_clips_from_dir(dir: PathBuf) -> Result<Vec<ClipInfo>, String> {
@@ -336,17 +343,71 @@ fn game_from_markers(markers: Option<&ClipMarkers>) -> Option<ClipGame> {
 /// the webview loads through the asset protocol. Lazy and per-clip so the
 /// library listing never blocks on ffmpeg.
 #[tauri::command]
-pub async fn clip_poster(
+pub async fn clip_poster<R: Runtime>(
+    app: AppHandle<R>,
     path: String,
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<String, String> {
+    let scope_root = settings.clips_dir()?;
     let target = validate_clip_path(&settings, &path)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let poster = tauri::async_runtime::spawn_blocking(move || {
         let seek_s = poster_seek_seconds(&target);
-        crate::poster::ensure_poster(&target, seek_s).map(|poster| poster.display().to_string())
+        crate::poster::ensure_poster(&target, seek_s)
     })
     .await
-    .map_err(|e| format!("clip poster task: {e}"))?
+    .map_err(|e| format!("clip poster task: {e}"))??;
+    allow_local_poster_asset(&app, &scope_root, &poster)?;
+    Ok(poster.display().to_string())
+}
+
+fn allow_local_clip_asset<R: Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    clip: &Path,
+) -> Result<(), String> {
+    allow_local_media_asset(app, root, clip, &["mp4"])
+}
+
+fn allow_local_poster_asset<R: Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    poster: &Path,
+) -> Result<(), String> {
+    allow_local_media_asset(app, root, poster, &["jpg", "jpeg"])
+}
+
+fn allow_local_media_asset<R: Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    asset: &Path,
+    extensions: &[&str],
+) -> Result<(), String> {
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|e| format!("canonicalize media root {root:?}: {e}"))?;
+    let canonical_asset = asset
+        .canonicalize()
+        .map_err(|e| format!("canonicalize media asset {asset:?}: {e}"))?;
+    if !canonical_asset.starts_with(&canonical_root) {
+        return Err(format!(
+            "media asset {canonical_asset:?} escaped root {canonical_root:?}"
+        ));
+    }
+    let extension = canonical_asset
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .ok_or_else(|| format!("media asset {canonical_asset:?} has no extension"))?;
+    if !extensions
+        .iter()
+        .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+    {
+        return Err(format!(
+            "media asset {canonical_asset:?} has an unsupported extension"
+        ));
+    }
+    app.asset_protocol_scope()
+        .allow_file(&canonical_asset)
+        .map_err(|e| format!("scope media asset {canonical_asset:?} for playback: {e}"))
 }
 
 /// The frame to grab a poster from: prefer a local-player review event, then

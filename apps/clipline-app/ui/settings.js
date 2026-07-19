@@ -2175,7 +2175,7 @@ async function addCustomGameFromWindow(win) {
   let icon = null;
   if (win.exe_path) {
     try {
-      icon = await invoke("extract_window_icon", { exePath: win.exe_path });
+      icon = await invoke("extract_window_icon", { processId: win.process_id });
     } catch (e) {
       icon = null;
     }

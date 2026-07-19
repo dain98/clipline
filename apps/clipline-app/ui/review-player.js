@@ -1756,9 +1756,7 @@ async function copyClipToClipboard() {
 
 async function chooseMediaFolder() {
   try {
-    const selected = await invoke("choose_media_folder", {
-      current: $("set-media-dir").value,
-    });
+    const selected = await invoke("choose_media_folder");
     if (selected) {
       $("set-media-dir").value = selected;
       syncSettingsDraftFromForm();
@@ -1771,9 +1769,7 @@ async function chooseMediaFolder() {
 
 async function chooseReplayCacheFolder() {
   try {
-    const selected = await invoke("choose_replay_cache_folder", {
-      current: $("set-replay-disk-dir").value,
-    });
+    const selected = await invoke("choose_replay_cache_folder");
     if (selected) {
       $("set-replay-disk-dir").value = selected;
       syncSettingsDraftFromForm();

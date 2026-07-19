@@ -1180,8 +1180,8 @@ fn allow_cloud_cache_asset<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Resul
         ));
     }
     app.asset_protocol_scope()
-        .allow_directory(&canonical_dir, true)
-        .map_err(|e| format!("scope cloud cache for playback: {e}"))
+        .allow_file(&canonical_path)
+        .map_err(|e| format!("scope cloud cache asset for playback: {e}"))
 }
 
 fn cached_cloud_clip_from_path(

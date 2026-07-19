@@ -396,7 +396,40 @@ pub fn normalize_media_dir(raw: &str) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err("media folder must be an absolute path".into());
     }
+    validate_media_scope_root(&path)?;
     Ok(path)
+}
+
+fn validate_media_scope_root(path: &Path) -> Result<(), String> {
+    let comparable = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if comparable.parent().is_none() {
+        return Err("media folder cannot be a filesystem or drive root".into());
+    }
+
+    for (label, variable) in [
+        ("Windows profile", "USERPROFILE"),
+        ("Windows", "SystemRoot"),
+        ("ProgramData", "ProgramData"),
+        ("Program Files", "ProgramFiles"),
+        ("Program Files (x86)", "ProgramFiles(x86)"),
+    ] {
+        let Some(root) = std::env::var_os(variable).map(PathBuf::from) else {
+            continue;
+        };
+        if !root.is_absolute() {
+            continue;
+        }
+        let root = root.canonicalize().unwrap_or(root);
+        if same_path(&comparable, &root) {
+            return Err(format!("media folder cannot be the {label} root"));
+        }
+    }
+    Ok(())
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    super::validation::same_or_nested_path(left, right)
+        && super::validation::same_or_nested_path(right, left)
 }
 
 pub fn default_media_dir() -> String {
