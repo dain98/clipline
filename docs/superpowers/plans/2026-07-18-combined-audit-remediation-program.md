@@ -18,6 +18,7 @@ Already completed and verified on this branch:
 Additional completed findings:
 
 - [ ] M-01 — same-origin bearer controls, no authenticated redirects, separate token-free object PUT transport (`716b3d3`)
+- [ ] M-02 — transactional settings/runtime side effects and durable credential cleanup (`99d5e7d`, `fc647fb`)
 - [ ] M-04 — LocalAppData cache, hard/aggregate/free-space bounds, LRU leases, safe temps/migration (`d54426b`)
 - [ ] M-06 — owned run recovery, cross-run quota accounting, transactional segments, and low-space finalization (`52eb9f4`)
 - [ ] H-05 — bounded file transforms, hashing, upload, and temporary ownership (`db86efe`)
@@ -64,3 +65,5 @@ Accumulate only tests that require a real account, hardware, elevated game, slow
 - Large cloud upload: upload a large original clip and a selected-audio variant using a real account. Interrupt and retry a resumable upload; confirm memory remains bounded, the remote file plays, progress resumes correctly, and local media is deleted only when the configured policy and ready-media verification both permit it.
 - Cloud cache pressure: with a real account, play several large remote clips until cache pressure triggers. Confirm cache data is under LocalAppData, the oldest unplayed entry is evicted, the clip currently playing remains available, total cache use returns under 10 GiB, and caching does not consume the final 2 GiB of free space.
 - Replay-cache low space and restart: use disk replay buffering with full-session recording on a disposable/test volume, then reduce free space below the 2 GiB reserve. Confirm recording visibly stops, the full-session file finalizes or remains explicitly recoverable, no partial segment remains in the active run, and restarting Clipline removes stale owned runs without deleting another live Clipline instance's cache.
+- Installed settings transaction: in an installed release build, change both recording hotkeys and `Open on startup`, save, restart/sign in, and confirm the hotkeys, tray label, and autostart behavior all match. Then make the settings folder temporarily unwritable and repeat a change; confirm the save reports failure and the prior hotkeys, tray label, autostart registration, and persisted settings all remain active. Restore folder permissions afterward.
+- Credential transaction: using real Clipline Cloud and osu! credentials, connect, reconnect to a different account/user, disconnect, and restart. Confirm `settings.json` never contains a secret, Windows Credential Manager retains only the current referenced targets, and any obsolete target that could not be removed is cleaned by the next status check/startup.

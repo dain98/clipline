@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): transactional settings and credentials
+
+The combined audit's M-02 is fixed. Backend-owned Cloud and osu! settings now stage a normalized
+copy, persist it, and publish it to live memory only after the write succeeds. The main settings
+save applies global hotkeys, the low-level keyboard hook, tray labels, and release autostart as a
+transaction: any later persistence or recorder-commit failure restores the old settings file and
+rolls back every already-applied runtime/OS side effect. Partial hotkey registration failures also
+restore earlier removals and surface any rollback failure instead of silently leaving a mixed
+configuration.
+
+Credential replacement now snapshots the previous Windows Credential Manager value, writes the
+replacement, and compensates if settings persistence fails. Obsolete Cloud and osu! credential
+targets are first recorded as durable pending cleanup, then deleted; failed cleanup is retried by
+the next status check rather than losing ownership. Renderer saves preserve these backend-owned
+cleanup fields, and no secret is written to `settings.json`.
+
+Plan commit `1cec26b`; implementation commits `99d5e7d` and `fc647fb`. The 57 settings tests,
+57 app command tests, 40 Cloud tests, five osu! tests, and four credential-transaction tests pass.
+Fresh-cache app Clippy, CI-mode workspace tests, and workspace Clippy pass with warnings denied.
+Computer Use verified an unchanged Settings save reports `saved` in the rebuilt native app while
+all nine clips remain visible. Installed-release autostart/hotkey rollback and real Credential
+Manager migration/cleanup remain on the final manual acceptance list.
+
 ## Checkpoint (2026-07-18): authenticated upload origin boundary
 
 The combined audit's M-01 is fixed. Every server-provided URL that receives the Clipline Cloud
