@@ -3469,3 +3469,28 @@ fn player_shortcuts_defer_to_any_open_dialog() {
         );
     }
 }
+
+#[test]
+fn cloud_auth_refresh_preserves_the_unsaved_settings_draft() {
+    let cloud = read_ui_js("cloud.js");
+    let reload = js_function_body(&cloud, "reloadSettings");
+    let connect = js_function_body(&cloud, "connectCloud");
+    let disconnect = js_function_body(&cloud, "disconnectCloud");
+
+    assert!(
+        reload.contains("CloudCore.mergeBackendCloudSettings")
+            && reload.contains("settingsDraft")
+            && reload.contains("settingsIndicatorBaseline")
+            && !reload.contains("fillSettings("),
+        "cloud auth reload must patch backend-owned cloud state instead of repainting all settings"
+    );
+    for (name, body) in [("connect", connect), ("disconnect", disconnect)] {
+        let snapshot = body
+            .find("syncSettingsDraftFromForm({ resetDiscard: false })")
+            .unwrap_or_else(|| panic!("{name} must snapshot the settings form before auth"));
+        let invoke = body
+            .find("await invoke(")
+            .unwrap_or_else(|| panic!("{name} must invoke its backend command"));
+        assert!(snapshot < invoke, "{name} must preserve edits before awaiting auth");
+    }
+}

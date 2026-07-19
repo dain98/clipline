@@ -485,13 +485,26 @@ function upsertCloudProgress(progress) {
 }
 async function reloadSettings() {
   const previousAccountKey = cloudAccountKey();
-  const settings = await invoke("get_settings");
-  fillSettings(settings);
+  const backendSettings = await invoke("get_settings");
+  currentSettings = CloudCore.mergeBackendCloudSettings(currentSettings || {}, backendSettings);
+  settingsDraft = CloudCore.mergeBackendCloudSettings(
+    settingsDraft || currentSettings,
+    backendSettings,
+  );
+  if (settingsIndicatorBaseline) {
+    settingsIndicatorBaseline = CloudCore.mergeBackendCloudSettings(
+      settingsIndicatorBaseline,
+      backendSettings,
+    );
+  }
+  fillCloudSettings(settingsDraft.cloud || defaultCloudSettings());
+  syncSettingsDirtyState({ resetDiscard: false });
   if (cloudAccountKey() !== previousAccountKey) resetCloudClipsCache();
   if (clipsCache.length) renderClips();
 }
 
 async function connectCloud() {
+  syncSettingsDraftFromForm({ resetDiscard: false });
   $("cloud-connect-status").textContent = "connecting...";
   $("error").textContent = "";
   const hostUrl = $("cloud-host-url").value.trim();
@@ -516,6 +529,7 @@ async function connectCloud() {
 }
 
 async function disconnectCloud() {
+  syncSettingsDraftFromForm({ resetDiscard: false });
   $("cloud-connect-status").textContent = "";
   $("error").textContent = "";
   try {

@@ -25,7 +25,28 @@ var CloudCore = (() => {
     };
   };
 
-  return { accountKey, createRequestGate };
+  const backendOwnedCloudFields = [
+    "host_url",
+    "public_url",
+    "connected_user_id",
+    "connected_username",
+    "connected_display_name",
+    "credential_target",
+    "uploads",
+  ];
+
+  const mergeBackendCloudSettings = (localSettings = {}, backendSettings = {}) => {
+    const backendCloud = backendSettings.cloud || {};
+    const cloud = { ...(localSettings.cloud || {}) };
+    for (const field of backendOwnedCloudFields) {
+      cloud[field] = field === "uploads"
+        ? { ...(backendCloud.uploads || {}) }
+        : (backendCloud[field] ?? null);
+    }
+    return { ...localSettings, cloud };
+  };
+
+  return { accountKey, createRequestGate, mergeBackendCloudSettings };
 })();
 
 globalThis.CloudCore = CloudCore;

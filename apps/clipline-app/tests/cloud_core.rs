@@ -77,3 +77,33 @@ fn account_key_is_stable_and_account_scoped() {
         "https://clips.example|user-7|credential-7"
     );
 }
+
+#[test]
+fn backend_cloud_merge_preserves_draft_preferences_and_unrelated_settings() {
+    let mut context = context();
+    assert_eq!(
+        eval(
+            &mut context,
+            "const draft = { replay_window_s: 91, audio: { mic_enabled: true }, cloud: {\
+               host_url: 'https://old.example', connected_user_id: 'old-user',\
+               connected_username: 'old-name', connected_display_name: null,\
+               credential_target: 'old-credential', public_url: null,\
+               default_visibility: 'unlisted', delete_local_after_upload: true,\
+               auto_upload_rules: false, uploads: { old: { path: 'old.mp4' } }\
+             } };\
+             const backend = { cloud: {\
+               host_url: 'https://new.example', connected_user_id: 'new-user',\
+               connected_username: 'new-name', connected_display_name: 'New Name',\
+               credential_target: 'new-credential', public_url: 'https://clips.example',\
+               default_visibility: 'private', delete_local_after_upload: false,\
+               auto_upload_rules: true, uploads: { fresh: { path: 'fresh.mp4' } }\
+             } };\
+             const merged = CloudCore.mergeBackendCloudSettings(draft, backend);\
+             JSON.stringify({\
+               replay_window_s: merged.replay_window_s, audio: merged.audio,\
+               cloud: merged.cloud, uploadsCloned: merged.cloud.uploads !== backend.cloud.uploads\
+             })",
+        ),
+        r#"{"replay_window_s":91,"audio":{"mic_enabled":true},"cloud":{"host_url":"https://new.example","connected_user_id":"new-user","connected_username":"new-name","connected_display_name":"New Name","credential_target":"new-credential","public_url":"https://clips.example","default_visibility":"unlisted","delete_local_after_upload":true,"auto_upload_rules":false,"uploads":{"fresh":{"path":"fresh.mp4"}}},"uploadsCloned":true}"#
+    );
+}
