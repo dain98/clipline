@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use clipline_events::{is_review_event, ClipMarker, ClipMarkers, ClipPlay};
 use clipline_mp4::{
@@ -17,8 +18,10 @@ use clipline_mp4::{
     trim_keyframe_aligned_file, MediaTrackCounts,
 };
 use clipline_storage::storage_status as read_storage_status;
-use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
-use windows_sys::Win32::System::DataExchange::{CloseClipboard, OpenClipboard, SetClipboardData};
+use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
+use windows_sys::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows_sys::Win32::System::Ole::CF_HDROP;
 use windows_sys::Win32::UI::Shell::DROPFILES;
@@ -1491,12 +1494,17 @@ pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Res
 pub async fn copy_clip_to_clipboard(
     request: CopyClipToClipboardRequest,
     settings: tauri::State<'_, StorageSettings>,
+    window: tauri::WebviewWindow,
 ) -> Result<(), String> {
     let target = validate_clip_path(&settings, &request.path)?;
     let audio_track_ids = request.audio_track_ids;
+    let owner = window
+        .hwnd()
+        .map_err(|error| format!("get Clipline window handle: {error}"))?
+        .0 as isize;
     tauri::async_runtime::spawn_blocking(move || {
         let share_path = clipboard_share_path(&target, audio_track_ids.as_deref())?;
-        copy_file_to_clipboard(&share_path)
+        copy_file_to_clipboard(&share_path, owner as HWND)
     })
     .await
     .map_err(|e| format!("copy clip task: {e}"))?
@@ -1711,7 +1719,7 @@ fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, n
     }
 }
 
-fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
+fn copy_file_to_clipboard(path: &Path, owner: HWND) -> Result<(), String> {
     let payload = dropfiles_payload(path);
     let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, payload.len()) };
     if handle.is_null() {
@@ -1732,17 +1740,62 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
     }
 
     let mut transfer = ClipboardTransfer::new(handle);
-    if unsafe { OpenClipboard(ptr::null_mut()) } == 0 {
-        return Err(last_os_error("open clipboard"));
+    clipboard_transaction(
+        8,
+        || {
+            if unsafe { OpenClipboard(owner) } == 0 {
+                Err(last_os_error("open clipboard"))
+            } else {
+                Ok(())
+            }
+        },
+        || unsafe {
+            CloseClipboard();
+        },
+        || {
+            if unsafe { EmptyClipboard() } == 0 {
+                Err(last_os_error("empty clipboard"))
+            } else {
+                Ok(())
+            }
+        },
+        || {
+            if unsafe { SetClipboardData(CF_HDROP as u32, transfer.handle()) }.is_null() {
+                Err(last_os_error("set clipboard data"))
+            } else {
+                transfer.release();
+                Ok(())
+            }
+        },
+        || std::thread::sleep(Duration::from_millis(15)),
+    )
+}
+
+fn clipboard_transaction<E>(
+    attempts: usize,
+    mut open: impl FnMut() -> Result<(), E>,
+    mut close: impl FnMut(),
+    mut empty: impl FnMut() -> Result<(), E>,
+    mut set: impl FnMut() -> Result<(), E>,
+    mut wait: impl FnMut(),
+) -> Result<(), E> {
+    let mut last_error = None;
+    for attempt in 0..attempts.max(1) {
+        match open() {
+            Ok(()) => {
+                let result = empty().and_then(|()| set());
+                close();
+                return result;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < attempts.max(1) {
+                    wait();
+                }
+            }
+        }
     }
-    let _close = ClipboardClose;
-    // CF_HDROP can be replaced format-by-format. Avoid EmptyClipboard so a
-    // rare SetClipboardData failure does not discard the user's clipboard.
-    if unsafe { SetClipboardData(CF_HDROP as u32, transfer.handle()) }.is_null() {
-        return Err(last_os_error("set clipboard data"));
-    }
-    transfer.release();
-    Ok(())
+    Err(last_error.expect("at least one clipboard-open attempt runs"))
 }
 
 fn dropfiles_payload(path: &Path) -> Vec<u8> {
@@ -1816,16 +1869,6 @@ impl Drop for ClipboardTransfer {
             unsafe {
                 GlobalFree(self.handle);
             }
-        }
-    }
-}
-
-struct ClipboardClose;
-
-impl Drop for ClipboardClose {
-    fn drop(&mut self) {
-        unsafe {
-            CloseClipboard();
         }
     }
 }
@@ -4002,5 +4045,86 @@ mod tests {
         let decoded = String::from_utf16(&shell_clipboard_path_wide(path)).unwrap();
 
         assert_eq!(decoded, r"\\nas\clips\clïp 雪.mp4");
+    }
+
+    #[test]
+    fn clipboard_transaction_retries_open_and_closes_every_opened_path() {
+        use std::cell::{Cell, RefCell};
+
+        let events = RefCell::new(Vec::new());
+        let opens = Cell::new(0_u32);
+        let result = clipboard_transaction(
+            3,
+            || {
+                events.borrow_mut().push("open");
+                opens.set(opens.get() + 1);
+                if opens.get() < 3 {
+                    Err("busy")
+                } else {
+                    Ok(())
+                }
+            },
+            || events.borrow_mut().push("close"),
+            || {
+                events.borrow_mut().push("empty");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("set");
+                Ok(())
+            },
+            || events.borrow_mut().push("wait"),
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            events.into_inner(),
+            vec!["open", "wait", "open", "wait", "open", "empty", "set", "close"]
+        );
+
+        for (fail_empty, expected) in [
+            (true, vec!["open", "empty", "close"]),
+            (false, vec!["open", "empty", "set", "close"]),
+        ] {
+            let events = RefCell::new(Vec::new());
+            let result = clipboard_transaction(
+                1,
+                || {
+                    events.borrow_mut().push("open");
+                    Ok::<(), &str>(())
+                },
+                || events.borrow_mut().push("close"),
+                || {
+                    events.borrow_mut().push("empty");
+                    if fail_empty {
+                        Err("empty")
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    events.borrow_mut().push("set");
+                    Err("set")
+                },
+                || unreachable!(),
+            );
+            assert!(result.is_err());
+            assert_eq!(events.into_inner(), expected);
+        }
+
+        let closes = Cell::new(0);
+        let result = clipboard_transaction(
+            2,
+            || Err::<(), _>("busy"),
+            || closes.set(closes.get() + 1),
+            || Ok(()),
+            || Ok(()),
+            || {},
+        );
+        assert_eq!(result, Err("busy"));
+        assert_eq!(
+            closes.get(),
+            0,
+            "never close a clipboard that was not opened"
+        );
     }
 }

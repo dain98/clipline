@@ -2997,8 +2997,11 @@ fn clipboard_copy_sends_selected_audio_tracks() {
 
     assert!(
         library.contains("pub struct CopyClipToClipboardRequest")
-            && library.contains("request: CopyClipToClipboardRequest"),
-        "clipboard command should accept a request object so selected audio can be passed"
+            && library.contains("request: CopyClipToClipboardRequest")
+            && library.contains("window: tauri::WebviewWindow")
+            && library.contains(".hwnd()")
+            && library.contains("EmptyClipboard()"),
+        "clipboard command should accept selected audio while native clipboard ownership comes from the invoking Clipline window",
     );
     assert!(
         app.contains("crate::library::copy_clip_to_clipboard"),
