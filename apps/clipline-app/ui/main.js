@@ -21,6 +21,12 @@ listen("status", (e) => {
   updateCaptureStatus();
 });
 
+function requestRefresh() {
+  refresh().catch((error) => {
+    $("error").textContent = String(error);
+  });
+}
+
 listen("saved", (e) => {
   $("error").textContent = "";
   const s = e.payload;
@@ -28,11 +34,11 @@ listen("saved", (e) => {
   setNotice(s.gc_deleted
     ? `cleaned up ${s.gc_deleted} old clip${s.gc_deleted > 1 ? "s" : ""} (${fmtBytes(s.gc_freed_bytes)})`
     : `saved ${fmtDur(s.seconds)} ${savedKind}`, { transient: true });
-  refresh();
+  requestRefresh();
 });
 
 listen("osu-enrichment-updated", () => {
-  refresh();
+  requestRefresh();
 });
 
 listen("error", (e) => { $("error").textContent = e.payload; });

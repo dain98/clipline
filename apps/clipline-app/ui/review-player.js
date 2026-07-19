@@ -1543,6 +1543,7 @@ async function exportRangeAsClip(startS, endS, {
       markers: exported.markers || null,
       game: sourceClip.game || null,
     };
+    invalidateLocalClipsRefresh();
     clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
     renderClips();
     await refreshStorage();
@@ -1612,6 +1613,7 @@ async function applyDeletion(removedPaths) {
   const removed = new Set(removedPaths || []);
   if (!removed.size) return;
   const wasCurrent = currentClip && removed.has(currentClip.path);
+  invalidateLocalClipsRefresh();
   clipsCache = clipsCache.filter((clip) => !removed.has(clip.path));
   if (wasCurrent) closeReview();
   else renderClips();

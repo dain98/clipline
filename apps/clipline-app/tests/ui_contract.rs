@@ -1337,6 +1337,54 @@ fn resolved_recorder_media_root_updates_library_and_playback_scope() {
 }
 
 #[test]
+fn local_library_refresh_rejects_stale_snapshots_and_reports_event_errors() {
+    let app_core = read_ui_js("app-core.js");
+    let library = read_ui_js("library.js");
+    let review = read_ui_js("review-player.js");
+    let main = read_ui_js("main.js");
+    let refresh_clips = js_function_body(&library, "refreshClips");
+
+    assert!(
+        app_core.contains("var localClipsRequestGate = CloudCore.createRequestGate();"),
+        "local Library reads need a latest-request generation gate"
+    );
+    for required in [
+        "const request = localClipsRequestGate.begin(\"local-library\");",
+        "const isCurrent = () => localClipsRequestGate.isCurrent(request, \"local-library\");",
+        "if (!isCurrent()) return false;",
+        "freshClips = await invoke(\"list_clips\");",
+        "clipsCache = freshClips;",
+    ] {
+        assert!(
+            refresh_clips.contains(required),
+            "refreshClips must arbitrate snapshots with `{required}`"
+        );
+    }
+    assert!(
+        refresh_clips.find("if (!isCurrent()) return false;")
+            < refresh_clips.find("clipsCache = freshClips;"),
+        "a stale response must be rejected before it mutates the local cache"
+    );
+    assert!(
+        library.contains("function invalidateLocalClipsRefresh()")
+            && js_function_body(&library, "replaceClipInCache")
+                .contains("invalidateLocalClipsRefresh();")
+            && js_function_body(&review, "applyDeletion")
+                .contains("invalidateLocalClipsRefresh();")
+            && review.matches("invalidateLocalClipsRefresh();").count() >= 2,
+        "rename, delete, and export cache mutations must invalidate older snapshots"
+    );
+    assert!(
+        main.contains("function requestRefresh()")
+            && main.contains("refresh().catch((error) => {")
+            && main.contains("listen(\"saved\"")
+            && main.contains("listen(\"osu-enrichment-updated\"")
+            && main.matches("requestRefresh();").count() >= 2,
+        "fire-and-forget event refreshes must catch and surface current failures"
+    );
+}
+
+#[test]
 fn keyboard_shortcuts_document_j_l_frame_step_and_arrows_seek() {
     let html = index_html();
 

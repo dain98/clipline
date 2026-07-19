@@ -64,6 +64,7 @@ function replacePosterCachePath(oldPath, newPath) {
 }
 
 function replaceClipInCache(oldPath, renamed) {
+  invalidateLocalClipsRefresh();
   clipsCache = clipsCache.map((clip) => (clip.path === oldPath ? renamed : clip));
   if (oldPath !== renamed.path && selectedClipPaths.delete(oldPath)) {
     selectedClipPaths.add(renamed.path);
@@ -71,8 +72,22 @@ function replaceClipInCache(oldPath, renamed) {
   replacePosterCachePath(oldPath, renamed.path);
 }
 
+function invalidateLocalClipsRefresh() {
+  localClipsRequestGate.invalidate();
+}
+
 async function refreshClips(preferredCurrentPath = null) {
-  clipsCache = await invoke("list_clips");
+  const request = localClipsRequestGate.begin("local-library");
+  const isCurrent = () => localClipsRequestGate.isCurrent(request, "local-library");
+  let freshClips;
+  try {
+    freshClips = await invoke("list_clips");
+  } catch (error) {
+    if (!isCurrent()) return false;
+    throw error;
+  }
+  if (!isCurrent()) return false;
+  clipsCache = freshClips;
   if (currentClip) {
     const currentPath = preferredCurrentPath || currentClip.path;
     const fresh = clipsCache.find((clip) => clip.path === currentPath);
@@ -86,6 +101,7 @@ async function refreshClips(preferredCurrentPath = null) {
     }
   }
   renderClips();
+  return true;
 }
 // Leading icon per clip kind. Static markup (no clip data) — innerHTML is safe.
 const CLIP_KIND_ICONS = {
