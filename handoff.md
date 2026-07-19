@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): reproducible dependency security gates
+
+The combined audit's L-11 is fixed. `anyhow` is locked to 1.0.103, clearing
+RUSTSEC-2026-0190. Running the newly added RustSec gate also surfaced newer actionable advisories,
+so `quinn-proto` is now 0.11.15 and the XML chain is on `quick-xml` 0.41 through `plist` 1.10.
+Because released `wayland-scanner` 0.31.10 still pins vulnerable quick-xml 0.39, Cargo temporarily
+patches only that build-time crate to the exact upstream commit that already adopted 0.41; there is
+no advisory ignore.
+
+All remote workflow actions are pinned to full reviewed commits with version/channel comments,
+checkout credentials are not persisted, and workflow tokens are least-privilege. A separate
+dependency-security workflow runs RustSec on dependency changes, weekly, and on demand. The checked
+in audit policy keeps ignores empty and documents the owner/rationale/expiry/removal requirements
+for any future exception. Dependabot proposes weekly Cargo and GitHub Actions updates.
+
+Plan commit `d2b1492`; implementation commit `a1b3e20`. A repository-security integration contract
+pins the fixed crate floors, SHA-only remote actions, readable pin comments, RustSec presence,
+empty-ignore policy, and both Dependabot ecosystems. The local cargo-audit 0.22.2 scan reports zero
+vulnerabilities; its 19 informational unmaintained warnings feed directly into L-12. Fresh-cache app
+Clippy, CI-mode workspace tests (401 app tests plus the repository contract), and workspace Clippy
+pass with warnings denied. No native or manual-only acceptance item is needed for this CI/lockfile
+batch.
+
 ## Checkpoint (2026-07-18): pinned League loopback transport
 
 The combined audit's L-10 is fixed. League Live Client bases are now parsed once and accepted only

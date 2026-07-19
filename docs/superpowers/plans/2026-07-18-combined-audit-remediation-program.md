@@ -51,6 +51,7 @@ Additional completed findings:
 - [ ] L-08 — explicit normalized-origin consent before any plain-HTTP password request (`962ba5e`)
 - [ ] L-09 — native-authorized media roots, exact-file asset scopes, and backend-enumerated local icon paths (`f80117b`)
 - [ ] L-10 — numeric loopback normalization with proxy bypass and redirect refusal for League requests (`a49813e`)
+- [ ] L-11 — fixed advisory versions, zero-ignore RustSec CI, immutable action pins, and automated update proposals (`a1b3e20`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
