@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): bounded remote HTTP operations
+
+The combined audit's M-05 is fixed. Desktop control requests now share a client with a five-second
+connect timeout, 15-second read-idle timeout, 30-second total deadline, and redirects disabled.
+Authenticated media streams use the same connect boundary plus a 30-second read-idle deadline
+without a short total cap; upload requests receive a size-aware deadline based on a 256 KiB/s
+minimum rate (60-second floor, 24-hour ceiling). Token-free object uploads keep a separate client.
+
+All Cloud and osu! success JSON is streamed through a 4 MiB bound, diagnostic/error bodies through
+64 KiB, and avatars through their existing 2 MiB image bound. The reader rejects deceptive
+`Content-Length` values before buffering and enforces the same cap chunk by chunk. Cloud connect,
+identity, listing, clip status, visibility, upload controls, assets, and osu! token/user/score
+requests no longer use fresh default clients or unbounded `json`/`text` reads. Cloud listing stops
+at 100 pages / 10,000 unique clip ids and returns a visible truncation warning. The loopback League
+client adds connect/read deadlines and rejects JSON over 4 MiB.
+
+Plan commit `acb3326`; implementation commit `3a51d1b`. Three bounded-reader/deadline tests, 15
+upload tests, 40 Cloud tests, five osu! tests, 22 League unit tests plus its HTTP integrations, and
+the cloud-library UI contract pass. Fresh-cache Clippy for both changed crates, CI-mode workspace
+tests (370 app tests), and workspace Clippy pass with warnings denied. Computer Use verified the
+rebuilt app renders all nine clips at 6.5 MB. Real Cloud/osu!/League continuity remains on the
+manual acceptance list because it requires live accounts and a running game.
+
 ## Checkpoint (2026-07-18): recoverable settings startup
 
 The combined audit's M-03 is fixed. Startup now distinguishes a first-run missing file from an
