@@ -4,6 +4,30 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): consolidated divergence-prone paths
+
+The combined audit's L-15 is fixed. Memory and disk replay rings now share keyframe-window and
+eviction planning, while `ReplayStorage` owns the remaining backend dispatch for metrics, window
+loading, and insertion. Folder commands share one off-main-thread native dialog constructor while
+retaining their distinct media-authorization rules. Game discovery no longer hides drift behind a
+module-wide dead-code allowance.
+
+Process-loopback activation reports a typed operation timeout, so recorder fallback no longer
+classifies errors by display text. The MP4 walker and both trim readers share one overflow-checked
+normal/large/terminal box-header decoder. All four fragment payload transports now share sample
+validation, `moof`/`mdat` planning, chunk bookkeeping, decode-time advancement, and sequence commit;
+only their payload I/O differs.
+
+Plan commit `c6bbc94`; implementation commit `621c6dc`. Tests prove memory/disk eviction safety,
+typed timeout classification, checked header boundaries, and byte-identical output across owned,
+borrowed, single-source, and per-track-source MP4 writes. A repository contract rejects the blanket
+allowance, duplicated dialog/header/state paths, timeout substring matching, and the FFmpeg codec
+no-op. All 421 app tests, 18 buffer tests, 194 capture tests, 112 MP4 tests plus integrations,
+CI-mode workspace tests, fresh-cache changed-crate Clippy, and warning-denied workspace Clippy pass.
+Computer Use verified the rebuilt nine-of-nine Library with recording active. Existing media-root
+and Windows capture lifecycle acceptance scenarios cover the native boundaries, so no duplicate
+manual-only item was added.
+
 ## Checkpoint (2026-07-18): coalesced off-thread memory sampling
 
 The combined audit's L-16 is fixed without changing the displayed metric. `MemorySampler` now owns

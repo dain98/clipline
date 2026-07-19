@@ -74,6 +74,8 @@ Additional completed findings:
 
 - [ ] L-16 — coalesced cached memory sampling on the blocking pool with hidden-window pause (`fb30ca0`)
 
+- [ ] L-15 — shared replay planning/storage dispatch, typed capture timeouts, centralized MP4 parsing/writing, and single native folder-picker ownership (`621c6dc`)
+
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
 - [ ] None currently.
