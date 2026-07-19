@@ -476,19 +476,16 @@ async function syncCloudClipStatus(clip) {
 }
 
 function upsertCloudProgress(progress) {
-  if (!progress || !progress.local_clip_id) return;
+  if (!progress || !progress.local_clip_id) return { record: null, renderRequired: false };
   const current = (cloudSettings().uploads || {})[progress.local_clip_id] || {};
-  upsertCloudUploadRecord({
-    ...current,
-    local_clip_id: progress.local_clip_id,
-    path: progress.path || current.path || "",
-    remote_clip_id: progress.remote_clip_id ?? current.remote_clip_id ?? null,
-    remote_url: progress.remote_url ?? current.remote_url ?? null,
-    visibility: current.visibility || cloudSettings().default_visibility || "private",
-    upload_status: progress.upload_status || current.upload_status || "not_uploaded",
-    error: progress.error ?? current.error ?? null,
-    updated_at_unix: Math.floor(Date.now() / 1000),
-  });
+  const update = CloudCore.reconcileUploadProgress(
+    current,
+    progress,
+    cloudSettings().default_visibility,
+    Date.now() / 1000,
+  );
+  upsertCloudUploadRecord(update.record);
+  return update;
 }
 async function reloadSettings() {
   const previousAccountKey = cloudAccountKey();

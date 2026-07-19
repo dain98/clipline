@@ -79,7 +79,7 @@ listen("game-detection", (e) => {
 
 listen("cloud-upload-progress", (e) => {
   const progress = e.payload || {};
-  upsertCloudProgress(progress);
+  const update = upsertCloudProgress(progress);
   if (progress.error) {
     $("error").textContent = progress.error;
   } else if (progress.upload_status === "uploading") {
@@ -91,7 +91,7 @@ listen("cloud-upload-progress", (e) => {
   } else if (progress.upload_status === "processing") {
     setDeckStatus("cloud upload processing");
   }
-  renderClips();
+  if (update.renderRequired) renderClips();
 });
 
 /* ---- wiring ---- */

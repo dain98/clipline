@@ -3609,3 +3609,34 @@ fn cloud_auth_refresh_preserves_the_unsaved_settings_draft() {
         );
     }
 }
+
+#[test]
+fn cloud_byte_progress_does_not_unconditionally_rebuild_the_gallery() {
+    let main = read_ui_js("main.js");
+    let handler = main
+        .split("listen(\"cloud-upload-progress\", (e) => {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n});").next())
+        .expect("cloud upload progress handler");
+
+    assert!(
+        handler.contains("const update = upsertCloudProgress(progress)")
+            && handler.contains("if (update.renderRequired) renderClips()"),
+        "gallery rebuilding must be conditional on meaningful upload-record transitions"
+    );
+    let condition = handler
+        .find("if (update.renderRequired) renderClips()")
+        .expect("conditional gallery render");
+    let percentage = handler
+        .find("received_size_bytes")
+        .expect("live byte progress");
+    assert!(
+        percentage < condition,
+        "the constant-size percentage update must remain live for byte-only progress"
+    );
+    assert_eq!(
+        handler.matches("renderClips()").count(),
+        1,
+        "the progress handler must not keep an unconditional gallery rebuild"
+    );
+}
