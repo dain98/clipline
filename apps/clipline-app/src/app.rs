@@ -1058,16 +1058,6 @@ fn save_replay(state: tauri::State<RuntimeState>) {
 }
 
 #[tauri::command]
-fn restart_as_administrator<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
-    if crate::windows::current_process_is_elevated()? {
-        return Ok(false);
-    }
-    crate::windows::launch_elevated_after(std::process::id())?;
-    quit_app(&app);
-    Ok(true)
-}
-
-#[tauri::command]
 fn get_autostart_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
     app.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
@@ -1770,7 +1760,6 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             save_replay,
-            restart_as_administrator,
             set_recording,
             get_settings,
             minimize_main_window,

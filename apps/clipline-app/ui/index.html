@@ -836,11 +836,10 @@
     <div class="confirm-body">
       <strong>Administrator game blocks replay hotkeys</strong>
       <span><span id="elevation-game-name">This game</span> is running as administrator. Windows prevents Clipline from receiving Save Replay hotkeys while the game is focused.</span>
-      <span class="hint">Restarting Clipline as administrator fixes the hotkey, but resets the current rolling replay buffer. Clipline will continue to start normally in the future.</span>
+      <span class="hint">For safe focused-game hotkeys, run the game without administrator privileges. Clipline does not elevate the full application.</span>
     </div>
     <div class="confirm-actions">
-      <button id="elevation-restart" class="primary">Restart as Administrator</button>
-      <button id="elevation-cancel">Not Now</button>
+      <button id="elevation-cancel" class="primary">Got It</button>
     </div>
   </dialog>
 
