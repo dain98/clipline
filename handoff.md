@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): isolated concurrent poster generation
+
+The combined audit's L-06 is fixed. Every FFmpeg poster attempt now reserves a distinct sibling
+temp file with `create_new` and a process/counter identity. An RAII owner removes exactly that file
+on spawn failure, encode failure, publish failure, or early return, so overlapping attempts cannot
+delete or overwrite one another and no in-flight-key map can grow over time.
+
+Only a successful FFmpeg exit reaches publication. Windows uses `MoveFileExW` with replace-existing
+and write-through flags to atomically replace a stale cached poster; other platforms use the native
+rename boundary. The visible poster is therefore always either the previous complete JPEG or one
+new complete JPEG, even when two requests finish together. This also corrects stale-poster refresh
+on Windows, where plain `std::fs::rename` could not replace an existing destination.
+
+Plan commit `9440a95`; implementation commit `509e5cd`. The app suite now has 398 unit tests,
+including independent concurrent reservations, owner-scoped cleanup, and real Windows atomic stale
+replacement. Fresh-cache app Clippy, CI-mode workspace tests, and workspace Clippy pass with warnings
+denied. Computer Use verified normal startup and complete cached thumbnails across the nine-clip
+Library. No manual-only item remains for this filesystem concurrency boundary.
+
 ## Checkpoint (2026-07-18): validated multipart upload work lists
 
 The combined audit's L-05 is fixed. Before either authenticated proxy upload or direct object-store

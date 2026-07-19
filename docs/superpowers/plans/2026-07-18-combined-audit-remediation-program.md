@@ -46,6 +46,7 @@ Additional completed findings:
 - [ ] L-03 — shared typed recorder-hotkey parsing, released orphan `KeyF` intent, and data-driven open-dialog keyboard ownership (`cc836fa`)
 - [ ] L-04 — case-insensitive recording-suffix recovery, already closed by the stronger H-02 ownership batch (`234f6af`)
 - [ ] L-05 — zero, duplicate, and file-range validation for proxy/direct multipart work lists (`b353966`)
+- [ ] L-06 — unique owned poster temps, all-branch cleanup, and atomic stale-poster publication (`509e5cd`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
