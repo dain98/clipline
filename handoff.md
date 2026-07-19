@@ -618,6 +618,11 @@ ownership proof. Recording recovery requires the explicit ownership document, ha
 suffix. The library continues to display unmarked MP4s for compatibility, but background storage
 maintenance cannot delete them.
 
+This also closes combined finding L-04: recovery detects and removes the `.recording` suffix with
+the same case-insensitive comparison while preserving the original MP4 stem. The dedicated
+`recovery_handles_mixed_case_recording_suffixes` fixture proves `Session.MP4.RECORDING` recovers as
+`Session.MP4` rather than aborting the pass.
+
 Plan commit `7dfc10a`; implementation commit `234f6af`. The focused storage suite passes with 23
 tests, focused service coverage passes with 37 tests, CI-mode `cargo test --workspace` passes, and
 fresh-cache workspace clippy passes with warnings denied. Computer Use opened the rebuilt app and
