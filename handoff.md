@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): serialized microphone test sessions
+
+The combined audit's L-20 is fixed. Microphone test state now owns a monotonic generation and stop
+sender. Allocating a generation, stopping the previous session, and installing its replacement are
+one locked transaction, so concurrent starts cannot overwrite the only control sender and strand a
+worker holding the microphone. Workers stop on either an explicit message or channel disconnect,
+and named thread creation is fallible with conditional state rollback.
+
+Live monitor publication and error/stopped completion are serialized against generation
+replacement. A superseded worker therefore cannot emit a late level/error event or clear the
+newer active session. Explicit stop and replacement also remain ordered after any in-progress
+event publication.
+
+Plan commit `0765beb`; implementation commit `065c9a7`. Focused tests cover disconnected control
+channels, 12 concurrent replacements with one surviving generation, and stale publish/finish
+rejection. After a fresh app-crate clean, all 404 app tests, CI-mode workspace tests, and
+warning-denied workspace Clippy pass. Computer Use verified the rebuilt nine-clip Library plus two
+real default-microphone start/stop cycles; controls returned to idle and the process settled at 32
+threads after stopping. No manual-only item remains for this lifecycle boundary.
+
 ## Checkpoint (2026-07-18): validated capture readback boundaries
 
 The combined audit's L-19 is fixed. WASAPI buffers are now viewed only as alignment-one byte
