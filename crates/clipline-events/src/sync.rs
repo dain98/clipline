@@ -1,5 +1,22 @@
 use std::time::Instant;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockSyncError {
+    AnchorBeforeRecordingStart,
+}
+
+impl std::fmt::Display for ClockSyncError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AnchorBeforeRecordingStart => {
+                formatter.write_str("clock anchor predates recording start")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ClockSyncError {}
+
 /// A paired sample of the source game clock and the wall clock.
 ///
 /// Re-sample one of these on every poll (ddoc §5): pauses and drift in the
@@ -18,16 +35,19 @@ pub struct ClockAnchor {
 ///
 /// `emit_latency_s` is the small fixed kill-feed/event-emit delay that
 /// nudges markers onto the visual moment. The result can be negative for
-/// events that predate the recording; callers clamp as appropriate.
+/// events that predate the recording; callers clamp as appropriate. An anchor
+/// sampled before `recording_t0` is rejected rather than silently saturated.
 pub fn recording_offset_s(
     event_time_s: f64,
     anchor: ClockAnchor,
     recording_t0: Instant,
     emit_latency_s: f64,
-) -> f64 {
-    (event_time_s - anchor.game_time_s)
-        + anchor.sampled_at.duration_since(recording_t0).as_secs_f64()
-        - emit_latency_s
+) -> Result<f64, ClockSyncError> {
+    let recording_elapsed = anchor
+        .sampled_at
+        .checked_duration_since(recording_t0)
+        .ok_or(ClockSyncError::AnchorBeforeRecordingStart)?;
+    Ok((event_time_s - anchor.game_time_s) + recording_elapsed.as_secs_f64() - emit_latency_s)
 }
 
 #[cfg(test)]
@@ -45,7 +65,7 @@ mod tests {
             game_time_s: 95.0,
             sampled_at: t0 + Duration::from_secs(100),
         };
-        let off = recording_offset_s(90.0, anchor, t0, 0.0);
+        let off = recording_offset_s(90.0, anchor, t0, 0.0).unwrap();
         assert!((off - 95.0).abs() < 1e-9);
     }
 
@@ -60,7 +80,7 @@ mod tests {
             game_time_s: 300.0,
             sampled_at: t0 + Duration::from_secs(360),
         };
-        let off = recording_offset_s(310.0, post_pause_anchor, t0, 0.0);
+        let off = recording_offset_s(310.0, post_pause_anchor, t0, 0.0).unwrap();
         assert!((off - 370.0).abs() < 1e-9);
     }
 
@@ -71,7 +91,22 @@ mod tests {
             game_time_s: 10.0,
             sampled_at: t0 + Duration::from_secs(10),
         };
-        let off = recording_offset_s(10.0, anchor, t0, 0.5);
+        let off = recording_offset_s(10.0, anchor, t0, 0.5).unwrap();
         assert!((off - 9.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn anchor_before_recording_start_is_rejected() {
+        let sampled_at = Instant::now();
+        let recording_t0 = sampled_at + Duration::from_secs(1);
+        let anchor = ClockAnchor {
+            game_time_s: 10.0,
+            sampled_at,
+        };
+
+        assert_eq!(
+            recording_offset_s(10.0, anchor, recording_t0, 0.0),
+            Err(ClockSyncError::AnchorBeforeRecordingStart)
+        );
     }
 }

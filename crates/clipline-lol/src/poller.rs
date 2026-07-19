@@ -48,22 +48,24 @@ pub async fn poll_once_with_continuity(
         game_time_s,
         sampled_at: Instant::now(),
     };
+    // Reject an impossible wall-clock relation before fetching events or
+    // advancing the cumulative tracker watermark.
+    recording_offset_s(game_time_s, anchor, recording_t0, 0.0)
+        .map_err(|error| Error::InvalidResponse(error.to_string()))?;
 
     let data = client.event_data().await?;
     let new_match = tracker.prepare_poll(game_time_s, &data.events);
     let events = tracker
         .fresh(&data.events)
         .into_iter()
-        .map(|raw| {
+        .map(|raw| -> Result<GameEvent, Error> {
             let mut ev = normalize(raw, local_player);
-            ev.recording_offset_s = Some(recording_offset_s(
-                raw.event_time,
-                anchor,
-                recording_t0,
-                emit_latency_s,
-            ));
-            ev
+            ev.recording_offset_s = Some(
+                recording_offset_s(raw.event_time, anchor, recording_t0, emit_latency_s)
+                    .map_err(|error| Error::InvalidResponse(error.to_string()))?,
+            );
+            Ok(ev)
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(PollBatch { events, new_match })
 }

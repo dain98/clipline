@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clipline_lol::{poll_once, poll_once_with_continuity, EventTracker, LiveClient};
 use httpmock::prelude::*;
@@ -66,6 +66,28 @@ async fn polls_dedupe_and_stamp_recording_offsets() {
         .unwrap();
     assert_eq!(batch2.len(), 1);
     assert_eq!(batch2[0].subtype.as_deref(), Some("2"));
+}
+
+#[tokio::test]
+async fn poll_rejects_an_anchor_before_recording_without_fetching_events() {
+    let server = MockServer::start();
+    mount_gamestats(&server, 100.0);
+    let events = mount_events(
+        &server,
+        json!([{ "EventID": 1, "EventName": "ChampionKill", "EventTime": 95.0 }]),
+    );
+    let client = LiveClient::new(server.base_url()).unwrap();
+    let mut tracker = EventTracker::default();
+    let future_recording_start = Instant::now() + Duration::from_secs(60);
+
+    let error = poll_once(&client, &mut tracker, "Me", future_recording_start, 0.0)
+        .await
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("clock anchor predates recording start"));
+    events.assert_hits(0);
 }
 
 #[tokio::test]
