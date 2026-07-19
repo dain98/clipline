@@ -13,8 +13,8 @@ use std::sync::Mutex;
 
 use clipline_events::{is_review_event, ClipMarker, ClipMarkers, ClipPlay};
 use clipline_mp4::{
-    remux_with_mixed_audio_track, remux_with_selected_audio_tracks, trim_keyframe_aligned_file,
-    MediaTrackCounts,
+    remux_with_mixed_audio_track_file, remux_with_selected_audio_tracks_file,
+    trim_keyframe_aligned_file, MediaTrackCounts,
 };
 use clipline_storage::storage_status as read_storage_status;
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
@@ -1088,17 +1088,18 @@ fn clipboard_share_path(
         source,
         selected_audio_track_ids,
         &crate::settings::share_export_cache_dir(),
-        |source, mode| {
-            let source_bytes = std::fs::read(source).map_err(|e| format!("read clip: {e}"))?;
+        |source, target, mode| {
             match mode {
                 ShareAudioExportMode::Remux(indices) => {
-                    remux_with_selected_audio_tracks(&source_bytes, &indices)
-                        .map_err(|e| e.to_string())
+                    remux_with_selected_audio_tracks_file(source, target, &indices)
+                        .map_err(|e| e.to_string())?;
                 }
                 ShareAudioExportMode::Mix(indices) => {
-                    remux_with_mixed_audio_track(&source_bytes, &indices).map_err(|e| e.to_string())
+                    remux_with_mixed_audio_track_file(source, target, &indices)
+                        .map_err(|e| e.to_string())?;
                 }
             }
+            Ok(())
         },
     )
 }
@@ -1107,7 +1108,7 @@ fn clipboard_share_path_with_exporter(
     source: &Path,
     selected_audio_track_ids: Option<&[String]>,
     export_dir: &Path,
-    mut export_audio: impl FnMut(&Path, ShareAudioExportMode) -> Result<Vec<u8>, String>,
+    mut export_audio: impl FnMut(&Path, &Path, ShareAudioExportMode) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     let Some(mode) = clipboard_share_export_mode(source, selected_audio_track_ids)? else {
         return Ok(source.to_path_buf());
@@ -1121,9 +1122,11 @@ fn clipboard_share_path_with_exporter(
         return Ok(export);
     }
 
-    let bytes = export_audio(source, mode)?;
     let tmp = share_export_tmp_path(&export)?;
-    std::fs::write(&tmp, bytes).map_err(|e| format!("write share export: {e}"))?;
+    if let Err(error) = export_audio(source, &tmp, mode) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
     match std::fs::rename(&tmp, &export) {
         Ok(()) => {}
         Err(_) if export.exists() => {
@@ -2350,10 +2353,11 @@ mod tests {
             &source,
             Some(&selected),
             &export_dir,
-            |input, mode| {
+            |input, target, mode| {
                 assert_eq!(input, source.as_path());
                 assert_eq!(mode, ShareAudioExportMode::Mix(vec![0, 1]));
-                Ok(b"mixed share mp4".to_vec())
+                std::fs::write(target, b"mixed share mp4").unwrap();
+                Ok(())
             },
         )
         .unwrap();
@@ -2373,7 +2377,7 @@ mod tests {
             &source,
             selected,
             &dir.path().join("share"),
-            |_, _| panic!("clipboard copy without explicit audio selection must not export"),
+            |_, _, _| panic!("clipboard copy without explicit audio selection must not export"),
         )
         .unwrap();
 

@@ -41,6 +41,7 @@ const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
 const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 const CLOUD_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const UPLOAD_PAYLOAD_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CLOUD_THUMBNAIL_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const CLOUD_MEDIA_FALLBACK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const CLOUD_MEDIA_SIZE_SLACK_BYTES: u64 = 64 * 1024 * 1024;
@@ -1041,13 +1042,19 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         return Err("clip file is empty".into());
     }
     let markers = crate::util::read_markers_raw(&target);
-    let bytes = upload_bytes_for_audio_selection_from_path(
+    let payload = upload_payload_for_audio_selection_from_path(
         &target,
         markers.as_ref(),
         request.audio_track_ids.as_deref(),
     )
     .await?;
-    let checksum = sha256_hex(&bytes);
+    let payload_meta = tokio::fs::metadata(payload.path())
+        .await
+        .map_err(|e| format!("read upload payload metadata: {e}"))?;
+    let payload_size = payload_meta.len();
+    let checksum = crate::cloud_upload::sha256_file(payload.path())
+        .await
+        .map_err(cloud_error)?;
     let local_clip_id = local_clip_id(&target, &meta, &checksum)?;
     let mut record = CloudUploadRecord {
         local_clip_id: local_clip_id.clone(),
@@ -1063,12 +1070,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         updated_at_unix: unix_now(),
     };
     persist_record(&state, &record)?;
-    emit_upload_progress(&app, &record, 0, bytes.len() as u64, None);
+    emit_upload_progress(&app, &record, 0, payload_size, None);
 
     let upload_request = create_upload_request(UploadRequestInput {
         path: &target,
         meta: &meta,
-        bytes: &bytes,
+        file_size_bytes: payload_size,
+        duration_ms: clip_duration_ms_file(payload.path(), markers.as_ref()),
         checksum: &checksum,
         visibility: &visibility,
         markers: markers.as_ref(),
@@ -1076,12 +1084,12 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         title: request.title.as_deref(),
     })?;
     let progress_path = request.path.clone();
-    let upload_result = crate::cloud_upload::upload_mp4_bytes_with_progress(
+    let upload_result = crate::cloud_upload::upload_mp4_file_with_progress(
         &client,
         &token,
         &upload_request,
         description.as_deref(),
-        &bytes,
+        payload.path(),
         |progress| {
             let url = cloud_clip_url(&cloud, &progress.clip_id);
             let status = if progress.status == "completed" {
@@ -1111,7 +1119,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
             record.error = Some(cloud_error(error));
             record.updated_at_unix = unix_now();
             persist_record(&state, &record)?;
-            emit_upload_progress(&app, &record, 0, bytes.len() as u64, record.error.clone());
+            emit_upload_progress(&app, &record, 0, payload_size, record.error.clone());
             return Ok(CloudUploadResult { record, clip: None });
         }
     };
@@ -1255,7 +1263,8 @@ fn connected_client(cloud: &CloudSettings, token: &str) -> Result<CloudClient, S
 struct UploadRequestInput<'a> {
     path: &'a Path,
     meta: &'a std::fs::Metadata,
-    bytes: &'a [u8],
+    file_size_bytes: u64,
+    duration_ms: Option<i64>,
     checksum: &'a str,
     visibility: &'a str,
     markers: Option<&'a ClipMarkers>,
@@ -1274,8 +1283,8 @@ fn create_upload_request(input: UploadRequestInput<'_>) -> Result<CreateUploadRe
         game_executable: None,
         source_type: Some(source_type(input.path)),
         recorded_at: input.meta.modified().ok().map(DateTime::<Utc>::from),
-        duration_ms: clip_duration_ms(input.bytes, input.markers),
-        file_size_bytes: input.bytes.len() as u64,
+        duration_ms: input.duration_ms,
+        file_size_bytes: input.file_size_bytes,
         checksum_sha256: input.checksum.to_string(),
         container: "mp4".to_string(),
         video_codec: None,
@@ -1310,32 +1319,129 @@ enum UploadAudioSelectionPlan {
     Mix(Vec<u32>),
 }
 
-async fn upload_bytes_for_audio_selection_from_path(
+struct UploadPayload {
+    path: PathBuf,
+    owned: bool,
+}
+
+impl UploadPayload {
+    fn original(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            owned: false,
+        }
+    }
+
+    fn owned(path: PathBuf) -> Self {
+        Self { path, owned: true }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for UploadPayload {
+    fn drop(&mut self) {
+        if self.owned {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+async fn upload_payload_for_audio_selection_from_path(
     source_path: &Path,
     markers: Option<&ClipMarkers>,
     selected_audio_track_ids: Option<&[String]>,
-) -> Result<Vec<u8>, String> {
+) -> Result<UploadPayload, String> {
     let markers_with_audio = selected_audio_track_ids.and_then(|_| {
         crate::util::markers_with_inferred_audio_tracks(source_path, markers.cloned())
     });
     let selection_markers = markers_with_audio.as_ref().or(markers);
     match upload_audio_selection_plan(selection_markers, selected_audio_track_ids)? {
-        UploadAudioSelectionPlan::Original => tokio::fs::read(source_path)
-            .await
-            .map_err(|e| format!("read clip: {e}")),
+        UploadAudioSelectionPlan::Original => Ok(UploadPayload::original(source_path)),
         UploadAudioSelectionPlan::Remux(selected_indices) => {
-            let source_bytes = tokio::fs::read(source_path)
-                .await
-                .map_err(|e| format!("read clip: {e}"))?;
-            clipline_mp4::remux_with_selected_audio_tracks(&source_bytes, &selected_indices)
-                .map_err(|e| e.to_string())
+            let target = reserve_upload_payload_path(source_path)?;
+            let payload = UploadPayload::owned(target.clone());
+            let source = source_path.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                clipline_mp4::remux_with_selected_audio_tracks_file(
+                    &source,
+                    &target,
+                    &selected_indices,
+                )
+            })
+            .await
+            .map_err(|e| format!("audio remux task failed: {e}"))?
+            .map_err(|e| e.to_string())?;
+            Ok(payload)
         }
         UploadAudioSelectionPlan::Mix(selected_indices) => {
-            let source_bytes = tokio::fs::read(source_path)
-                .await
-                .map_err(|e| format!("read clip: {e}"))?;
-            clipline_mp4::remux_with_mixed_audio_track(&source_bytes, &selected_indices)
-                .map_err(|e| e.to_string())
+            let target = reserve_upload_payload_path(source_path)?;
+            let payload = UploadPayload::owned(target.clone());
+            let source = source_path.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                clipline_mp4::remux_with_mixed_audio_track_file(&source, &target, &selected_indices)
+            })
+            .await
+            .map_err(|e| format!("audio mix task failed: {e}"))?
+            .map_err(|e| e.to_string())?;
+            Ok(payload)
+        }
+    }
+}
+
+fn reserve_upload_payload_path(source: &Path) -> Result<PathBuf, String> {
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| "clip path must include a file name".to_string())?;
+    let parent = source
+        .parent()
+        .ok_or_else(|| "clip path must include a parent directory".to_string())?;
+    prune_abandoned_upload_payloads(parent);
+    for _ in 0..128 {
+        let suffix = CLOUD_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut name = file_name.to_os_string();
+        name.push(format!(
+            ".clipline-upload-{}-{suffix}.tmp",
+            std::process::id()
+        ));
+        let path = source.with_file_name(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                drop(file);
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("reserve upload payload: {error}")),
+        }
+    }
+    Err("could not reserve a unique upload payload path".into())
+}
+
+fn prune_abandoned_upload_payloads(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_upload_temp = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains(".clipline-upload-") && name.ends_with(".tmp"));
+        let abandoned = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= UPLOAD_PAYLOAD_MAX_AGE);
+        if is_upload_temp && abandoned {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -1399,8 +1505,10 @@ fn game_from_markers(markers: &ClipMarkers) -> Option<crate::library::ClipGame> 
     })
 }
 
-fn clip_duration_ms(bytes: &[u8], markers: Option<&ClipMarkers>) -> Option<i64> {
-    clipline_mp4::walker::movie_duration_s(bytes)
+fn clip_duration_ms_file(path: &Path, markers: Option<&ClipMarkers>) -> Option<i64> {
+    clipline_mp4::movie_duration_s_file(path)
+        .ok()
+        .flatten()
         .or_else(|| markers.map(|markers| markers.duration_s))
         .map(|seconds| (seconds * 1000.0).round())
         .filter(|value| value.is_finite() && *value >= 0.0)
@@ -1879,6 +1987,68 @@ mod tests {
             .expect_err("unknown track");
 
         assert!(err.contains("unknown audio track"), "{err}");
+    }
+
+    #[test]
+    fn owned_upload_payload_is_removed_but_original_is_preserved() {
+        let dir = TestDir::new("clipline-cloud", "upload-payload-ownership");
+        let original = dir.path().join("original.mp4");
+        let temporary = dir.path().join("temporary.mp4");
+        std::fs::write(&original, b"original").unwrap();
+        std::fs::write(&temporary, b"temporary").unwrap();
+
+        drop(UploadPayload::original(&original));
+        drop(UploadPayload::owned(temporary.clone()));
+
+        assert!(original.exists());
+        assert!(!temporary.exists());
+    }
+
+    #[tokio::test]
+    async fn selected_audio_upload_uses_and_cleans_file_backed_payload() {
+        let dir = TestDir::new("clipline-cloud", "selected-upload-payload");
+        let source = dir.path().join("source.mp4");
+        std::fs::write(&source, two_audio_mp4()).unwrap();
+        let markers = audio_markers();
+        let selected = vec!["microphone".to_string()];
+
+        let payload =
+            upload_payload_for_audio_selection_from_path(&source, Some(&markers), Some(&selected))
+                .await
+                .unwrap();
+        let payload_path = payload.path().to_path_buf();
+        let payload_bytes = std::fs::read(&payload_path).unwrap();
+
+        assert_ne!(payload_path, source);
+        assert!(payload_bytes.windows(6).any(|window| window == b"V00000"));
+        assert!(!payload_bytes.windows(6).any(|window| window == b"A00000"));
+        assert!(payload_bytes.windows(6).any(|window| window == b"B00000"));
+        drop(payload);
+        assert!(!payload_path.exists());
+        assert!(source.exists());
+    }
+
+    #[test]
+    fn abandoned_upload_payload_prune_is_scoped_and_age_gated() {
+        let dir = TestDir::new("clipline-cloud", "upload-payload-prune");
+        let abandoned = dir.path().join("clip.mp4.clipline-upload-1-1.tmp");
+        let active = dir.path().join("clip.mp4.clipline-upload-1-2.tmp");
+        let unrelated = dir.path().join("editor.tmp");
+        for path in [&abandoned, &active, &unrelated] {
+            std::fs::write(path, b"temp").unwrap();
+        }
+        std::fs::File::options()
+            .write(true)
+            .open(&abandoned)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+
+        prune_abandoned_upload_payloads(dir.path());
+
+        assert!(!abandoned.exists());
+        assert!(active.exists());
+        assert!(unrelated.exists());
     }
 
     #[test]

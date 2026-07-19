@@ -40,6 +40,12 @@ pub struct SourceSample {
     pub is_sync: bool,
 }
 
+/// Seekable sample source used when one output contains media from more than
+/// one backing file (for example source video plus a spooled mixed-audio track).
+pub trait ReadSeek: Read + Seek {}
+
+impl<T: Read + Seek + ?Sized> ReadSeek for T {}
+
 impl<W: Write + Seek> HybridMp4Writer<W> {
     /// Single video track (original API).
     pub fn new(w: W, cfg: VideoTrackConfig) -> io::Result<Self> {
@@ -315,6 +321,98 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
                 state.sync.push(s.is_sync);
                 state.next_decode_time += s.duration as u64;
                 sample_offset += s.size as u64;
+            }
+        }
+        self.next_sequence += 1;
+        Ok(())
+    }
+
+    pub fn write_fragment_multi_from_sources(
+        &mut self,
+        sources: &mut [&mut dyn ReadSeek],
+        per_track: &[&[SourceSample]],
+    ) -> io::Result<()> {
+        if per_track.len() != self.tracks.len() || sources.len() != self.tracks.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "expected {} track sources and slices, got {} sources and {} slices",
+                    self.tracks.len(),
+                    sources.len(),
+                    per_track.len()
+                ),
+            ));
+        }
+        if per_track.iter().all(|samples| samples.is_empty()) {
+            return Ok(());
+        }
+
+        let info_storage: Vec<Vec<FragSampleInfo>> = per_track
+            .iter()
+            .map(|samples| {
+                samples
+                    .iter()
+                    .map(|sample| FragSampleInfo {
+                        size: sample.size,
+                        duration: sample.duration,
+                        is_sync: sample.is_sync,
+                    })
+                    .collect()
+            })
+            .collect();
+        let runs: Vec<TrackRunInfo<'_>> = info_storage
+            .iter()
+            .enumerate()
+            .filter(|(_, samples)| !samples.is_empty())
+            .map(|(index, samples)| TrackRunInfo {
+                track_id: index as u32 + 1,
+                base_decode_time: self.tracks[index].next_decode_time,
+                samples,
+            })
+            .collect();
+
+        let frag_start = self.w.stream_position()?;
+        let total_payload = per_track
+            .iter()
+            .flat_map(|samples| samples.iter())
+            .try_fold(0_u64, |total, sample| {
+                total.checked_add(u64::from(sample.size)).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "fragment payload size overflow",
+                    )
+                })
+            })?;
+        let moof = fragment_moof_multi(self.next_sequence, &runs).map_err(fragment_io_error)?;
+        let mdat_header = mdat_header(total_payload);
+        self.w.write_all(&moof)?;
+        self.w.write_all(&mdat_header)?;
+
+        let mut copy_buf = vec![0_u8; 64 * 1024];
+        for run in &runs {
+            let index = (run.track_id - 1) as usize;
+            for sample in per_track[index] {
+                sources[index].seek(SeekFrom::Start(sample.offset))?;
+                copy_exact(
+                    &mut sources[index],
+                    &mut self.w,
+                    u64::from(sample.size),
+                    &mut copy_buf,
+                )?;
+            }
+        }
+
+        let mut sample_offset = frag_start + moof.len() as u64 + mdat_header.len() as u64;
+        for run in &runs {
+            let index = (run.track_id - 1) as usize;
+            let state = &mut self.tracks[index];
+            state.chunks.push((sample_offset, run.samples.len() as u32));
+            for sample in per_track[index] {
+                state.sizes.push(sample.size);
+                state.durations.push(sample.duration);
+                state.sync.push(sample.is_sync);
+                state.next_decode_time += u64::from(sample.duration);
+                sample_offset += u64::from(sample.size);
             }
         }
         self.next_sequence += 1;

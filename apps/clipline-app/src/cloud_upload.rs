@@ -4,6 +4,9 @@
 //! uploads are used only when discovery and the create-upload response both
 //! advertise the required capability.
 
+use std::path::Path;
+
+use bytes::Bytes;
 use clipline_cloud_api::{
     sha256_hex,
     types::{DirectPartUploadAckRequest, DirectPartUploadUrlResponse},
@@ -13,21 +16,25 @@ use clipline_cloud_api::{
 use reqwest::{header, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio_util::io::ReaderStream;
 
 const DIRECT_PUT_MAX_ATTEMPTS: usize = 3;
+const MAX_UPLOAD_PART_BYTES: u64 = 64 * 1024 * 1024;
 
-pub async fn upload_mp4_bytes_with_progress<F>(
+pub async fn upload_mp4_file_with_progress<F>(
     client: &CloudClient,
     device_token: &str,
     request: &CreateUploadRequest,
     description: Option<&str>,
-    bytes: &[u8],
+    path: &Path,
     mut on_progress: F,
 ) -> CloudApiResult<UploadProgressResponse>
 where
     F: FnMut(&UploadProgressResponse),
 {
-    validate_upload_request_matches_bytes(request, bytes)?;
+    validate_upload_request_matches_file(request, path).await?;
     let direct_s3_available = client
         .discover()
         .await
@@ -41,7 +48,7 @@ where
         &http,
         device_token,
         &upload,
-        bytes,
+        path,
         direct_s3_available,
         &mut on_progress,
     )
@@ -55,7 +62,7 @@ where
                 &http,
                 device_token,
                 &upload,
-                bytes,
+                path,
                 false,
                 &mut on_progress,
             )
@@ -64,6 +71,42 @@ where
         }
         Err(error) => Err(error.into_cloud_error()),
     }
+}
+
+#[cfg(test)]
+async fn upload_mp4_bytes_with_progress<F>(
+    client: &CloudClient,
+    device_token: &str,
+    request: &CreateUploadRequest,
+    description: Option<&str>,
+    bytes: &[u8],
+    mut on_progress: F,
+) -> CloudApiResult<UploadProgressResponse>
+where
+    F: FnMut(&UploadProgressResponse),
+{
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_UPLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let suffix = TEST_UPLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "clipline-upload-test-{}-{suffix}.mp4",
+        std::process::id()
+    ));
+    tokio::fs::write(&path, bytes)
+        .await
+        .map_err(|error| upload_file_error("write test upload", &path, error))?;
+    let result = upload_mp4_file_with_progress(
+        client,
+        device_token,
+        request,
+        description,
+        &path,
+        |progress| on_progress(progress),
+    )
+    .await;
+    let _ = tokio::fs::remove_file(path).await;
+    result
 }
 
 async fn create_upload(
@@ -125,7 +168,7 @@ async fn upload_existing<F>(
     http: &reqwest::Client,
     device_token: &str,
     upload: &CreateUploadResponse,
-    bytes: &[u8],
+    path: &Path,
     direct_s3_available: bool,
     on_progress: &mut F,
 ) -> Result<UploadProgressResponse, DirectUploadError>
@@ -133,7 +176,7 @@ where
     F: FnMut(&UploadProgressResponse),
 {
     match upload.mode.as_str() {
-        "single_put" => upload_single(client, upload, bytes, on_progress)
+        "single_put" => upload_single(client, http, device_token, upload, path, on_progress)
             .await
             .map_err(DirectUploadError::Cloud),
         "chunked" => {
@@ -144,18 +187,18 @@ where
             on_progress(&progress);
 
             let Some(presign_template) = upload.direct_part_presign_url_template.as_deref() else {
-                return upload_chunked_proxy(client, upload, bytes, progress, on_progress)
+                return upload_chunked_proxy(client, upload, path, progress, on_progress)
                     .await
                     .map_err(DirectUploadError::Cloud);
             };
             let Some(ack_template) = upload.direct_part_ack_url_template.as_deref() else {
-                return upload_chunked_proxy(client, upload, bytes, progress, on_progress)
+                return upload_chunked_proxy(client, upload, path, progress, on_progress)
                     .await
                     .map_err(DirectUploadError::Cloud);
             };
 
             if !direct_s3_available {
-                return upload_chunked_proxy(client, upload, bytes, progress, on_progress)
+                return upload_chunked_proxy(client, upload, path, progress, on_progress)
                     .await
                     .map_err(DirectUploadError::Cloud);
             }
@@ -169,7 +212,7 @@ where
                 presign: presign_template,
                 ack: ack_template,
             };
-            upload_chunked_direct(transport, upload, bytes, progress, templates, on_progress).await
+            upload_chunked_direct(transport, upload, path, progress, templates, on_progress).await
         }
         other => Err(DirectUploadError::Cloud(CloudApiError::InvalidUpload(
             format!("server returned unsupported upload mode {other:?}"),
@@ -179,8 +222,10 @@ where
 
 async fn upload_single<F>(
     client: &CloudClient,
+    http: &reqwest::Client,
+    device_token: &str,
     upload: &CreateUploadResponse,
-    bytes: &[u8],
+    path: &Path,
     on_progress: &mut F,
 ) -> CloudApiResult<UploadProgressResponse>
 where
@@ -191,9 +236,26 @@ where
         on_progress(&progress);
         return Ok(progress);
     }
-    let progress = client
-        .put_single_content(&upload.upload_id, bytes.to_vec())
+    let template = upload.single_put_url.as_deref().ok_or_else(|| {
+        CloudApiError::InvalidUpload("single_put upload omitted its content URL".to_string())
+    })?;
+    let url = upload_url(client, template, 0)?;
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| upload_file_error("open upload", path, error))?;
+    let file_size = file
+        .metadata()
+        .await
+        .map_err(|error| upload_file_error("read upload metadata", path, error))?
+        .len();
+    let response = http
+        .put(url)
+        .bearer_auth(device_token)
+        .header(header::CONTENT_LENGTH, file_size)
+        .body(reqwest::Body::wrap_stream(ReaderStream::new(file)))
+        .send()
         .await?;
+    let progress = parse_json_response(response).await?;
     on_progress(&progress);
     Ok(progress)
 }
@@ -201,17 +263,22 @@ where
 async fn upload_chunked_proxy<F>(
     client: &CloudClient,
     upload: &CreateUploadResponse,
-    bytes: &[u8],
+    path: &Path,
     progress: UploadProgressResponse,
     on_progress: &mut F,
 ) -> CloudApiResult<UploadProgressResponse>
 where
     F: FnMut(&UploadProgressResponse),
 {
+    let file_size = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| upload_file_error("read upload metadata", path, error))?
+        .len();
     for part_number in progress.missing_parts {
-        let chunk = chunk_for_part(bytes, upload.part_size_bytes, part_number)?;
+        let chunk =
+            read_chunk_for_part(path, file_size, upload.part_size_bytes, part_number).await?;
         client
-            .put_part(&upload.upload_id, part_number, chunk.to_vec())
+            .put_part(&upload.upload_id, part_number, chunk)
             .await?;
         let progress = client.get_upload(&upload.upload_id).await?;
         on_progress(&progress);
@@ -224,7 +291,7 @@ where
 async fn upload_chunked_direct<F>(
     transport: UploadTransport<'_>,
     upload: &CreateUploadResponse,
-    bytes: &[u8],
+    path: &Path,
     progress: UploadProgressResponse,
     templates: DirectPartTemplates<'_>,
     on_progress: &mut F,
@@ -232,10 +299,16 @@ async fn upload_chunked_direct<F>(
 where
     F: FnMut(&UploadProgressResponse),
 {
+    let file_size = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| upload_file_error("read upload metadata", path, error))
+        .map_err(DirectUploadError::Cloud)?
+        .len();
     for part_number in progress.missing_parts {
-        let chunk = chunk_for_part(bytes, upload.part_size_bytes, part_number)
+        let chunk = read_chunk_for_part(path, file_size, upload.part_size_bytes, part_number)
+            .await
             .map_err(DirectUploadError::Cloud)?;
-        upload_direct_part(transport, upload, part_number, chunk, templates).await?;
+        upload_direct_part(transport, upload, part_number, &chunk, templates).await?;
         let progress = transport
             .client
             .get_upload(&upload.upload_id)
@@ -256,7 +329,7 @@ async fn upload_direct_part(
     transport: UploadTransport<'_>,
     upload: &CreateUploadResponse,
     part_number: u16,
-    chunk: &[u8],
+    chunk: &Bytes,
     templates: DirectPartTemplates<'_>,
 ) -> Result<PartUploadResponse, DirectUploadError> {
     let mut last_retryable_error = None;
@@ -271,7 +344,7 @@ async fn upload_direct_part(
         .await?;
         validate_presign(upload, part_number, chunk, &presign)?;
 
-        match put_presigned_part(transport.http, &presign, chunk).await {
+        match put_presigned_part(transport.http, &presign, chunk.clone()).await {
             Ok(etag) => {
                 let checksum_sha256 = sha256_hex(chunk);
                 let ack = DirectPartUploadAckRequest {
@@ -366,9 +439,9 @@ fn validate_presign(
 async fn put_presigned_part(
     http: &reqwest::Client,
     presign: &DirectPartUploadUrlResponse,
-    chunk: &[u8],
+    chunk: Bytes,
 ) -> Result<String, DirectPutError> {
-    let mut request = http.put(&presign.url).body(chunk.to_vec());
+    let mut request = http.put(&presign.url).body(chunk);
     for header in &presign.headers {
         let name = header::HeaderName::from_bytes(header.name.as_bytes()).map_err(|e| {
             DirectPutError::Fallback(format!(
@@ -501,45 +574,97 @@ fn is_retryable_direct_put_status(status: StatusCode) -> bool {
         || status.is_server_error()
 }
 
-fn validate_upload_request_matches_bytes(
+async fn validate_upload_request_matches_file(
     request: &CreateUploadRequest,
-    bytes: &[u8],
+    path: &Path,
 ) -> CloudApiResult<()> {
-    if request.file_size_bytes != bytes.len() as u64 {
+    let file_size = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| upload_file_error("read upload metadata", path, error))?
+        .len();
+    if request.file_size_bytes != file_size {
         return Err(CloudApiError::InvalidUpload(format!(
-            "file_size_bytes is {}, but body has {} bytes",
-            request.file_size_bytes,
-            bytes.len()
+            "file_size_bytes is {}, but file has {} bytes",
+            request.file_size_bytes, file_size
         )));
     }
-    let checksum = sha256_hex(bytes);
+    let checksum = sha256_file(path).await?;
     if request.checksum_sha256.to_ascii_lowercase() != checksum {
         return Err(CloudApiError::InvalidUpload(
-            "checksum_sha256 does not match body bytes".to_string(),
+            "checksum_sha256 does not match the upload file".to_string(),
         ));
     }
     Ok(())
 }
 
-fn chunk_for_part(bytes: &[u8], part_size_bytes: u64, part_number: u16) -> CloudApiResult<&[u8]> {
-    let part_size = usize::try_from(part_size_bytes)
-        .map_err(|_| CloudApiError::InvalidUpload("part size does not fit usize".to_string()))?;
-    if part_size == 0 {
+pub(crate) async fn sha256_file(path: &Path) -> CloudApiResult<String> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| upload_file_error("open upload for hashing", path, error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|error| upload_file_error("hash upload", path, error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+async fn read_chunk_for_part(
+    path: &Path,
+    file_size: u64,
+    part_size_bytes: u64,
+    part_number: u16,
+) -> CloudApiResult<Bytes> {
+    if part_size_bytes == 0 {
         return Err(CloudApiError::InvalidUpload(
             "part size must be positive".to_string(),
         ));
     }
-    let index = usize::from(part_number.saturating_sub(1));
-    let start = index
-        .checked_mul(part_size)
-        .ok_or_else(|| CloudApiError::InvalidUpload("part offset overflowed".to_string()))?;
-    if start >= bytes.len() {
+    if part_size_bytes > MAX_UPLOAD_PART_BYTES {
         return Err(CloudApiError::InvalidUpload(format!(
-            "part {part_number} starts beyond the body"
+            "server part size {part_size_bytes} exceeds the {} byte client limit",
+            MAX_UPLOAD_PART_BYTES
         )));
     }
-    let end = start.saturating_add(part_size).min(bytes.len());
-    Ok(&bytes[start..end])
+    if part_number == 0 {
+        return Err(CloudApiError::InvalidUpload(
+            "part numbers start at 1".to_string(),
+        ));
+    }
+    let index = u64::from(part_number - 1);
+    let start = index
+        .checked_mul(part_size_bytes)
+        .ok_or_else(|| CloudApiError::InvalidUpload("part offset overflowed".to_string()))?;
+    if start >= file_size {
+        return Err(CloudApiError::InvalidUpload(format!(
+            "part {part_number} starts beyond the upload file"
+        )));
+    }
+    let length = part_size_bytes.min(file_size - start);
+    let length = usize::try_from(length)
+        .map_err(|_| CloudApiError::InvalidUpload("part size does not fit usize".to_string()))?;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| upload_file_error("open upload part", path, error))?;
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|error| upload_file_error("seek upload part", path, error))?;
+    let mut bytes = vec![0_u8; length];
+    file.read_exact(&mut bytes)
+        .await
+        .map_err(|error| upload_file_error("read upload part", path, error))?;
+    Ok(Bytes::from(bytes))
+}
+
+fn upload_file_error(action: &str, path: &Path, error: std::io::Error) -> CloudApiError {
+    CloudApiError::InvalidUpload(format!("{action} {path:?}: {error}"))
 }
 
 #[derive(Clone, Copy)]
@@ -588,6 +713,30 @@ mod tests {
     use httpmock::prelude::*;
     use httpmock::Mock;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn file_hash_and_part_reads_are_seekable_and_bounded() {
+        let path =
+            std::env::temp_dir().join(format!("clipline-upload-source-{}.bin", std::process::id()));
+        tokio::fs::write(&path, b"abcdef").await.unwrap();
+
+        assert_eq!(sha256_file(&path).await.unwrap(), sha256_hex(b"abcdef"));
+        assert_eq!(
+            read_chunk_for_part(&path, 6, 3, 2).await.unwrap(),
+            Bytes::from_static(b"def")
+        );
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn hostile_part_size_is_rejected_before_file_allocation() {
+        let missing = Path::new("this-file-must-not-be-opened.mp4");
+        let error = read_chunk_for_part(missing, u64::MAX, MAX_UPLOAD_PART_BYTES + 1, 1)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("exceeds"), "{error}");
+    }
 
     const TOKEN: &str = "device-token";
 
