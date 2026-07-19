@@ -645,4 +645,9 @@ afterNextPaint().then(() => {
   }, 750);
 });
 reportFrontendReady();
-setInterval(refreshMemoryUsage, 2000);
+setInterval(() => {
+  if (!document.hidden) refreshMemoryUsage();
+}, 2000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshMemoryUsage();
+});

@@ -549,8 +549,10 @@ fn webview2_runtime_diagnostic() -> String {
 }
 
 #[tauri::command]
-fn memory_status() -> Result<crate::memory::MemoryStatus, String> {
-    crate::memory::current_process_tree_memory()
+async fn memory_status(
+    sampler: tauri::State<'_, crate::memory::MemorySampler>,
+) -> Result<crate::memory::MemoryStatus, String> {
+    sampler.sample().await
 }
 
 #[tauri::command]
@@ -2191,6 +2193,7 @@ pub fn run() {
         .manage(RuntimeState::new(settings.clone(), lol_url))
         .manage(StartupWarnings::new(startup_warnings))
         .manage(MicTestState::default())
+        .manage(crate::memory::MemorySampler::default())
         .manage(NativeMediaFolderAuthorization::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {

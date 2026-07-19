@@ -2866,8 +2866,25 @@ fn shell_shows_live_memory_usage() {
         "sidebar chrome must include the RAM indicator placeholder"
     );
     assert!(
-        js.contains("memory_status") && js.contains("setInterval(refreshMemoryUsage, 2000)"),
-        "memory indicator must poll the backend command on a short interval"
+        js.contains("memory_status"),
+        "memory indicator must use the backend sampler"
+    );
+    assert!(
+        js.contains("if (!document.hidden) refreshMemoryUsage()")
+            && js.contains("visibilitychange"),
+        "memory polling must pause while hidden and refresh when visible again"
+    );
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let app = fs::read_to_string(source_root.join("app.rs")).expect("read app.rs");
+    assert!(
+        app.contains("async fn memory_status(")
+            && app.contains("State<'_, crate::memory::MemorySampler>"),
+        "memory_status must use the managed asynchronous sampler"
+    );
+    let memory = fs::read_to_string(source_root.join("memory.rs")).expect("read memory.rs");
+    assert!(
+        memory.contains("spawn_blocking") && memory.contains("tokio::sync::Mutex"),
+        "the process-tree walk must run on the blocking pool and coalesce callers"
     );
     assert!(
         css.contains(".memory-usage") && css.contains("font-variant-numeric: tabular-nums"),
