@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): League poller match continuity
+
+The combined audit's M-07 is fixed. The League poller now owns one `EventTracker` for its whole
+lifetime, so a failed Live Client request cannot discard the cumulative-event watermark. Each
+successful batch compares both Riot's maximum event ID and game clock with the prior successful
+batch. A rollback resets the watermark and emits the old-match/new-match boundary before the new
+match's first event; small clock corrections do not reset it.
+
+Polling failures receive bounded exponential backoff and a six-consecutive-failure grace window.
+A brief outage emits no boundary, while sustained absence ends an active match once. `GameEnd`
+still closes immediately, and an endpoint that lingers on its completed cumulative payload cannot
+start a duplicate session. Tracker identity survives sustained absence, while the local player is
+re-acquired when the endpoint returns. Heartbeats during unavailable-game waits and retry sleeps
+make a dropped recorder receiver terminate the otherwise idle poller thread.
+
+Plan commit `4af92c3`; implementation commit `905d976`. Six deterministic app lifecycle tests,
+25 League unit tests, and five League HTTP/end-to-end tests pass, including a real mock-server
+failure/recovery sequence that emits only the later event. Fresh-cache Clippy for both changed
+crates, CI-mode workspace tests (376 app tests), and workspace Clippy pass with warnings denied.
+Computer Use verified the rebuilt app renders all nine clips at 6.6 MB. A short real-match League
+endpoint interruption and the following match remain on the final manual acceptance list.
+
 ## Checkpoint (2026-07-18): bounded remote HTTP operations
 
 The combined audit's M-05 is fixed. Desktop control requests now share a client with a five-second
