@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): bounded direct-upload retry backoff
+
+The combined audit's L-24 is fixed. Retryable direct object-storage PUT failures now wait between
+attempts using 250 ms / 500 ms exponential steps plus deterministic per-upload, part, and attempt
+jitter. `Retry-After` delta seconds and HTTP dates become a minimum delay, with all local/server
+delays capped at 30 seconds for foreground failure reporting. Tokio timers keep task abort/future
+drop cancellation immediate.
+
+Malformed request construction and redirect configuration errors now fall back from the direct
+provider immediately; timeout/connect/request/body failures remain retryable. Existing status
+policy still refreshes expired 403 presigns and retries 408, 429, and 5xx responses, while provider
+fallback and terminal missing-ETag behavior are unchanged.
+
+Plan commit `9083940`; implementation commit `dd896dc`. Pure tests cover deterministic exponential
+jitter, server minimums/capping, delta/date/expired/malformed `Retry-After`, and existing integration
+tests prove expired presigns still make three spaced PUTs and provider failure still restarts through
+proxy. After a fresh app-crate clean, all 409 app tests, CI-mode workspace tests, and warning-denied
+workspace Clippy pass. Computer Use verified the rebuilt nine-clip Library. The existing real Cloud
+upload acceptance scenario now includes throttled direct-upload timing; no duplicate item was added.
+
 ## Checkpoint (2026-07-18): live extracted plugin icons
 
 The combined audit's L-22 is fixed. Parsed profiles and resolved immutable catalog presentation
