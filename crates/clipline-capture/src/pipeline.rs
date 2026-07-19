@@ -41,6 +41,112 @@ enum ReplayStorage {
     Disk(DiskReplayRing),
 }
 
+impl ReplayStorage {
+    fn len(&self) -> usize {
+        match self {
+            Self::Memory(ring) => ring.len(),
+            Self::Disk(ring) => ring.len(),
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Memory(ring) => ring.bytes(),
+            Self::Disk(ring) => ring.bytes(),
+        }
+    }
+
+    fn buffered_span_s(&self) -> f64 {
+        match self {
+            Self::Memory(ring) => segment_span(
+                ring.segments()
+                    .map(|segment| (segment.pts_start_s, segment.pts_end_s())),
+            ),
+            Self::Disk(ring) => segment_span(
+                ring.segments()
+                    .map(|segment| (segment.pts_start_s, segment.pts_end_s())),
+            ),
+        }
+    }
+
+    fn save_window_bounds(
+        &self,
+        window_s: f64,
+        exclude_before_s: Option<f64>,
+    ) -> Option<(f64, f64)> {
+        match self {
+            Self::Memory(ring) => bounds_for_segments(ring.save_window(window_s, exclude_before_s)),
+            Self::Disk(ring) => bounds_for_segments(ring.save_window(window_s, exclude_before_s)),
+        }
+    }
+
+    fn load_window(
+        &self,
+        window_s: f64,
+        exclude_before_s: Option<f64>,
+    ) -> io::Result<Vec<Segment>> {
+        match self {
+            Self::Memory(ring) => Ok(ring
+                .save_window(window_s, exclude_before_s)
+                .into_iter()
+                .cloned()
+                .collect()),
+            Self::Disk(ring) => ring
+                .save_window(window_s, exclude_before_s)
+                .into_iter()
+                .map(|segment| segment.load())
+                .collect(),
+        }
+    }
+
+    fn push(&mut self, segment: Arc<Segment>) -> io::Result<()> {
+        match self {
+            Self::Memory(ring) => ring.push_shared(segment),
+            Self::Disk(ring) => ring.push_ref(&segment)?,
+        }
+        Ok(())
+    }
+}
+
+fn segment_span(mut segments: impl Iterator<Item = (f64, f64)>) -> f64 {
+    let Some((first_start, first_end)) = segments.next() else {
+        return 0.0;
+    };
+    segments.fold(first_end - first_start, |_, (_, end)| end - first_start)
+}
+
+trait SegmentBounds {
+    fn pts_start_s(&self) -> f64;
+    fn pts_end_s(&self) -> f64;
+}
+
+impl SegmentBounds for &Segment {
+    fn pts_start_s(&self) -> f64 {
+        self.pts_start_s
+    }
+
+    fn pts_end_s(&self) -> f64 {
+        Segment::pts_end_s(self)
+    }
+}
+
+impl SegmentBounds for &clipline_buffer::DiskSegment {
+    fn pts_start_s(&self) -> f64 {
+        self.pts_start_s
+    }
+
+    fn pts_end_s(&self) -> f64 {
+        clipline_buffer::DiskSegment::pts_end_s(self)
+    }
+}
+
+fn bounds_for_segments<T: SegmentBounds>(segments: Vec<T>) -> Option<(f64, f64)> {
+    Some((
+        segments.first()?.pts_start_s(),
+        segments.last()?.pts_end_s(),
+    ))
+}
+
 pub trait WriteSeek: Write + Seek + Send {}
 
 impl<T: Write + Seek + Send> WriteSeek for T {}
@@ -234,37 +340,15 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
     }
 
     pub fn ring_len(&self) -> usize {
-        match &self.ring {
-            ReplayStorage::Memory(ring) => ring.len(),
-            ReplayStorage::Disk(ring) => ring.len(),
-        }
+        self.ring.len()
     }
 
     pub fn ring_bytes(&self) -> usize {
-        match &self.ring {
-            ReplayStorage::Memory(ring) => ring.bytes(),
-            ReplayStorage::Disk(ring) => ring.bytes(),
-        }
+        self.ring.bytes()
     }
 
     pub fn buffered_span_s(&self) -> f64 {
-        let mut span = 0.0f64;
-        let mut first_pts = None::<f64>;
-        match &self.ring {
-            ReplayStorage::Memory(ring) => {
-                for seg in ring.segments() {
-                    first_pts.get_or_insert(seg.pts_start_s);
-                    span = seg.pts_end_s() - first_pts.unwrap();
-                }
-            }
-            ReplayStorage::Disk(ring) => {
-                for seg in ring.segments() {
-                    first_pts.get_or_insert(seg.pts_start_s);
-                    span = seg.pts_end_s() - first_pts.unwrap();
-                }
-            }
-        }
-        span
+        self.ring.buffered_span_s()
     }
 
     pub fn save_window_bounds(
@@ -272,16 +356,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         window_s: f64,
         exclude_before_s: Option<f64>,
     ) -> Option<(f64, f64)> {
-        match &self.ring {
-            ReplayStorage::Memory(ring) => {
-                let segs = ring.save_window(window_s, exclude_before_s);
-                Some((segs.first()?.pts_start_s, segs.last()?.pts_end_s()))
-            }
-            ReplayStorage::Disk(ring) => {
-                let segs = ring.save_window(window_s, exclude_before_s);
-                Some((segs.first()?.pts_start_s, segs.last()?.pts_end_s()))
-            }
-        }
+        self.ring.save_window_bounds(window_s, exclude_before_s)
     }
 
     pub fn encoder(&self) -> &E {
@@ -420,18 +495,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         window_s: f64,
         exclude_before_s: Option<f64>,
     ) -> io::Result<Vec<Segment>> {
-        match &self.ring {
-            ReplayStorage::Memory(ring) => Ok(ring
-                .save_window(window_s, exclude_before_s)
-                .into_iter()
-                .cloned()
-                .collect()),
-            ReplayStorage::Disk(ring) => ring
-                .save_window(window_s, exclude_before_s)
-                .into_iter()
-                .map(|seg| seg.load())
-                .collect(),
-        }
+        self.ring.load_window(window_s, exclude_before_s)
     }
 
     fn seal_pending(&mut self, boundary_pts_s: f64) -> Result<(), PipelineError> {
@@ -514,10 +578,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             .full_session
             .as_ref()
             .is_some_and(|sink| sink.send_error.is_none());
-        match &mut self.ring {
-            ReplayStorage::Memory(ring) => ring.push_shared(Arc::clone(&seg)),
-            ReplayStorage::Disk(ring) => ring.push_ref(&seg)?,
-        }
+        self.ring.push(Arc::clone(&seg))?;
         if queue_full_session {
             self.queue_full_session_segment(seg);
         }

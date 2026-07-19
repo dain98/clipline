@@ -27,6 +27,17 @@ pub enum CaptureError {
     DeviceLost(String),
     #[error("no frame arrived within {0:?}")]
     Timeout(std::time::Duration),
+    #[error("{operation} timed out after {after:?}")]
+    OperationTimeout {
+        operation: String,
+        after: std::time::Duration,
+    },
+}
+
+impl CaptureError {
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Timeout(_) | Self::OperationTimeout { .. })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -197,6 +208,13 @@ mod tests {
         assert!(format!("{err}").contains("gone"));
         let err = CaptureError::Timeout(std::time::Duration::from_millis(500));
         assert!(format!("{err}").contains("500ms"));
+        assert!(err.is_timeout());
+        let err = CaptureError::OperationTimeout {
+            operation: "process loopback activation".into(),
+            after: std::time::Duration::from_millis(1500),
+        };
+        assert!(err.is_timeout());
+        assert!(format!("{err}").contains("process loopback activation"));
     }
 
     #[test]

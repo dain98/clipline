@@ -1658,6 +1658,23 @@ fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
     state.settings()
 }
 
+async fn choose_folder_dialog(
+    title: &'static str,
+    current_dir: PathBuf,
+) -> Result<Option<PathBuf>, String> {
+    // Run the native modal off the main thread so recorder status and other
+    // IPC keep flowing while the picker is open.
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title(title);
+        if current_dir.exists() {
+            dialog = dialog.set_directory(current_dir);
+        }
+        dialog.pick_folder()
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 async fn choose_media_folder(
     state: tauri::State<'_, RuntimeState>,
@@ -1670,17 +1687,7 @@ async fn choose_media_folder(
         .filter(|path| path.exists())
         .unwrap_or_else(service::default_clips_dir);
 
-    // Run the native modal off the main thread so recorder status and other
-    // IPC keep flowing while the picker is open.
-    let selected = tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Media Folder");
-        if current_dir.exists() {
-            dialog = dialog.set_directory(current_dir);
-        }
-        dialog.pick_folder()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let selected = choose_folder_dialog("Choose Clipline Media Folder", current_dir).await?;
     let Some(selected) = selected else {
         return Ok(None);
     };
@@ -1704,15 +1711,9 @@ async fn choose_replay_cache_folder(
             .or_else(|| settings.media_dir_path().ok())
             .unwrap_or_else(service::default_clips_dir);
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Replay Cache Folder");
-        if current_dir.exists() {
-            dialog = dialog.set_directory(current_dir);
-        }
-        dialog.pick_folder().map(|path| path.display().to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())
+    choose_folder_dialog("Choose Clipline Replay Cache Folder", current_dir)
+        .await
+        .map(|selected| selected.map(|path| path.display().to_string()))
 }
 
 #[tauri::command]

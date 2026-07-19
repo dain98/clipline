@@ -88,18 +88,22 @@ impl DiskReplayRing {
             samples: seg.samples.clone(),
             audio,
         };
-        let mut committed_bytes = self.bytes.saturating_add(stored.byte_len);
-        while committed_bytes > self.max_bytes && !self.segments.is_empty() {
+        let evict = crate::planning::eviction_count(
+            self.segments.iter().map(DiskSegment::byte_len),
+            self.bytes,
+            stored.byte_len,
+            self.max_bytes,
+        );
+        for _ in 0..evict {
             let front = self
                 .segments
                 .front()
                 .expect("non-empty ring has a front segment");
             fs::remove_file(&front.path)?;
             let front = self.segments.pop_front().expect("front segment exists");
-            self.bytes -= front.byte_len;
-            committed_bytes -= front.byte_len;
+            self.bytes = self.bytes.saturating_sub(front.byte_len);
         }
-        self.bytes = committed_bytes;
+        self.bytes = self.bytes.saturating_add(stored.byte_len);
         self.segments.push_back(stored);
         self.next_id += 1;
         final_owner.disarm();
@@ -123,37 +127,11 @@ impl DiskReplayRing {
     }
 
     pub fn save_window(&self, window_s: f64, exclude_before_s: Option<f64>) -> Vec<&DiskSegment> {
-        let Some(last) = self.segments.back() else {
+        let Some(idx) =
+            crate::planning::replay_window_start_index(&self.segments, window_s, exclude_before_s)
+        else {
             return Vec::new();
         };
-        let mut start_target = last.pts_end_s() - window_s;
-        if let Some(x) = exclude_before_s {
-            start_target = start_target.max(x);
-        }
-
-        let mut start_idx = self
-            .segments
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.starts_with_keyframe && s.pts_start_s <= start_target)
-            .map(|(i, _)| i)
-            .next_back();
-        if start_idx.is_none() {
-            start_idx = self.segments.iter().position(|s| s.starts_with_keyframe);
-        }
-        let Some(mut idx) = start_idx else {
-            return Vec::new();
-        };
-
-        if let Some(x) = exclude_before_s {
-            while idx < self.segments.len() && self.segments[idx].pts_end_s() <= x {
-                idx += 1;
-            }
-            while idx < self.segments.len() && !self.segments[idx].starts_with_keyframe {
-                idx += 1;
-            }
-        }
-
         self.segments.iter().skip(idx).collect()
     }
 }

@@ -2,8 +2,8 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use crate::boxes::{full_box, mp4_box, Payload};
 use crate::fragment::{
-    fragment_moof_multi, fragment_multi, mdat_header, FragSample, FragSampleInfo, FragSampleRef,
-    FragmentError, TrackRun, TrackRunInfo,
+    fragment_moof_multi, mdat_header, FragSample, FragSampleInfo, FragSampleRef, FragmentError,
+    TrackRunInfo,
 };
 use crate::init::{
     audio_trak_with_tables_and_edits, free_placeholder, ftyp, moov_init_multi, mvhd,
@@ -47,6 +47,42 @@ pub struct SourceSample {
     pub size: u32,
     pub duration: u32,
     pub is_sync: bool,
+}
+
+trait FragmentSampleMeta {
+    fn fragment_info(&self) -> io::Result<FragSampleInfo>;
+}
+
+impl FragmentSampleMeta for FragSample {
+    fn fragment_info(&self) -> io::Result<FragSampleInfo> {
+        Ok(FragSampleInfo {
+            size: u32::try_from(self.data.len())
+                .map_err(|_| fragment_io_error(FragmentError::SampleSizeExceedsU32))?,
+            duration: self.duration,
+            is_sync: self.is_sync,
+        })
+    }
+}
+
+impl FragmentSampleMeta for FragSampleRef<'_> {
+    fn fragment_info(&self) -> io::Result<FragSampleInfo> {
+        Ok(FragSampleInfo {
+            size: u32::try_from(self.data.len())
+                .map_err(|_| fragment_io_error(FragmentError::SampleSizeExceedsU32))?,
+            duration: self.duration,
+            is_sync: self.is_sync,
+        })
+    }
+}
+
+impl FragmentSampleMeta for SourceSample {
+    fn fragment_info(&self) -> io::Result<FragSampleInfo> {
+        Ok(FragSampleInfo {
+            size: self.size,
+            duration: self.duration,
+            is_sync: self.is_sync,
+        })
+    }
 }
 
 /// Seekable sample source used when one output contains media from more than
@@ -117,76 +153,12 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
     /// with the track list. Empty slices are allowed (track sat this
     /// fragment out).
     pub fn write_fragment_multi(&mut self, per_track: &[&[FragSample]]) -> io::Result<()> {
-        if per_track.len() != self.tracks.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "expected {} track slices, got {}",
-                    self.tracks.len(),
-                    per_track.len()
-                ),
-            ));
-        }
-        if per_track.iter().all(|s| s.is_empty()) {
+        let Some(info_storage) = fragment_info_storage(per_track, self.tracks.len())? else {
             return Ok(());
-        }
-        validate_nonzero_durations(
-            per_track
-                .iter()
-                .flat_map(|samples| samples.iter().map(|s| s.duration)),
-        )?;
-
-        let runs: Vec<TrackRun<'_>> = per_track
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| !s.is_empty())
-            .map(|(i, s)| TrackRun {
-                track_id: i as u32 + 1,
-                base_decode_time: self.tracks[i].next_decode_time,
-                samples: s,
-            })
-            .collect();
-
-        let frag = fragment_multi(self.next_sequence, &runs).map_err(fragment_io_error)?;
-        let frag_start = self.w.stream_position()?;
-        let total_payload =
-            runs.iter()
-                .flat_map(|r| r.samples.iter())
-                .try_fold(0_usize, |total, sample| {
-                    total.checked_add(sample.data.len()).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "fragment payload size overflow",
-                        )
-                    })
-                })?;
-        let mdat_header_len = mdat_header(total_payload as u64).len();
-        let moof_len = frag
-            .len()
-            .checked_sub(mdat_header_len + total_payload)
-            .expect("fragment layout includes its moof and mdat header");
-        self.w.write_all(&frag)?;
-
-        // Record chunk offsets in run order (the mdat layout order).
-        let mut sample_offset = frag_start + moof_len as u64 + mdat_header_len as u64;
-        for run in &runs {
-            let idx = (run.track_id - 1) as usize;
-            let state = &mut self.tracks[idx];
-            state.record_run(run.samples.iter().map(|sample| sample.duration))?;
-            state.chunks.push((sample_offset, run.samples.len() as u32));
-            for s in run.samples {
-                state.sizes.push(
-                    u32::try_from(s.data.len())
-                        .map_err(|_| fragment_io_error(FragmentError::SampleSizeExceedsU32))?,
-                );
-                state.durations.push(s.duration);
-                state.sync.push(s.is_sync);
-                state.next_decode_time += s.duration as u64;
-                sample_offset += s.data.len() as u64;
-            }
-        }
-        self.next_sequence += 1;
-        Ok(())
+        };
+        self.write_planned_fragment(&info_storage, |writer, track, sample| {
+            writer.write_all(&per_track[track][sample].data)
+        })
     }
 
     /// Borrowed variant for already-contiguous GOP buffers. This avoids
@@ -195,94 +167,12 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         &mut self,
         per_track: &[&[FragSampleRef<'_>]],
     ) -> io::Result<()> {
-        if per_track.len() != self.tracks.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "expected {} track slices, got {}",
-                    self.tracks.len(),
-                    per_track.len()
-                ),
-            ));
-        }
-        if per_track.iter().all(|s| s.is_empty()) {
+        let Some(info_storage) = fragment_info_storage(per_track, self.tracks.len())? else {
             return Ok(());
-        }
-        validate_nonzero_durations(
-            per_track
-                .iter()
-                .flat_map(|samples| samples.iter().map(|s| s.duration)),
-        )?;
-
-        let info_storage: Vec<Vec<FragSampleInfo>> = per_track
-            .iter()
-            .map(|samples| {
-                samples
-                    .iter()
-                    .map(|s| {
-                        Ok(FragSampleInfo {
-                            size: u32::try_from(s.data.len()).map_err(|_| {
-                                fragment_io_error(FragmentError::SampleSizeExceedsU32)
-                            })?,
-                            duration: s.duration,
-                            is_sync: s.is_sync,
-                        })
-                    })
-                    .collect::<io::Result<_>>()
-            })
-            .collect::<io::Result<_>>()?;
-        let runs: Vec<TrackRunInfo<'_>> = info_storage
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| !s.is_empty())
-            .map(|(i, s)| TrackRunInfo {
-                track_id: i as u32 + 1,
-                base_decode_time: self.tracks[i].next_decode_time,
-                samples: s,
-            })
-            .collect();
-
-        let frag_start = self.w.stream_position()?;
-        let total_payload = per_track
-            .iter()
-            .flat_map(|samples| samples.iter())
-            .try_fold(0_u64, |total, sample| {
-                total.checked_add(sample.data.len() as u64).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "fragment payload size overflow",
-                    )
-                })
-            })?;
-        let moof = fragment_moof_multi(self.next_sequence, &runs).map_err(fragment_io_error)?;
-        self.w.write_all(&moof)?;
-        let mdat_header = mdat_header(total_payload);
-        self.w.write_all(&mdat_header)?;
-
-        for run in &runs {
-            let idx = (run.track_id - 1) as usize;
-            for sample in per_track[idx] {
-                self.w.write_all(sample.data)?;
-            }
-        }
-
-        let mut sample_offset = frag_start + moof.len() as u64 + mdat_header.len() as u64;
-        for run in &runs {
-            let idx = (run.track_id - 1) as usize;
-            let state = &mut self.tracks[idx];
-            state.record_run(per_track[idx].iter().map(|sample| sample.duration))?;
-            state.chunks.push((sample_offset, run.samples.len() as u32));
-            for s in per_track[idx] {
-                let size = s.data.len() as u32;
-                state.sizes.push(size);
-                state.durations.push(s.duration);
-                state.sync.push(s.is_sync);
-                state.next_decode_time += s.duration as u64;
-                sample_offset += size as u64;
-            }
-        }
-        self.next_sequence += 1;
-        Ok(())
+        };
+        self.write_planned_fragment(&info_storage, |writer, track, sample| {
+            writer.write_all(per_track[track][sample].data)
+        })
     }
 
     pub fn write_fragment_multi_from_source<R: Read + Seek>(
@@ -290,91 +180,15 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         source: &mut R,
         per_track: &[&[SourceSample]],
     ) -> io::Result<()> {
-        if per_track.len() != self.tracks.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "expected {} track slices, got {}",
-                    self.tracks.len(),
-                    per_track.len()
-                ),
-            ));
-        }
-        if per_track.iter().all(|s| s.is_empty()) {
-            return Ok(());
-        }
-        validate_nonzero_durations(
-            per_track
-                .iter()
-                .flat_map(|samples| samples.iter().map(|s| s.duration)),
-        )?;
-
-        let info_storage: Vec<Vec<FragSampleInfo>> = per_track
-            .iter()
-            .map(|samples| {
-                samples
-                    .iter()
-                    .map(|s| FragSampleInfo {
-                        size: s.size,
-                        duration: s.duration,
-                        is_sync: s.is_sync,
-                    })
-                    .collect()
-            })
-            .collect();
-        let runs: Vec<TrackRunInfo<'_>> = info_storage
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| !s.is_empty())
-            .map(|(i, s)| TrackRunInfo {
-                track_id: i as u32 + 1,
-                base_decode_time: self.tracks[i].next_decode_time,
-                samples: s,
-            })
-            .collect();
-
-        let frag_start = self.w.stream_position()?;
-        let total_payload = per_track
-            .iter()
-            .flat_map(|samples| samples.iter())
-            .try_fold(0_u64, |total, sample| {
-                total.checked_add(sample.size as u64).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "fragment payload size overflow",
-                    )
-                })
-            })?;
-        let moof = fragment_moof_multi(self.next_sequence, &runs).map_err(fragment_io_error)?;
-        let mdat_header = mdat_header(total_payload);
-        self.w.write_all(&moof)?;
-        self.w.write_all(&mdat_header)?;
-
         let mut copy_buf = vec![0u8; 64 * 1024];
-        for run in &runs {
-            let idx = (run.track_id - 1) as usize;
-            for sample in per_track[idx] {
-                source.seek(SeekFrom::Start(sample.offset))?;
-                copy_exact(source, &mut self.w, sample.size as u64, &mut copy_buf)?;
-            }
-        }
-
-        let mut sample_offset = frag_start + moof.len() as u64 + mdat_header.len() as u64;
-        for run in &runs {
-            let idx = (run.track_id - 1) as usize;
-            let state = &mut self.tracks[idx];
-            state.record_run(per_track[idx].iter().map(|sample| sample.duration))?;
-            state.chunks.push((sample_offset, run.samples.len() as u32));
-            for s in per_track[idx] {
-                state.sizes.push(s.size);
-                state.durations.push(s.duration);
-                state.sync.push(s.is_sync);
-                state.next_decode_time += s.duration as u64;
-                sample_offset += s.size as u64;
-            }
-        }
-        self.next_sequence += 1;
-        Ok(())
+        let Some(info_storage) = fragment_info_storage(per_track, self.tracks.len())? else {
+            return Ok(());
+        };
+        self.write_planned_fragment(&info_storage, |writer, track, sample| {
+            let sample = &per_track[track][sample];
+            source.seek(SeekFrom::Start(sample.offset))?;
+            copy_exact(source, writer, u64::from(sample.size), &mut copy_buf)
+        })
     }
 
     pub fn write_fragment_multi_from_sources(
@@ -393,28 +207,30 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
                 ),
             ));
         }
-        if per_track.iter().all(|samples| samples.is_empty()) {
+        let mut copy_buf = vec![0_u8; 64 * 1024];
+        let Some(info_storage) = fragment_info_storage(per_track, self.tracks.len())? else {
             return Ok(());
-        }
-        validate_nonzero_durations(
-            per_track
-                .iter()
-                .flat_map(|samples| samples.iter().map(|s| s.duration)),
-        )?;
+        };
+        self.write_planned_fragment(&info_storage, |writer, track, sample| {
+            let sample = &per_track[track][sample];
+            sources[track].seek(SeekFrom::Start(sample.offset))?;
+            copy_exact(
+                &mut sources[track],
+                writer,
+                u64::from(sample.size),
+                &mut copy_buf,
+            )
+        })
+    }
 
-        let info_storage: Vec<Vec<FragSampleInfo>> = per_track
-            .iter()
-            .map(|samples| {
-                samples
-                    .iter()
-                    .map(|sample| FragSampleInfo {
-                        size: sample.size,
-                        duration: sample.duration,
-                        is_sync: sample.is_sync,
-                    })
-                    .collect()
-            })
-            .collect();
+    fn write_planned_fragment<F>(
+        &mut self,
+        info_storage: &[Vec<FragSampleInfo>],
+        mut write_payload: F,
+    ) -> io::Result<()>
+    where
+        F: FnMut(&mut W, usize, usize) -> io::Result<()>,
+    {
         let runs: Vec<TrackRunInfo<'_>> = info_storage
             .iter()
             .enumerate()
@@ -425,11 +241,9 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
                 samples,
             })
             .collect();
-
-        let frag_start = self.w.stream_position()?;
-        let total_payload = per_track
+        let total_payload = info_storage
             .iter()
-            .flat_map(|samples| samples.iter())
+            .flatten()
             .try_fold(0_u64, |total, sample| {
                 total.checked_add(u64::from(sample.size)).ok_or_else(|| {
                     io::Error::new(
@@ -438,32 +252,27 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
                     )
                 })
             })?;
+
+        let frag_start = self.w.stream_position()?;
         let moof = fragment_moof_multi(self.next_sequence, &runs).map_err(fragment_io_error)?;
         let mdat_header = mdat_header(total_payload);
         self.w.write_all(&moof)?;
         self.w.write_all(&mdat_header)?;
-
-        let mut copy_buf = vec![0_u8; 64 * 1024];
-        for run in &runs {
-            let index = (run.track_id - 1) as usize;
-            for sample in per_track[index] {
-                sources[index].seek(SeekFrom::Start(sample.offset))?;
-                copy_exact(
-                    &mut sources[index],
-                    &mut self.w,
-                    u64::from(sample.size),
-                    &mut copy_buf,
-                )?;
+        for (track_index, samples) in info_storage.iter().enumerate() {
+            for sample_index in 0..samples.len() {
+                write_payload(&mut self.w, track_index, sample_index)?;
             }
         }
 
         let mut sample_offset = frag_start + moof.len() as u64 + mdat_header.len() as u64;
-        for run in &runs {
-            let index = (run.track_id - 1) as usize;
-            let state = &mut self.tracks[index];
-            state.record_run(per_track[index].iter().map(|sample| sample.duration))?;
-            state.chunks.push((sample_offset, run.samples.len() as u32));
-            for sample in per_track[index] {
+        for (track_index, samples) in info_storage.iter().enumerate() {
+            if samples.is_empty() {
+                continue;
+            }
+            let state = &mut self.tracks[track_index];
+            state.record_run(samples.iter().map(|sample| sample.duration))?;
+            state.chunks.push((sample_offset, samples.len() as u32));
+            for sample in samples {
                 state.sizes.push(sample.size);
                 state.durations.push(sample.duration);
                 state.sync.push(sample.is_sync);
@@ -512,6 +321,36 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         }
         mp4_box(*b"moov", moov)
     }
+}
+
+fn fragment_info_storage<S: FragmentSampleMeta>(
+    per_track: &[&[S]],
+    expected_tracks: usize,
+) -> io::Result<Option<Vec<Vec<FragSampleInfo>>>> {
+    if per_track.len() != expected_tracks {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "expected {expected_tracks} track slices, got {}",
+                per_track.len()
+            ),
+        ));
+    }
+    if per_track.iter().all(|samples| samples.is_empty()) {
+        return Ok(None);
+    }
+
+    let info_storage = per_track
+        .iter()
+        .map(|samples| {
+            samples
+                .iter()
+                .map(FragmentSampleMeta::fragment_info)
+                .collect::<io::Result<Vec<_>>>()
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    validate_nonzero_durations(info_storage.iter().flatten().map(|sample| sample.duration))?;
+    Ok(Some(info_storage))
 }
 
 fn validate_track_configs(tracks: &[TrackConfig]) -> io::Result<()> {
@@ -1300,6 +1139,62 @@ mod tests {
         w.write_fragment_multi_from_source(&mut source, &[empty])
             .unwrap();
         assert_eq!(w.w.position(), before);
+    }
+
+    #[test]
+    fn fragment_transports_emit_identical_bytes() {
+        let owned = gop(7);
+        let borrowed: Vec<_> = owned
+            .iter()
+            .map(|sample| FragSampleRef {
+                data: &sample.data,
+                duration: sample.duration,
+                is_sync: sample.is_sync,
+            })
+            .collect();
+        let mut source_bytes = Vec::new();
+        let source_samples: Vec<_> = owned
+            .iter()
+            .map(|sample| {
+                let offset = source_bytes.len() as u64;
+                source_bytes.extend_from_slice(&sample.data);
+                SourceSample {
+                    offset,
+                    size: sample.data.len() as u32,
+                    duration: sample.duration,
+                    is_sync: sample.is_sync,
+                }
+            })
+            .collect();
+
+        let mut owned_writer = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        owned_writer.write_fragment_multi(&[&owned]).unwrap();
+        let expected = owned_writer.into_inner().into_inner();
+
+        let mut borrowed_writer =
+            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        borrowed_writer
+            .write_fragment_multi_borrowed(&[&borrowed])
+            .unwrap();
+        assert_eq!(borrowed_writer.into_inner().into_inner(), expected);
+
+        let mut source_writer = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        source_writer
+            .write_fragment_multi_from_source(
+                &mut Cursor::new(source_bytes.clone()),
+                &[&source_samples],
+            )
+            .unwrap();
+        assert_eq!(source_writer.into_inner().into_inner(), expected);
+
+        let mut sources_writer =
+            HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        let mut source = Cursor::new(source_bytes);
+        let mut sources: [&mut dyn ReadSeek; 1] = [&mut source];
+        sources_writer
+            .write_fragment_multi_from_sources(&mut sources, &[&source_samples])
+            .unwrap();
+        assert_eq!(sources_writer.into_inner().into_inner(), expected);
     }
 
     #[test]

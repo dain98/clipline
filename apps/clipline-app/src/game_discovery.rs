@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use clipline_capture::windows::{enumerate_capturable_windows, CapturableWindow};

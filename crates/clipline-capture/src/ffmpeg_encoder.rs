@@ -600,7 +600,6 @@ fn build_args(
         Codec::Hevc => "hevc",
         Codec::Av1 => "ivf",
     };
-    let _ = codec;
     let mut a: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),

@@ -1,3 +1,5 @@
+use crate::box_header::{decode_box_header, uses_large_size};
+
 /// One parsed box header. Offsets are absolute within the parsed buffer.
 #[derive(Debug, Clone)]
 pub struct BoxInfo {
@@ -68,7 +70,7 @@ fn walk_range(buf: &[u8], mut pos: u64, end: u64) -> Vec<BoxInfo> {
         let size32 = u32::from_be_bytes(buf[p..p + 4].try_into().unwrap());
         let mut fourcc = [0u8; 4];
         fourcc.copy_from_slice(&buf[p + 4..p + 8]);
-        let (size, header) = if size32 == 1 {
+        let large_size = if uses_large_size(size32) {
             let Some(large_header_end) = pos.checked_add(16) else {
                 break;
             };
@@ -78,29 +80,20 @@ fn walk_range(buf: &[u8], mut pos: u64, end: u64) -> Vec<BoxInfo> {
             if large_header_end > end || large_header_end_usize > buf.len() {
                 break;
             }
-            let large = u64::from_be_bytes(buf[p + 8..p + 16].try_into().unwrap());
-            (large, 16u64)
-        } else if size32 == 0 {
-            (end - pos, 8u64) // box extends to end
+            Some(u64::from_be_bytes(buf[p + 8..p + 16].try_into().unwrap()))
         } else {
-            (size32 as u64, 8u64)
+            None
         };
-        let Some(box_end) = pos.checked_add(size) else {
+        let Ok(decoded) = decode_box_header(size32, large_size, pos, end) else {
             break;
         };
-        let Some(payload_offset) = pos.checked_add(header) else {
-            break;
-        };
-        if size < header || box_end > end {
-            break; // truncated/corrupt — stop, return what we have
-        }
         out.push(BoxInfo {
             fourcc,
             offset: pos,
-            size,
-            payload_offset,
+            size: decoded.size,
+            payload_offset: decoded.payload_offset,
         });
-        pos = box_end;
+        pos = decoded.end;
     }
     out
 }

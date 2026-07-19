@@ -524,3 +524,53 @@ fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
         );
     }
 }
+
+#[test]
+fn divergence_prone_paths_keep_single_production_owners() {
+    let root = workspace_root();
+    let game_discovery = fs::read_to_string(root.join("apps/clipline-app/src/game_discovery.rs"))
+        .expect("read game discovery source");
+    assert!(
+        !game_discovery.contains("#![allow(dead_code)]"),
+        "game discovery must expose real dead-code drift to the compiler"
+    );
+
+    let app =
+        fs::read_to_string(root.join("apps/clipline-app/src/app.rs")).expect("read app source");
+    assert_eq!(
+        app.matches("rfd::FileDialog::new()").count(),
+        1,
+        "folder pickers must share one dialog construction path"
+    );
+    assert!(app.matches("choose_folder_dialog(").count() >= 3);
+
+    let service = fs::read_to_string(root.join("apps/clipline-app/src/service.rs"))
+        .expect("read service source");
+    assert!(!service.contains("to_string().contains(\"timed out\")"));
+    let ffmpeg = fs::read_to_string(root.join("crates/clipline-capture/src/ffmpeg_encoder.rs"))
+        .expect("read FFmpeg source");
+    assert!(!ffmpeg.contains("let _ = codec"));
+
+    let walker = fs::read_to_string(root.join("crates/clipline-mp4/src/walker.rs"))
+        .expect("read MP4 walker");
+    let trim = fs::read_to_string(root.join("crates/clipline-mp4/src/trim.rs"))
+        .expect("read MP4 trim source");
+    assert!(walker.contains("decode_box_header("));
+    assert!(trim.matches("decode_box_header(").count() >= 2);
+    assert!(!walker.contains("size32 == 1"));
+    assert!(!trim.contains("size32 == 1"));
+
+    let writer = fs::read_to_string(root.join("crates/clipline-mp4/src/writer.rs"))
+        .expect("read MP4 writer");
+    let writer_production = writer
+        .split_once("#[cfg(test)]\nmod tests")
+        .expect("writer unit-test boundary")
+        .0;
+    assert_eq!(
+        writer_production
+            .matches("state.next_decode_time +=")
+            .count(),
+        1,
+        "all fragment transports must share one metadata commit path"
+    );
+}

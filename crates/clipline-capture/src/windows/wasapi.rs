@@ -53,6 +53,7 @@ use crate::traits::{AudioPacket, AudioSource, CaptureError};
 
 const OPUS_SAMPLE_RATE: u32 = 48_000;
 const POLLING_BUFFER_DURATION_100NS: i64 = 10_000_000; // One second.
+const PROCESS_LOOPBACK_ACTIVATION_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone)]
 pub struct AudioDeviceInfo {
@@ -904,7 +905,7 @@ fn activate_process_loopback_client(pid: u32) -> Result<IAudioClient, CaptureErr
         }
     };
 
-    let deadline = Instant::now() + Duration::from_millis(1500);
+    let deadline = Instant::now() + PROCESS_LOOPBACK_ACTIVATION_TIMEOUT;
     let mut guard = state.completed.lock().expect("activation mutex");
     loop {
         if *guard {
@@ -950,9 +951,7 @@ fn activate_process_loopback_client(pid: u32) -> Result<IAudioClient, CaptureErr
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             // SAFETY: clears the VT_BLOB payload allocated with CoTaskMemAlloc.
             let _ = unsafe { PropVariantClear(&mut variant) };
-            return Err(CaptureError::Init(format!(
-                "WASAPI process loopback activation timed out for pid {pid}"
-            )));
+            return Err(process_loopback_activation_timeout(pid));
         };
         let (next_guard, timeout) = state
             .ready
@@ -962,10 +961,15 @@ fn activate_process_loopback_client(pid: u32) -> Result<IAudioClient, CaptureErr
         if timeout.timed_out() && !*guard {
             // SAFETY: clears the VT_BLOB payload allocated with CoTaskMemAlloc.
             let _ = unsafe { PropVariantClear(&mut variant) };
-            return Err(CaptureError::Init(format!(
-                "WASAPI process loopback activation timed out for pid {pid}"
-            )));
+            return Err(process_loopback_activation_timeout(pid));
         }
+    }
+}
+
+fn process_loopback_activation_timeout(pid: u32) -> CaptureError {
+    CaptureError::OperationTimeout {
+        operation: format!("WASAPI process loopback activation for pid {pid}"),
+        after: PROCESS_LOOPBACK_ACTIVATION_TIMEOUT,
     }
 }
 
@@ -1693,10 +1697,22 @@ mod tests {
                 "20 ms cadence"
             );
         }
+
         for p in &packets {
             assert!(!p.data.is_empty());
         }
         eprintln!("captured {} opus packets in 300 ms", packets.len());
+    }
+
+    #[test]
+    fn process_loopback_activation_timeout_is_typed() {
+        let error = process_loopback_activation_timeout(42);
+        assert!(error.is_timeout());
+        assert!(matches!(
+            error,
+            CaptureError::OperationTimeout { after, .. }
+                if after == PROCESS_LOOPBACK_ACTIVATION_TIMEOUT
+        ));
     }
 
     #[test]

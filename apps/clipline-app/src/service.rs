@@ -1121,7 +1121,7 @@ fn add_output_audio_sources(
                         options.output_volume,
                     ) {
                         Ok(audio) => process_tracks.push((process, audio)),
-                        Err(e) if e.to_string().contains("timed out") => {
+                        Err(e) if e.is_timeout() => {
                             process_loopback_failed = true;
                             process_loopback_error.get_or_insert_with(|| e.to_string());
                             break;

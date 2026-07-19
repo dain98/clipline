@@ -1,5 +1,6 @@
 mod av1c;
 mod bitread;
+mod box_header;
 pub mod boxes;
 pub mod fragment;
 mod hvcc;

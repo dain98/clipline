@@ -2004,20 +2004,18 @@ fn read_box_at(input: &[u8], offset: usize, limit: usize) -> Result<BoxInfo, Tri
     }
     let size32 = read_u32(input, offset)?;
     let fourcc = read_fourcc(input, offset + 4)?;
-    let (size, header) = if size32 == 1 {
+    let large_size = if crate::box_header::uses_large_size(size32) {
         if offset + 16 > limit || offset + 16 > input.len() {
             return Err(TrimError::Corrupt("truncated largesize box header".into()));
         }
-        (read_u64(input, offset + 8)?, 16u64)
-    } else if size32 == 0 {
-        ((limit - offset) as u64, 8u64)
+        Some(read_u64(input, offset + 8)?)
     } else {
-        (size32 as u64, 8u64)
+        None
     };
-    let end = offset
-        .checked_add(size as usize)
-        .ok_or_else(|| TrimError::Corrupt("box size overflow".into()))?;
-    if size < header || end > limit || end > input.len() {
+    let decoded =
+        crate::box_header::decode_box_header(size32, large_size, offset as u64, limit as u64)
+            .map_err(|error| box_header_error(error, &fourcc))?;
+    if decoded.end > input.len() as u64 {
         return Err(TrimError::Corrupt(format!(
             "invalid {} box size",
             fourcc_str(&fourcc)
@@ -2026,8 +2024,8 @@ fn read_box_at(input: &[u8], offset: usize, limit: usize) -> Result<BoxInfo, Tri
     Ok(BoxInfo {
         fourcc,
         offset: offset as u64,
-        size,
-        payload_offset: offset as u64 + header,
+        size: decoded.size,
+        payload_offset: decoded.payload_offset,
     })
 }
 
@@ -2071,35 +2069,37 @@ fn read_top_level_box<R: Read + Seek>(
     let size32 = u32::from_be_bytes(header[..4].try_into().unwrap());
     let fourcc = header[4..8].try_into().unwrap();
 
-    let (size, header_len) = if size32 == 1 {
+    let large_size = if crate::box_header::uses_large_size(size32) {
         if offset.checked_add(16).is_none_or(|end| end > limit) {
             return Err(TrimError::Corrupt("truncated largesize box header".into()));
         }
         let mut large = [0_u8; 8];
         reader.read_exact(&mut large)?;
-        (u64::from_be_bytes(large), 16_u64)
-    } else if size32 == 0 {
-        (limit - offset, 8_u64)
+        Some(u64::from_be_bytes(large))
     } else {
-        (u64::from(size32), 8_u64)
+        None
     };
-
-    let end = offset
-        .checked_add(size)
-        .ok_or_else(|| TrimError::Corrupt("box size overflow".into()))?;
-    if size < header_len || end > limit {
-        return Err(TrimError::Corrupt(format!(
-            "invalid {} box size",
-            fourcc_str(&fourcc)
-        )));
-    }
+    let decoded = crate::box_header::decode_box_header(size32, large_size, offset, limit)
+        .map_err(|error| box_header_error(error, &fourcc))?;
 
     Ok(BoxInfo {
         fourcc,
         offset,
-        size,
-        payload_offset: offset + header_len,
+        size: decoded.size,
+        payload_offset: decoded.payload_offset,
     })
+}
+
+fn box_header_error(error: crate::box_header::BoxHeaderError, fourcc: &[u8; 4]) -> TrimError {
+    match error {
+        crate::box_header::BoxHeaderError::SizeOverflow => {
+            TrimError::Corrupt("box size overflow".into())
+        }
+        crate::box_header::BoxHeaderError::MissingLargeSize
+        | crate::box_header::BoxHeaderError::InvalidExtent => {
+            TrimError::Corrupt(format!("invalid {} box size", fourcc_str(fourcc)))
+        }
+    }
 }
 
 fn read_box_bytes<R: Read + Seek>(reader: &mut R, b: &BoxInfo) -> Result<Vec<u8>, TrimError> {
