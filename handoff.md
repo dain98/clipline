@@ -22,6 +22,21 @@ all workspace tests, warning-denied workspace Clippy, and clean-cache capture Cl
 reported preserved recording was not opened, renamed, or deleted. Plan commit `f563812`;
 implementation commit `daff93a`.
 
+## Checkpoint (2026-07-19): single-PUT uploads declare MP4 content type
+
+The consolidated manual Cloud acceptance run found that a real single-PUT upload failed with HTTP
+400: the server requires `Content-Type: video/mp4`. Clipline's chunked proxy path already declared
+that media type, but its streamed single-PUT request sent only `Content-Length`. The existing mock
+verified the body without constraining the header, so the divergence was not covered.
+
+The single-PUT request now sends the same explicit MP4 content type, and the focused mock requires
+it. Plan commit `92f05b6`; implementation commit `0d3475a`. The focused test failed before the
+implementation and passes afterward. CI-mode workspace tests and warning-denied workspace Clippy
+pass. The local real-device WGC shared-clock test separately failed twice because the hardware
+encoder did not emit a keyframe before the existing ten-second pending-GOP bound; that capture
+failure is unrelated to the HTTP-only change. Retest by uploading a small clip through a deployment
+that selects `single_put` and confirm progress reaches processing/ready without the HTTP 400.
+
 ## Checkpoint (2026-07-19): immediate playback for newly exported clips
 
 The first consolidated manual-acceptance run found one clear failure: a 30-second trim exported
