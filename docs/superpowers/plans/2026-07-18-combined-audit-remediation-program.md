@@ -37,6 +37,7 @@ Additional completed findings:
 - [ ] L-02 — bounded MP4 scalar parsing plus release-mode public writer/config validation (`ec6f373`)
 - [ ] L-27 — reserved HEVC temporal-layer counts rejected before hvcC serialization (`ec6f373`)
 - [ ] L-28 — malformed public segment sample metadata returns `InvalidData` instead of panicking (`ec6f373`)
+- [ ] M-18 — real Clipline HWND ownership, bounded busy retry, `EmptyClipboard`, and exact `CF_HDROP` allocation transfer (`68bbc82`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
@@ -73,7 +74,7 @@ Accumulate only tests that require a real account, hardware, elevated game, slow
 
 - Elevated-game boundary: run a game as administrator while Clipline remains normal. Confirm the warning appears once for that process, recommends running the game without administrator privileges, contains no restart/UAC action, and ordinary Clipline recording remains unaffected after dismissal.
 - Large trim: export a range from a multi-gigabyte/full-session clip. Confirm Clipline memory stays broadly flat, the source remains playable, no partial clip appears during export, and the completed trim plays through its end.
-- Clipboard audio selection: copy one clip with a single selected audio track and again with multiple tracks mixed. Paste each into another app; confirm video is intact, only the selected/mixed audio is audible, memory stays broadly flat, and no `.clipline-*-tmp` files remain after completion.
+- Clipboard audio selection and contention: copy one clip with a single selected audio track and again with multiple tracks mixed. Paste each into another app; confirm video is intact, only the selected/mixed audio is audible, memory stays broadly flat, and no `.clipline-*-tmp` files remain after completion. Repeat once while a clipboard manager or another app holds the clipboard briefly and confirm Clipline retries then succeeds. Hold it longer than the retry window and confirm Clipline reports failure without claiming success; after releasing it, retry and paste the expected file normally.
 - Large cloud upload: upload a large original clip and a selected-audio variant using a real account. Interrupt and retry a resumable upload; confirm memory remains bounded, the remote file plays, progress resumes correctly, and local media is deleted only when the configured policy and ready-media verification both permit it.
 - Cloud cache pressure: with a real account, play several large remote clips until cache pressure triggers. Confirm cache data is under LocalAppData, the oldest unplayed entry is evicted, the clip currently playing remains available, total cache use returns under 10 GiB, and caching does not consume the final 2 GiB of free space.
 - Replay-cache low space and restart: use disk replay buffering with full-session recording on a disposable/test volume, then reduce free space below the 2 GiB reserve. Confirm recording visibly stops, the full-session file finalizes or remains explicitly recoverable, no partial segment remains in the active run, and restarting Clipline removes stale owned runs without deleting another live Clipline instance's cache.

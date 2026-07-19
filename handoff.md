@@ -4,6 +4,22 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): owned and retryable Windows file clipboard
+
+The combined audit's M-18 is fixed. Clipboard file-copy commands now derive a real native owner
+from the invoking Clipline webview window, retry a busy clipboard for a short bounded interval,
+and call `EmptyClipboard` before publishing `CF_HDROP`. The movable allocation transfers to
+Windows only after `SetClipboardData` succeeds; every failure path closes an opened clipboard and
+frees the allocation exactly once.
+
+Plan commit `b941c91`; implementation commit `68bbc82`. A deterministic transaction test covers
+busy retries, exact open/wait/empty/set/close order, empty/set failures, and never closing a
+clipboard that was not opened. The UI contract pins native-window injection and ownership setup.
+Fresh-cache app Clippy, CI-mode workspace tests (386 app tests), and workspace Clippy pass with
+warnings denied. Computer Use exercised Copy Clip from the real review UI and PowerShell verified
+one existing `.mp4` in Windows' file-drop clipboard. Brief and persistent contention remain on the
+final manual acceptance list because they require another desktop clipboard owner.
+
 ## Checkpoint (2026-07-18): lossless MP4 track timing and codec arrays
 
 The combined audit's M-17 is fixed, along with the pending L-02/L-27/L-28 overlaps. The hybrid
