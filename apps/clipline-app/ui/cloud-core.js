@@ -46,7 +46,18 @@ var CloudCore = (() => {
     return { ...localSettings, cloud };
   };
 
-  return { accountKey, createRequestGate, mergeBackendCloudSettings };
+  const plainHttpConfirmed = (activeOrigin, confirmedOrigin, checked) => (
+    Boolean(activeOrigin)
+    && Boolean(checked)
+    && String(activeOrigin) === String(confirmedOrigin || "")
+  );
+
+  return {
+    accountKey,
+    createRequestGate,
+    mergeBackendCloudSettings,
+    plainHttpConfirmed,
+  };
 })();
 
 globalThis.CloudCore = CloudCore;

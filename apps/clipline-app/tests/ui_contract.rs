@@ -883,12 +883,17 @@ fn review_player_owns_all_controls() {
     );
     assert!(
         html.contains(">Cloud<")
-            && html.contains("This host uses HTTP. Your password will be sent without TLS.")
-            && !html.contains("id=\"cloud-http-confirm\"")
+            && html.contains("I understand my password will be sent without TLS to")
+            && html.contains("id=\"cloud-http-confirm\"")
+            && html.contains("id=\"cloud-http-origin\"")
             && main_js().contains("cloud_connect")
             && main_js().contains("cloud_disconnect")
-            && main_js().contains("function cloudHostUsesInsecureHttp()")
-            && main_js().contains("plain_http_confirmed: cloudHostUsesInsecureHttp()")
+            && main_js().contains("function cloudInsecureHttpOrigin(")
+            && main_js().contains("CloudCore.plainHttpConfirmed(")
+            && main_js().contains("plain_http_confirmed: plainHttpConfirmed")
+            && main_js().contains("if (plainHttpOrigin && !plainHttpConfirmed)")
+            && main_js().contains("confirm.checked = false")
+            && !main_js().contains("plain_http_confirmed: cloudHostUsesInsecureHttp()")
             && main_js().contains(
                 "$(\"cloud-host-url\").addEventListener(\"input\", syncCloudHttpWarning)"
             )
@@ -947,6 +952,9 @@ fn review_player_owns_all_controls() {
             && styles_css().contains(".cloud-connect-fields")
             && styles_css().contains(".cloud-connect-fields[hidden] { display: none; }")
             && styles_css().contains(".cloud-http-warning")
+            && styles_css().contains(".cloud-http-warning input")
+            && styles_css().contains(".cloud-http-warning span")
+            && styles_css().contains("word-break: break-all")
             && styles_css().contains(".cloud-http-warning[hidden] { display: none; }")
             && styles_css().contains(".clip-cloud-visibility.public")
             && styles_css().contains(".clip-cloud-visibility.unlisted")

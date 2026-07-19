@@ -1064,9 +1064,30 @@ button.primary.settings-save-glow {
 }
 
 .cloud-http-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
   color: var(--warn);
   font-size: 12px;
   line-height: 1.35;
+}
+.cloud-http-warning input {
+  flex: 0 0 15px;
+  width: 15px;
+  height: 15px;
+  min-width: 15px;
+  margin-top: 2px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+.cloud-http-warning span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cloud-http-warning code {
+  color: inherit;
+  white-space: normal;
+  word-break: break-all;
 }
 .cloud-http-warning[hidden] { display: none; }
 

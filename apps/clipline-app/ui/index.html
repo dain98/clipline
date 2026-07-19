@@ -724,9 +724,13 @@
                   <input id="cloud-host-url" placeholder="https://clips.example.com" spellcheck="false" />
                   <input id="cloud-username" placeholder="Username" autocomplete="username" spellcheck="false" />
                   <input id="cloud-password" type="password" placeholder="Password" autocomplete="current-password" />
-                  <span id="cloud-http-warning" class="cloud-http-warning" hidden>
-                    This host uses HTTP. Your password will be sent without TLS.
-                  </span>
+                  <label id="cloud-http-warning" class="cloud-http-warning" hidden>
+                    <input id="cloud-http-confirm" type="checkbox" />
+                    <span>
+                      I understand my password will be sent without TLS to
+                      <code id="cloud-http-origin"></code>.
+                    </span>
+                  </label>
                 </div>
                 <div class="cloud-actions">
                   <button id="cloud-connect" type="button" class="primary">Connect</button>

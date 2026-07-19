@@ -107,3 +107,21 @@ fn backend_cloud_merge_preserves_draft_preferences_and_unrelated_settings() {
         r#"{"replay_window_s":91,"audio":{"mic_enabled":true},"cloud":{"host_url":"https://new.example","connected_user_id":"new-user","connected_username":"new-name","connected_display_name":"New Name","credential_target":"new-credential","public_url":"https://clips.example","default_visibility":"unlisted","delete_local_after_upload":true,"auto_upload_rules":false,"uploads":{"fresh":{"path":"fresh.mp4"}}},"uploadsCloned":true}"#
     );
 }
+
+#[test]
+fn plain_http_confirmation_requires_checked_exact_origin() {
+    let mut context = context();
+    assert_eq!(
+        eval(
+            &mut context,
+            "JSON.stringify([\
+               CloudCore.plainHttpConfirmed('http://clips.local', 'http://clips.local', true),\
+               CloudCore.plainHttpConfirmed('http://clips.local', 'http://clips.local', false),\
+               CloudCore.plainHttpConfirmed('http://clips.local', 'http://other.local', true),\
+               CloudCore.plainHttpConfirmed('http://clips.local:8080', 'http://clips.local', true),\
+               CloudCore.plainHttpConfirmed('', '', true)\
+             ])",
+        ),
+        "[true,false,false,false,false]"
+    );
+}

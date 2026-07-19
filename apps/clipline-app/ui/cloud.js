@@ -132,18 +132,25 @@ async function openRailProfile() {
   }
 }
 
-function cloudHostUsesInsecureHttp() {
-  const raw = $("cloud-host-url").value.trim();
-  if (!raw) return false;
+function cloudInsecureHttpOrigin(raw = $("cloud-host-url").value.trim()) {
+  if (!raw) return "";
   try {
-    return new URL(raw).protocol === "http:";
+    const url = new URL(raw);
+    return url.protocol === "http:" ? url.origin : "";
   } catch (_) {
-    return /^http:\/\//i.test(raw);
+    return "";
   }
 }
 
 function syncCloudHttpWarning() {
-  $("cloud-http-warning").hidden = !cloudHostUsesInsecureHttp();
+  const origin = cloudInsecureHttpOrigin();
+  const confirm = $("cloud-http-confirm");
+  if (confirm.dataset.origin !== origin) {
+    confirm.checked = false;
+    confirm.dataset.origin = origin;
+  }
+  $("cloud-http-origin").textContent = origin;
+  $("cloud-http-warning").hidden = !origin;
 }
 
 function readCloudSettings() {
@@ -505,9 +512,21 @@ async function reloadSettings() {
 
 async function connectCloud() {
   syncSettingsDraftFromForm({ resetDiscard: false });
-  $("cloud-connect-status").textContent = "connecting...";
   $("error").textContent = "";
   const hostUrl = $("cloud-host-url").value.trim();
+  syncCloudHttpWarning();
+  const plainHttpOrigin = cloudInsecureHttpOrigin(hostUrl);
+  const plainHttpConfirmed = CloudCore.plainHttpConfirmed(
+    plainHttpOrigin,
+    $("cloud-http-confirm").dataset.origin,
+    $("cloud-http-confirm").checked,
+  );
+  if (plainHttpOrigin && !plainHttpConfirmed) {
+    $("cloud-connect-status").textContent = "Confirm plain HTTP password transmission first.";
+    $("cloud-http-confirm").focus();
+    return;
+  }
+  $("cloud-connect-status").textContent = "connecting...";
   try {
     await invoke("cloud_connect", {
       request: {
@@ -515,7 +534,7 @@ async function connectCloud() {
         username: $("cloud-username").value.trim(),
         password: $("cloud-password").value,
         device_name: "Clipline Desktop",
-        plain_http_confirmed: cloudHostUsesInsecureHttp(),
+        plain_http_confirmed: plainHttpConfirmed,
         default_visibility: $("cloud-default-visibility").value,
       },
     });
