@@ -40,13 +40,25 @@ where
         .await
         .map(|discovery| discovery.features.direct_s3_upload)
         .unwrap_or(false);
-    let http = reqwest::Client::new();
-
-    let upload = create_upload(client, &http, device_token, request, description).await?;
-    match upload_existing(
+    let authenticated_http = authenticated_upload_client()?;
+    let object_http = reqwest::Client::new();
+    let transport = UploadTransport {
         client,
-        &http,
+        authenticated_http: &authenticated_http,
+        object_http: &object_http,
         device_token,
+    };
+
+    let upload = create_upload(
+        client,
+        &authenticated_http,
+        device_token,
+        request,
+        description,
+    )
+    .await?;
+    match upload_existing(
+        transport,
         &upload,
         path,
         direct_s3_available,
@@ -56,18 +68,17 @@ where
     {
         Ok(progress) => Ok(progress),
         Err(DirectUploadError::Fallback(_reason)) => {
-            let upload = create_upload(client, &http, device_token, request, description).await?;
-            upload_existing(
+            let upload = create_upload(
                 client,
-                &http,
+                &authenticated_http,
                 device_token,
-                &upload,
-                path,
-                false,
-                &mut on_progress,
+                request,
+                description,
             )
-            .await
-            .map_err(DirectUploadError::into_cloud_error)
+            .await?;
+            upload_existing(transport, &upload, path, false, &mut on_progress)
+                .await
+                .map_err(DirectUploadError::into_cloud_error)
         }
         Err(error) => Err(error.into_cloud_error()),
     }
@@ -164,9 +175,7 @@ fn normalized_description(description: Option<&str>) -> Option<&str> {
 }
 
 async fn upload_existing<F>(
-    client: &CloudClient,
-    http: &reqwest::Client,
-    device_token: &str,
+    transport: UploadTransport<'_>,
     upload: &CreateUploadResponse,
     path: &Path,
     direct_s3_available: bool,
@@ -176,38 +185,41 @@ where
     F: FnMut(&UploadProgressResponse),
 {
     match upload.mode.as_str() {
-        "single_put" => upload_single(client, http, device_token, upload, path, on_progress)
-            .await
-            .map_err(DirectUploadError::Cloud),
+        "single_put" => upload_single(
+            transport.client,
+            transport.authenticated_http,
+            transport.device_token,
+            upload,
+            path,
+            on_progress,
+        )
+        .await
+        .map_err(DirectUploadError::Cloud),
         "chunked" => {
-            let progress = client
+            let progress = transport
+                .client
                 .get_upload(&upload.upload_id)
                 .await
                 .map_err(DirectUploadError::Cloud)?;
             on_progress(&progress);
 
             let Some(presign_template) = upload.direct_part_presign_url_template.as_deref() else {
-                return upload_chunked_proxy(client, upload, path, progress, on_progress)
+                return upload_chunked_proxy(transport.client, upload, path, progress, on_progress)
                     .await
                     .map_err(DirectUploadError::Cloud);
             };
             let Some(ack_template) = upload.direct_part_ack_url_template.as_deref() else {
-                return upload_chunked_proxy(client, upload, path, progress, on_progress)
+                return upload_chunked_proxy(transport.client, upload, path, progress, on_progress)
                     .await
                     .map_err(DirectUploadError::Cloud);
             };
 
             if !direct_s3_available {
-                return upload_chunked_proxy(client, upload, path, progress, on_progress)
+                return upload_chunked_proxy(transport.client, upload, path, progress, on_progress)
                     .await
                     .map_err(DirectUploadError::Cloud);
             }
 
-            let transport = UploadTransport {
-                client,
-                http,
-                device_token,
-            };
             let templates = DirectPartTemplates {
                 presign: presign_template,
                 ack: ack_template,
@@ -336,7 +348,7 @@ async fn upload_direct_part(
     for _ in 0..DIRECT_PUT_MAX_ATTEMPTS {
         let presign = request_direct_presign(
             transport.client,
-            transport.http,
+            transport.authenticated_http,
             transport.device_token,
             templates.presign,
             part_number,
@@ -344,7 +356,7 @@ async fn upload_direct_part(
         .await?;
         validate_presign(upload, part_number, chunk, &presign)?;
 
-        match put_presigned_part(transport.http, &presign, chunk.clone()).await {
+        match put_presigned_part(transport.object_http, &presign, chunk.clone()).await {
             Ok(etag) => {
                 let checksum_sha256 = sha256_hex(chunk);
                 let ack = DirectPartUploadAckRequest {
@@ -354,7 +366,7 @@ async fn upload_direct_part(
                 };
                 return ack_direct_part(
                     transport.client,
-                    transport.http,
+                    transport.authenticated_http,
                     transport.device_token,
                     templates.ack,
                     part_number,
@@ -488,13 +500,24 @@ async fn put_presigned_part(
 
 fn upload_url(client: &CloudClient, template: &str, part_number: u16) -> CloudApiResult<String> {
     let path = template.replace("{part_number}", &part_number.to_string());
-    if reqwest::Url::parse(&path).is_ok() {
-        return Ok(path);
+    let url = reqwest::Url::parse(&path).or_else(|_| client.base_url().join(&path))?;
+    if url.origin() != client.base_url().origin() {
+        return Err(CloudApiError::InvalidUpload(format!(
+            "authenticated upload URL must use the configured cloud origin: {url}"
+        )));
     }
-    Ok(client
-        .base_url()
-        .join(path.trim_start_matches('/'))?
-        .to_string())
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(CloudApiError::InvalidUpload(
+            "authenticated upload URL must not contain user credentials".to_string(),
+        ));
+    }
+    Ok(url.to_string())
+}
+
+fn authenticated_upload_client() -> CloudApiResult<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?)
 }
 
 async fn post_json_with_auth<T, B>(
@@ -670,7 +693,8 @@ fn upload_file_error(action: &str, path: &Path, error: std::io::Error) -> CloudA
 #[derive(Clone, Copy)]
 struct UploadTransport<'a> {
     client: &'a CloudClient,
-    http: &'a reqwest::Client,
+    authenticated_http: &'a reqwest::Client,
+    object_http: &'a reqwest::Client,
     device_token: &'a str,
 }
 
@@ -764,6 +788,71 @@ mod tests {
 
         assert!(body.get("description").is_none());
         assert!(body.get("markers").is_none());
+    }
+
+    #[test]
+    fn authenticated_upload_urls_stay_on_the_configured_cloud_origin() {
+        let cloud = MockServer::start();
+        let other = MockServer::start();
+        let client = test_client(&cloud);
+
+        assert!(upload_url(&client, "/api/v1/uploads/u1/content", 0).is_ok());
+        assert!(upload_url(
+            &client,
+            &format!("{}/api/v1/uploads/u1/content", cloud.base_url()),
+            0,
+        )
+        .is_ok());
+        assert!(upload_url(
+            &client,
+            &format!("{}/api/v1/uploads/u1/content", other.base_url()),
+            0,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn authenticated_upload_url_rejects_scheme_downgrade_and_port_change() {
+        let client =
+            CloudClient::with_device_token("https://cloud.example:8443/".parse().unwrap(), TOKEN);
+
+        assert!(upload_url(
+            &client,
+            "http://cloud.example:8443/api/v1/uploads/u1/content",
+            0,
+        )
+        .is_err());
+        assert!(upload_url(
+            &client,
+            "https://cloud.example:9443/api/v1/uploads/u1/content",
+            0,
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn authenticated_create_upload_does_not_follow_redirects() {
+        let cloud = MockServer::start();
+        let target = MockServer::start();
+        let redirected = target.mock(|when, then| {
+            when.method(GET).path("/stolen");
+            then.status(400)
+                .json_body(json!({ "error": "reached target" }));
+        });
+        cloud.mock(|when, then| {
+            when.method(POST).path("/api/v1/uploads");
+            then.status(302)
+                .header("Location", format!("{}/stolen", target.base_url()));
+        });
+        let client = test_client(&cloud);
+        let http = authenticated_upload_client().unwrap();
+
+        let error = create_upload(&client, &http, TOKEN, &upload_request(b"abc"), None)
+            .await
+            .expect_err("redirect must not be followed");
+
+        assert!(error.to_string().contains("302"), "{error}");
+        redirected.assert_hits(0);
     }
 
     #[tokio::test]
