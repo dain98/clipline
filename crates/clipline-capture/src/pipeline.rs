@@ -13,6 +13,9 @@ use crate::traits::{
 };
 
 const MAX_PENDING_GOP_BYTES: usize = 64 * 1024 * 1024;
+/// Normal replay GOPs are about 500 ms. This generous ceiling prevents a
+/// broken encoder from retaining an arbitrarily long video/audio segment.
+const MAX_PENDING_GOP_DURATION_S: f64 = 10.0;
 const FULL_SESSION_QUEUE_MAX_BYTES: usize = 128 * 1024 * 1024;
 const FULL_SESSION_QUEUE_MAX_SEGMENTS: usize = 8;
 const MID_STREAM_REPLAY_OPUS_PRE_SKIP: u16 = 960; // One 20 ms Opus frame at 48 kHz.
@@ -81,9 +84,13 @@ pub struct Recorder<C: CaptureEngine, E: Encoder> {
     encoder: E,
     ring: ReplayStorage,
     pending: Vec<EncodedPacket>,
+    /// Encoded video payload held for the current unsealed GOP.
     pending_bytes: usize,
+    /// Encoded audio payload held across all tracks for the current GOP.
+    pending_audio_bytes: usize,
     pending_byte_budget: usize,
     pre_keyframe_bytes: usize,
+    pending_started_pts_s: Option<f64>,
     audio_sources: Vec<Box<dyn AudioSource>>,
     pending_audio: Vec<Vec<AudioPacket>>,
     /// pts of the first video packet — the recording's timeline start.
@@ -101,8 +108,10 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             ring: ReplayStorage::Memory(ReplayRing::new(max_buffer_bytes)),
             pending: Vec::new(),
             pending_bytes: 0,
+            pending_audio_bytes: 0,
             pending_byte_budget: pending_byte_budget(max_buffer_bytes),
             pre_keyframe_bytes: 0,
+            pending_started_pts_s: None,
             audio_sources: Vec::new(),
             pending_audio: Vec::new(),
             video_start_pts_s: None,
@@ -133,8 +142,10 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             ring,
             pending: Vec::new(),
             pending_bytes: 0,
+            pending_audio_bytes: 0,
             pending_byte_budget: pending_byte_budget(storage_max_bytes),
             pre_keyframe_bytes: 0,
+            pending_started_pts_s: None,
             audio_sources: Vec::new(),
             pending_audio: Vec::new(),
             video_start_pts_s: None,
@@ -169,12 +180,11 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             return Ok(false);
         };
         observe(&frame);
-        for (src, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
-            pending.extend(src.poll_packets(frame.pts_s)?);
-        }
+        self.poll_audio_until(frame.pts_s)?;
         for pkt in self.encoder.encode(&frame)? {
             self.push_encoded_packet(pkt)?;
         }
+        self.validate_pending_limits(frame.pts_s)?;
         Ok(true)
     }
 
@@ -186,11 +196,11 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         }
         if self.pending.is_empty()
             && self.video_start_pts_s.is_none()
-            && self.pre_keyframe_bytes > 0
+            && self.pending_payload_bytes() > 0
         {
             return Err(EncodeError::Backend(format!(
                 "encoder ended before producing an initial keyframe ({} bytes were dropped before the first keyframe)",
-                self.pre_keyframe_bytes
+                self.pending_payload_bytes()
             ))
             .into());
         }
@@ -200,9 +210,8 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
                 .last()
                 .map(|p| p.pts_s + p.duration_s)
                 .unwrap_or(0.0);
-            for (src, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
-                pending.extend(src.poll_packets(end)?);
-            }
+            self.poll_audio_until(end)?;
+            self.validate_pending_limits(end)?;
             self.seal_pending(f64::INFINITY)?;
         }
         Ok(())
@@ -481,6 +490,14 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             }
             audio.push(track);
         }
+        self.recount_pending_audio_bytes();
+        self.pending_started_pts_s = self
+            .pending_audio
+            .iter()
+            .flat_map(|track| track.iter())
+            .map(|packet| packet.pts_s)
+            .filter(|pts| pts.is_finite())
+            .min_by(f64::total_cmp);
 
         let seg = Arc::new(Segment {
             starts_with_keyframe,
@@ -507,35 +524,99 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
     fn push_encoded_packet(&mut self, pkt: EncodedPacket) -> Result<(), PipelineError> {
         if self.video_start_pts_s.is_none() {
             if !pkt.is_keyframe {
+                self.note_pending_start(pkt.pts_s);
                 self.pre_keyframe_bytes = self.pre_keyframe_bytes.saturating_add(pkt.data.len());
-                if self.pre_keyframe_bytes > self.pending_byte_budget {
-                    return Err(EncodeError::Backend(format!(
-                        "encoder did not produce an initial keyframe before pending packet budget was exceeded ({} > {} bytes)",
-                        self.pre_keyframe_bytes, self.pending_byte_budget
-                    ))
-                    .into());
-                }
                 return Ok(());
             }
             self.video_start_pts_s = Some(pkt.pts_s);
             self.pre_keyframe_bytes = 0;
+            for pending in &mut self.pending_audio {
+                pending.retain(|audio| audio.pts_s + audio.duration_s > pkt.pts_s + 1e-9);
+            }
+            self.recount_pending_audio_bytes();
+            self.pending_started_pts_s = Some(pkt.pts_s);
         }
 
         if pkt.is_keyframe && !self.pending.is_empty() {
+            self.validate_pending_limits(pkt.pts_s)?;
             self.seal_pending(pkt.pts_s)?;
         }
 
-        let next_pending_bytes = self.pending_bytes.saturating_add(pkt.data.len());
-        if next_pending_bytes > self.pending_byte_budget {
+        self.note_pending_start(pkt.pts_s);
+        self.pending_bytes = self.pending_bytes.saturating_add(pkt.data.len());
+        self.pending.push(pkt);
+        Ok(())
+    }
+
+    fn poll_audio_until(&mut self, until_pts_s: f64) -> Result<(), PipelineError> {
+        let mut added_bytes = 0usize;
+        let mut first_pts_s: Option<f64> = None;
+        for (source, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
+            let packets = source.poll_packets(until_pts_s)?;
+            added_bytes = packets.iter().fold(added_bytes, |total, packet| {
+                total.saturating_add(packet.data.len())
+            });
+            for packet in &packets {
+                if packet.pts_s.is_finite() {
+                    first_pts_s =
+                        Some(first_pts_s.map_or(packet.pts_s, |pts| pts.min(packet.pts_s)));
+                }
+            }
+            pending.extend(packets);
+        }
+        self.pending_audio_bytes = self.pending_audio_bytes.saturating_add(added_bytes);
+        if let Some(pts_s) = first_pts_s {
+            self.note_pending_start(pts_s);
+        }
+        Ok(())
+    }
+
+    fn note_pending_start(&mut self, pts_s: f64) {
+        if !pts_s.is_finite() {
+            return;
+        }
+        self.pending_started_pts_s = Some(
+            self.pending_started_pts_s
+                .map_or(pts_s, |current| current.min(pts_s)),
+        );
+    }
+
+    fn recount_pending_audio_bytes(&mut self) {
+        self.pending_audio_bytes = self
+            .pending_audio
+            .iter()
+            .flat_map(|track| track.iter())
+            .fold(0usize, |total, packet| {
+                total.saturating_add(packet.data.len())
+            });
+    }
+
+    fn validate_pending_limits(&self, now_pts_s: f64) -> Result<(), PipelineError> {
+        let pending_payload_bytes = self.pending_payload_bytes();
+        if pending_payload_bytes > self.pending_byte_budget {
             return Err(EncodeError::Backend(format!(
-                "encoder did not produce a keyframe before pending GOP budget was exceeded ({} > {} bytes)",
-                next_pending_bytes, self.pending_byte_budget
+                "encoder did not produce a keyframe before pending video/audio GOP budget was exceeded ({pending_payload_bytes} > {} bytes)",
+                self.pending_byte_budget
             ))
             .into());
         }
-        self.pending_bytes = next_pending_bytes;
-        self.pending.push(pkt);
+        if let Some(start_pts_s) = self.pending_started_pts_s {
+            let duration_s = now_pts_s - start_pts_s;
+            if duration_s.is_finite() && duration_s > MAX_PENDING_GOP_DURATION_S {
+                return Err(EncodeError::Backend(format!(
+                    "encoder did not produce a keyframe before pending GOP duration exceeded {:.1} seconds ({duration_s:.3} seconds)",
+                    MAX_PENDING_GOP_DURATION_S
+                ))
+                .into());
+            }
+        }
         Ok(())
+    }
+
+    fn pending_payload_bytes(&self) -> usize {
+        self.pre_keyframe_bytes
+            .saturating_add(self.pending_bytes)
+            .saturating_add(self.pending_audio_bytes)
     }
 
     fn queue_full_session_segment(&mut self, seg: Arc<Segment>) {
@@ -829,6 +910,47 @@ mod tests {
     }
 
     #[test]
+    fn pending_gop_budget_counts_audio_payloads() {
+        use crate::mock::MockAudioSource;
+
+        let mut video_only =
+            Recorder::new(MockCapture::new(10, 30), MockEncoder::new(30, 30), 1024);
+        video_only
+            .run_to_end()
+            .expect("video payload alone fits the pending budget");
+
+        let mut with_audio =
+            Recorder::new(MockCapture::new(10, 30), MockEncoder::new(30, 30), 1024)
+                .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+        let error = with_audio
+            .run_to_end()
+            .expect_err("audio must consume the same pending GOP budget");
+
+        assert!(
+            error.to_string().contains("video/audio GOP budget"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn pending_gop_duration_is_bounded_when_keyframes_stop() {
+        let mut recorder = Recorder::new(
+            MockCapture::new(360, 30),
+            MockEncoder::new(1000, 30),
+            usize::MAX,
+        );
+
+        let error = recorder
+            .run_to_end()
+            .expect_err("an encoder must not retain an arbitrarily long GOP");
+
+        assert!(
+            error.to_string().contains("GOP duration") && error.to_string().contains("keyframe"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn short_stream_without_initial_keyframe_is_reported() {
         let mut rec = Recorder::new(
             MockCapture::new(1, 30),
@@ -867,6 +989,24 @@ mod tests {
         // First packet of the second segment starts at its GOP boundary.
         let seg2 = ring.segments().nth(1).unwrap();
         assert_eq!(&seg2.audio[0].data[..6], b"P00050");
+    }
+
+    #[test]
+    fn pending_audio_reservation_is_released_when_each_gop_seals() {
+        use crate::mock::MockAudioSource;
+
+        let mut recorder =
+            Recorder::new(MockCapture::new(90, 30), MockEncoder::new(30, 30), 8 * 1024)
+                .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+
+        recorder
+            .run_to_end()
+            .expect("each individual GOP fits even though all three do not");
+        assert_eq!(
+            recorder.ring().unwrap().len(),
+            2,
+            "ring still enforces its budget"
+        );
     }
 
     #[test]

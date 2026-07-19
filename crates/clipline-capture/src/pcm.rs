@@ -2,6 +2,8 @@
 //! Loopback goes quiet when nothing renders; the MP4 audio timeline is
 //! duration-cumulative, so gaps MUST become silence or A/V desyncs.
 
+use std::collections::VecDeque;
+
 use crate::opus::{FRAME_DURATION_S, FRAME_LEN};
 
 const SAMPLE_RATE: f64 = 48_000.0;
@@ -9,13 +11,22 @@ const SAMPLE_RATE: f64 = 48_000.0;
 const GAP_TOLERANCE_S: f64 = FRAME_DURATION_S / 2.0;
 /// A bogus device timestamp must not allocate unbounded silence.
 const MAX_GAP_FILL_S: f64 = 5.0;
+const FRAME_PAIRS: u64 = (FRAME_LEN / 2) as u64;
 
 pub type PcmFrame = (f64, Vec<f32>);
 
+#[derive(Clone, Copy, Debug)]
+struct TimelineAnchor {
+    pair_index: u64,
+    pts_s: f64,
+}
+
 #[derive(Default)]
 pub struct LoopbackAssembler {
-    /// pts of the first sample ever pushed; frame N pops at base + N*0.02.
-    base_pts_s: Option<f64>,
+    /// Timestamp anchors at absolute stereo-pair positions. Ordinary input
+    /// needs only the initial anchor; a capped clock discontinuity appends a
+    /// new one without allocating the entire missing interval as silence.
+    anchors: VecDeque<TimelineAnchor>,
     /// Expected WASAPI timestamp for the next finite chunk.
     next_chunk_pts_s: Option<f64>,
     buffered: Vec<f32>, // interleaved stereo
@@ -33,14 +44,23 @@ impl LoopbackAssembler {
             self.push_contiguous_chunk(interleaved);
             return;
         }
-        self.base_pts_s.get_or_insert(pts_s);
+        self.ensure_initial_anchor(pts_s);
         let expected = self.next_chunk_pts_s.unwrap_or(pts_s);
         let gap = pts_s - expected;
         let mut samples = interleaved;
         if gap > GAP_TOLERANCE_S {
-            let missing_pairs = (gap.min(MAX_GAP_FILL_S) * SAMPLE_RATE).round() as usize;
+            let mut missing_pairs = (gap.min(MAX_GAP_FILL_S) * SAMPLE_RATE).round() as u64;
+            if gap > MAX_GAP_FILL_S {
+                // End the bounded silence on a packet boundary so no Opus
+                // frame straddles the old and re-anchored clocks.
+                let end_remainder = (self.written_pairs() + missing_pairs) % FRAME_PAIRS;
+                missing_pairs = missing_pairs.saturating_sub(end_remainder);
+            }
             self.buffered
-                .extend(std::iter::repeat_n(0.0, missing_pairs * 2));
+                .extend(std::iter::repeat_n(0.0, missing_pairs as usize * 2));
+            if gap > MAX_GAP_FILL_S {
+                self.reanchor_next_pair(pts_s);
+            }
         } else if gap < -GAP_TOLERANCE_S {
             let overlap_pairs = ((expected - pts_s) * SAMPLE_RATE).round() as usize;
             if overlap_pairs >= interleaved.len() / 2 {
@@ -79,7 +99,7 @@ impl LoopbackAssembler {
 
     /// Append a chunk when the device explicitly marked its timestamp invalid.
     pub fn push_contiguous_chunk(&mut self, interleaved: &[f32]) {
-        self.base_pts_s.get_or_insert(0.0);
+        self.ensure_initial_anchor(0.0);
         self.buffered.extend_from_slice(interleaved);
         if let Some(next_chunk_pts_s) = &mut self.next_chunk_pts_s {
             *next_chunk_pts_s += (interleaved.len() / 2) as f64 / SAMPLE_RATE;
@@ -91,10 +111,49 @@ impl LoopbackAssembler {
         if self.buffered.len() < FRAME_LEN {
             return None;
         }
-        let pts = self.base_pts_s? + self.frames_popped as f64 * FRAME_DURATION_S;
+        let pair_index = self.frames_popped * FRAME_PAIRS;
+        while self
+            .anchors
+            .get(1)
+            .is_some_and(|anchor| anchor.pair_index <= pair_index)
+        {
+            self.anchors.pop_front();
+        }
+        let anchor = self.anchors.front()?;
+        let pts = anchor.pts_s + (pair_index - anchor.pair_index) as f64 / SAMPLE_RATE;
         let frame: Vec<f32> = self.buffered.drain(..FRAME_LEN).collect();
         self.frames_popped += 1;
         Some((pts, frame))
+    }
+
+    fn written_pairs(&self) -> u64 {
+        self.frames_popped * FRAME_PAIRS + (self.buffered.len() / 2) as u64
+    }
+
+    fn ensure_initial_anchor(&mut self, pts_s: f64) {
+        if self.anchors.is_empty() {
+            self.anchors.push_back(TimelineAnchor {
+                pair_index: self.written_pairs(),
+                pts_s,
+            });
+        }
+    }
+
+    fn reanchor_next_pair(&mut self, source_pts_s: f64) {
+        let pair_index = self.written_pairs();
+        let prior_grid_pts = self.anchors.back().map_or(source_pts_s, |anchor| {
+            anchor.pts_s + (pair_index - anchor.pair_index) as f64 / SAMPLE_RATE
+        });
+        let pts_s = source_pts_s.max(prior_grid_pts);
+        if let Some(last) = self
+            .anchors
+            .back_mut()
+            .filter(|a| a.pair_index == pair_index)
+        {
+            last.pts_s = last.pts_s.max(pts_s);
+        } else {
+            self.anchors.push_back(TimelineAnchor { pair_index, pts_s });
+        }
     }
 }
 
@@ -322,6 +381,21 @@ mod tests {
             asm.buffered.len(),
             (960 + max_missing_pairs + 960 + 960) * 2
         );
+        let frames: Vec<_> = std::iter::from_fn(|| asm.pop_frame()).collect();
+        assert!((frames[frames.len() - 2].0 - 3600.0).abs() < 1e-9);
+        assert!((frames[frames.len() - 1].0 - 3600.02).abs() < 1e-9);
+    }
+
+    #[test]
+    fn discontinuity_anchor_starts_on_a_complete_frame_after_partial_pcm() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &pairs(480, 1.0));
+        asm.push_chunk(3600.0, &pairs(960, 0.5));
+
+        let frames: Vec<_> = std::iter::from_fn(|| asm.pop_frame()).collect();
+        let resumed = frames.last().expect("resumed source frame");
+        assert!((resumed.0 - 3600.0).abs() < 1e-9);
+        assert!(resumed.1.iter().all(|&sample| sample == 0.5));
     }
 
     #[test]
