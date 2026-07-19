@@ -397,6 +397,122 @@ fn update_dialog_body_can_drag_frameless_window() {
     );
 }
 
+#[test]
+fn elevated_game_hotkey_warning_offers_opt_in_restart_once_per_process() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+    let warning = js_function_body(&js, "maybeWarnElevatedGame");
+
+    for required in [
+        "id=\"elevation-dialog\"",
+        "id=\"elevation-restart\"",
+        "id=\"elevation-cancel\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "missing elevated-game UI: {required}"
+        );
+    }
+    assert!(
+        js.contains("elevated_hotkeys_blocked")
+            && warning.contains("game.process_instance_id")
+            && js.contains("warnedElevatedGameProcesses")
+            && js.contains("invoke(\"restart_as_administrator\")")
+            && warning.contains("if (dialog.open && !elevationRestartInFlight) dialog.close();")
+            && js.contains("addEventListener(\"close\", () => maybeWarnElevatedGame(activeDetectedGame))"),
+        "game detection must warn once per process instance, close stale warnings, and invoke only the explicit restart command"
+    );
+    assert!(
+        css.contains("#elevation-dialog"),
+        "the elevation dialog must share the app's in-product modal styling"
+    );
+}
+
+#[test]
+fn cancelled_uac_restart_keeps_elevation_dialog_open_for_retry() {
+    let js = main_js();
+    let restart = js_function_body(&js, "restartAsAdministrator");
+    let warning = js_function_body(&js, "maybeWarnElevatedGame");
+    let catch_start = restart
+        .find("catch (error)")
+        .expect("administrator restart failure path");
+    let catch_body = &restart[catch_start..];
+
+    assert!(
+        warning.contains("warnedElevatedGameProcesses.has(processInstanceId)"),
+        "elevation warnings must remain once per process instance after an intentional dismiss"
+    );
+    assert!(
+        catch_body.contains("button.disabled = false")
+            && catch_body.contains("Restart as Administrator")
+            && catch_body.contains("$(\"error\").textContent = String(error)")
+            && !catch_body.contains(".close()"),
+        "UAC cancellation must leave the elevation dialog open; closing it while the PID stays in warnedElevatedGameProcesses removes the only retry path"
+    );
+}
+
+#[test]
+fn elevation_restart_restores_retry_if_dialog_closed_during_uac() {
+    let js = main_js();
+    let restart = js_function_body(&js, "restartAsAdministrator");
+    let catch_start = restart
+        .find("catch (error)")
+        .expect("administrator restart failure path");
+    let catch_body = &restart[catch_start..];
+
+    assert!(
+        restart.contains("elevationRestartInFlight = true")
+            && restart.contains("cancel.disabled = true")
+            && js.contains("addEventListener(\"cancel\"")
+            && js.contains("elevationRestartInFlight"),
+        "an in-flight administrator restart must disable dismiss controls and block Escape"
+    );
+    assert!(
+        catch_body.contains("if (!dialog.open)")
+            && catch_body.contains("warnedElevatedGameProcesses.delete(processInstanceId)")
+            && catch_body.contains("maybeWarnElevatedGame(activeDetectedGame)"),
+        "if the elevation dialog was closed while UAC was showing, failure must clear the warned process instance and re-offer the warning"
+    );
+}
+
+#[test]
+fn elevation_restart_reconciles_after_inflight_and_handles_false_result() {
+    let js = main_js();
+    let restart = js_function_body(&js, "restartAsAdministrator");
+    let cleared = restart
+        .rfind("elevationRestartInFlight = false")
+        .expect("in-flight flag must clear after the restart attempt");
+
+    assert!(
+        restart.contains("const restarted = await invoke(\"restart_as_administrator\")")
+            && restart.contains("if (!restarted)")
+            && restart.contains("cancel.disabled = false"),
+        "Ok(false) must re-enable elevation dialog controls instead of leaving them disabled"
+    );
+    assert!(
+        restart[cleared..].contains("maybeWarnElevatedGame(activeDetectedGame)"),
+        "after in-flight clears, the dialog must reconcile: close if the game already went inactive during UAC (no further detection emit), or restore a closed retry path"
+    );
+}
+
+#[test]
+fn failed_elevation_handoff_does_not_start_tauri() {
+    let main = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+        .expect("read src/main.rs");
+    let handoff_error = main
+        .find("if let Err(error) = windows::wait_for_elevation_parent_from_args()")
+        .expect("elevation handoff error branch");
+    let app_run = main[handoff_error..]
+        .find("app::run();")
+        .map(|offset| handoff_error + offset)
+        .expect("Tauri startup");
+    assert!(
+        main[handoff_error..app_run].contains("return;"),
+        "a failed parent handoff must abort before Tauri and the recorder start"
+    );
+}
+
 fn library_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library.rs");
     fs::read_to_string(path).expect("read src/library.rs")

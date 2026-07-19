@@ -2420,6 +2420,7 @@ button.primary.settings-save-glow {
 #confirm-dialog,
 #quit-dialog,
 #update-dialog,
+#elevation-dialog,
 #upload-dialog,
 #rename-file-dialog {
   width: 380px;
@@ -2433,6 +2434,7 @@ button.primary.settings-save-glow {
 #confirm-dialog::backdrop,
 #quit-dialog::backdrop,
 #update-dialog::backdrop,
+#elevation-dialog::backdrop,
 #upload-dialog::backdrop,
 #rename-file-dialog::backdrop { background: rgba(var(--scrim-b-rgb), 0.62); }
 

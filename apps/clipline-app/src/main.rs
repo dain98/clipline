@@ -7,6 +7,10 @@ fn main() {
 
 #[cfg(windows)]
 fn main() {
+    if let Err(error) = windows::wait_for_elevation_parent_from_args() {
+        eprintln!("administrator restart handoff: {error}");
+        return;
+    }
     app::run();
 }
 
@@ -48,3 +52,5 @@ mod sound;
 mod updates;
 #[cfg(windows)]
 mod util;
+#[cfg(windows)]
+mod windows;

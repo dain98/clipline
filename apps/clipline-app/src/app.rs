@@ -70,8 +70,10 @@ struct GameDetectionEvent {
     name: Option<String>,
     window_title: Option<String>,
     process_id: Option<u32>,
+    process_instance_id: Option<String>,
     exe_name: Option<String>,
     recording_mode: Option<GameRecordingMode>,
+    elevated_hotkeys_blocked: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -89,22 +91,62 @@ struct UpdateCheckResult {
 
 impl GameDetectionEvent {
     fn from_detected(detected: Option<&DetectedGame>) -> Self {
+        Self::from_detected_with_process_queries(
+            detected,
+            crate::windows::current_process_is_elevated(),
+            crate::windows::process_is_elevated,
+            crate::windows::process_instance_id,
+        )
+    }
+
+    #[cfg(test)]
+    fn from_detected_with_elevation(
+        detected: Option<&DetectedGame>,
+        clipline_elevated: Result<bool, String>,
+        game_is_elevated: impl FnOnce(u32) -> Result<bool, String>,
+    ) -> Self {
+        Self::from_detected_with_process_queries(
+            detected,
+            clipline_elevated,
+            game_is_elevated,
+            |process_id| Ok(format!("{process_id}:test")),
+        )
+    }
+
+    fn from_detected_with_process_queries(
+        detected: Option<&DetectedGame>,
+        clipline_elevated: Result<bool, String>,
+        game_is_elevated: impl FnOnce(u32) -> Result<bool, String>,
+        process_instance_id: impl FnOnce(u32) -> Result<String, String>,
+    ) -> Self {
         match detected {
-            Some(game) => Self {
-                active: true,
-                name: Some(game.name.clone()),
-                window_title: Some(game.window_title.clone()),
-                process_id: Some(game.process_id),
-                exe_name: Some(game.exe_name.clone()),
-                recording_mode: Some(game.recording_mode),
-            },
+            Some(game) => {
+                let elevated_hotkeys_blocked = matches!(clipline_elevated, Ok(false))
+                    && game_is_elevated(game.process_id).unwrap_or(true);
+                let process_instance_id = elevated_hotkeys_blocked.then(|| {
+                    process_instance_id(game.process_id)
+                        .unwrap_or_else(|_| format!("{}:window:{}", game.process_id, game.hwnd))
+                });
+                Self {
+                    active: true,
+                    name: Some(game.name.clone()),
+                    window_title: Some(game.window_title.clone()),
+                    process_id: Some(game.process_id),
+                    process_instance_id,
+                    exe_name: Some(game.exe_name.clone()),
+                    recording_mode: Some(game.recording_mode),
+                    elevated_hotkeys_blocked,
+                }
+            }
             None => Self {
                 active: false,
                 name: None,
                 window_title: None,
                 process_id: None,
+                process_instance_id: None,
                 exe_name: None,
                 recording_mode: None,
+                elevated_hotkeys_blocked: false,
             },
         }
     }
@@ -969,6 +1011,16 @@ fn save_replay(state: tauri::State<RuntimeState>) {
 }
 
 #[tauri::command]
+fn restart_as_administrator<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    if crate::windows::current_process_is_elevated()? {
+        return Ok(false);
+    }
+    crate::windows::launch_elevated_after(std::process::id())?;
+    quit_app(&app);
+    Ok(true)
+}
+
+#[tauri::command]
 fn get_autostart_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
     app.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
@@ -1671,6 +1723,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             save_replay,
+            restart_as_administrator,
             set_recording,
             get_settings,
             minimize_main_window,
@@ -2404,6 +2457,62 @@ mod tests {
             exe_name: format!("{name}.exe"),
             recording_mode: GameRecordingMode::FullSession,
         }
+    }
+
+    #[test]
+    fn elevated_game_warning_requires_lower_privilege_clipline() {
+        let game = detected_game("endfield", "Arknights: Endfield", 42);
+
+        let blocked = GameDetectionEvent::from_detected_with_elevation(
+            Some(&game),
+            Ok(false),
+            |process_id| Ok(process_id == 42),
+        );
+        assert!(blocked.elevated_hotkeys_blocked);
+
+        let already_elevated =
+            GameDetectionEvent::from_detected_with_elevation(Some(&game), Ok(true), |_| Ok(true));
+        assert!(!already_elevated.elevated_hotkeys_blocked);
+
+        let ordinary_game =
+            GameDetectionEvent::from_detected_with_elevation(Some(&game), Ok(false), |_| Ok(false));
+        assert!(!ordinary_game.elevated_hotkeys_blocked);
+
+        let inactive =
+            GameDetectionEvent::from_detected_with_elevation(None, Ok(false), |_| Ok(true));
+        assert!(!inactive.elevated_hotkeys_blocked);
+    }
+
+    #[test]
+    fn elevated_game_warning_carries_process_instance_identity() {
+        let game = detected_game("endfield", "Arknights: Endfield", 42);
+
+        let event = GameDetectionEvent::from_detected_with_process_queries(
+            Some(&game),
+            Ok(false),
+            |_| Ok(true),
+            |process_id| Ok(format!("{process_id}:987654321")),
+        );
+
+        assert_eq!(event.process_instance_id.as_deref(), Some("42:987654321"));
+    }
+
+    #[test]
+    fn elevated_game_warning_is_conservative_when_elevation_cannot_be_queried() {
+        let game = detected_game("endfield", "Arknights: Endfield", 42);
+
+        let blocked =
+            GameDetectionEvent::from_detected_with_elevation(Some(&game), Ok(false), |_| {
+                Err("protected process".to_string())
+            });
+        assert!(blocked.elevated_hotkeys_blocked);
+
+        let unknown_clipline = GameDetectionEvent::from_detected_with_elevation(
+            Some(&game),
+            Err("token query failed".to_string()),
+            |_| Ok(true),
+        );
+        assert!(!unknown_clipline.elevated_hotkeys_blocked);
     }
 
     #[test]

@@ -67,6 +67,7 @@ listen("game-detection", (e) => {
   activeDetectedGame = e.payload || null;
   updateCaptureStatus();
   updateGameDetectionStatus();
+  maybeWarnElevatedGame(activeDetectedGame);
 });
 
 listen("cloud-upload-progress", (e) => {
@@ -157,6 +158,19 @@ $("update-cancel").addEventListener("click", () => {
   pendingUpdate = null;
   $("update-dialog").close();
 });
+$("elevation-cancel").addEventListener("click", () => {
+  if (!elevationRestartInFlight) $("elevation-dialog").close();
+});
+$("elevation-restart").addEventListener("click", restartAsAdministrator);
+$("elevation-dialog").addEventListener("click", (ev) => {
+  if (ev.target === $("elevation-dialog") && !elevationRestartInFlight) {
+    $("elevation-dialog").close();
+  }
+});
+$("elevation-dialog").addEventListener("cancel", (ev) => {
+  if (elevationRestartInFlight) ev.preventDefault();
+});
+$("elevation-dialog").addEventListener("close", () => maybeWarnElevatedGame(activeDetectedGame));
 $("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);
 $("set-replay-disk-quota").addEventListener("input", syncReplayStorageFields);
 $("set-replay-disk-quota").addEventListener("change", syncReplayStorageFields);
@@ -507,6 +521,7 @@ document.addEventListener("keydown", (ev) => {
     $("confirm-dialog").open ||
     $("quit-dialog").open ||
     $("update-dialog").open ||
+    $("elevation-dialog").open ||
     $("upload-dialog").open ||
     $("game-plugin-settings-dialog").open ||
     $("keys-dialog").open
@@ -578,6 +593,61 @@ document.addEventListener("keydown", (ev) => {
     case "close": closeReview(); break;
   }
 });
+
+function maybeWarnElevatedGame(game) {
+  const dialog = $("elevation-dialog");
+  if (!game || !game.active || !game.elevated_hotkeys_blocked) {
+    // Keep the dialog up while UAC is in flight so a transient inactive
+    // detection cannot erase the only retry path for this PID.
+    if (dialog.open && !elevationRestartInFlight) dialog.close();
+    return;
+  }
+  const processInstanceId = String(game.process_instance_id || "");
+  if (!processInstanceId || warnedElevatedGameProcesses.has(processInstanceId)) return;
+  if (dialog.open) return;
+
+  warnedElevatedGameProcesses.add(processInstanceId);
+  $("elevation-game-name").textContent = game.name || game.exe_name || "This game";
+  dialog.showModal();
+}
+
+async function restartAsAdministrator() {
+  const button = $("elevation-restart");
+  const cancel = $("elevation-cancel");
+  const dialog = $("elevation-dialog");
+  elevationRestartInFlight = true;
+  button.disabled = true;
+  cancel.disabled = true;
+  button.textContent = "Waiting for Windows...";
+  $("error").textContent = "";
+  try {
+    const restarted = await invoke("restart_as_administrator");
+    if (!restarted) {
+      button.disabled = false;
+      cancel.disabled = false;
+      button.textContent = "Restart as Administrator";
+    }
+  } catch (error) {
+    // Leave the dialog open so UAC cancel can retry (PID already warned).
+    // If dismiss still happened during the wait, clear the warned PID so the
+    // post-flight reconcile can re-offer the warning.
+    button.disabled = false;
+    cancel.disabled = false;
+    button.textContent = "Restart as Administrator";
+    $("error").textContent = String(error);
+    if (!dialog.open) {
+      const processInstanceId = String(
+        (activeDetectedGame && activeDetectedGame.process_instance_id) || "",
+      );
+      if (processInstanceId) warnedElevatedGameProcesses.delete(processInstanceId);
+    }
+  } finally {
+    elevationRestartInFlight = false;
+  }
+  // After in-flight clears: restore a closed retry path, or close a stale
+  // dialog that could not be closed while UAC suppressed inactive detection.
+  maybeWarnElevatedGame(activeDetectedGame);
+}
 
 /* ---- boot ---- */
 
