@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): partial local Library scans
+
+The combined audit's L-21 is fixed. Local Library enumeration now returns a typed result with
+readable clips plus warnings. Failure to open or enumerate the configured media root remains fatal,
+but an unreadable child entry/session is named, logged, skipped, and no longer hides clips from
+readable sibling sessions. Sorting and exact-file asset authorization still run over every returned
+clip.
+
+The frontend applies a partial-scan warning only after the local request-generation gate accepts
+that result, so an older slow refresh cannot overwrite newer Library state. A later complete scan
+clears the prior Library warning only when it still owns the visible error text, preserving any
+unrelated error that appeared afterward. Warning text is rendered through `textContent`.
+
+Plan commit `252602e`; implementation commit `5e69249`. Deterministic tests inject an access-denied
+child beside a readable session and verify the readable clip plus named warning, while a missing
+root remains fatal. The warning ordering/clearing UI contract and changed JavaScript syntax checks
+pass. After a fresh app-crate clean, all 406 app tests, CI-mode workspace tests, and warning-denied
+workspace Clippy pass. Computer Use verified the rebuilt complete Library at nine of nine clips
+without a warning. No manual-only item remains for this deterministic enumeration boundary.
+
 ## Checkpoint (2026-07-18): serialized microphone test sessions
 
 The combined audit's L-20 is fixed. Microphone test state now owns a monotonic generation and stop

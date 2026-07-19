@@ -58,6 +58,7 @@ Additional completed findings:
 - [ ] L-18 — validated own-property marker presentation and allowlisted CSS marker images (`bdff7aa`)
 - [ ] L-19 — alignment-safe WASAPI decoding and validated, lifecycle-safe D3D readback (`bd2d617`)
 - [ ] L-20 — generation-serialized microphone tests with disconnect shutdown and stale-event gating (`065c9a7`)
+- [ ] L-21 — partial child-session Library scans with request-gated visible warnings (`5e69249`)
 - [ ] L-33 — renderer capability manifest reduced to observed window/autostart operations (`bdff7aa`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
