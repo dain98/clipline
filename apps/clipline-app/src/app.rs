@@ -1049,6 +1049,7 @@ fn preserve_backend_owned_settings_fields(settings: &mut AppSettings, backend: &
     settings.cloud.connected_username = backend.cloud.connected_username.clone();
     settings.cloud.connected_display_name = backend.cloud.connected_display_name.clone();
     settings.cloud.credential_target = backend.cloud.credential_target.clone();
+    settings.cloud.credential_cleanup_targets = backend.cloud.credential_cleanup_targets.clone();
     settings.cloud.uploads = backend.cloud.uploads.clone();
     settings.osu = backend.osu.clone();
 }
@@ -1625,6 +1626,7 @@ fn save_hotkey_label(settings: &AppSettings) -> String {
     settings.hotkeys().join(" / ")
 }
 
+#[cfg(test)]
 fn run_before_releasing_settings_save_lock<T>(
     save_guard: MutexGuard<'_, ()>,
     operation: impl FnOnce() -> Result<T, String>,
@@ -1632,6 +1634,64 @@ fn run_before_releasing_settings_save_lock<T>(
     let result = operation();
     drop(save_guard);
     result
+}
+
+#[derive(Default)]
+struct AppliedSettingsSideEffects {
+    global_hotkeys: bool,
+    hook_hotkeys: bool,
+    tray_label: bool,
+    autostart: bool,
+}
+
+fn rollback_settings_side_effects<R: Runtime>(
+    app: &AppHandle<R>,
+    tray_items: &TrayItems<R>,
+    old: &AppSettings,
+    old_global_hotkeys: &[Shortcut],
+    new_global_hotkeys: &[Shortcut],
+    applied: &AppliedSettingsSideEffects,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if applied.autostart {
+        if let Err(error) = set_autostart(app, old.open_on_startup) {
+            errors.push(format!("restore Windows startup registration: {error}"));
+        }
+    }
+    if applied.tray_label {
+        if let Err(error) = tray_items.set_hotkey_label(&save_hotkey_label(old)) {
+            errors.push(format!("restore tray hotkey label: {error}"));
+        }
+    }
+    if applied.hook_hotkeys {
+        if let Err(error) = crate::hotkeys::set_save_hotkeys(&old.hotkeys()) {
+            errors.push(format!("restore low-level save hotkeys: {error}"));
+        }
+    }
+    if applied.global_hotkeys {
+        let shortcuts = app.global_shortcut();
+        if let Err(error) = sync_global_hotkeys(
+            new_global_hotkeys,
+            old_global_hotkeys,
+            |shortcut| shortcuts.is_registered(shortcut),
+            |shortcut| shortcuts.register(shortcut),
+            |shortcut| shortcuts.unregister(shortcut),
+        ) {
+            errors.push(format!("restore global save hotkeys: {error}"));
+        }
+    }
+    errors
+}
+
+fn settings_transaction_error(primary: String, rollback_errors: Vec<String>) -> String {
+    if rollback_errors.is_empty() {
+        primary
+    } else {
+        format!(
+            "{primary}; settings rollback incomplete: {}",
+            rollback_errors.join(", ")
+        )
+    }
 }
 
 #[tauri::command]
@@ -1657,7 +1717,9 @@ fn save_settings<R: Runtime>(
         .allow_directory(&media_dir, true)
         .map_err(|e| format!("scope media folder for playback: {e}"))?;
 
+    let cloud_save_guard = RuntimeState::lock_cloud_settings_save()?;
     let old = state.settings();
+    preserve_backend_owned_settings_fields(&mut settings, &old);
 
     // Apply the autostart registry change before persisting so settings.json
     // can never say "enabled" while the Run key update failed. Debug builds
@@ -1668,16 +1730,11 @@ fn save_settings<R: Runtime>(
         requested_open_on_startup,
         old.open_on_startup,
     );
-    if settings.open_on_startup != old.open_on_startup
-        && autostart_should_mutate_for_current_build()
-    {
-        settings.open_on_startup = set_autostart(&app, settings.open_on_startup)
-            .map_err(|e| format!("update Windows startup registration: {e}"))?;
-    }
-
     let old_global_hotkeys = global_hotkeys(&old)?;
     let new_global_hotkeys = global_hotkeys(&settings)?;
+    let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
     let shortcuts = app.global_shortcut();
+    let mut applied = AppliedSettingsSideEffects::default();
     let warnings = sync_global_hotkeys(
         &old_global_hotkeys,
         &new_global_hotkeys,
@@ -1685,38 +1742,100 @@ fn save_settings<R: Runtime>(
         |shortcut| shortcuts.register(shortcut),
         |shortcut| shortcuts.unregister(shortcut),
     )?;
+    applied.global_hotkeys = true;
+    if let Err(primary) = crate::hotkeys::set_save_hotkeys(&settings.hotkeys()) {
+        let rollback = rollback_settings_side_effects(
+            &app,
+            &tray_items,
+            &old,
+            &old_global_hotkeys,
+            &new_global_hotkeys,
+            &applied,
+        );
+        return Err(settings_transaction_error(primary, rollback));
+    }
+    applied.hook_hotkeys = true;
+    if let Err(primary) = tray_items.set_hotkey_label(&save_hotkey_label(&settings)) {
+        let rollback = rollback_settings_side_effects(
+            &app,
+            &tray_items,
+            &old,
+            &old_global_hotkeys,
+            &new_global_hotkeys,
+            &applied,
+        );
+        return Err(settings_transaction_error(primary, rollback));
+    }
+    applied.tray_label = true;
+    if settings.open_on_startup != old.open_on_startup
+        && autostart_should_mutate_for_current_build()
+    {
+        match set_autostart(&app, settings.open_on_startup) {
+            Ok(actual) => {
+                settings.open_on_startup = actual;
+                applied.autostart = true;
+            }
+            Err(primary) => {
+                let rollback = rollback_settings_side_effects(
+                    &app,
+                    &tray_items,
+                    &old,
+                    &old_global_hotkeys,
+                    &new_global_hotkeys,
+                    &applied,
+                );
+                return Err(settings_transaction_error(
+                    format!("update Windows startup registration: {primary}"),
+                    rollback,
+                ));
+            }
+        }
+    }
+    let prepared_restart = match state.prepare_settings_restart(settings.clone()) {
+        Ok(prepared) => prepared,
+        Err(primary) => {
+            let rollback = rollback_settings_side_effects(
+                &app,
+                &tray_items,
+                &old,
+                &old_global_hotkeys,
+                &new_global_hotkeys,
+                &applied,
+            );
+            return Err(settings_transaction_error(primary, rollback));
+        }
+    };
+    if let Err(error) = settings.save() {
+        let rollback = rollback_settings_side_effects(
+            &app,
+            &tray_items,
+            &old,
+            &old_global_hotkeys,
+            &new_global_hotkeys,
+            &applied,
+        );
+        return Err(settings_transaction_error(error, rollback));
+    }
+    if let Err(primary) = state.finish_prepared_restart(app.clone(), prepared_restart) {
+        let mut rollback = Vec::new();
+        if let Err(error) = old.save() {
+            rollback.push(format!("restore settings.json: {error}"));
+        }
+        rollback.extend(rollback_settings_side_effects(
+            &app,
+            &tray_items,
+            &old,
+            &old_global_hotkeys,
+            &new_global_hotkeys,
+            &applied,
+        ));
+        return Err(settings_transaction_error(primary, rollback));
+    }
+    drop(cloud_save_guard);
     for message in warnings {
         eprintln!("{message}");
         let _ = app.emit("error", message);
     }
-
-    let cloud_save_guard = RuntimeState::lock_cloud_settings_save()?;
-    // Cloud connection/upload state and osu credential metadata are backend-owned
-    // (mutated through dedicated commands). A settings Save carries the frontend's
-    // snapshot of these fields, which can be stale; keep the authoritative backend
-    // values while allowing user-editable Cloud preferences from the payload.
-    preserve_backend_owned_settings_fields(&mut settings, &state.settings());
-    // (Cloud default_visibility, delete_local_after_upload, auto_upload_rules stay as sent.)
-
-    let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
-    let prepared_restart = state.prepare_settings_restart(settings.clone())?;
-    if let Err(error) = settings.save() {
-        // Best-effort revert to the old registrations.
-        let shortcuts = app.global_shortcut();
-        let _ = sync_global_hotkeys(
-            &new_global_hotkeys,
-            &old_global_hotkeys,
-            |shortcut| shortcuts.is_registered(shortcut),
-            |shortcut| shortcuts.register(shortcut),
-            |shortcut| shortcuts.unregister(shortcut),
-        );
-        return Err(error);
-    }
-    tray_items.set_hotkey_label(&save_hotkey_label(&settings))?;
-    crate::hotkeys::set_save_hotkeys(&settings.hotkeys())?;
-    run_before_releasing_settings_save_lock(cloud_save_guard, || {
-        state.finish_prepared_restart(app, prepared_restart)
-    })?;
     storage_settings.set_quota_bytes(quota_bytes);
     storage_settings.set_media_dir(media_dir);
     Ok(settings)
@@ -2325,6 +2444,24 @@ mod tests {
 
         assert_eq!(error, "settings denied");
         assert!(state.settings().osu.client_id.is_none());
+    }
+
+    #[test]
+    fn settings_transaction_error_preserves_primary_and_rollback_failures() {
+        assert_eq!(
+            settings_transaction_error("save failed".into(), Vec::new()),
+            "save failed"
+        );
+        let error = settings_transaction_error(
+            "save failed".into(),
+            vec![
+                "restore autostart failed".into(),
+                "restore hotkey failed".into(),
+            ],
+        );
+        assert!(error.starts_with("save failed"), "{error}");
+        assert!(error.contains("restore autostart failed"), "{error}");
+        assert!(error.contains("restore hotkey failed"), "{error}");
     }
 
     #[test]
@@ -3063,6 +3200,7 @@ mod tests {
         backend.cloud.connected_username = Some("dain".into());
         backend.cloud.connected_display_name = Some("Dain".into());
         backend.cloud.credential_target = Some("clipline:user-1".into());
+        backend.cloud.credential_cleanup_targets = vec!["clipline:old-user".into()];
         backend.cloud.uploads.insert(
             "local-1".into(),
             CloudUploadRecord {
@@ -3097,6 +3235,10 @@ mod tests {
             frontend.cloud.credential_target,
             backend.cloud.credential_target
         );
+        assert_eq!(
+            frontend.cloud.credential_cleanup_targets,
+            backend.cloud.credential_cleanup_targets
+        );
         assert_eq!(frontend.cloud.uploads, backend.cloud.uploads);
         assert_eq!(frontend.cloud.default_visibility, "public");
         assert!(frontend.cloud.delete_local_after_upload);
@@ -3115,6 +3257,7 @@ mod tests {
         backend.osu.client_id = Some("61835".into());
         backend.osu.user = Some("3426414".into());
         backend.osu.credential_target = Some("Clipline osu!:61835:3426414".into());
+        backend.osu.credential_cleanup_targets = vec!["Clipline osu!:old".into()];
         backend.osu.last_connected_username = Some("Dain".into());
 
         preserve_backend_owned_settings_fields(&mut frontend, &backend);

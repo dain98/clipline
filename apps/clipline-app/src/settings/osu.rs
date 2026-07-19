@@ -13,6 +13,8 @@ pub struct OsuApiSettings {
     pub user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_cleanup_targets: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_connected_username: Option<String>,
 }
@@ -22,6 +24,12 @@ impl OsuApiSettings {
         self.client_id = clean_optional(self.client_id.take());
         self.user = clean_optional(self.user.take());
         self.credential_target = clean_optional(self.credential_target.take());
+        self.credential_cleanup_targets = std::mem::take(&mut self.credential_cleanup_targets)
+            .into_iter()
+            .filter_map(|value| clean_optional(Some(value)))
+            .collect();
+        self.credential_cleanup_targets.sort();
+        self.credential_cleanup_targets.dedup();
         self.last_connected_username = clean_optional(self.last_connected_username.take());
     }
 

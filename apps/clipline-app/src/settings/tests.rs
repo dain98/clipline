@@ -1166,6 +1166,7 @@ fn osu_api_settings_round_trip_without_secret() {
             client_id: Some("61835".into()),
             user: Some("3426414".into()),
             credential_target: Some("Clipline osu!:61835:3426414".into()),
+            credential_cleanup_targets: vec!["Clipline osu!:old".into()],
             last_connected_username: Some("Dain".into()),
         },
         ..AppSettings::default()
@@ -1183,6 +1184,10 @@ fn osu_api_settings_round_trip_without_secret() {
     assert_eq!(
         round_trip.osu.credential_target.as_deref(),
         Some("Clipline osu!:61835:3426414")
+    );
+    assert_eq!(
+        round_trip.osu.credential_cleanup_targets,
+        ["Clipline osu!:old"]
     );
     assert_eq!(
         round_trip.osu.last_connected_username.as_deref(),

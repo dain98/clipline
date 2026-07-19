@@ -20,6 +20,7 @@ use clipline_events::ClipMarkers;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::io::AsyncWriteExt;
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
 use windows_sys::Win32::Security::Credentials::{
     CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
     CRED_TYPE_GENERIC,
@@ -227,6 +228,9 @@ impl Drop for OwnedCloudCacheTemp {
 
 #[tauri::command]
 pub fn cloud_status(state: tauri::State<RuntimeState>) -> CloudConnectionStatus {
+    if let Err(error) = reconcile_cloud_credential_cleanup(&state) {
+        eprintln!("reconcile pending cloud credentials: {error}");
+    }
     let settings = state.settings();
     connection_status(&settings.cloud)
 }
@@ -1283,34 +1287,43 @@ pub async fn cloud_connect(
         .trim_end_matches('/')
         .to_string();
     let target = credential_target(&host_url, &connected.user.id);
-    write_credential(&target, &connected.user.username, &connected.token)?;
-
     let old_target = state.settings().cloud.credential_target;
-    let settings = state.update_cloud(|cloud| {
-        let identity_changed = cloud.host_url != host_url
-            || cloud.connected_user_id.as_deref() != Some(connected.user.id.as_str());
-        cloud.host_url = host_url.clone();
-        cloud.public_url = Some(public_url.clone());
-        cloud.connected_user_id = Some(connected.user.id.clone());
-        cloud.connected_username = Some(connected.user.username.clone());
-        cloud.connected_display_name = connected
-            .user
-            .display_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        cloud.credential_target = Some(target.clone());
-        cloud.default_visibility = visibility.clone();
-        if identity_changed {
-            cloud.uploads.clear();
-        }
-    })?;
-
-    if old_target.as_deref().is_some_and(|old| old != target) {
-        if let Err(e) = delete_credential(old_target.as_deref().unwrap()) {
-            eprintln!("delete old cloud credential: {e}");
-        }
+    let previous_target_secret = read_credential(&target).ok();
+    let settings = crate::credential_transaction::write_then_persist(
+        &target,
+        &connected.user.username,
+        &connected.token,
+        previous_target_secret.as_deref(),
+        write_credential,
+        delete_credential_if_present,
+        || {
+            state.update_cloud(|cloud| {
+                let identity_changed = cloud.host_url != host_url
+                    || cloud.connected_user_id.as_deref() != Some(connected.user.id.as_str());
+                cloud.host_url = host_url.clone();
+                cloud.public_url = Some(public_url.clone());
+                cloud.connected_user_id = Some(connected.user.id.clone());
+                cloud.connected_username = Some(connected.user.username.clone());
+                cloud.connected_display_name = connected
+                    .user
+                    .display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                cloud.credential_target = Some(target.clone());
+                cloud.default_visibility = visibility.clone();
+                if let Some(old) = old_target.as_deref().filter(|old| *old != target) {
+                    cloud.credential_cleanup_targets.push(old.to_string());
+                }
+                if identity_changed {
+                    cloud.uploads.clear();
+                }
+            })
+        },
+    )?;
+    if let Err(error) = reconcile_cloud_credential_cleanup(&state) {
+        eprintln!("reconcile old cloud credentials: {error}");
     }
 
     Ok(connection_status(&settings.cloud))
@@ -1321,18 +1334,48 @@ pub fn cloud_disconnect(
     state: tauri::State<RuntimeState>,
 ) -> Result<CloudConnectionStatus, String> {
     let old_target = state.settings().cloud.credential_target;
-    if let Some(target) = old_target.as_deref() {
-        if let Err(e) = delete_credential(target) {
-            eprintln!("delete cloud credential on disconnect: {e}");
-        }
-    }
     let settings = state.update_cloud(|cloud| {
         cloud.connected_user_id = None;
         cloud.connected_username = None;
         cloud.connected_display_name = None;
-        cloud.credential_target = None;
+        if let Some(target) = old_target.clone() {
+            cloud.credential_cleanup_targets.push(target);
+        }
     })?;
+    if let Err(error) = reconcile_cloud_credential_cleanup(&state) {
+        eprintln!("reconcile disconnected cloud credential: {error}");
+    }
     Ok(connection_status(&settings.cloud))
+}
+
+fn reconcile_cloud_credential_cleanup(state: &RuntimeState) -> Result<(), String> {
+    let targets = state.settings().cloud.credential_cleanup_targets;
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let report =
+        crate::credential_transaction::cleanup_targets(targets, delete_credential_if_present);
+    let deleted = report.deleted;
+    if !deleted.is_empty() {
+        state.update_cloud(|cloud| {
+            cloud
+                .credential_cleanup_targets
+                .retain(|target| !deleted.contains(target));
+            if cloud.connected_user_id.is_none()
+                && cloud
+                    .credential_target
+                    .as_ref()
+                    .is_some_and(|target| deleted.contains(target))
+            {
+                cloud.credential_target = None;
+            }
+        })?;
+    }
+    if report.failures.is_empty() {
+        Ok(())
+    } else {
+        Err(report.failures.join(", "))
+    }
 }
 
 #[tauri::command]
@@ -2198,12 +2241,15 @@ fn read_credential(target: &str) -> Result<String, String> {
     String::from_utf8(bytes.to_vec()).map_err(|_| "cloud token is not valid UTF-8".to_string())
 }
 
-fn delete_credential(target: &str) -> Result<(), String> {
+fn delete_credential_if_present(target: &str) -> Result<(), String> {
     let target_w = wide_null(OsStr::new(target));
-    if unsafe { CredDeleteW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
-        return Err(last_os_error("delete cloud token"));
+    if unsafe { CredDeleteW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0 {
+        return Ok(());
     }
-    Ok(())
+    if unsafe { GetLastError() } == ERROR_NOT_FOUND {
+        return Ok(());
+    }
+    Err(last_os_error("delete cloud token"))
 }
 
 struct CredentialFree(*mut CREDENTIALW);

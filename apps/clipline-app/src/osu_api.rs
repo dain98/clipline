@@ -8,8 +8,10 @@ use std::slice;
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
 use windows_sys::Win32::Security::Credentials::{
-    CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+    CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
+    CRED_TYPE_GENERIC,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -76,6 +78,9 @@ struct OsuRecentFetch {
 pub fn osu_api_status(
     state: tauri::State<'_, RuntimeState>,
 ) -> Result<OsuApiConnectionStatus, String> {
+    if let Err(error) = reconcile_osu_credential_cleanup(&state) {
+        eprintln!("reconcile pending osu! credentials: {error}");
+    }
     Ok(status_from_settings(&state.settings().osu))
 }
 
@@ -110,20 +115,35 @@ pub fn save_osu_api_settings(
         old_target.as_deref(),
         old_secret.as_deref(),
     )?;
-    if let Some(secret) = plan.secret_to_write.as_deref() {
-        write_secret(&plan.target, &user, secret)?;
-    }
-
-    let settings = state.update_osu(|osu| {
-        osu.client_id = Some(client_id.clone());
-        osu.user = Some(user.clone());
-        osu.credential_target = Some(plan.target.clone());
-        if old_target.as_deref() != Some(plan.target.as_str()) {
-            osu.last_connected_username = None;
-        }
-    })?;
-    if let Some(delete_target) = plan.delete_target {
-        let _ = delete_secret(&delete_target);
+    let persist = || {
+        state.update_osu(|osu| {
+            osu.client_id = Some(client_id.clone());
+            osu.user = Some(user.clone());
+            osu.credential_target = Some(plan.target.clone());
+            if let Some(delete_target) = plan.delete_target.clone() {
+                osu.credential_cleanup_targets.push(delete_target);
+            }
+            if old_target.as_deref() != Some(plan.target.as_str()) {
+                osu.last_connected_username = None;
+            }
+        })
+    };
+    let settings = if let Some(secret) = plan.secret_to_write.as_deref() {
+        let previous_target_secret = read_secret(&plan.target).ok();
+        crate::credential_transaction::write_then_persist(
+            &plan.target,
+            &user,
+            secret,
+            previous_target_secret.as_deref(),
+            write_secret,
+            delete_secret_if_present,
+            persist,
+        )?
+    } else {
+        persist()?
+    };
+    if let Err(error) = reconcile_osu_credential_cleanup(&state) {
+        eprintln!("reconcile old osu! credentials: {error}");
     }
     Ok(status_from_settings(&settings.osu))
 }
@@ -139,19 +159,36 @@ pub async fn test_osu_api_connection(
     let username = fetch.username.clone();
     let user_id = fetch.user_id.clone();
     let target = credential_target(&config.client_id, &user_id);
-    if settings.credential_target.as_deref() != Some(target.as_str()) {
-        write_secret(&target, &user_id, &config.client_secret)?;
-        if let Some(old_target) = settings.credential_target.as_deref() {
-            let _ = delete_secret(old_target);
-        }
+    let old_target = settings.credential_target.clone();
+    let persist = || {
+        state.update_osu(|osu| {
+            osu.user = Some(user_id.clone());
+            osu.credential_target = Some(target.clone());
+            if let Some(old) = old_target.as_deref().filter(|old| *old != target) {
+                osu.credential_cleanup_targets.push(old.to_string());
+            }
+            if let Some(username) = username.clone() {
+                osu.last_connected_username = Some(username);
+            }
+        })
+    };
+    let next = if old_target.as_deref() != Some(target.as_str()) {
+        let previous_target_secret = read_secret(&target).ok();
+        crate::credential_transaction::write_then_persist(
+            &target,
+            &user_id,
+            &config.client_secret,
+            previous_target_secret.as_deref(),
+            write_secret,
+            delete_secret_if_present,
+            persist,
+        )?
+    } else {
+        persist()?
+    };
+    if let Err(error) = reconcile_osu_credential_cleanup(&state) {
+        eprintln!("reconcile migrated osu! credentials: {error}");
     }
-    let next = state.update_osu(|osu| {
-        osu.user = Some(user_id.clone());
-        osu.credential_target = Some(target.clone());
-        if let Some(username) = username.clone() {
-            osu.last_connected_username = Some(username);
-        }
-    })?;
     let status = status_from_settings(&next.osu);
     let media_root = storage.media_dir();
     if let Err(e) = retry_pending_enrichment_with_settings(&next.osu, media_root).await {
@@ -772,19 +809,35 @@ fn read_secret(target: &str) -> Result<String, String> {
         .map_err(|_| "osu! client secret is not valid UTF-8".to_string())
 }
 
-fn delete_secret(target: &str) -> Result<(), String> {
+fn delete_secret_if_present(target: &str) -> Result<(), String> {
     let target_w = wide_null(OsStr::new(target));
-    if unsafe {
-        windows_sys::Win32::Security::Credentials::CredDeleteW(
-            target_w.as_ptr(),
-            CRED_TYPE_GENERIC,
-            0,
-        )
-    } == 0
-    {
-        return Err(last_os_error("delete osu! client secret"));
+    if unsafe { CredDeleteW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0 {
+        return Ok(());
     }
-    Ok(())
+    if unsafe { GetLastError() } == ERROR_NOT_FOUND {
+        return Ok(());
+    }
+    Err(last_os_error("delete osu! client secret"))
+}
+
+fn reconcile_osu_credential_cleanup(state: &RuntimeState) -> Result<(), String> {
+    let targets = state.settings().osu.credential_cleanup_targets;
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let report = crate::credential_transaction::cleanup_targets(targets, delete_secret_if_present);
+    let deleted = report.deleted;
+    if !deleted.is_empty() {
+        state.update_osu(|osu| {
+            osu.credential_cleanup_targets
+                .retain(|target| !deleted.contains(target));
+        })?;
+    }
+    if report.failures.is_empty() {
+        Ok(())
+    } else {
+        Err(report.failures.join(", "))
+    }
 }
 
 struct CredentialFree(*mut CREDENTIALW);
