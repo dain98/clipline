@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): explicit event clock-anchor validation
+
+The combined audit's L-25 is fixed. `recording_offset_s` now uses
+`Instant::checked_duration_since` and returns a typed `ClockSyncError` when an anchor was sampled
+before recording start. Legitimate negative offsets for game events that occurred before recording
+remain unchanged; only the invalid wall-clock relation is rejected.
+
+The League poller validates its newly sampled anchor immediately after the game-clock request,
+before fetching cumulative event data or advancing `EventTracker`. The neutral error maps to the
+existing Live Client invalid-response boundary with a diagnostic, so future/backfill misuse fails
+visibly without silently shifting or consuming markers.
+
+Plan commit `ae25fa1`; implementation commit `a4d2ad7`. All 13 event tests pass, including the typed
+earlier-anchor case. A League HTTP integration supplies a future recording start, observes the
+diagnostic error, and proves the event endpoint receives zero requests; normal negative-offset and
+continuity tests remain green. Both changed crates pass fresh warning-denied Clippy, followed by
+CI-mode workspace tests and workspace Clippy. Computer Use verified the relinked nine-clip Library.
+No manual-only item remains for this latent invariant.
+
 ## Checkpoint (2026-07-18): bounded direct-upload retry backoff
 
 The combined audit's L-24 is fixed. Retryable direct object-storage PUT failures now wait between

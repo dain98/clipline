@@ -61,6 +61,7 @@ Additional completed findings:
 - [ ] L-21 — partial child-session Library scans with request-gated visible warnings (`5e69249`)
 - [ ] L-22 — immutable catalog base with live extracted-icon overlays and detection refresh (`ea11121`)
 - [ ] L-24 — bounded jittered direct-PUT backoff with Retry-After and terminal config fallback (`dd896dc`)
+- [ ] L-25 — typed pre-recording clock-anchor rejection before event fetch/watermark mutation (`a4d2ad7`)
 - [ ] L-33 — renderer capability manifest reduced to observed window/autostart operations (`bdff7aa`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
