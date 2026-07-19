@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): cloud auth preserves unsaved settings
+
+The combined audit's L-07 is fixed. Connect and disconnect now snapshot the complete settings form
+before their first await. After authentication changes, a pure CloudCore merge patches only the
+backend-owned host/public URL, connected identity, credential target, and upload-record fields into
+`currentSettings`, `settingsDraft`, and the dirty-comparison baseline. It no longer calls the full
+`fillSettings` repaint that replaced unrelated draft values and controls.
+
+Recording, audio, storage, game, and general edits survive unchanged. User-editable Cloud defaults
+and delete-local policy also remain the draft values until Save Settings, while authoritative
+account and upload state immediately drives the profile, gallery, and connection UI. Account-key
+changes still invalidate cloud request generations and cached listings.
+
+Plan commit `d3c90a9`; implementation commit `4ad75ac`. A pure merge fixture covers unrelated
+settings, Cloud preferences, identity, credentials, public URL, cloned upload records, and account
+replacement; the 73 UI contracts pin pre-await snapshots and prohibit full settings repaint during
+auth refresh. Fresh-cache app Clippy, CI-mode workspace tests, and workspace Clippy pass with
+warnings denied. Computer Use verified the rebuilt Cloud settings pane and clean return to the
+nine-clip Library. The existing real-account credential acceptance scenario now also checks draft
+preservation across reconnect/disconnect.
+
 ## Checkpoint (2026-07-18): isolated concurrent poster generation
 
 The combined audit's L-06 is fixed. Every FFmpeg poster attempt now reserves a distinct sibling
