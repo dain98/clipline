@@ -55,6 +55,31 @@ pub struct OsuPendingEnrichment {
     pub message: Option<String>,
 }
 
+/// A pending record bound to the filesystem objects from which it was
+/// discovered. The serialized `clip_path` is validated for consistency but
+/// is never used as an I/O authority after discovery.
+#[derive(Debug, Clone)]
+pub struct DiscoveredPendingEnrichment {
+    record: OsuPendingEnrichment,
+    clip_path: PathBuf,
+    sidecar_path: PathBuf,
+}
+
+impl DiscoveredPendingEnrichment {
+    pub fn record(&self) -> &OsuPendingEnrichment {
+        &self.record
+    }
+
+    pub fn clip_path(&self) -> &Path {
+        &self.clip_path
+    }
+
+    #[cfg(test)]
+    fn sidecar_path(&self) -> &Path {
+        &self.sidecar_path
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OsuProxyScore {
     pub id: String,
@@ -138,31 +163,44 @@ pub fn write_pending_for_saved_clip(saved: &OsuSavedClip) -> Result<Option<PathB
     Ok(Some(path))
 }
 
-pub fn discover_pending(media_root: &Path) -> Result<Vec<OsuPendingEnrichment>, String> {
+pub fn discover_pending(media_root: &Path) -> Result<Vec<DiscoveredPendingEnrichment>, String> {
+    if path_is_link_or_reparse(media_root)? {
+        return Err(format!(
+            "refusing linked/reparse osu! enrichment media root {media_root:?}"
+        ));
+    }
+    let media_root = media_root
+        .canonicalize()
+        .map_err(|e| format!("canonicalize osu! enrichment media root {media_root:?}: {e}"))?;
     let mut out = Vec::new();
-    discover_pending_in_dir(media_root, &mut out)?;
-    for entry in std::fs::read_dir(media_root).map_err(|e| e.to_string())? {
+    discover_pending_in_dir(&media_root, &media_root, &mut out)?;
+    for entry in std::fs::read_dir(&media_root).map_err(|e| e.to_string())? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
-        if path.is_dir() {
-            discover_pending_in_dir(&path, &mut out)?;
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.is_dir() && !metadata_is_link_or_reparse(&metadata) {
+            discover_pending_in_dir(&media_root, &path, &mut out)?;
         }
     }
     out.sort_by(|a, b| {
-        a.recording_start_unix
-            .cmp(&b.recording_start_unix)
+        a.record
+            .recording_start_unix
+            .cmp(&b.record.recording_start_unix)
             .then_with(|| a.clip_path.cmp(&b.clip_path))
     });
     Ok(out)
 }
 
 pub fn apply_scores_to_pending(
-    pending: &OsuPendingEnrichment,
+    pending: &DiscoveredPendingEnrichment,
     scores: &[OsuProxyScore],
     pagination_ceiling_reached: bool,
 ) -> Result<OsuMappedPlays, String> {
-    let mapped = map_proxy_scores_to_clip_plays(pending, scores, pagination_ceiling_reached);
-    let clip_path = PathBuf::from(&pending.clip_path);
+    let mapped =
+        map_proxy_scores_to_clip_plays(&pending.record, scores, pagination_ceiling_reached);
     if mapped.plays.is_empty() {
         mark_pending_retry(
             pending,
@@ -170,42 +208,49 @@ pub fn apply_scores_to_pending(
         )?;
         return Ok(mapped);
     }
-    write_plays_sidecar(&clip_path, pending, mapped.plays.clone())?;
-    let pending_path = pending_path(&clip_path);
-    if let Err(e) = std::fs::remove_file(&pending_path) {
+    write_plays_sidecar(&pending.clip_path, &pending.record, mapped.plays.clone())?;
+    if let Err(e) = std::fs::remove_file(&pending.sidecar_path) {
         if e.kind() != std::io::ErrorKind::NotFound {
             return Err(format!(
-                "remove completed osu! enrichment {pending_path:?}: {e}"
+                "remove completed osu! enrichment {:?}: {e}",
+                pending.sidecar_path
             ));
         }
     }
     Ok(mapped)
 }
 
-fn mark_pending_retry(pending: &OsuPendingEnrichment, message: &str) -> Result<(), String> {
-    let mut next = pending.clone();
+fn mark_pending_retry(pending: &DiscoveredPendingEnrichment, message: &str) -> Result<(), String> {
+    let mut next = pending.record.clone();
     next.status = OsuEnrichmentStatus::Pending;
     next.attempts = next.attempts.saturating_add(1);
     next.message = Some(message.to_string());
-    let clip_path = PathBuf::from(&pending.clip_path);
-    let path = pending_path(&clip_path);
     let json = serde_json::to_string_pretty(&next)
         .map_err(|e| format!("serialize retryable osu! enrichment sidecar: {e}"))?;
-    std::fs::write(&path, json)
-        .map_err(|e| format!("write retryable osu! enrichment sidecar {path:?}: {e}"))
+    std::fs::write(&pending.sidecar_path, json).map_err(|e| {
+        format!(
+            "write retryable osu! enrichment sidecar {:?}: {e}",
+            pending.sidecar_path
+        )
+    })
 }
 
-pub fn mark_pending_failed(pending: &OsuPendingEnrichment, message: &str) -> Result<(), String> {
-    let mut next = pending.clone();
+pub fn mark_pending_failed(
+    pending: &DiscoveredPendingEnrichment,
+    message: &str,
+) -> Result<(), String> {
+    let mut next = pending.record.clone();
     next.status = OsuEnrichmentStatus::Failed;
     next.attempts = next.attempts.saturating_add(1);
     next.message = Some(message.to_string());
-    let clip_path = PathBuf::from(&pending.clip_path);
-    let path = pending_path(&clip_path);
     let json = serde_json::to_string_pretty(&next)
         .map_err(|e| format!("serialize failed osu! enrichment sidecar: {e}"))?;
-    std::fs::write(&path, json)
-        .map_err(|e| format!("write failed osu! enrichment sidecar {path:?}: {e}"))
+    std::fs::write(&pending.sidecar_path, json).map_err(|e| {
+        format!(
+            "write failed osu! enrichment sidecar {:?}: {e}",
+            pending.sidecar_path
+        )
+    })
 }
 
 fn write_plays_sidecar(
@@ -426,7 +471,11 @@ fn parse_osu_title_play(title: &str) -> Option<TitlePlayInfo> {
     })
 }
 
-fn discover_pending_in_dir(dir: &Path, out: &mut Vec<OsuPendingEnrichment>) -> Result<(), String> {
+fn discover_pending_in_dir(
+    media_root: &Path,
+    dir: &Path,
+    out: &mut Vec<DiscoveredPendingEnrichment>,
+) -> Result<(), String> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -435,23 +484,98 @@ fn discover_pending_in_dir(dir: &Path, out: &mut Vec<OsuPendingEnrichment>) -> R
     for entry in entries {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
-        if !path.is_file() {
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|e| format!("inspect pending osu! enrichment {path:?}: {e}"))?;
+        if !metadata.is_file() || metadata_is_link_or_reparse(&metadata) {
             continue;
         }
-        if !path
+        let Some(stem) = path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".osu-enrichment.json"))
-        {
+            .and_then(|name| name.strip_suffix(".osu-enrichment.json"))
+            .filter(|stem| !stem.is_empty())
+        else {
             continue;
+        };
+        let sidecar_path = path
+            .canonicalize()
+            .map_err(|e| format!("canonicalize pending osu! enrichment {path:?}: {e}"))?;
+        if !sidecar_path.starts_with(media_root) {
+            return Err(format!(
+                "pending osu! enrichment {sidecar_path:?} escaped media root {media_root:?}"
+            ));
+        }
+        let clip_candidate = path.with_file_name(format!("{stem}.mp4"));
+        let clip_metadata = std::fs::symlink_metadata(&clip_candidate).map_err(|e| {
+            format!(
+                "pending osu! enrichment {sidecar_path:?} has no expected MP4 {clip_candidate:?}: {e}"
+            )
+        })?;
+        if !clip_metadata.is_file() || metadata_is_link_or_reparse(&clip_metadata) {
+            return Err(format!(
+                "expected MP4 {clip_candidate:?} is not a regular unlinked file"
+            ));
+        }
+        let clip_path = clip_candidate
+            .canonicalize()
+            .map_err(|e| format!("canonicalize expected MP4 {clip_candidate:?}: {e}"))?;
+        let parent_ok = clip_path.parent() == Some(media_root)
+            || clip_path.parent().and_then(Path::parent) == Some(media_root);
+        if !parent_ok
+            || !clip_path.starts_with(media_root)
+            || clip_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                != Some("mp4")
+        {
+            return Err(format!(
+                "expected MP4 {clip_path:?} is outside the allowed media-root depth"
+            ));
         }
         let json = std::fs::read_to_string(&path)
             .map_err(|e| format!("read pending osu! enrichment {path:?}: {e}"))?;
-        let pending = serde_json::from_str(&json)
+        let record: OsuPendingEnrichment = serde_json::from_str(&json)
             .map_err(|e| format!("parse pending osu! enrichment {path:?}: {e}"))?;
-        out.push(pending);
+        let serialized_clip = Path::new(&record.clip_path).canonicalize().map_err(|e| {
+            format!(
+                "canonicalize serialized osu! enrichment clip path {:?}: {e}",
+                record.clip_path
+            )
+        })?;
+        if serialized_clip != clip_path {
+            return Err(format!(
+                "serialized osu! enrichment clip path {serialized_clip:?} does not match discovered MP4 {clip_path:?}"
+            ));
+        }
+        out.push(DiscoveredPendingEnrichment {
+            record,
+            clip_path,
+            sidecar_path,
+        });
     }
     Ok(())
+}
+
+fn path_is_link_or_reparse(path: &Path) -> Result<bool, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("inspect osu! enrichment path {path:?}: {e}"))?;
+    Ok(metadata_is_link_or_reparse(&metadata))
+}
+
+fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 fn clip_session_is_osu(path: &Path) -> bool {
@@ -690,7 +814,151 @@ mod tests {
         let pending = discover_pending(dir.path()).unwrap();
 
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].clip_path, clip.display().to_string());
+        assert_eq!(pending[0].clip_path(), clip.canonicalize().unwrap());
+        assert_eq!(
+            pending[0].sidecar_path(),
+            pending_path(&clip).canonicalize().unwrap()
+        );
+        assert_eq!(pending[0].record().clip_path, clip.display().to_string());
+    }
+
+    #[test]
+    fn discovery_rejects_a_serialized_clip_path_outside_the_media_root() {
+        let dir = TestDir::new("clipline-osu", "pending-path-escape");
+        let media_root = dir.path().join("media");
+        let session = media_root.join("session");
+        write_session_game(&session, crate::game_plugins::OSU_ID, "osu!");
+        let expected_clip = session.join("session.mp4");
+        std::fs::write(&expected_clip, b"mp4").unwrap();
+
+        let outside_clip = dir.path().join("outside.mp4");
+        std::fs::write(&outside_clip, b"outside").unwrap();
+        let record = OsuPendingEnrichment {
+            schema_version: 1,
+            clip_path: outside_clip.display().to_string(),
+            recording_start_unix: 100,
+            recording_end_unix: 130,
+            clip_duration_s: 30.0,
+            status: OsuEnrichmentStatus::Pending,
+            attempts: 0,
+            pagination_ceiling_reached: false,
+            title_events: Vec::new(),
+            message: None,
+        };
+        std::fs::write(
+            pending_path(&expected_clip),
+            serde_json::to_vec_pretty(&record).unwrap(),
+        )
+        .unwrap();
+
+        let error = discover_pending(&media_root).unwrap_err();
+
+        assert!(error.contains("does not match"), "{error}");
+        assert!(!outside_clip.with_extension("markers.json").exists());
+        assert!(!pending_path(&outside_clip).exists());
+    }
+
+    #[test]
+    fn discovery_requires_the_mp4_named_by_the_sidecar() {
+        let dir = TestDir::new("clipline-osu", "pending-missing-clip");
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let missing_clip = dir.path().join("missing.mp4");
+        let record = OsuPendingEnrichment {
+            schema_version: 1,
+            clip_path: missing_clip.display().to_string(),
+            recording_start_unix: 100,
+            recording_end_unix: 130,
+            clip_duration_s: 30.0,
+            status: OsuEnrichmentStatus::Pending,
+            attempts: 0,
+            pagination_ceiling_reached: false,
+            title_events: Vec::new(),
+            message: None,
+        };
+        std::fs::write(
+            pending_path(&missing_clip),
+            serde_json::to_vec_pretty(&record).unwrap(),
+        )
+        .unwrap();
+
+        let error = discover_pending(dir.path()).unwrap_err();
+
+        assert!(error.contains("expected MP4"), "{error}");
+    }
+
+    #[test]
+    fn discovery_does_not_follow_a_linked_session_directory() {
+        let dir = TestDir::new("clipline-osu", "pending-linked-session");
+        let media_root = dir.path().join("media");
+        let outside = dir.path().join("outside-session");
+        std::fs::create_dir_all(&media_root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let clip = outside.join("session.mp4");
+        std::fs::write(&clip, b"mp4").unwrap();
+        let record = OsuPendingEnrichment {
+            schema_version: 1,
+            clip_path: clip.display().to_string(),
+            recording_start_unix: 100,
+            recording_end_unix: 130,
+            clip_duration_s: 30.0,
+            status: OsuEnrichmentStatus::Pending,
+            attempts: 0,
+            pagination_ceiling_reached: false,
+            title_events: Vec::new(),
+            message: None,
+        };
+        std::fs::write(
+            pending_path(&clip),
+            serde_json::to_vec_pretty(&record).unwrap(),
+        )
+        .unwrap();
+        let linked = media_root.join("linked-session");
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(&outside, &linked).is_err() {
+            return;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &linked).unwrap();
+
+        let pending = discover_pending(&media_root).unwrap();
+
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn retry_writes_only_the_path_bound_to_the_discovered_job() {
+        let dir = TestDir::new("clipline-osu", "pending-bound-retry");
+        let safe_clip = dir.path().join("safe.mp4");
+        std::fs::write(&safe_clip, b"mp4").unwrap();
+        let safe_sidecar = pending_path(&safe_clip);
+        let outside_clip = dir.path().join("outside").join("victim.mp4");
+        std::fs::create_dir_all(outside_clip.parent().unwrap()).unwrap();
+        std::fs::write(&outside_clip, b"victim").unwrap();
+        let record = OsuPendingEnrichment {
+            schema_version: 1,
+            clip_path: outside_clip.display().to_string(),
+            recording_start_unix: 100,
+            recording_end_unix: 130,
+            clip_duration_s: 30.0,
+            status: OsuEnrichmentStatus::Pending,
+            attempts: 0,
+            pagination_ceiling_reached: false,
+            title_events: Vec::new(),
+            message: None,
+        };
+        std::fs::write(&safe_sidecar, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+        let job = DiscoveredPendingEnrichment {
+            record,
+            clip_path: safe_clip.clone(),
+            sidecar_path: safe_sidecar.clone(),
+        };
+
+        mark_pending_retry(&job, "retry safely").unwrap();
+
+        let safe: OsuPendingEnrichment =
+            serde_json::from_slice(&std::fs::read(&safe_sidecar).unwrap()).unwrap();
+        assert_eq!(safe.attempts, 1);
+        assert!(!pending_path(&outside_clip).exists());
     }
 
     #[test]
@@ -782,10 +1050,10 @@ mod tests {
         })
         .unwrap()
         .expect("pending file");
-        let pending: OsuPendingEnrichment =
-            serde_json::from_str(&std::fs::read_to_string(&pending_path).unwrap()).unwrap();
+        let pending = discover_pending(dir.path()).unwrap();
+        let pending = pending.first().expect("discovered pending job");
 
-        let mapped = apply_scores_to_pending(&pending, &[], false).unwrap();
+        let mapped = apply_scores_to_pending(pending, &[], false).unwrap();
 
         assert!(mapped.plays.is_empty());
         let markers: ClipMarkers = serde_json::from_str(

@@ -246,13 +246,13 @@ async fn retry_pending_enrichment_with_settings(
     }
     let earliest = pending
         .iter()
-        .map(|record| record.recording_start_unix)
+        .map(|job| job.record().recording_start_unix)
         .min();
     let fetch = fetch_recent_scores(&config, earliest).await?;
     let mut updated = false;
-    for record in pending {
+    for job in pending {
         match crate::osu_enrichment::apply_scores_to_pending(
-            &record,
+            &job,
             &fetch.scores,
             fetch.pagination_ceiling_reached,
         ) {
@@ -262,13 +262,16 @@ async fn retry_pending_enrichment_with_settings(
                 }
                 eprintln!(
                     "osu! enrichment complete for {}: {} play(s)",
-                    record.clip_path,
+                    job.clip_path().display(),
                     mapped.plays.len()
                 );
             }
             Err(e) => {
-                eprintln!("osu! enrichment failed for {}: {e}", record.clip_path);
-                let _ = crate::osu_enrichment::mark_pending_failed(&record, &e);
+                eprintln!(
+                    "osu! enrichment failed for {}: {e}",
+                    job.clip_path().display()
+                );
+                let _ = crate::osu_enrichment::mark_pending_failed(&job, &e);
             }
         }
     }
