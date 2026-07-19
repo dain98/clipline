@@ -13,6 +13,7 @@ Already completed and verified on this branch:
 - [ ] H-04 — recorder desired-state/generation races (`820c68f`)
 - [ ] M-10 — bounded full-session writer backlog (`5c3b810`)
 - [ ] M-19 — keyboard-hook readiness and teardown (`820c68f`)
+- [ ] H-01 / L-23 — full-app elevation and privileged relaunch removed (`5d06c21`)
 
 Recently hardened and requiring reconciliation against the combined labels before closure:
 
@@ -22,7 +23,7 @@ Recently hardened and requiring reconciliation against the combined labels befor
 
 ## Phase 1: remaining high severity
 
-- [ ] H-01 — remove the unsafe full-application elevation/executable-provenance boundary or replace it with a protected minimal design.
+- [ ] H-01 — completed by removing the full-application elevation boundary (`5d06c21`).
 - [ ] H-05 — eliminate whole-file/multi-copy behavior from upload, remux/mix, clipboard audio export, and trim paths; impose explicit safe limits where streaming cannot land atomically.
 
 ## Phase 2: medium security, persistence, and lifecycle
@@ -48,3 +49,5 @@ Recently hardened and requiring reconciliation against the combined labels befor
 ## Final manual acceptance checklist
 
 Accumulate only tests that require a real account, hardware, elevated game, slow/failing device, installer, or release environment and therefore cannot be safely completed with deterministic automated fixtures. The final handoff will group them by risk and provide expected results, setup, and cleanup.
+
+- Elevated-game boundary: run a game as administrator while Clipline remains normal. Confirm the warning appears once for that process, recommends running the game without administrator privileges, contains no restart/UAC action, and ordinary Clipline recording remains unaffected after dismissal.

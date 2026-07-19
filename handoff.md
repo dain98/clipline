@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): remove unsafe full-application elevation
+
+The combined audit's H-01 is fixed by removing the privilege boundary rather than partially
+filtering subprocess paths. Clipline no longer exposes a `restart_as_administrator` command,
+invokes `ShellExecuteW("runas")`, accepts a privileged handoff argument, waits for an unelevated
+parent, or offers a UAC action in the renderer. This also closes L-23: there is no elevated restart
+that can discard the original command-line behavior overrides.
+
+Elevated-game detection remains read-only and preserves process-instance identity, so Clipline can
+still explain once per game process why Windows blocks focused hotkeys. The dialog now recommends
+running the game without administrator privileges and has only a dismiss action. Building a
+protected signed broker remains a possible future product feature, but the current per-user app
+does not cross the administrator boundary.
+
+Plan commit `65d1bb1`; implementation commit `5d06c21`. All 68 UI contracts, focused elevation and
+Windows identity tests, CI-mode workspace tests, fresh-cache app clippy, and workspace clippy pass
+with warnings denied. Manual acceptance still needs an actually elevated game process to verify
+the final warning copy and absence of any UAC/restart action.
+
 ## Checkpoint (2026-07-18): cloud upload durability boundary
 
 The combined audit's H-03 is fixed. Post-upload polling no longer treats the first successful
