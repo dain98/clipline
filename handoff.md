@@ -4,6 +4,33 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): durable single-flight osu! enrichment
+
+The combined audit's M-09 is fixed. Startup, library refresh, connection tests, and completed-save
+triggers now acquire a process-wide lease keyed by the canonical configured media root. An
+overlapping pass for that root coalesces instead of issuing duplicate API requests or racing queue
+files; other roots remain independent and RAII releases the lease on every return/error path. The
+save trigger now uses the configured root rather than treating its session folder as another key.
+
+Persisted queue state now schedules work. New jobs run immediately; pending attempts back off from
+one minute to a six-hour cap, and `Failed` legacy jobs re-enter after a six-hour delay capped at one
+day. A pass fetches only for due jobs, and a failed shared API fetch atomically increments those
+jobs so repeated refreshes cannot hammer the service. Malformed, unreadable, mismatched, or missing
+jobs are logged and moved to unique `.invalid.<pid>.<counter>` siblings individually; valid jobs in
+the same directory continue and quarantine files are never rediscovered.
+
+All pending/retry/failed/marker JSON now publishes through unique create-new sibling temporaries,
+file sync, and replace-existing/write-through rename. Owned temporaries clean themselves on every
+failure, eliminating partial JSON and breaking any swapped link at publication rather than writing
+through it.
+
+Plan commit `0b72632`; implementation commit `16b20f1`. Eighteen focused enrichment tests plus
+worker-lease and no-credential tests cover coalescing, independent roots, retry caps, failed-record
+re-entry, atomic replacement, mixed malformed/valid discovery, and quarantine. Fresh-cache app
+Clippy, CI-mode workspace tests (384 app tests), and workspace Clippy pass with warnings denied.
+Computer Use verified normal startup with all nine clips at 6.4 MB. No manual-only acceptance test
+remains for these deterministic worker and persistence guarantees.
+
 ## Checkpoint (2026-07-18): osu! enrichment filesystem boundary
 
 The combined audit's M-08 is fixed. Discovery no longer returns bare deserialized enrichment

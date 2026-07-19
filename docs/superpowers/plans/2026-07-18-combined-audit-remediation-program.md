@@ -25,6 +25,7 @@ Additional completed findings:
 - [ ] M-06 — owned run recovery, cross-run quota accounting, transactional segments, and low-space finalization (`52eb9f4`)
 - [ ] M-07 — persistent League match/event continuity, failure grace/backoff, reliable new-match reset, and idle receiver liveness (`905d976`)
 - [ ] M-08 — canonical sidecar-derived osu! enrichment jobs with path/depth/mismatch/reparse validation (`d143dbc`)
+- [ ] M-09 — per-root single-flight osu! worker, persisted backoff, atomic JSON publication, and per-record quarantine (`16b20f1`)
 - [ ] H-05 — bounded file transforms, hashing, upload, and temporary ownership (`db86efe`)
 - [ ] M-16 — hard-link identity checks and atomic MP4 publication (`db86efe`)
 
