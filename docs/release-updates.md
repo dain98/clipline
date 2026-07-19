@@ -43,11 +43,17 @@ For now, publish Nightly manually from a Windows checkout:
 
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content .local-secrets\clipline-updater.key -Raw
 
-# Stage the LGPL FFmpeg resource bundle used for gallery poster generation
-# and the optional FFmpeg encoder tier. Defaults to
-# %APPDATA%\Clipline\ffmpeg, which should contain ffmpeg.exe, its DLLs, and
-# the license texts from the LGPL shared distribution.
-.\scripts\stage-ffmpeg-resource.ps1
+# Download and stage the exact reviewed LGPL FFmpeg archive used for gallery
+# posters and the optional FFmpeg encoder tier. The script hashes the archive
+# before opening it, extracts only the manifest allowlist, validates the
+# executable/version/configuration and per-file hashes, and emits
+# PROVENANCE.json beside the staged runtime.
+$ffmpegManifest = Get-Content apps\clipline-app\ffmpeg-runtime.json -Raw | ConvertFrom-Json
+$ffmpegInputs = Join-Path $env:LOCALAPPDATA "Clipline\release-inputs"
+New-Item -ItemType Directory -Path $ffmpegInputs -Force | Out-Null
+$ffmpegArchive = Join-Path $ffmpegInputs $ffmpegManifest.archive_name
+Invoke-WebRequest -Uri $ffmpegManifest.archive_url -OutFile $ffmpegArchive
+.\scripts\stage-ffmpeg-resource.ps1 -ArchivePath $ffmpegArchive
 
 # 1. Regular build (from apps/clipline-app so config discovery works)
 Set-Location apps/clipline-app
@@ -74,9 +80,13 @@ update both paths in `tauri.standalone.conf.json` when the version changes,
 stage the matching runtime, and run the preflight above. Before publication,
 play an H.264/Opus clip through its end in the standalone build and confirm the
 HEVC/AV1 capability probes still enable only codecs that the runtime can play.
-When bumping or replacing FFmpeg, update the source bundle staged by
-`scripts\stage-ffmpeg-resource.ps1`; `apps/clipline-app/ffmpeg/` is a build
-staging directory and its binaries are intentionally git-ignored.
+When bumping FFmpeg, select a retained immutable LGPL-shared release, review
+its license and configuration, then rotate every version, URL, archive/file
+size, and hash in `apps/clipline-app/ffmpeg-runtime.json` together. Run the
+staging script against the exact archive and review the logged provenance.
+Never use BtbN's floating `latest` asset. `apps/clipline-app/ffmpeg/` is a
+build staging directory and its binaries are intentionally git-ignored; its
+allowlisted `PROVENANCE.json` and license are bundled into both installers.
 A GitHub Actions workflow can automate this later, but pushing workflow files
 requires a token with GitHub's `workflow` scope.
 

@@ -1,9 +1,13 @@
-Release builds stage the LGPL FFmpeg runtime in this directory before running
-`cargo tauri build`.
+Release builds stage the pinned LGPLv3 FFmpeg runtime in this directory before
+running `cargo tauri build`.
 
-The actual binaries are ignored so they do not land in git. Use the release
-prep script or copy the known LGPL shared build here, preserving:
+The actual binaries are ignored so they do not land in git. Use only
+`scripts/stage-ffmpeg-resource.ps1`; it verifies the immutable archive and
+copies the reviewed allowlist here with `PROVENANCE.json`, preserving:
 
 - `ffmpeg.exe`
 - FFmpeg DLL dependencies
-- LGPL/GPL license texts from the distribution
+- `LICENSE.txt` from the distribution and Clipline's third-party notice/source offer
+
+FFmpeg remains a separate, independently replaceable process. Users may swap
+these files for a compatible modified LGPL build.

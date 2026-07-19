@@ -242,10 +242,9 @@ fn dependency_exceptions_and_fixed_runtime_are_owned_and_current() {
         );
     }
     assert!(root.join("third-party/shiguredo_opus/LICENSE").is_file());
-    assert!(
-        root.join("third-party/shiguredo_opus/CLIPLINE-PATCHES.md")
-            .is_file()
-    );
+    assert!(root
+        .join("third-party/shiguredo_opus/CLIPLINE-PATCHES.md")
+        .is_file());
 
     let manifest: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(root.join("apps/clipline-app/webview2-fixed-runtime.json"))
@@ -286,6 +285,123 @@ fn dependency_exceptions_and_fixed_runtime_are_owned_and_current() {
         assert!(
             verifier.contains(contract),
             "runtime verifier must enforce {contract}"
+        );
+    }
+}
+
+#[test]
+fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
+    let root = workspace_root();
+    let manifest: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join("apps/clipline-app/ffmpeg-runtime.json"))
+            .expect("read FFmpeg runtime manifest"),
+    )
+    .expect("valid FFmpeg runtime manifest JSON");
+
+    let release_tag = manifest["release_tag"].as_str().expect("release tag");
+    let archive_name = manifest["archive_name"].as_str().expect("archive name");
+    let archive_url = manifest["archive_url"].as_str().expect("archive URL");
+    let archive_sha = manifest["archive_sha256"]
+        .as_str()
+        .expect("archive SHA-256");
+    assert!(release_tag.starts_with("autobuild-20") && !release_tag.contains("latest"));
+    assert!(archive_name.ends_with("win64-lgpl-shared-8.1.zip"));
+    assert!(archive_url.starts_with("https://github.com/BtbN/FFmpeg-Builds/releases/download/"));
+    assert!(archive_url.contains(release_tag) && archive_url.ends_with(archive_name));
+    assert!(!archive_url.contains("/latest/"));
+    assert!(
+        archive_sha.len() == 64 && archive_sha.chars().all(|ch| ch.is_ascii_hexdigit()),
+        "FFmpeg archive requires an exact SHA-256"
+    );
+    assert!(manifest["version_line"]
+        .as_str()
+        .is_some_and(|line| line.starts_with("ffmpeg version n8.1.")));
+    let forbidden_configuration = manifest["forbidden_configuration"]
+        .as_array()
+        .expect("forbidden FFmpeg configuration");
+    for forbidden in [
+        "--enable-gpl",
+        "--enable-nonfree",
+        "--enable-libx264",
+        "--enable-libx265",
+    ] {
+        assert!(
+            forbidden_configuration
+                .iter()
+                .any(|value| value.as_str() == Some(forbidden)),
+            "FFmpeg manifest must reject {forbidden}"
+        );
+    }
+
+    let files = manifest["allowed_files"]
+        .as_array()
+        .expect("FFmpeg file allowlist");
+    let staged_names: Vec<_> = files
+        .iter()
+        .map(|file| file["staged_name"].as_str().expect("staged file name"))
+        .collect();
+    assert_eq!(
+        staged_names,
+        [
+            "LICENSE.txt",
+            "ffmpeg.exe",
+            "avcodec-62.dll",
+            "avdevice-62.dll",
+            "avfilter-11.dll",
+            "avformat-62.dll",
+            "avutil-60.dll",
+            "swresample-6.dll",
+            "swscale-9.dll",
+        ]
+    );
+    let mut unique_names = staged_names.clone();
+    unique_names.sort_unstable();
+    unique_names.dedup();
+    assert_eq!(unique_names.len(), staged_names.len());
+    for file in files {
+        let archive_path = file["archive_path"].as_str().expect("archive path");
+        let sha = file["sha256"].as_str().expect("file SHA-256");
+        assert!(
+            !archive_path.starts_with('/')
+                && !archive_path.starts_with('\\')
+                && !archive_path.contains("..")
+        );
+        assert!(file["size"].as_u64().is_some_and(|size| size > 0));
+        assert!(sha.len() == 64 && sha.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+    assert!(!staged_names.contains(&"ffplay.exe"));
+    assert!(!staged_names.contains(&"ffprobe.exe"));
+
+    let script = fs::read_to_string(root.join("scripts/stage-ffmpeg-resource.ps1"))
+        .expect("read FFmpeg staging script");
+    for contract in [
+        "Get-FileHash",
+        "OpenRead",
+        "allowed_files",
+        "PROVENANCE.json",
+        "version_line",
+        "forbidden_configuration",
+        "Move-Item",
+    ] {
+        assert!(
+            script.contains(contract),
+            "FFmpeg staging must enforce {contract}"
+        );
+    }
+    assert!(!script.contains("$SourceDir"));
+
+    let tauri = fs::read_to_string(root.join("apps/clipline-app/tauri.conf.json"))
+        .expect("read Tauri config");
+    assert_eq!(tauri.matches("\"ffmpeg/\"").count(), 1);
+    let readme = fs::read_to_string(root.join("apps/clipline-app/ffmpeg/README.md"))
+        .expect("read bundled FFmpeg notice");
+    assert!(readme.contains("LGPL") && readme.contains("replace"));
+    let notices = fs::read_to_string(root.join("THIRD-PARTY-NOTICES.md"))
+        .expect("read third-party notices");
+    for provenance in [release_tag, "ce3c09c101", "PROVENANCE.json", "LGPL v3"] {
+        assert!(
+            notices.contains(provenance),
+            "FFmpeg notice must retain {provenance}"
         );
     }
 }
