@@ -34,6 +34,12 @@ restart is in flight, restore the warned PID if the dialog closed during that wa
 the dialog after in-flight clears (so a game that exited during UAC cannot leave a stale
 modal), and re-enable controls when restart returns false.
 
+The final PR review now binds both elevation handoff and frontend warning suppression to a Windows
+process instance (PID plus kernel creation timestamp), rather than a reusable PID alone. An
+elevated replacement verifies that identity on its owned parent handle before waiting, and the UI
+keys its once-per-process warning cache with the same identity. PR #87 merged as `1bb1090`; Nightly
+0.1.36 is the first updater build containing the elevated-game hotkey recovery.
+
 ## Checkpoint (2026-07-18): Nightly 0.1.35
 
 Nightly 0.1.35 contains PR #86. It ships the Proxmox/Windows VM software H.264 fallback,
