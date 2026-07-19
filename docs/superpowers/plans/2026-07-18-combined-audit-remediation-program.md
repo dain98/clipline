@@ -30,6 +30,7 @@ Additional completed findings:
 - [ ] M-12 — first-slice/AUD picture framing, encoded AV1 frame types, and strict input/output timestamp cardinality (`68c6606`)
 - [ ] M-13 — combined pending video/audio budget, maximum GOP duration, and monotonic PCM discontinuity anchors (`05152fd`)
 - [ ] M-14 — pull-mode process loopback buffering, explicit WGC target closure, event-token teardown, and cadence end propagation (`e3190a0`)
+- [ ] M-15 — concurrent bounded probe drainage, shared child deadlines, finite encoder flush/drop, and kill-before-reader-join teardown (`8ff611e`)
 - [ ] H-05 — bounded file transforms, hashing, upload, and temporary ownership (`db86efe`)
 - [ ] M-16 — hard-link identity checks and atomic MP4 publication (`db86efe`)
 

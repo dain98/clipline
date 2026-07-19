@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): bounded FFmpeg subprocess lifecycle
+
+The combined audit's M-15 is fixed. Probe commands now start a named stdout reader immediately,
+retain at most 4 MiB, and continue draining excess bytes through EOF while the parent polls the
+child. One shared deadline primitive returns a real exit status or kills and reaps on timeout;
+`try_wait` errors also trigger best-effort kill/reap cleanup. Probe spawn/reader setup failures no
+longer leave a live child behind.
+
+Encoder finish closes stdin, lets the existing stdout reader drain concurrently while FFmpeg gets
+a documented 30-second flush grace, and waits for the process before joining the reader. A timeout
+kills/reaps first, then joins/drains and reports that the encoded tail was discarded. `Drop` uses
+the same finite cleanup and recognizes an encoder already cleaned by `finish`. Normal exit still
+preserves tail packets and then applies reader, exit-status, and input/output-count validation.
+
+Plan commit `75acdf6`; implementation commit `8ff611e`. The 185 capture unit tests include an
+8 MiB probe burst retained at a 1 MiB test cap, bounded-reader exhaustion, wedged probe kill/reap,
+wedged encoder kill-before-join, and a normal two-picture encoded tail. Fresh-cache capture Clippy,
+CI-mode workspace tests (385 app tests), and workspace Clippy pass with warnings denied. The real
+FFmpeg/mux integration self-skipped because no FFmpeg binary was discoverable on this machine.
+Computer Use verified normal startup with all nine clips at 6.2 MB. No manual-only acceptance item
+remains for the deterministic process lifecycle.
+
 ## Checkpoint (2026-07-18): Windows capture lifecycle contracts
 
 The combined audit's M-14 is fixed. Per-process WASAPI loopback no longer requests event-callback
