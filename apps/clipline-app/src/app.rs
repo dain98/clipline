@@ -495,6 +495,7 @@ impl<R: Runtime> TrayItems<R> {
 struct RuntimeInner {
     tx: Option<Sender<Cmd>>,
     recording_generation: u64,
+    recording_desired: bool,
     settings: AppSettings,
     lol_url: Option<String>,
     active_game: Option<DetectedGame>,
@@ -507,6 +508,11 @@ struct RuntimeInner {
 
 struct PreparedRuntimeRestart {
     settings: AppSettings,
+}
+
+struct PreparedServiceRestart {
+    old_tx: Option<Sender<Cmd>>,
+    replacement: Option<(ServiceOptions, u64)>,
 }
 
 #[derive(Debug)]
@@ -530,6 +536,7 @@ impl RuntimeState {
         let mut inner = RuntimeInner {
             tx: None,
             recording_generation: 0,
+            recording_desired: false,
             settings,
             lol_url,
             active_game: None,
@@ -545,6 +552,7 @@ impl RuntimeState {
 
     fn install_recording_sender(inner: &mut RuntimeInner, tx: Sender<Cmd>) -> u64 {
         inner.recording_generation = inner.recording_generation.wrapping_add(1);
+        inner.recording_desired = true;
         inner.tx = Some(tx);
         inner.last_save_request = None;
         inner.recording_generation
@@ -558,6 +566,8 @@ impl RuntimeState {
             return false;
         }
         inner.tx = None;
+        inner.recording_desired = false;
+        inner.recording_generation = inner.recording_generation.wrapping_add(1);
         inner.last_save_request = None;
         true
     }
@@ -618,17 +628,47 @@ impl RuntimeState {
         )
     }
 
-    fn prepare_service_restart(
-        inner: &mut RuntimeInner,
-    ) -> Result<(Option<Sender<Cmd>>, Option<ServiceOptions>), String> {
-        if inner.tx.is_none() {
-            return Ok((None, None));
-        }
-        let mut next_options = Self::options(inner)?;
-        next_options.recover_abandoned_recordings = false;
+    fn prepare_service_restart(inner: &mut RuntimeInner) -> Result<PreparedServiceRestart, String> {
+        let next_options = if inner.recording_desired {
+            let mut options = match Self::options(inner) {
+                Ok(options) => options,
+                Err(error) => {
+                    // A sender means the current service is still authoritative,
+                    // so preserve it on an option error. With no sender, a prior
+                    // restart is already spawning; invalidate that stale plan.
+                    if inner.tx.is_none() {
+                        inner.recording_generation = inner.recording_generation.wrapping_add(1);
+                    }
+                    return Err(error);
+                }
+            };
+            options.recover_abandoned_recordings = false;
+            Some(options)
+        } else {
+            None
+        };
         let old_tx = inner.tx.take();
+        inner.recording_generation = inner.recording_generation.wrapping_add(1);
+        let generation = inner.recording_generation;
         inner.last_save_request = None;
-        Ok((old_tx, Some(next_options)))
+        Ok(PreparedServiceRestart {
+            old_tx,
+            replacement: next_options.map(|options| (options, generation)),
+        })
+    }
+
+    fn install_prepared_service_restart(
+        inner: &mut RuntimeInner,
+        generation: u64,
+        tx: Sender<Cmd>,
+    ) -> Result<u64, Sender<Cmd>> {
+        if !inner.recording_desired
+            || inner.recording_generation != generation
+            || inner.tx.is_some()
+        {
+            return Err(tx);
+        }
+        Ok(Self::install_recording_sender(inner, tx))
     }
 
     fn prepare_settings_restart(
@@ -643,7 +683,7 @@ impl RuntimeState {
         } else {
             inner.active_game.as_ref()
         };
-        if inner.tx.is_some() {
+        if inner.recording_desired {
             Self::options_for(
                 &settings,
                 inner.lol_url.clone(),
@@ -670,7 +710,7 @@ impl RuntimeState {
         } else {
             inner.active_game.as_ref()
         };
-        let next_options = if inner.tx.is_some() {
+        let next_options = if inner.recording_desired {
             let mut options = Self::options_for(
                 &settings,
                 inner.lol_url.clone(),
@@ -865,6 +905,8 @@ impl RuntimeState {
     fn stop_recording(&self) -> Result<bool, String> {
         let tx = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            inner.recording_desired = false;
+            inner.recording_generation = inner.recording_generation.wrapping_add(1);
             let tx = inner.tx.take();
             inner.last_save_request = None;
             tx
@@ -881,36 +923,41 @@ impl RuntimeState {
         detected: Option<DetectedGame>,
     ) -> Result<(), String> {
         let event = GameDetectionEvent::from_detected(detected.as_ref());
-        let (old_tx, next_options, emit_event) = {
+        let (prepared_restart, emit_event) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             record_osu_title_event(&mut inner, detected.as_ref(), unix_now());
             if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
                 if game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref()) {
                     inner.active_game = detected;
-                    let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
-                    (old_tx, next_options, true)
+                    (Some(Self::prepare_service_restart(&mut inner)?), true)
                 } else if inner.active_game != detected {
                     inner.active_game = detected;
-                    (None, None, true)
+                    (None, true)
                 } else {
-                    (None, None, false)
+                    (None, false)
                 }
             } else {
                 inner.active_game = detected;
-                let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
-                (old_tx, next_options, true)
+                (Some(Self::prepare_service_restart(&mut inner)?), true)
             }
         };
-        if let Some(tx) = old_tx {
-            let _ = tx.send(Cmd::Stop { announce: false });
-        }
-        if let Some(options) = next_options {
-            let (tx, rx) = service::spawn(options);
-            let generation = {
-                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-                Self::install_recording_sender(&mut inner, tx)
-            };
-            pump_events(app.clone(), rx, generation);
+        if let Some(prepared) = prepared_restart {
+            if let Some(tx) = prepared.old_tx {
+                let _ = tx.send(Cmd::Stop { announce: false });
+            }
+            if let Some((options, restart_generation)) = prepared.replacement {
+                let (tx, rx) = service::spawn(options);
+                let installed = {
+                    let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+                    Self::install_prepared_service_restart(&mut inner, restart_generation, tx)
+                };
+                match installed {
+                    Ok(generation) => pump_events(app.clone(), rx, generation),
+                    Err(tx) => {
+                        let _ = tx.send(Cmd::Stop { announce: false });
+                    }
+                }
+            }
         }
         if emit_event {
             let _ = app.emit("game-detection", event);
@@ -2606,10 +2653,11 @@ mod tests {
         };
         let prepared = state.prepare_settings_restart(changed).unwrap();
 
+        state.stop_recording().unwrap();
+
         let mut spawned = false;
         let committed = {
             let mut inner = state.0.lock().unwrap();
-            inner.tx.take();
             RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
                 spawned = true;
                 let (replacement_tx, _replacement_rx) = mpsc::channel();
@@ -2658,6 +2706,7 @@ mod tests {
         let mut inner = RuntimeInner {
             tx: Some(tx),
             recording_generation: 1,
+            recording_desired: true,
             settings: invalid_disk_replay_settings(),
             lol_url: None,
             active_game: None,
@@ -2673,6 +2722,8 @@ mod tests {
 
         assert!(err.contains("replay cache folder"), "{err}");
         assert!(inner.tx.is_some(), "failed options must not drop sender");
+        assert!(inner.recording_desired);
+        assert_eq!(inner.recording_generation, 1);
         assert!(
             inner.last_save_request.is_some(),
             "failed options must not clear debounce state"
@@ -2685,6 +2736,7 @@ mod tests {
         let mut inner = RuntimeInner {
             tx: Some(tx),
             recording_generation: 1,
+            recording_desired: true,
             settings: AppSettings::default(),
             lol_url: None,
             active_game: None,
@@ -2693,12 +2745,120 @@ mod tests {
             decodable_codecs: vec![service::Codec::H264],
         };
 
-        let (_old_tx, next_options) = RuntimeState::prepare_service_restart(&mut inner).unwrap();
+        let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
+        let (next_options, _generation) = prepared.replacement.unwrap();
 
         assert!(
-            !next_options.unwrap().recover_abandoned_recordings,
+            !next_options.recover_abandoned_recordings,
             "internal recorder restarts must not recover another active recorder's temp file"
         );
+    }
+
+    #[test]
+    fn game_restart_gap_does_not_resurrect_after_user_stop() {
+        let (initial_tx, _initial_rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(initial_tx, AppSettings::default(), None);
+        let prepared = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::prepare_service_restart(&mut inner).unwrap()
+        };
+        let (_options, restart_generation) = prepared.replacement.unwrap();
+
+        state.stop_recording().unwrap();
+        let (replacement_tx, replacement_rx) = mpsc::channel();
+        let rejected = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::install_prepared_service_restart(
+                &mut inner,
+                restart_generation,
+                replacement_tx,
+            )
+            .unwrap_err()
+        };
+        rejected.send(Cmd::Stop { announce: false }).unwrap();
+
+        assert!(
+            !state.send(Cmd::Save),
+            "a replacement spawned before Stop must not resurrect recording"
+        );
+        assert!(matches!(
+            replacement_rx.try_recv(),
+            Ok(Cmd::Stop { announce: false })
+        ));
+    }
+
+    #[test]
+    fn game_restart_gap_does_not_overwrite_a_newer_manual_start() {
+        let (initial_tx, _initial_rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(initial_tx, AppSettings::default(), None);
+        let prepared = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::prepare_service_restart(&mut inner).unwrap()
+        };
+        let (_options, restart_generation) = prepared.replacement.unwrap();
+
+        let (newer_tx, newer_rx) = mpsc::channel();
+        let (stale_tx, stale_rx) = mpsc::channel();
+        let rejected = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::install_recording_sender(&mut inner, newer_tx);
+            RuntimeState::install_prepared_service_restart(&mut inner, restart_generation, stale_tx)
+                .unwrap_err()
+        };
+        rejected.send(Cmd::Stop { announce: false }).unwrap();
+
+        assert!(state.send(Cmd::Save));
+        assert!(
+            matches!(newer_rx.try_recv(), Ok(Cmd::Save)),
+            "the manual start must remain the active sender"
+        );
+        assert!(matches!(
+            stale_rx.try_recv(),
+            Ok(Cmd::Stop { announce: false })
+        ));
+    }
+
+    #[test]
+    fn newer_game_restart_supersedes_a_restart_already_spawning() {
+        let (initial_tx, _initial_rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(initial_tx, AppSettings::default(), None);
+        let first = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::prepare_service_restart(&mut inner).unwrap()
+        };
+        let (_first_options, first_generation) = first.replacement.unwrap();
+
+        let second = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::prepare_service_restart(&mut inner).unwrap()
+        };
+        let (_second_options, second_generation) = second.replacement.unwrap();
+
+        let (first_tx, first_rx) = mpsc::channel();
+        let (second_tx, second_rx) = mpsc::channel();
+        let first_rejected = {
+            let mut inner = state.0.lock().unwrap();
+            let rejected = RuntimeState::install_prepared_service_restart(
+                &mut inner,
+                first_generation,
+                first_tx,
+            )
+            .unwrap_err();
+            RuntimeState::install_prepared_service_restart(
+                &mut inner,
+                second_generation,
+                second_tx,
+            )
+            .unwrap();
+            rejected
+        };
+        first_rejected.send(Cmd::Stop { announce: false }).unwrap();
+        assert!(matches!(
+            first_rx.try_recv(),
+            Ok(Cmd::Stop { announce: false })
+        ));
+        assert!(state.send(Cmd::Save));
+        assert!(matches!(second_rx.try_recv(), Ok(Cmd::Save)));
     }
 
     #[test]
@@ -2707,6 +2867,7 @@ mod tests {
         let mut inner = RuntimeInner {
             tx: Some(tx),
             recording_generation: 1,
+            recording_desired: true,
             settings: invalid_disk_replay_settings(),
             lol_url: None,
             active_game: Some(DetectedGame {
@@ -2734,6 +2895,26 @@ mod tests {
             inner.last_save_request.is_some(),
             "failed options must not clear debounce state"
         );
+    }
+
+    #[test]
+    fn failed_newer_game_restart_invalidates_a_plan_already_spawning() {
+        let mut inner = RuntimeInner {
+            tx: None,
+            recording_generation: 7,
+            recording_desired: true,
+            settings: invalid_disk_replay_settings(),
+            lol_url: None,
+            active_game: None,
+            osu_title_events: Vec::new(),
+            last_save_request: None,
+            decodable_codecs: vec![service::Codec::H264],
+        };
+
+        assert!(RuntimeState::prepare_service_restart(&mut inner).is_err());
+        assert_eq!(inner.recording_generation, 8);
+        assert!(inner.recording_desired);
+        assert!(inner.tx.is_none());
     }
 
     #[test]
@@ -2887,6 +3068,7 @@ mod tests {
         let mut inner = RuntimeInner {
             tx: None,
             recording_generation: 0,
+            recording_desired: false,
             settings: AppSettings::default(),
             lol_url: None,
             active_game: None,
@@ -3221,6 +3403,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         let inner = RuntimeInner {
             tx: None,
             recording_generation: 0,
+            recording_desired: false,
             settings: AppSettings::default(),
             lol_url: None,
             active_game: Some(DetectedGame {
@@ -3255,6 +3438,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         let inner = RuntimeInner {
             tx: None,
             recording_generation: 0,
+            recording_desired: false,
             settings: AppSettings::default(),
             lol_url: Some("http://mock".into()),
             active_game: Some(DetectedGame {
