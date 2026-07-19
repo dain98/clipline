@@ -111,6 +111,15 @@ Recently hardened and requiring reconciliation against the combined labels befor
 
 Accumulate only tests that require a real account, hardware, elevated game, slow/failing device, installer, or release environment and therefore cannot be safely completed with deterministic automated fixtures. The final handoff will group them by risk and provide expected results, setup, and cleanup.
 
+Acceptance run on 2026-07-19 completed every safely runnable scenario. Large trim exposed an
+immediate-playback asset-scope regression and now needs one focused retest after
+`2026-07-19-exported-clip-asset-scope.md`. Clipboard export passed for one selected track and a
+multi-track mix with bounded memory and clean temporary artifacts; paste/audio and contention still
+need designated helper applications. Cloud-page origin passed with two distinct opaque IDs and the
+correct selected media. Media-root direct entry, drive-root, and profile-root rejection passed;
+writable/unwritable fallback still needs disposable storage. A real Cloud account loaded all 17
+cards and retained usable context menus; upload and cache-pressure scenarios remain.
+
 - Elevated-game boundary: run a game as administrator while Clipline remains normal. Confirm the warning appears once for that process, recommends running the game without administrator privileges, contains no restart/UAC action, and ordinary Clipline recording remains unaffected after dismissal.
 - Large trim: export a range from a multi-gigabyte/full-session clip. Confirm Clipline memory stays broadly flat, the source remains playable, no partial clip appears during export, and the completed trim plays through its end.
 - Clipboard audio selection and contention: copy one clip with a single selected audio track and again with multiple tracks mixed. Paste each into another app; confirm video is intact, only the selected/mixed audio is audible, memory stays broadly flat, and no `.clipline-*-tmp` files remain after completion. Repeat once while a clipboard manager or another app holds the clipboard briefly and confirm Clipline retries then succeeds. Hold it longer than the retry window and confirm Clipline reports failure without claiming success; after releasing it, retry and paste the expected file normally.

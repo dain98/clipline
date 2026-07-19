@@ -536,6 +536,27 @@ fn audio_preview_command_scopes_generated_preview_files() {
 }
 
 #[test]
+fn exported_clips_are_scoped_for_immediate_playback() {
+    let library = library_rs();
+    let export_start = library
+        .find("pub async fn export_clip")
+        .expect("export_clip command");
+    let export_end = library[export_start..]
+        .find("\n#[tauri::command]")
+        .map(|offset| export_start + offset)
+        .unwrap_or(library.len());
+    let export_command = &library[export_start..export_end];
+
+    assert!(
+        export_command.contains("app: AppHandle<R>")
+            && export_command.contains("let scope_root = settings.clips_dir()?")
+            && export_command.contains("allow_local_clip_asset(")
+            && export_command.contains("Path::new(&exported.path)"),
+        "a newly exported MP4 must be exact-scoped before its card can open it without a Library rescan"
+    );
+}
+
+#[test]
 fn audio_sidecar_command_protects_active_media_and_prunes_cache_on_startup() {
     let library = library_rs();
     let app = app_rs();

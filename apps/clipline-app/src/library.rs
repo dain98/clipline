@@ -823,7 +823,8 @@ fn rollback_renamed_clip_files(
 }
 
 #[tauri::command]
-pub async fn export_clip(
+pub async fn export_clip<R: Runtime>(
+    app: AppHandle<R>,
     path: String,
     start_s: f64,
     end_s: f64,
@@ -831,13 +832,16 @@ pub async fn export_clip(
     include_markers: Option<bool>,
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<ExportedClipInfo, String> {
+    let scope_root = settings.clips_dir()?;
     let source = validate_clip_path(&settings, &path)?;
     let include_markers = include_markers.unwrap_or(true);
-    tauri::async_runtime::spawn_blocking(move || {
+    let exported = tauri::async_runtime::spawn_blocking(move || {
         export_clip_file(source, start_s, end_s, title, include_markers)
     })
     .await
-    .map_err(|e| format!("export clip task: {e}"))?
+    .map_err(|e| format!("export clip task: {e}"))??;
+    allow_local_clip_asset(&app, &scope_root, Path::new(&exported.path))?;
+    Ok(exported)
 }
 
 #[tauri::command]

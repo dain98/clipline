@@ -4,6 +4,24 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-19): immediate playback for newly exported clips
+
+The first consolidated manual-acceptance run found one clear failure: a 30-second trim exported
+from a 2.0 GB, 33:43 session completed with flat process memory (about 152--155 MB), but its newly
+inserted Library card consistently showed WebView media error 4. The original session remained
+intact and playable. This was an authorization race, not evidence of a failed large-file mux:
+`list_clips` exact-scoped every discovered MP4 for Tauri's asset protocol, while `export_clip`
+returned a new path and the renderer inserted it directly into the Library cache before another
+scan could grant that path.
+
+`export_clip` now receives the application handle, retains the validated configured media root,
+and exact-scopes the completed MP4 before returning it to the renderer. A focused UI contract first
+reproduced the missing command invariant and now requires that grant. The Library unit-test group
+passes. Plan commit `d8226f6`; all workspace tests, warning-denied workspace Clippy, and clean-cache
+warning-denied app Clippy pass. Retest by exporting a trim and opening its card immediately without
+refreshing or restarting; confirm metadata, playback, seeking, and a second reopen all work and the
+source remains playable.
+
 ## Checkpoint (2026-07-18): explicit application module boundaries
 
 The combined audit's L-14 is fixed with incremental, compatibility-safe module boundaries. The
