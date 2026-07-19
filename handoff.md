@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): verified writable media-root fallback
+
+The combined audit's M-21 is fixed. Recording now verifies a configured media directory by
+atomically reserving a unique probe file, writing and syncing one byte, and removing the probe.
+An existing but unwritable, disconnected, full, or otherwise unusable root therefore falls back to
+the default `Videos\Clipline` directory instead of passing `create_dir_all` and failing later. The
+fallback receives the same probe, and a double failure reports both paths and causes.
+
+The recorder publishes its actual resolved root before normal status events. Shared Library state
+and the WebView asset scope follow that root, so fallback clips appear and play immediately instead
+of leaving the UI pointed at the unavailable configured folder. Settings saves apply the same
+writable preflight before committing runtime or persisted changes. Routine Library reads do not
+repeat the durable probe, avoiding a disk/network sync on every refresh.
+
+Plan commit `4fe2d31`; implementation commit `410a7da`. The app suite now has 393 unit tests and 70
+UI contracts, including injected existing-directory ACL denial, fallback failure diagnostics,
+probe cleanup, and resolved-root state/scope propagation. Fresh-cache app Clippy, CI-mode workspace
+tests, and workspace Clippy pass with warnings denied. Computer Use verified normal startup with all
+nine clips visible and the Settings UI opening. A real unwritable/removable-volume scenario remains
+on the final manual acceptance list.
+
 ## Checkpoint (2026-07-18): scoped built-in and custom game identities
 
 The combined audit's M-20 is fixed. Built-in IDs now live in one reserved catalog and runtime game
