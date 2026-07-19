@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): verified FFmpeg release staging
+
+The combined audit's L-13 is fixed. Release staging no longer accepts an arbitrary directory or
+copies its contents wholesale. `ffmpeg-runtime.json` pins BtbN's retained
+`autobuild-2026-06-30-13-34` x64 LGPL-shared FFmpeg archive, archive digest, exact version and
+license-safe configuration, upstream source/build links, and the size/hash of each allowed runtime
+file. The selected version3 build excludes GPL/nonfree mode plus libx264/libx265.
+
+`stage-ffmpeg-resource.ps1` hashes the regular archive before opening it, selects only the nine
+manifest entries, verifies each extracted file, executes only the verified `ffmpeg.exe` for the
+version/configuration probe, and builds the complete resource in an owned temporary directory. It
+then atomically replaces staging and emits deterministic `PROVENANCE.json` beside the retained
+license and independently replaceable FFmpeg runtime. Release instructions and third-party notices
+now document immutable rotation, exact source/build provenance, and LGPL replacement rights.
+
+Plan commit `87c3e32`; implementation commit `2890d0a`. The focused repository contract passed.
+A tiny archive with the exact expected name was rejected on SHA-256 before ZIP access. Real staging
+removed an injected `evil.dll`, produced exactly 11 resource files, and matched every declared
+size/hash plus the receipt. After a fresh app-crate clean, all CI-mode workspace tests and
+warning-denied workspace Clippy passed. This batch changes release inputs only, so no native app
+rebuild was required. The final acceptance list now includes inspecting both installed variants and
+exercising their packaged FFmpeg runtime.
+
 ## Checkpoint (2026-07-18): owned dependency and fixed-runtime maintenance
 
 The combined audit's L-12 is fixed. The abandoned `audiopus`/`audiopus_sys` pair is gone. Capture,
@@ -1888,10 +1911,10 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   `ffmpeg::probe()` returns empty and the live encoder test (`tests/ffmpeg_encode.rs`) self-skips;
   everything stays MFT-only there. The neutral bits (probe parsing, `framing.rs`, codec boxes)
   are fully unit-tested on both CI OSes.
-- Ship an **lgpl-shared** build (BtbN) under `%APPDATA%\Clipline\ffmpeg` — it has SVT-AV1 + GPU
-  encoders but **no libx264/libx265**, so no software H.264/HEVC. The dev box has it installed
-  there; release builds stage that bundle into `apps/clipline-app/ffmpeg/` so the installer ships
-  it as a Tauri resource for gallery poster generation and the optional encoder tier. The search
+- Ship the pinned **lgpl-shared** BtbN archive through `scripts/stage-ffmpeg-resource.ps1`; it has
+  SVT-AV1 + GPU encoders but **no libx264/libx265**, so no software H.264/HEVC. The script verifies
+  archive and per-file hashes, stages only the manifest allowlist into
+  `apps/clipline-app/ffmpeg/`, and preserves license/provenance in the installer resource. The search
   order (`CLIPLINE_FFMPEG` override → bundled resource → exe dir → `%APPDATA%\Clipline\ffmpeg` →
   PATH) means the packaged LGPL build wins over any GPL PATH ffmpeg. Attribution:
   `THIRD-PARTY-NOTICES.md`.
