@@ -27,7 +27,7 @@ pub struct DetectedGame {
 }
 
 pub fn game_plugin_catalog() -> Vec<GamePluginInfo> {
-    game_plugins::catalog().to_vec()
+    game_plugins::catalog()
 }
 
 pub fn list_game_windows() -> Vec<GameWindowInfo> {

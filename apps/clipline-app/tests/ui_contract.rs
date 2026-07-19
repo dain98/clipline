@@ -3085,6 +3085,7 @@ fn games_ui_wires_detection_commands() {
         "await invoke(\"list_game_plugins\")",
         "await invoke(\"list_game_windows\")",
         "listen(\"game-detection\"",
+        "if (activeDetectedGame?.active) loadGamePlugins();",
         "var detectedGameCandidates = []",
         "var selectedDetectedGameIds = new Set()",
         "var detectedGamesScanId = 0",

@@ -71,6 +71,7 @@ listen("suspend-review-playback", () => suspendReviewPlayback());
 
 listen("game-detection", (e) => {
   activeDetectedGame = e.payload || null;
+  if (activeDetectedGame?.active) loadGamePlugins();
   updateCaptureStatus();
   updateGameDetectionStatus();
   maybeWarnElevatedGame(activeDetectedGame);
