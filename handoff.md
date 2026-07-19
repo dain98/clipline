@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-18): osu! enrichment filesystem boundary
+
+The combined audit's M-08 is fixed. Discovery no longer returns bare deserialized enrichment
+records whose embedded `clip_path` controls later I/O. It returns a path-bound job: the pending
+sidecar is the actual regular file found under the canonical media root, and the MP4 is derived
+from that sidecar's filename and directory. The serialized path remains only a schema-v1
+consistency check and must canonicalize to that exact MP4.
+
+Discovery accepts only an existing regular `.mp4` at the media root or one session directory
+below it. It rejects mismatched/missing targets, sidecar or media reparse points, and linked session
+directories. Marker publication, retry/failure rewrites, and completion deletion use only the
+private bound paths, so crafted JSON cannot redirect a write or deletion. Clipline's existing
+rename transaction continues rewriting the compatibility field when it moves a pending clip.
+
+Plan commit `d1fdbf6`; implementation commit `d143dbc`. Fifteen focused enrichment tests cover
+outside-path injection, missing MP4s, linked directories, safe retry targeting, discovery, and
+score mapping. Fresh-cache app Clippy, CI-mode workspace tests (380 app tests), and workspace
+Clippy pass with warnings denied. Computer Use verified normal startup with all nine clips at
+6.5 MB. No manual-only acceptance test remains for this deterministic path boundary.
+
 ## Checkpoint (2026-07-18): League poller match continuity
 
 The combined audit's M-07 is fixed. The League poller now owns one `EventTracker` for its whole

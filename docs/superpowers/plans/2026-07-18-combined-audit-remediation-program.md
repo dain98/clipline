@@ -24,6 +24,7 @@ Additional completed findings:
 - [ ] M-05 — bounded/reused HTTP clients, body caps, size-aware transfer deadlines, and finite deduplicated pagination (`3a51d1b`)
 - [ ] M-06 — owned run recovery, cross-run quota accounting, transactional segments, and low-space finalization (`52eb9f4`)
 - [ ] M-07 — persistent League match/event continuity, failure grace/backoff, reliable new-match reset, and idle receiver liveness (`905d976`)
+- [ ] M-08 — canonical sidecar-derived osu! enrichment jobs with path/depth/mismatch/reparse validation (`d143dbc`)
 - [ ] H-05 — bounded file transforms, hashing, upload, and temporary ownership (`db86efe`)
 - [ ] M-16 — hard-link identity checks and atomic MP4 publication (`db86efe`)
 
