@@ -17,6 +17,12 @@ materialization removes pre-origin samples only from the first selected segment.
 delivered WASAPI audio can trail video and be sealed into a later GOP segment, so a later selected
 segment may also contain samples older than the replay video origin.
 
+Implemented validation: the pure EOF fixture stays paused past the 29.64-second sidecar end and
+resumes after a forced seek to 10 seconds. A two-segment replay fixture removes the 0.98-second
+sample from the later segment, advances its start to the 1.00-second video origin, and retains the
+following samples byte-for-byte. Focused suites, workspace tests, warning-denied workspace Clippy,
+and clean-cache app/capture Clippy pass.
+
 ## Implementation
 
 - [ ] Add a pure player regression showing that a sidecar shorter than the still-playing video is

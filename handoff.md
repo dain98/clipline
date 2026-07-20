@@ -4,6 +4,32 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): repeat replay save and review-audio EOF
+
+The first crackle-free replay, `clip_1784529665.mp4`, exposed two follow-on boundary bugs. Its video
+is exactly 30.000 seconds, while Output Audio ends at 29.655 seconds and Microphone at 29.635 seconds.
+The audio-only review sidecars preserve those endpoints. During the remaining video tail, the review
+timer saw each ended audio element paused and called `play()` again; WebView restarted it from zero,
+so roughly the first 350 ms of audio played at the end. VLC correctly remained silent.
+
+The sidecar synchronization policy now receives each element's duration and ended state. An ended
+sidecar stays exhausted while video is beyond its duration, but a seek back inside the sidecar range
+seeks and resumes it normally. A pure regression covers both decisions and the UI contract requires
+the live transport state to be wired into the policy.
+
+The next Save Replay failed with `media sample timestamp precedes recording origin`. Continuously
+delivered WASAPI audio can trail video and be sealed into a later GOP, but replay materialization
+filtered pre-origin audio only from the first selected segment. Origin filtering now visits every
+selected segment and every audio track before fragment timestamps are built. A two-segment fixture
+places stale audio in the later segment and verifies exact sample/data removal plus timestamp advance.
+
+Plan commit `cf0083d`; player implementation `b0f306a`; replay implementation `5147791`. All 89
+player-core tests, 78 UI contracts, 206 capture tests, workspace tests, warning-denied workspace
+Clippy, and clean-cache app/capture Clippy pass.
+
+Retest the existing first replay through its final second in Clipline, seek back from EOF, then save
+at least two new replays from one continuously running buffer. Both new saves must finalize.
+
 ## Checkpoint (2026-07-20): continuous WASAPI delivery no longer becomes synthetic silence
 
 VLC reproduced the crackle in `clip_1784527236.mp4`, proving the artifact was encoded rather than a
