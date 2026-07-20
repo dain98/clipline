@@ -29,6 +29,12 @@ the former step pattern. The MOTU's reported source timeline drifts behind the v
 PCM arrives continuously. Quiet flushing must therefore use elapsed host time since the most recent
 WASAPI packet, not the difference between a packet timestamp and the video/synthesis horizon.
 
+The packet-idleness build ran the real output-plus-microphone recorder for 45 seconds with zero
+late-audio reanchors; the former builds emitted their first correction within five seconds and then
+repeated it throughout the same window. Only the two expected startup data-discontinuity events
+remained. The recovery fade is retained for genuine idle resume or device discontinuity, but normal
+continuous delivery no longer enters that path.
+
 ## Implementation
 
 - [ ] Extend the typed, rate-limited late-recovery diagnostic with device-chunk duration and total

@@ -4,6 +4,32 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): continuous WASAPI delivery no longer becomes synthetic silence
+
+VLC reproduced the crackle in `clip_1784527236.mp4`, proving the artifact was encoded rather than a
+review-player problem. Typed telemetry on the configured MOTU M Series `Out 1-2` and `In 1-2`
+tracks showed recurring complete-packet late recovery: each event corrected 10--11 ms and both
+sources accumulated roughly 150 ms per 30 seconds. The five-millisecond recovery fade consequently
+became a periodic encoded level hole during otherwise continuous audio.
+
+WASAPI capture now holds one timestamped chunk, interpolates it to the following QPC interval, and
+treats pending real PCM as a hard frontier for poll-time silence. Crucially, the fallback flush is
+based on 100 ms with no device packet arriving, not on packet timestamp age: this MOTU driver reports
+a source timeline that drifts behind video even while samples arrive continuously. A genuinely quiet
+loopback still flushes finitely, stream finish still flushes immediately, and the discontinuity/late
+fade remains available only for actual startup, idle resume, and device discontinuities.
+
+Neutral fixtures cover the observed 512-sample/510-sample interval, endpoint preservation, genuine
+timestamp gaps, the pending-real-audio synthesis frontier, finite idle flush, and 300 consecutive
+chunks without a packet reanchor. The real output-plus-microphone build ran for 45 seconds with zero
+`wasapi_late_audio_reanchored` events; only the two expected startup discontinuities appeared. The
+205-test capture suite, workspace tests, warning-denied workspace Clippy, and clean-cache capture
+Clippy pass. Plan/telemetry commits begin at `e06752d`; core implementation commits are `de9b804`,
+`ec70d82`, and `a2fb2e3`.
+
+Retest with a fresh recording of at least one minute while game output and microphone remain active,
+then save a 30-second replay and listen in VLC. The old MP4 remains unchanged and will still crackle.
+
 ## Checkpoint (2026-07-20): review sidecar rate artifacts
 
 The fresh replay `clip_1784527236.mp4` still sounded crackly throughout in Clipline. Its two Opus
