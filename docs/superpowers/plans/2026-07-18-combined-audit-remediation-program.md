@@ -140,6 +140,13 @@ five-minute full session with both sources active near the beginning, middle, an
 replay during the run, and confirm continuous synchronized audio. If
 `wasapi_late_audio_reanchored` appears, confirm capture remains audible after it.
 
+The 74-second follow-up session retained continuous Opus packets and decoded samples at its reported
+two-second stutter, isolating that symptom to multi-track review playback rather than capture or
+muxing. Smooth sidecar rate correction with hard seeks reserved for discontinuities is recorded
+under `2026-07-20-review-audio-sidecar-drift.md` (plan `3abaf7c`, implementation `e7ca91e`). Retest
+that session from the beginning with Output Audio and Microphone selected, play for at least one
+minute, then seek and toggle track selections; no periodic skip or repeated fragment should occur.
+
 - Elevated-game boundary: run a game as administrator while Clipline remains normal. Confirm the warning appears once for that process, recommends running the game without administrator privileges, contains no restart/UAC action, and ordinary Clipline recording remains unaffected after dismissal.
 - Large trim: export a range from a multi-gigabyte/full-session clip. Confirm Clipline memory stays broadly flat, the source remains playable, no partial clip appears during export, and the completed trim plays through its end.
 - Clipboard audio selection and contention: copy one clip with a single selected audio track and again with multiple tracks mixed. Paste each into another app; confirm video is intact, only the selected/mixed audio is audible, memory stays broadly flat, and no `.clipline-*-tmp` files remain after completion. Repeat once while a clipboard manager or another app holds the clipboard briefly and confirm Clipline retries then succeeds. Hold it longer than the retry window and confirm Clipline reports failure without claiming success; after releasing it, retry and paste the expected file normally.

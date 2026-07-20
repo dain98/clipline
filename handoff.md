@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): smooth multi-track review audio synchronization
+
+The follow-up 74-second full session `session_1784523792.mp4` was mostly audible after the delayed
+WASAPI recovery, but multi-track playback stuttered at exactly two seconds. Both Opus tracks have
+continuous 20 ms packets and continuous decoded PCM through that boundary, so the saved media is
+intact. The default review selection enables Output Audio and Microphone, which makes the player
+extract and run two independent audio sidecars alongside the video element.
+
+The review player compared each sidecar clock with video every 500 ms and hard-seeked the audio
+element whenever ordinary drift exceeded 100 ms. That turned natural WebView media-clock drift into
+an audible skip or repeated fragment. Playing sidecars now use bounded +/-5% rate correction outside
+a 25 ms deadband and return to the requested video rate when aligned. Hard seeks remain for explicit
+seeks, paused alignment, invalid sidecar clocks, and gross drift over 500 ms. The pure player
+regression failed under the old behavior and covers correction in both directions plus every
+hard-seek boundary. Focused tests, workspace tests, warning-denied workspace Clippy, and clean-cache
+app Clippy pass. Plan commit `3abaf7c`; implementation commit `e7ca91e`.
+
+Retest the reported file from the beginning with both tracks selected, then let it play for at least
+one minute. Confirm the two-second stutter and periodic skips are gone. Seek while playing and
+paused, and toggle Output only, Microphone only, both, and mute; each selection should remain synced.
+
 ## Checkpoint (2026-07-20): delayed WASAPI audio recovery
 
 A real 989-second League full-session recording exposed both enabled audio tracks stuttering into
