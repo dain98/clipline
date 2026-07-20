@@ -19,7 +19,8 @@ The packet that straddles the origin is dropped whole; later delayed and gapped 
 unchanged. A deterministic 510 ms video-offset fixture reproduced the exact finalization error
 before the fix and now produces a finalized MP4. Existing lead-in and delayed/gapped mux tests,
 all workspace tests, warning-denied workspace Clippy, and clean-cache capture Clippy pass. The
-reported preserved recording was not opened, renamed, or deleted. Plan commit `f563812`.
+reported preserved recording was not opened, renamed, or deleted. Plan commit `f563812`;
+implementation commit `daff93a`.
 
 ## Checkpoint (2026-07-19): immediate playback for newly exported clips
 
