@@ -14,100 +14,57 @@ const MAX_GAP_FILL_S: f64 = 5.0;
 const FRAME_PAIRS: u64 = (FRAME_LEN / 2) as u64;
 const DISCONTINUITY_FADE_PAIRS: usize = 1_920; // 40 ms at 48 kHz.
 const LATE_RECOVERY_FADE_PAIRS: usize = 240; // 5 ms at 48 kHz.
-const PENDING_CHUNK_QUIET_GRACE_S: f64 = 0.1;
+const DEVICE_PACKET_QUIET_GRACE_S: f64 = 0.1;
 
 pub type PcmFrame = (f64, Vec<f32>);
 
-/// Holds one device chunk so its sample count can be matched to the QPC
-/// interval ending at the following chunk. Some shared-mode drivers deliver
-/// a fixed number of samples whose nominal duration differs slightly from
-/// their clock cadence; passing those counts through unchanged accumulates a
-/// whole-packet timeline error and forces periodic discontinuous correction.
-#[derive(Default)]
-pub(crate) struct TimestampedChunkAligner {
-    pending: Option<PcmFrame>,
+/// Selects how each WASAPI device packet joins the shared recording timeline.
+/// QPC establishes the initial anchor and re-anchors after genuine quiet;
+/// continuously arriving PCM keeps its authoritative sample-count cadence.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum DevicePacketPlacement {
+    Timestamped(f64),
+    Contiguous,
 }
 
-impl TimestampedChunkAligner {
+pub(crate) struct DevicePacketTimeline {
+    needs_timestamp_anchor: bool,
+}
+
+impl DevicePacketTimeline {
     pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn push(&mut self, pts_s: f64, samples: Vec<f32>) -> Option<PcmFrame> {
-        let previous = self.pending.replace((pts_s, samples))?;
-        Some(align_chunk_to_interval(previous, pts_s))
-    }
-
-    /// Release the final chunk only when device delivery itself has been idle.
-    /// Packet timestamps from some drivers drift relative to the shared video
-    /// clock and cannot reliably distinguish a quiet endpoint.
-    pub(crate) fn flush_if_idle(&mut self, idle_s: f64) -> Option<PcmFrame> {
-        if !idle_s.is_finite() || idle_s + f64::EPSILON < PENDING_CHUNK_QUIET_GRACE_S {
-            return None;
+        Self {
+            needs_timestamp_anchor: true,
         }
-        self.pending.take()
     }
 
-    /// Real PCM already delivered by the device must take precedence over
-    /// poll-time synthetic silence while it waits for one timestamp of
-    /// lookahead.
-    pub(crate) fn synthesis_horizon(&self, requested_pts_s: f64) -> f64 {
-        self.pending
-            .as_ref()
-            .map_or(requested_pts_s, |(pts_s, _)| requested_pts_s.min(*pts_s))
+    pub(crate) fn placement(&mut self, pts_s: Option<f64>) -> DevicePacketPlacement {
+        let placement = if self.needs_timestamp_anchor {
+            pts_s.filter(|pts_s| pts_s.is_finite()).map_or(
+                DevicePacketPlacement::Contiguous,
+                DevicePacketPlacement::Timestamped,
+            )
+        } else {
+            DevicePacketPlacement::Contiguous
+        };
+        self.needs_timestamp_anchor = false;
+        placement
     }
 
-    pub(crate) fn finish(&mut self) -> Option<PcmFrame> {
-        self.pending.take()
-    }
-}
-
-fn align_chunk_to_interval((pts_s, samples): PcmFrame, next_pts_s: f64) -> PcmFrame {
-    let source_pairs = samples.len() / 2;
-    let nominal_duration_s = source_pairs as f64 / SAMPLE_RATE;
-    let interval_s = next_pts_s - pts_s;
-    let relative_interval = interval_s / nominal_duration_s;
-    let target_pairs = if source_pairs > 0
-        && relative_interval.is_finite()
-        && (0.5..=1.5).contains(&relative_interval)
-    {
-        (interval_s * SAMPLE_RATE).round().max(1.0) as usize
-    } else {
-        source_pairs
-    };
-    (pts_s, resample_stereo_to_pairs(&samples, target_pairs))
-}
-
-fn resample_stereo_to_pairs(samples: &[f32], target_pairs: usize) -> Vec<f32> {
-    let source_pairs = samples.len() / 2;
-    if source_pairs == target_pairs {
-        return samples.to_vec();
-    }
-    if source_pairs == 0 || target_pairs == 0 {
-        return Vec::new();
-    }
-    if source_pairs == 1 {
-        return std::iter::repeat_n([samples[0], samples[1]], target_pairs)
-            .flatten()
-            .collect();
-    }
-    if target_pairs == 1 {
-        return samples[..2].to_vec();
+    pub(crate) fn require_timestamp_anchor(&mut self) {
+        self.needs_timestamp_anchor = true;
     }
 
-    let mut output = Vec::with_capacity(target_pairs * 2);
-    let scale = (source_pairs - 1) as f64 / (target_pairs - 1) as f64;
-    for output_pair in 0..target_pairs {
-        let source_position = output_pair as f64 * scale;
-        let lower = source_position.floor() as usize;
-        let upper = (lower + 1).min(source_pairs - 1);
-        let fraction = (source_position - lower as f64) as f32;
-        output.push(samples[lower * 2] + (samples[upper * 2] - samples[lower * 2]) * fraction);
-        output.push(
-            samples[lower * 2 + 1] + (samples[upper * 2 + 1] - samples[lower * 2 + 1]) * fraction,
-        );
+    /// Packet timestamps from some drivers drift relative to the shared video
+    /// clock and cannot identify quiet. Only host-observed delivery idleness
+    /// permits the next packet to establish a fresh QPC anchor.
+    pub(crate) fn note_synthesized_silence(&mut self, idle_s: f64) -> bool {
+        if !idle_s.is_finite() || idle_s + f64::EPSILON < DEVICE_PACKET_QUIET_GRACE_S {
+            return false;
+        }
+        self.needs_timestamp_anchor = true;
+        true
     }
-    output
 }
 
 pub(crate) struct DiscontinuityFade {
@@ -794,77 +751,61 @@ mod tests {
     }
 
     #[test]
-    fn timestamped_chunk_aligner_matches_the_next_qpc_interval() {
-        let mut aligner = TimestampedChunkAligner::new();
-        let mut ramp = Vec::with_capacity(512 * 2);
-        for pair in 0..512 {
-            ramp.extend([pair as f32, -(pair as f32)]);
-        }
-
-        assert!(aligner.push(0.0, ramp).is_none());
-        let (pts_s, aligned) = aligner
-            .push(510.0 / SAMPLE_RATE, pairs(512, 0.25))
-            .expect("the second timestamp releases the first chunk");
-
-        assert_eq!(pts_s, 0.0);
-        assert_eq!(aligned.len() / 2, 510);
-        assert_eq!(&aligned[..2], &[0.0, -0.0]);
-        assert_eq!(&aligned[aligned.len() - 2..], &[511.0, -511.0]);
-    }
-
-    #[test]
-    fn timestamped_chunk_aligner_flushes_stale_pending_after_bounded_grace() {
-        let mut aligner = TimestampedChunkAligner::new();
-        let start_pts_s = 1.0;
-        assert!(aligner.push(start_pts_s, pairs(512, 0.75)).is_none());
-
-        assert!(aligner.flush_if_idle(0.1 - 1e-6).is_none());
-        let (pts_s, flushed) = aligner
-            .flush_if_idle(0.1)
-            .expect("the stale chunk is released after a bounded quiet grace");
-        assert_eq!(pts_s, start_pts_s);
-        assert_eq!(flushed.len() / 2, 512);
-    }
-
-    #[test]
-    fn timestamped_chunk_aligner_caps_silence_at_pending_real_audio() {
-        let mut aligner = TimestampedChunkAligner::new();
-        assert!(aligner.push(2.0, pairs(512, 0.75)).is_none());
-
-        assert_eq!(aligner.synthesis_horizon(2.05), 2.0);
-        assert_eq!(aligner.synthesis_horizon(1.95), 1.95);
-
-        aligner.finish();
-        assert_eq!(aligner.synthesis_horizon(2.05), 2.05);
-    }
-
-    #[test]
-    fn timestamped_chunk_aligner_does_not_stretch_a_real_gap() {
-        let mut aligner = TimestampedChunkAligner::new();
-        assert!(aligner.push(0.0, pairs(512, 0.5)).is_none());
-
-        let (_, aligned) = aligner
-            .push(1.0, pairs(512, 0.25))
-            .expect("the second timestamp releases the first chunk");
-
-        assert_eq!(aligned.len() / 2, 512);
-    }
-
-    #[test]
-    fn timestamped_chunk_alignment_prevents_periodic_packet_reanchors() {
-        let mut aligner = TimestampedChunkAligner::new();
+    fn continuous_device_packets_preserve_nominal_sample_cadence() {
+        let mut timeline = DevicePacketTimeline::new();
         let mut assembler = LoopbackAssembler::new();
         assembler.push_chunk(0.0, &[]);
 
         for index in 0..300 {
             let pts_s = index as f64 * 510.0 / SAMPLE_RATE;
-            if let Some((aligned_pts_s, aligned)) = aligner.push(pts_s, pairs(512, 0.5)) {
-                let outcome = assembler.push_chunk(aligned_pts_s, &aligned);
-                assert_eq!(outcome.late_reanchor_s, None);
+            let chunk = pairs(512, 0.5);
+            match timeline.placement(Some(pts_s)) {
+                DevicePacketPlacement::Timestamped(anchor_pts_s) => {
+                    let outcome = assembler.push_chunk(anchor_pts_s, &chunk);
+                    assert_eq!(outcome.late_reanchor_s, None);
+                }
+                DevicePacketPlacement::Contiguous => assembler.push_contiguous_chunk(&chunk),
             }
         }
 
-        let (pts_s, pending) = aligner.finish().expect("one pending chunk remains");
-        assert_eq!(assembler.push_chunk(pts_s, &pending).late_reanchor_s, None);
+        assert_eq!(assembler.written_pairs(), 300 * 512);
+        let actual_end = assembler
+            .next_chunk_pts_s
+            .expect("timeline remains anchored");
+        let expected_end = 300.0 * 512.0 / SAMPLE_RATE;
+        assert!((actual_end - expected_end).abs() < 1e-9);
+    }
+
+    #[test]
+    fn synthesized_idle_requires_the_next_packet_to_reanchor() {
+        let mut timeline = DevicePacketTimeline::new();
+        assert_eq!(
+            timeline.placement(Some(1.0)),
+            DevicePacketPlacement::Timestamped(1.0)
+        );
+        assert_eq!(
+            timeline.placement(Some(1.01)),
+            DevicePacketPlacement::Contiguous
+        );
+        assert!(!timeline.note_synthesized_silence(0.1 - 1e-6));
+        assert_eq!(
+            timeline.placement(Some(1.02)),
+            DevicePacketPlacement::Contiguous
+        );
+        assert!(timeline.note_synthesized_silence(0.1));
+        assert_eq!(
+            timeline.placement(Some(1.03)),
+            DevicePacketPlacement::Timestamped(1.03)
+        );
+        assert_eq!(
+            timeline.placement(Some(1.04)),
+            DevicePacketPlacement::Contiguous
+        );
+
+        timeline.require_timestamp_anchor();
+        assert_eq!(
+            timeline.placement(Some(1.05)),
+            DevicePacketPlacement::Timestamped(1.05)
+        );
     }
 }
