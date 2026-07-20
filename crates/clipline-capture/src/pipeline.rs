@@ -533,11 +533,10 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         }
 
         // Audio captured before the first video packet is engine-init
-        // lead-in: drop it, or video plays early by that offset.
+        // lead-in: drop it, or video plays early by that offset. Opus packets
+        // are indivisible, so a packet straddling the origin is dropped too.
         let timeline_start = self.video_start_pts_s.unwrap_or(pts_start_s);
-        for pending in &mut self.pending_audio {
-            pending.retain(|p| p.pts_s + p.duration_s > timeline_start + 1e-9);
-        }
+        drop_audio_before_timeline(&mut self.pending_audio, timeline_start);
         // Audio packets ending at or before the boundary belong to this GOP.
         let mut audio = Vec::with_capacity(self.pending_audio.len());
         for pending in &mut self.pending_audio {
@@ -594,9 +593,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             }
             self.video_start_pts_s = Some(pkt.pts_s);
             self.pre_keyframe_bytes = 0;
-            for pending in &mut self.pending_audio {
-                pending.retain(|audio| audio.pts_s + audio.duration_s > pkt.pts_s + 1e-9);
-            }
+            drop_audio_before_timeline(&mut self.pending_audio, pkt.pts_s);
             self.recount_pending_audio_bytes();
             self.pending_started_pts_s = Some(pkt.pts_s);
         }
@@ -728,6 +725,12 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
                 sink.send_error = Some("full session writer stopped".into());
             }
         }
+    }
+}
+
+fn drop_audio_before_timeline(pending_audio: &mut [Vec<AudioPacket>], timeline_start_s: f64) {
+    for pending in pending_audio {
+        pending.retain(|packet| packet.pts_s >= timeline_start_s - 1e-9);
     }
 }
 
@@ -1769,6 +1772,37 @@ mod tests {
         // And the first kept packet starts at/after the video start.
         // (MockAudioSource stamps pts; we can't read them back from the
         // sealed track, but coverage bounds above imply it.)
+    }
+
+    #[test]
+    fn straddling_audio_lead_in_does_not_break_full_session_finalization() {
+        use crate::mock::MockAudioSource;
+
+        let dir = TestDir::new("clipline-pipeline", "straddling-audio-origin");
+        let full_path = dir.path().join("full.mp4");
+        let cap = OffsetCapture {
+            inner: MockCapture::new(60, 30),
+            // Deliberately place the first video frame inside the 500--520 ms
+            // Opus packet rather than on a 20 ms packet boundary.
+            offset_s: 0.51,
+        };
+        let mut recorder = Recorder::new(cap, MockEncoder::new(30, 30), usize::MAX)
+            .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+        recorder
+            .start_full_session(std::fs::File::create(&full_path).unwrap())
+            .unwrap();
+
+        recorder.run_to_end().unwrap();
+        let summary = recorder.finish_full_session().unwrap().unwrap();
+        let first = recorder.ring().unwrap().segments().next().unwrap();
+        assert!(
+            first.audio[0].pts_start_s.unwrap() >= first.pts_start_s - 1e-9,
+            "the first kept Opus packet must not precede the video origin"
+        );
+        assert!((summary.duration_s - 2.0).abs() < 1e-6);
+        assert!(
+            clipline_mp4::walker::movie_duration_s(&std::fs::read(full_path).unwrap()).is_some()
+        );
     }
 
     #[test]

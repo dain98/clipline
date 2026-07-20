@@ -120,6 +120,12 @@ correct selected media. Media-root direct entry, drive-root, and profile-root re
 writable/unwritable fallback still needs disposable storage. A real Cloud account loaded all 17
 cards and retained usable context menus; upload and cache-pressure scenarios remain.
 
+A follow-up full-session stop exposed an audio packet straddling the first-video timeline origin.
+The file-preservation path passed, and the deterministic regression is fixed under
+`2026-07-19-full-session-audio-origin.md`. Retest one full-session start/stop with audio enabled:
+the warning must not recur, the result must publish as `.mp4`, and it must play from the beginning.
+Leave the previously preserved `.mp4.recording` untouched pending explicit recovery inspection.
+
 - Elevated-game boundary: run a game as administrator while Clipline remains normal. Confirm the warning appears once for that process, recommends running the game without administrator privileges, contains no restart/UAC action, and ordinary Clipline recording remains unaffected after dismissal.
 - Large trim: export a range from a multi-gigabyte/full-session clip. Confirm Clipline memory stays broadly flat, the source remains playable, no partial clip appears during export, and the completed trim plays through its end.
 - Clipboard audio selection and contention: copy one clip with a single selected audio track and again with multiple tracks mixed. Paste each into another app; confirm video is intact, only the selected/mixed audio is audible, memory stays broadly flat, and no `.clipline-*-tmp` files remain after completion. Repeat once while a clipboard manager or another app holds the clipboard briefly and confirm Clipline retries then succeeds. Hold it longer than the retry window and confirm Clipline reports failure without claiming success; after releasing it, retry and paste the expected file normally.

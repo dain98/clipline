@@ -4,6 +4,23 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-19): full-session audio-origin finalization
+
+A real full-session stop exposed `media sample timestamp precedes recording origin`; the non-empty
+`.mp4.recording` was preserved as designed. The recorder defines its timeline at the first encoded
+video packet and already drops engine-init audio lead-in, but the predicate retained an indivisible
+20 ms Opus packet when it began before that video origin and ended after it. The asynchronous
+full-session writer then correctly rejected the packet's negative relative timestamp and reported
+the failure at finalization.
+
+Startup-audio filtering is now shared by both first-keyframe and GOP-seal paths and retains only
+packets whose start is at or after the video origin, with the existing sub-nanosecond tolerance.
+The packet that straddles the origin is dropped whole; later delayed and gapped audio timing is
+unchanged. A deterministic 510 ms video-offset fixture reproduced the exact finalization error
+before the fix and now produces a finalized MP4. Existing lead-in and delayed/gapped mux tests,
+all workspace tests, warning-denied workspace Clippy, and clean-cache capture Clippy pass. The
+reported preserved recording was not opened, renamed, or deleted. Plan commit `f563812`.
+
 ## Checkpoint (2026-07-19): immediate playback for newly exported clips
 
 The first consolidated manual-acceptance run found one clear failure: a 30-second trim exported
