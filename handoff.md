@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): replay audio-origin save
+
+Manual replay acceptance after the full-session startup fix exposed the same
+`media sample timestamp precedes recording origin` invariant at a different boundary. Replay save
+rebases the MP4 timeline to the first selected video GOP, but an indivisible 20 ms Opus packet can
+begin before that GOP's keyframe and end after it. That packet is correctly retained across GOPs
+for full-session continuity, yet it has a negative timestamp when its later GOP becomes the first
+segment of a replay.
+
+Replay materialization now removes complete audio samples from only the first selected segment
+while their start precedes the selected video origin, then advances that track's start by the exact
+removed durations. Ring contents, full-session muxing, later replay segments, delayed/gapped audio,
+and the MP4 writer's negative-timestamp validation remain unchanged. A deterministic fixture puts
+the replay keyframe at 1.51 s inside the 1.50--1.52 s Opus packet: it reproduced the production
+error before the fix and now drops exactly that packet, starts audio at 1.52 s, and finalizes the
+replay. Capture tests, workspace tests, warning-denied workspace Clippy, and clean-cache capture
+Clippy pass. Plan commit `47cd9cc`; implementation commit `c91d805`.
+
+Retest Save Replay with system or microphone audio after capture has run longer than one GOP.
+Confirm the warning does not recur, the clip appears in Library, and playback begins cleanly with
+synchronized audio.
+
 ## Checkpoint (2026-07-19): full-session audio-origin finalization
 
 A real full-session stop exposed `media sample timestamp precedes recording origin`; the non-empty
