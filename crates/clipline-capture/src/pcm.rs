@@ -38,14 +38,11 @@ impl TimestampedChunkAligner {
         Some(align_chunk_to_interval(previous, pts_s))
     }
 
-    /// Release a chunk that can no longer wait for a following timestamp.
-    /// This keeps a silent endpoint and the terminal drain finite while the
-    /// normal live path retains one chunk of lookahead.
-    pub(crate) fn flush_before(&mut self, horizon_pts_s: f64) -> Option<PcmFrame> {
-        let (pts_s, samples) = self.pending.as_ref()?;
-        let flush_pts_s =
-            *pts_s + samples.len() as f64 / 2.0 / SAMPLE_RATE + PENDING_CHUNK_QUIET_GRACE_S;
-        if !horizon_pts_s.is_finite() || horizon_pts_s + f64::EPSILON < flush_pts_s {
+    /// Release the final chunk only when device delivery itself has been idle.
+    /// Packet timestamps from some drivers drift relative to the shared video
+    /// clock and cannot reliably distinguish a quiet endpoint.
+    pub(crate) fn flush_if_idle(&mut self, idle_s: f64) -> Option<PcmFrame> {
+        if !idle_s.is_finite() || idle_s + f64::EPSILON < PENDING_CHUNK_QUIET_GRACE_S {
             return None;
         }
         self.pending.take()
@@ -819,14 +816,11 @@ mod tests {
     fn timestamped_chunk_aligner_flushes_stale_pending_after_bounded_grace() {
         let mut aligner = TimestampedChunkAligner::new();
         let start_pts_s = 1.0;
-        let duration_s = 512.0 / SAMPLE_RATE;
         assert!(aligner.push(start_pts_s, pairs(512, 0.75)).is_none());
 
-        assert!(aligner
-            .flush_before(start_pts_s + duration_s + 0.1 - 1e-6)
-            .is_none());
+        assert!(aligner.flush_if_idle(0.1 - 1e-6).is_none());
         let (pts_s, flushed) = aligner
-            .flush_before(start_pts_s + duration_s + 0.1)
+            .flush_if_idle(0.1)
             .expect("the stale chunk is released after a bounded quiet grace");
         assert_eq!(pts_s, start_pts_s);
         assert_eq!(flushed.len() / 2, 512);

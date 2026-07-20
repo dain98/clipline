@@ -267,6 +267,7 @@ struct WasapiPcmCapture {
     resampler: Option<StereoResampler>,
     discontinuity_fade: DiscontinuityFade,
     timestamp_aligner: TimestampedChunkAligner,
+    last_device_packet_at: Instant,
     assembler: LoopbackAssembler,
     queue: std::collections::VecDeque<PcmFrame>,
     discontinuity_diagnostics: DiagnosticRateLimiter,
@@ -435,6 +436,7 @@ impl WasapiPcmCapture {
                     .then(|| StereoResampler::new(mix.sample_rate, OPUS_SAMPLE_RATE)),
                 discontinuity_fade: DiscontinuityFade::new(),
                 timestamp_aligner: TimestampedChunkAligner::new(),
+                last_device_packet_at: Instant::now(),
                 assembler,
                 queue: std::collections::VecDeque::new(),
                 discontinuity_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
@@ -511,6 +513,7 @@ impl WasapiPcmCapture {
         // ReleaseBuffer.
         unsafe {
             while self.capture.GetNextPacketSize().map_err(lost)? > 0 {
+                self.last_device_packet_at = Instant::now();
                 let mut data = std::ptr::null_mut();
                 let mut frames = 0u32;
                 let mut flags = 0u32;
@@ -578,8 +581,9 @@ impl WasapiPcmCapture {
         self.drain_device()?;
         if synthesize_silence {
             if let Some(horizon_pts_s) = audio_poll_silence_horizon(until_pts_s) {
-                if let Some((pending_pts_s, pending)) =
-                    self.timestamp_aligner.flush_before(horizon_pts_s)
+                if let Some((pending_pts_s, pending)) = self
+                    .timestamp_aligner
+                    .flush_if_idle(self.last_device_packet_at.elapsed().as_secs_f64())
                 {
                     self.push_timed_stereo(pending_pts_s, &pending);
                 }
