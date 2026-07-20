@@ -100,6 +100,11 @@ pub struct AudioPacket {
 /// model: return every packet that ends at or before `until_pts_s`.
 pub trait AudioSource {
     fn poll_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError>;
+    /// Final opportunity to drain device/encoder latency through the video
+    /// boundary. Sources without delayed delivery use ordinary polling.
+    fn finish_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
+        self.poll_packets(until_pts_s)
+    }
     /// Track parameters for muxing this source's stream.
     fn track_config(&self) -> AudioTrackConfig;
 }

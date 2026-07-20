@@ -55,6 +55,7 @@ use crate::traits::{AudioPacket, AudioSource, CaptureError};
 const OPUS_SAMPLE_RATE: u32 = 48_000;
 const POLLING_BUFFER_DURATION_100NS: i64 = 10_000_000; // One second.
 const PROCESS_LOOPBACK_ACTIVATION_TIMEOUT: Duration = Duration::from_millis(1500);
+const AUDIO_DELIVERY_HEADROOM_S: f64 = FRAME_DURATION_S + 0.010;
 
 #[derive(Debug, Clone)]
 pub struct AudioDeviceInfo {
@@ -212,7 +213,7 @@ impl AudioLevelAccumulator {
 
 fn audio_poll_silence_horizon(until_pts_s: f64) -> Option<f64> {
     (until_pts_s.is_finite() && until_pts_s != f64::MAX)
-        .then(|| (until_pts_s - FRAME_DURATION_S).max(0.0))
+        .then(|| (until_pts_s - AUDIO_DELIVERY_HEADROOM_S).max(0.0))
 }
 
 /// Owns one successful `IAudioCaptureClient::GetBuffer` packet until it is
@@ -554,10 +555,16 @@ impl WasapiPcmCapture {
         Ok(())
     }
 
-    fn poll_frames(&mut self, until_pts_s: f64) -> Result<Vec<PcmFrame>, CaptureError> {
+    fn collect_frames(
+        &mut self,
+        until_pts_s: f64,
+        synthesize_silence: bool,
+    ) -> Result<Vec<PcmFrame>, CaptureError> {
         self.drain_device()?;
-        if let Some(horizon_pts_s) = audio_poll_silence_horizon(until_pts_s) {
-            self.assembler.advance_with_silence(horizon_pts_s);
+        if synthesize_silence {
+            if let Some(horizon_pts_s) = audio_poll_silence_horizon(until_pts_s) {
+                self.assembler.advance_with_silence(horizon_pts_s);
+            }
         }
         while let Some(frame) = self.assembler.pop_frame() {
             self.queue.push_back(frame);
@@ -568,6 +575,14 @@ impl WasapiPcmCapture {
             .position(|(pts_s, _)| pts_s + FRAME_DURATION_S > until_pts_s + 1e-9)
             .unwrap_or(self.queue.len());
         Ok(self.queue.drain(..split).collect())
+    }
+
+    fn poll_frames(&mut self, until_pts_s: f64) -> Result<Vec<PcmFrame>, CaptureError> {
+        self.collect_frames(until_pts_s, true)
+    }
+
+    fn finish_frames(&mut self, until_pts_s: f64) -> Result<Vec<PcmFrame>, CaptureError> {
+        self.collect_frames(until_pts_s, false)
     }
 }
 
@@ -643,6 +658,30 @@ impl WasapiLoopback {
             level: self.pcm.take_level(),
             samples,
         })
+    }
+
+    fn encode_frames(&mut self, frames: Vec<PcmFrame>) -> Result<(), CaptureError> {
+        for (pts_s, frame) in frames {
+            let data = self
+                .opus
+                .encode_frame(&frame)
+                .map_err(|e| CaptureError::DeviceLost(format!("opus encode: {e}")))?;
+            self.queue.push(AudioPacket {
+                data,
+                pts_s,
+                duration_s: FRAME_DURATION_S,
+            });
+        }
+        Ok(())
+    }
+
+    fn take_packets_until(&mut self, until_pts_s: f64) -> Vec<AudioPacket> {
+        let split = self
+            .queue
+            .iter()
+            .position(|packet| packet.pts_s + packet.duration_s > until_pts_s + 1e-9)
+            .unwrap_or(self.queue.len());
+        self.queue.drain(..split).collect()
     }
 }
 
@@ -1240,24 +1279,16 @@ fn utf16z_from_buf(buf: &[u16]) -> String {
 
 impl AudioSource for WasapiLoopback {
     fn poll_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
-        for (pts_s, frame) in self.pcm.poll_frames(until_pts_s)? {
-            let data = self
-                .opus
-                .encode_frame(&frame)
-                .map_err(|e| CaptureError::DeviceLost(format!("opus encode: {e}")))?;
-            self.queue.push(AudioPacket {
-                data,
-                pts_s,
-                duration_s: FRAME_DURATION_S,
-            });
-        }
-        // Mock semantics: every packet that ends at or before `until`.
-        let split = self
-            .queue
-            .iter()
-            .position(|p| p.pts_s + p.duration_s > until_pts_s + 1e-9)
-            .unwrap_or(self.queue.len());
-        Ok(self.queue.drain(..split).collect())
+        let frames = self.pcm.poll_frames(until_pts_s)?;
+        self.encode_frames(frames)?;
+        Ok(self.take_packets_until(until_pts_s))
+    }
+
+    fn finish_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
+        std::thread::sleep(Duration::from_secs_f64(FRAME_DURATION_S));
+        let frames = self.pcm.finish_frames(until_pts_s)?;
+        self.encode_frames(frames)?;
+        Ok(self.take_packets_until(until_pts_s))
     }
 
     fn track_config(&self) -> AudioTrackConfig {
@@ -1464,8 +1495,8 @@ mod tests {
     }
 
     #[test]
-    fn audio_poll_horizon_leaves_one_opus_frame_for_delivery() {
-        assert_eq!(audio_poll_silence_horizon(0.5), Some(0.48));
+    fn audio_poll_horizon_leaves_thirty_milliseconds_for_delivery() {
+        assert_eq!(audio_poll_silence_horizon(0.5), Some(0.47));
         assert_eq!(audio_poll_silence_horizon(0.01), Some(0.0));
     }
 

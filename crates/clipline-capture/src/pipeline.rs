@@ -316,7 +316,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
                 .last()
                 .map(|p| p.pts_s + p.duration_s)
                 .unwrap_or(0.0);
-            self.poll_audio_until(end)?;
+            self.finish_audio_until(end)?;
             self.validate_pending_limits(end)?;
             self.seal_pending(f64::INFINITY)?;
         }
@@ -615,6 +615,29 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         let mut first_pts_s: Option<f64> = None;
         for (source, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
             let packets = source.poll_packets(until_pts_s)?;
+            added_bytes = packets.iter().fold(added_bytes, |total, packet| {
+                total.saturating_add(packet.data.len())
+            });
+            for packet in &packets {
+                if packet.pts_s.is_finite() {
+                    first_pts_s =
+                        Some(first_pts_s.map_or(packet.pts_s, |pts| pts.min(packet.pts_s)));
+                }
+            }
+            pending.extend(packets);
+        }
+        self.pending_audio_bytes = self.pending_audio_bytes.saturating_add(added_bytes);
+        if let Some(pts_s) = first_pts_s {
+            self.note_pending_start(pts_s);
+        }
+        Ok(())
+    }
+
+    fn finish_audio_until(&mut self, until_pts_s: f64) -> Result<(), PipelineError> {
+        let mut added_bytes = 0usize;
+        let mut first_pts_s: Option<f64> = None;
+        for (source, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
+            let packets = source.finish_packets(until_pts_s)?;
             added_bytes = packets.iter().fold(added_bytes, |total, packet| {
                 total.saturating_add(packet.data.len())
             });
@@ -1032,7 +1055,7 @@ mod tests {
     use super::*;
     use crate::mock::{MockCapture, MockEncoder};
     use crate::traits::{EncodedPacket, Frame};
-    use clipline_mp4::VideoTrackConfig;
+    use clipline_mp4::{AudioTrackConfig, VideoTrackConfig};
     use clipline_test_utils::TestDir;
 
     struct NeverKeyframeEncoder {
@@ -1735,6 +1758,55 @@ mod tests {
             .map(|s| s.samples.len())
             .sum();
         assert_eq!(total, 30);
+    }
+
+    struct FinishOnlyAudioSource {
+        finished: bool,
+    }
+
+    impl AudioSource for FinishOnlyAudioSource {
+        fn poll_packets(&mut self, _until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
+            Ok(Vec::new())
+        }
+
+        fn finish_packets(
+            &mut self,
+            until_pts_s: f64,
+        ) -> Result<Vec<AudioPacket>, CaptureError> {
+            if self.finished || until_pts_s + 1e-9 < 0.98 {
+                return Ok(Vec::new());
+            }
+            self.finished = true;
+            Ok(vec![AudioPacket {
+                data: vec![0xAB; 24],
+                pts_s: 0.96,
+                duration_s: 0.02,
+            }])
+        }
+
+        fn track_config(&self) -> AudioTrackConfig {
+            AudioTrackConfig {
+                channels: 2,
+                sample_rate: 48_000,
+                pre_skip: 312,
+            }
+        }
+    }
+
+    #[test]
+    fn finish_stream_retains_audio_available_only_during_terminal_drain() {
+        let mut recorder = Recorder::new(
+            MockCapture::new(30, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        )
+        .with_audio(Box::new(FinishOnlyAudioSource { finished: false }));
+
+        recorder.run_to_end().unwrap();
+
+        let segment = recorder.ring().unwrap().segments().next().unwrap();
+        assert_eq!(segment.audio[0].samples.len(), 1);
+        assert!((segment.audio[0].pts_start_s.unwrap() - 0.96).abs() < 1e-9);
     }
 
     #[test]
