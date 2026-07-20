@@ -4,6 +4,21 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): QPC servo rejected and rolled back
+
+Manual testing rejected the continuous QPC audio clock servo. After the recorder had been running
+for roughly 53 minutes, `clip_1784585886.mp4` contained 30.000 seconds of video but only 25.540
+seconds of Output Audio and 25.520 seconds of Microphone audio. The same run logged repeated WASAPI
+data discontinuities. The one-packet servo therefore amplified real device interruptions into
+multi-second audio loss and made synchronization dramatically worse.
+
+The servo implementation has been removed and WASAPI packet placement restored exactly to the
+previous nominal-cadence path: QPC anchors the first packet and post-idle/discontinuity recovery,
+while continuously delivered PCM retains every sample. Do not revive the resampling approach
+without first adding raw packet-QPC/sample-count telemetry and testing a controlled synchronized
+A/V fixture over a long-running buffer. The restored 204-test capture suite, including hardware
+device tests, passes.
+
 ## Checkpoint (2026-07-20): continuous QPC audio clock servo
 
 The nominal-cadence follow-up did not fix A/V sync. In `clip_1784581736.mp4`, video lasts exactly

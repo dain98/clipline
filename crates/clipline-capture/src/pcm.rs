@@ -14,120 +14,57 @@ const MAX_GAP_FILL_S: f64 = 5.0;
 const FRAME_PAIRS: u64 = (FRAME_LEN / 2) as u64;
 const DISCONTINUITY_FADE_PAIRS: usize = 1_920; // 40 ms at 48 kHz.
 const LATE_RECOVERY_FADE_PAIRS: usize = 240; // 5 ms at 48 kHz.
-const PENDING_CHUNK_QUIET_GRACE_S: f64 = 0.1;
+const DEVICE_PACKET_QUIET_GRACE_S: f64 = 0.1;
 
 pub type PcmFrame = (f64, Vec<f32>);
 
-/// Holds one device packet until the following QPC timestamp fixes its shared-
-/// clock duration. Target sample frontiers are cumulative so fractional packet
-/// intervals never round into long-running A/V drift.
-#[derive(Default)]
-pub(crate) struct TimestampedChunkServo {
-    pending: Option<PcmFrame>,
-    anchor_pts_s: Option<f64>,
-    emitted_target_pairs: u64,
+/// Selects how each WASAPI device packet joins the shared recording timeline.
+/// QPC establishes the initial anchor and re-anchors after genuine quiet;
+/// continuously arriving PCM keeps its authoritative sample-count cadence.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum DevicePacketPlacement {
+    Timestamped(f64),
+    Contiguous,
 }
 
-impl TimestampedChunkServo {
+pub(crate) struct DevicePacketTimeline {
+    needs_timestamp_anchor: bool,
+}
+
+impl DevicePacketTimeline {
     pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn push(&mut self, pts_s: f64, samples: Vec<f32>) -> Option<PcmFrame> {
-        let previous = self.pending.replace((pts_s, samples))?;
-        let source_pairs = previous.1.len() / 2;
-        let nominal_duration_s = source_pairs as f64 / SAMPLE_RATE;
-        let interval_s = pts_s - previous.0;
-        let relative_interval = interval_s / nominal_duration_s;
-        let interval_is_clockable = source_pairs > 0
-            && relative_interval.is_finite()
-            && (0.5..=1.5).contains(&relative_interval);
-
-        let target_pairs = if interval_is_clockable {
-            let anchor_pts_s = *self.anchor_pts_s.get_or_insert(previous.0);
-            let desired_total = ((pts_s - anchor_pts_s) * SAMPLE_RATE).round().max(1.0) as u64;
-            let target = desired_total.saturating_sub(self.emitted_target_pairs);
-            if target > 0
-                && (target as f64 / source_pairs as f64).is_finite()
-                && (0.5..=1.5).contains(&(target as f64 / source_pairs as f64))
-            {
-                self.emitted_target_pairs = desired_total;
-                target as usize
-            } else {
-                self.anchor_pts_s = Some(pts_s);
-                self.emitted_target_pairs = 0;
-                source_pairs
-            }
-        } else {
-            self.anchor_pts_s = Some(pts_s);
-            self.emitted_target_pairs = 0;
-            source_pairs
-        };
-        let lookahead = self.pending.as_ref().map(|(_, samples)| samples.as_slice());
-        Some((
-            previous.0,
-            resample_stereo_to_pairs(&previous.1, target_pairs, lookahead),
-        ))
-    }
-
-    pub(crate) fn flush_if_idle(&mut self, idle_s: f64) -> Option<PcmFrame> {
-        if !idle_s.is_finite() || idle_s + f64::EPSILON < PENDING_CHUNK_QUIET_GRACE_S {
-            return None;
+        Self {
+            needs_timestamp_anchor: true,
         }
-        self.finish()
     }
 
-    pub(crate) fn synthesis_horizon(&self, requested_pts_s: f64) -> f64 {
-        self.pending
-            .as_ref()
-            .map_or(requested_pts_s, |(pts_s, _)| requested_pts_s.min(*pts_s))
-    }
-
-    pub(crate) fn finish(&mut self) -> Option<PcmFrame> {
-        let pending = self.pending.take();
-        self.anchor_pts_s = None;
-        self.emitted_target_pairs = 0;
-        pending
-    }
-}
-
-fn resample_stereo_to_pairs(
-    samples: &[f32],
-    target_pairs: usize,
-    lookahead: Option<&[f32]>,
-) -> Vec<f32> {
-    let source_pairs = samples.len() / 2;
-    if source_pairs == target_pairs {
-        return samples.to_vec();
-    }
-    if source_pairs == 0 || target_pairs == 0 {
-        return Vec::new();
-    }
-
-    let next_pair = lookahead
-        .filter(|next| next.len() >= 2)
-        .map(|next| [next[0], next[1]])
-        .unwrap_or([samples[samples.len() - 2], samples[samples.len() - 1]]);
-    let scale = source_pairs as f64 / target_pairs as f64;
-    let mut output = Vec::with_capacity(target_pairs * 2);
-    for output_pair in 0..target_pairs {
-        let source_position = output_pair as f64 * scale;
-        let lower = source_position.floor() as usize;
-        let fraction = (source_position - lower as f64) as f32;
-        let lower_pair = if lower < source_pairs {
-            [samples[lower * 2], samples[lower * 2 + 1]]
+    pub(crate) fn placement(&mut self, pts_s: Option<f64>) -> DevicePacketPlacement {
+        let placement = if self.needs_timestamp_anchor {
+            pts_s.filter(|pts_s| pts_s.is_finite()).map_or(
+                DevicePacketPlacement::Contiguous,
+                DevicePacketPlacement::Timestamped,
+            )
         } else {
-            next_pair
+            DevicePacketPlacement::Contiguous
         };
-        let upper_pair = if lower + 1 < source_pairs {
-            [samples[(lower + 1) * 2], samples[(lower + 1) * 2 + 1]]
-        } else {
-            next_pair
-        };
-        output.push(lower_pair[0] + (upper_pair[0] - lower_pair[0]) * fraction);
-        output.push(lower_pair[1] + (upper_pair[1] - lower_pair[1]) * fraction);
+        self.needs_timestamp_anchor = false;
+        placement
     }
-    output
+
+    pub(crate) fn require_timestamp_anchor(&mut self) {
+        self.needs_timestamp_anchor = true;
+    }
+
+    /// Packet timestamps from some drivers drift relative to the shared video
+    /// clock and cannot identify quiet. Only host-observed delivery idleness
+    /// permits the next packet to establish a fresh QPC anchor.
+    pub(crate) fn note_synthesized_silence(&mut self, idle_s: f64) -> bool {
+        if !idle_s.is_finite() || idle_s + f64::EPSILON < DEVICE_PACKET_QUIET_GRACE_S {
+            return false;
+        }
+        self.needs_timestamp_anchor = true;
+        true
+    }
 }
 
 pub(crate) struct DiscontinuityFade {
@@ -814,60 +751,61 @@ mod tests {
     }
 
     #[test]
-    fn timestamped_clock_servo_follows_the_cumulative_qpc_frontier() {
-        let mut servo = TimestampedChunkServo::new();
-        let interval_pairs = 514.4;
-        let mut emitted_pairs = 0usize;
+    fn continuous_device_packets_preserve_nominal_sample_cadence() {
+        let mut timeline = DevicePacketTimeline::new();
+        let mut assembler = LoopbackAssembler::new();
+        assembler.push_chunk(0.0, &[]);
 
-        for index in 0..=300 {
-            let pts_s = index as f64 * interval_pairs / SAMPLE_RATE;
-            if let Some((_pts_s, aligned)) = servo.push(pts_s, pairs(512, 0.5)) {
-                emitted_pairs += aligned.len() / 2;
+        for index in 0..300 {
+            let pts_s = index as f64 * 510.0 / SAMPLE_RATE;
+            let chunk = pairs(512, 0.5);
+            match timeline.placement(Some(pts_s)) {
+                DevicePacketPlacement::Timestamped(anchor_pts_s) => {
+                    let outcome = assembler.push_chunk(anchor_pts_s, &chunk);
+                    assert_eq!(outcome.late_reanchor_s, None);
+                }
+                DevicePacketPlacement::Contiguous => assembler.push_contiguous_chunk(&chunk),
             }
         }
 
+        assert_eq!(assembler.written_pairs(), 300 * 512);
+        let actual_end = assembler
+            .next_chunk_pts_s
+            .expect("timeline remains anchored");
+        let expected_end = 300.0 * 512.0 / SAMPLE_RATE;
+        assert!((actual_end - expected_end).abs() < 1e-9);
+    }
+
+    #[test]
+    fn synthesized_idle_requires_the_next_packet_to_reanchor() {
+        let mut timeline = DevicePacketTimeline::new();
         assert_eq!(
-            emitted_pairs,
-            (300.0 * interval_pairs).round() as usize,
-            "fractional QPC intervals must accumulate instead of rounding each packet independently"
+            timeline.placement(Some(1.0)),
+            DevicePacketPlacement::Timestamped(1.0)
         );
-    }
-
-    #[test]
-    fn timestamped_clock_servo_keeps_interpolation_continuous_at_packet_edges() {
-        let mut servo = TimestampedChunkServo::new();
-        let first: Vec<f32> = (0..512)
-            .flat_map(|pair| [pair as f32, -(pair as f32)])
-            .collect();
-        let second: Vec<f32> = (512..1024)
-            .flat_map(|pair| [pair as f32, -(pair as f32)])
-            .collect();
-
-        assert!(servo.push(0.0, first).is_none());
-        let (_, aligned) = servo
-            .push(514.0 / SAMPLE_RATE, second)
-            .expect("lookahead releases the first packet");
-
-        assert_eq!(aligned.len() / 2, 514);
-        let final_left = aligned[aligned.len() - 2];
-        assert!(
-            final_left > 511.0 && final_left < 512.0,
-            "the half-open packet must interpolate across its boundary"
+        assert_eq!(
+            timeline.placement(Some(1.01)),
+            DevicePacketPlacement::Contiguous
         );
-        assert!((512.0 - final_left - 512.0 / 514.0).abs() < 1e-3);
-    }
+        assert!(!timeline.note_synthesized_silence(0.1 - 1e-6));
+        assert_eq!(
+            timeline.placement(Some(1.02)),
+            DevicePacketPlacement::Contiguous
+        );
+        assert!(timeline.note_synthesized_silence(0.1));
+        assert_eq!(
+            timeline.placement(Some(1.03)),
+            DevicePacketPlacement::Timestamped(1.03)
+        );
+        assert_eq!(
+            timeline.placement(Some(1.04)),
+            DevicePacketPlacement::Contiguous
+        );
 
-    #[test]
-    fn timestamped_clock_servo_preserves_pending_frontier_and_finite_idle_flush() {
-        let mut servo = TimestampedChunkServo::new();
-        assert!(servo.push(2.0, pairs(512, 0.75)).is_none());
-        assert_eq!(servo.synthesis_horizon(2.05), 2.0);
-        assert!(servo.flush_if_idle(0.1 - 1e-6).is_none());
-        let (pts_s, flushed) = servo
-            .flush_if_idle(0.1)
-            .expect("actual device idleness releases the pending packet");
-        assert_eq!(pts_s, 2.0);
-        assert_eq!(flushed.len() / 2, 512);
-        assert_eq!(servo.synthesis_horizon(2.05), 2.05);
+        timeline.require_timestamp_anchor();
+        assert_eq!(
+            timeline.placement(Some(1.05)),
+            DevicePacketPlacement::Timestamped(1.05)
+        );
     }
 }
