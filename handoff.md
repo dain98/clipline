@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): WASAPI discontinuity onset fade
+
+The next 188-second full session `session_1784524668.mp4` contained a loud sound at its beginning.
+Both Opus streams are structurally continuous, but Output Audio begins at 11.687 ms with a non-zero
+broadband transient: the first 20 ms peaks around -24.5 dBFS and decays by roughly 30 dB over the
+following 60 ms. Recorder diagnostics show `wasapi_data_discontinuity` on both sources at the exact
+05:17:48 recording start, confirming that the abrupt source boundary was encoded into the file.
+
+WASAPI capture now applies a 40 ms linear stereo fade after conversion, resampling, and configured
+gain. The fade is armed at capture startup and re-armed before each packet marked
+`DATA_DISCONTINUITY`; explicit digital-silence buffers do not consume it. Timestamps, sample counts,
+gap filling, late-buffer recovery, Opus framing, and diagnostics are unchanged. The neutral
+regression covers a two-buffer ramp, digital-silence deferral, steady-state pass-through, and
+re-arming. The capture suite, real shared-clock device test, workspace tests, warning-denied
+workspace Clippy, and clean-cache capture Clippy pass. Plan commit `475a5eb`; implementation commit
+`7920ad0`.
+
+Retest a new full session with Output Audio and Microphone enabled, stop after at least ten seconds,
+and replay 0:00 several times. The old file remains unchanged and will still contain its encoded
+transient; only recordings made by this build receive the discontinuity fade.
+
 ## Checkpoint (2026-07-20): smooth multi-track review audio synchronization
 
 The follow-up 74-second full session `session_1784523792.mp4` was mostly audible after the delayed
