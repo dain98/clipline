@@ -417,7 +417,7 @@ impl MftH264Encoder {
         }
         let nominal = 1.0 / self.cfg.fps as f64;
         // SAFETY: attribute getters on a valid sample.
-        let (pts_s, duration_s, is_keyframe) = unsafe {
+        let (pts_s, duration_s, clean_point) = unsafe {
             (
                 sample.GetSampleTime().map_err(backend)? as f64 / 1e7,
                 sample
@@ -427,6 +427,7 @@ impl MftH264Encoder {
                 sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) == 1,
             )
         };
+        let is_keyframe = clean_point || crate::annexb::is_keyframe(&annexb);
         Ok(EncodedPacket {
             data: annexb_to_avcc(&annexb),
             pts_s,
