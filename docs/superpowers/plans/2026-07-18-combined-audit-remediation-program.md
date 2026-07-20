@@ -154,6 +154,15 @@ A 40 ms PCM fade armed at startup and every WASAPI discontinuity is recorded und
 recorded full session from 0:00 several times with both sources selected; startup must be clean and
 normal volume must follow immediately after the brief ramp.
 
+The following 30-second replay began cleanly but contained repeated crackle. Continuous Opus packet
+timelines and isolated deep 10 ms decoded-PCM holes, together with recurring
+`wasapi_late_audio_reanchored` diagnostics, showed that normal 10--11 ms WASAPI delivery latency was
+exhausting the former 20 ms silence-synthesis allowance. A 30 ms normal-poll delivery allowance and
+a separate finite terminal drain are recorded under `2026-07-20-wasapi-delivery-headroom.md` (plan
+`1b13651`, implementation `58109ac`). Retest a fresh replay of at least 30 seconds with both sources
+active throughout, then listen with both tracks selected and each track alone; no periodic crackle,
+short hole, missing tail audio, or added tail silence should occur.
+
 - Elevated-game boundary: run a game as administrator while Clipline remains normal. Confirm the warning appears once for that process, recommends running the game without administrator privileges, contains no restart/UAC action, and ordinary Clipline recording remains unaffected after dismissal.
 - Large trim: export a range from a multi-gigabyte/full-session clip. Confirm Clipline memory stays broadly flat, the source remains playable, no partial clip appears during export, and the completed trim plays through its end.
 - Clipboard audio selection and contention: copy one clip with a single selected audio track and again with multiple tracks mixed. Paste each into another app; confirm video is intact, only the selected/mixed audio is audible, memory stays broadly flat, and no `.clipline-*-tmp` files remain after completion. Repeat once while a clipboard manager or another app holds the clipboard briefly and confirm Clipline retries then succeeds. Hold it longer than the retry window and confirm Clipline reports failure without claiming success; after releasing it, retry and paste the expected file normally.
