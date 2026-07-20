@@ -4,7 +4,14 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureDiagnostic {
-    WasapiDataDiscontinuity { suppressed_since_last: u64 },
+    WasapiDataDiscontinuity {
+        suppressed_since_last: u64,
+    },
+    WasapiLateAudioReanchored {
+        source: &'static str,
+        correction_ms: u64,
+        suppressed_since_last: u64,
+    },
 }
 
 impl fmt::Display for CaptureDiagnostic {
@@ -15,6 +22,14 @@ impl fmt::Display for CaptureDiagnostic {
             } => write!(
                 formatter,
                 "capture event=wasapi_data_discontinuity suppressed_since_last={suppressed_since_last} action=audio_gap_fill_capped"
+            ),
+            Self::WasapiLateAudioReanchored {
+                source,
+                correction_ms,
+                suppressed_since_last,
+            } => write!(
+                formatter,
+                "capture event=wasapi_late_audio_reanchored source={source} correction_ms={correction_ms} suppressed_since_last={suppressed_since_last} action=preserve_live_audio"
             ),
         }
     }

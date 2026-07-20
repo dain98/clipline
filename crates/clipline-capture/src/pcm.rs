@@ -15,6 +15,11 @@ const FRAME_PAIRS: u64 = (FRAME_LEN / 2) as u64;
 
 pub type PcmFrame = (f64, Vec<f32>);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct PcmPushOutcome {
+    pub late_reanchor_s: Option<f64>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct TimelineAnchor {
     pair_index: u64,
@@ -29,6 +34,11 @@ pub struct LoopbackAssembler {
     anchors: VecDeque<TimelineAnchor>,
     /// Expected WASAPI timestamp for the next finite chunk.
     next_chunk_pts_s: Option<f64>,
+    /// Persistent correction established when synthesized silence overtakes
+    /// delayed source timestamps. Following chunks keep their cadence rather
+    /// than falling behind the synthetic frontier again.
+    source_pts_correction_s: f64,
+    synthesized_since_real: bool,
     buffered: Vec<f32>, // interleaved stereo
     frames_popped: u64,
 }
@@ -39,14 +49,24 @@ impl LoopbackAssembler {
     }
 
     /// `pts_s` stamps the first sample of `interleaved` (stereo pairs).
-    pub fn push_chunk(&mut self, pts_s: f64, interleaved: &[f32]) {
+    pub(crate) fn push_chunk(&mut self, pts_s: f64, interleaved: &[f32]) -> PcmPushOutcome {
         if !pts_s.is_finite() {
             self.push_contiguous_chunk(interleaved);
-            return;
+            return PcmPushOutcome::default();
         }
-        self.ensure_initial_anchor(pts_s);
-        let expected = self.next_chunk_pts_s.unwrap_or(pts_s);
-        let gap = pts_s - expected;
+        let mut corrected_pts_s = pts_s + self.source_pts_correction_s;
+        self.ensure_initial_anchor(corrected_pts_s);
+        let expected = self.next_chunk_pts_s.unwrap_or(corrected_pts_s);
+        let mut gap = corrected_pts_s - expected;
+        let correction = if gap < -GAP_TOLERANCE_S && self.synthesized_since_real {
+            let correction_s = expected - corrected_pts_s;
+            self.source_pts_correction_s += correction_s;
+            corrected_pts_s = expected;
+            gap = 0.0;
+            Some(correction_s)
+        } else {
+            None
+        };
         let mut samples = interleaved;
         if gap > GAP_TOLERANCE_S {
             let mut missing_pairs = (gap.min(MAX_GAP_FILL_S) * SAMPLE_RATE).round() as u64;
@@ -59,22 +79,26 @@ impl LoopbackAssembler {
             self.buffered
                 .extend(std::iter::repeat_n(0.0, missing_pairs as usize * 2));
             if gap > MAX_GAP_FILL_S {
-                self.reanchor_next_pair(pts_s);
+                self.reanchor_next_pair(corrected_pts_s);
             }
         } else if gap < -GAP_TOLERANCE_S {
-            let overlap_pairs = ((expected - pts_s) * SAMPLE_RATE).round() as usize;
+            let overlap_pairs = ((expected - corrected_pts_s) * SAMPLE_RATE).round() as usize;
             if overlap_pairs >= interleaved.len() / 2 {
-                return;
+                return PcmPushOutcome::default();
             }
             samples = &interleaved[overlap_pairs * 2..];
         }
         self.buffered.extend_from_slice(samples);
         let chunk_duration_s = (samples.len() / 2) as f64 / SAMPLE_RATE;
         self.next_chunk_pts_s = Some(if gap > GAP_TOLERANCE_S {
-            pts_s + chunk_duration_s
+            corrected_pts_s + chunk_duration_s
         } else {
             expected + chunk_duration_s
         });
+        self.synthesized_since_real = false;
+        PcmPushOutcome {
+            late_reanchor_s: correction,
+        }
     }
 
     /// Extend an anchored timeline with stereo silence up to an absolute PTS.
@@ -95,6 +119,7 @@ impl LoopbackAssembler {
         self.buffered
             .extend(std::iter::repeat_n(0.0, missing_pairs * 2));
         self.next_chunk_pts_s = Some(expected_pts_s + missing_pairs as f64 / SAMPLE_RATE);
+        self.synthesized_since_real |= missing_pairs > 0;
     }
 
     /// Append a chunk when the device explicitly marked its timestamp invalid.
@@ -104,6 +129,7 @@ impl LoopbackAssembler {
         if let Some(next_chunk_pts_s) = &mut self.next_chunk_pts_s {
             *next_chunk_pts_s += (interleaved.len() / 2) as f64 / SAMPLE_RATE;
         }
+        self.synthesized_since_real = false;
     }
 
     /// One 20 ms frame once enough samples are buffered.
@@ -425,34 +451,67 @@ mod tests {
     }
 
     #[test]
-    fn late_chunk_keeps_only_suffix_after_synthesized_silence() {
+    fn partially_overlapped_live_chunk_is_reanchored_without_stuttering() {
         let mut asm = LoopbackAssembler::new();
         asm.push_chunk(0.0, &[]);
         asm.advance_with_silence(0.10);
 
-        asm.push_chunk(0.08, &pairs(1_920, 0.75));
+        let outcome = asm.push_chunk(0.08, &pairs(1_920, 0.75));
 
         let mut frames = Vec::new();
         while let Some(frame) = asm.pop_frame() {
             frames.push(frame);
         }
-        assert_eq!(frames.len(), 6);
+        assert!((outcome.late_reanchor_s.unwrap() - 0.02).abs() < 1e-9);
+        assert_eq!(frames.len(), 7);
         assert!(frames[..5]
             .iter()
             .all(|(_, frame)| frame.iter().all(|&sample| sample == 0.0)));
         assert!((frames[5].0 - 0.10).abs() < 1e-9);
         assert!(frames[5].1.iter().all(|&sample| sample == 0.75));
+        assert!((frames[6].0 - 0.12).abs() < 1e-9);
+        assert!(frames[6].1.iter().all(|&sample| sample == 0.75));
     }
 
     #[test]
-    fn fully_overlapped_late_chunk_does_not_extend_timeline() {
+    fn synthesized_silence_does_not_permanently_discard_late_live_audio() {
         let mut asm = LoopbackAssembler::new();
         asm.push_chunk(0.0, &[]);
         asm.advance_with_silence(0.10);
+        assert_eq!(
+            std::iter::from_fn(|| asm.pop_frame()).count(),
+            5,
+            "silence has already been committed before the source catches up"
+        );
 
-        asm.push_chunk(0.04, &pairs(960, 0.75));
+        let first = asm.push_chunk(0.04, &pairs(960, 0.75));
+        let second = asm.push_chunk(0.06, &pairs(960, 0.50));
 
-        assert_eq!(std::iter::from_fn(|| asm.pop_frame()).count(), 5);
+        let resumed: Vec<_> = std::iter::from_fn(|| asm.pop_frame()).collect();
+        assert!((first.late_reanchor_s.unwrap() - 0.06).abs() < 1e-9);
+        assert_eq!(second.late_reanchor_s, None);
+        assert_eq!(
+            resumed.len(),
+            2,
+            "late audio must resume instead of locking out"
+        );
+        assert!((resumed[0].0 - 0.10).abs() < 1e-9);
+        assert!(resumed[0].1.iter().all(|&sample| sample == 0.75));
+        assert!((resumed[1].0 - 0.12).abs() < 1e-9);
+        assert!(resumed[1].1.iter().all(|&sample| sample == 0.50));
+    }
+
+    #[test]
+    fn duplicate_late_chunk_without_synthetic_advance_is_still_discarded() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &pairs(960, 0.75));
+
+        let duplicate = asm.push_chunk(0.0, &pairs(960, 0.50));
+
+        assert_eq!(duplicate.late_reanchor_s, None);
+        let frames: Vec<_> = std::iter::from_fn(|| asm.pop_frame()).collect();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].1.iter().all(|&sample| sample == 0.75));
     }
 
     #[test]

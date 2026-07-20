@@ -107,6 +107,15 @@ enum EndpointMode {
     InputCapture(WasapiChannelMode),
 }
 
+impl EndpointMode {
+    fn diagnostic_label(self) -> &'static str {
+        match self {
+            Self::OutputLoopback => "output",
+            Self::InputCapture(_) => "microphone",
+        }
+    }
+}
+
 enum WaveFormatStorage<'a> {
     Borrowed(&'a mut WAVEFORMATEX),
     CoTaskMem(*mut WAVEFORMATEX),
@@ -256,6 +265,7 @@ struct WasapiPcmCapture {
     assembler: LoopbackAssembler,
     queue: std::collections::VecDeque<PcmFrame>,
     discontinuity_diagnostics: DiagnosticRateLimiter,
+    late_audio_diagnostics: DiagnosticRateLimiter,
 }
 
 pub struct WasapiLoopback {
@@ -421,6 +431,7 @@ impl WasapiPcmCapture {
                 assembler,
                 queue: std::collections::VecDeque::new(),
                 discontinuity_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
+                late_audio_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
             })
         }
     }
@@ -507,7 +518,18 @@ impl WasapiPcmCapture {
                 let samples = samples?;
                 let stereo = self.stereo_samples(&samples);
                 if let Some(pts_s) = pts_s {
-                    self.assembler.push_chunk(pts_s, &stereo);
+                    let outcome = self.assembler.push_chunk(pts_s, &stereo);
+                    if let Some(correction_s) = outcome.late_reanchor_s {
+                        if let Some(suppressed_since_last) =
+                            self.late_audio_diagnostics.observe(Instant::now())
+                        {
+                            emit_diagnostic(CaptureDiagnostic::WasapiLateAudioReanchored {
+                                source: self.mode.diagnostic_label(),
+                                correction_ms: (correction_s * 1_000.0).round() as u64,
+                                suppressed_since_last,
+                            });
+                        }
+                    }
                 } else {
                     self.assembler.push_contiguous_chunk(&stereo);
                 }

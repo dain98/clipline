@@ -43,3 +43,17 @@ fn typed_capture_diagnostic_routes_through_installed_handler() {
         "capture event=wasapi_data_discontinuity suppressed_since_last=7 action=audio_gap_fill_capped"
     );
 }
+
+#[test]
+fn late_audio_reanchor_diagnostic_names_source_delay_and_suppression() {
+    let event = CaptureDiagnostic::WasapiLateAudioReanchored {
+        source: "microphone",
+        correction_ms: 37,
+        suppressed_since_last: 4,
+    };
+
+    assert_eq!(
+        event.to_string(),
+        "capture event=wasapi_late_audio_reanchored source=microphone correction_ms=37 suppressed_since_last=4 action=preserve_live_audio"
+    );
+}
