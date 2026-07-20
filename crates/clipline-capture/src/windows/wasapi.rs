@@ -47,7 +47,8 @@ use crate::clock::RelativeClock;
 use crate::diagnostics::{emit_diagnostic, CaptureDiagnostic, DiagnosticRateLimiter};
 use crate::opus::{OpusFrameEncoder, FRAME_DURATION_S};
 use crate::pcm::{
-    apply_gain, extract_mono_centered, extract_stereo, LoopbackAssembler, PcmFrame, StereoResampler,
+    apply_gain, extract_mono_centered, extract_stereo, DiscontinuityFade, LoopbackAssembler,
+    PcmFrame, StereoResampler,
 };
 use crate::traits::{AudioPacket, AudioSource, CaptureError};
 
@@ -262,6 +263,7 @@ struct WasapiPcmCapture {
     volume: f32,
     level: AudioLevelAccumulator,
     resampler: Option<StereoResampler>,
+    discontinuity_fade: DiscontinuityFade,
     assembler: LoopbackAssembler,
     queue: std::collections::VecDeque<PcmFrame>,
     discontinuity_diagnostics: DiagnosticRateLimiter,
@@ -428,6 +430,7 @@ impl WasapiPcmCapture {
                 level: AudioLevelAccumulator::default(),
                 resampler: (mix.sample_rate != OPUS_SAMPLE_RATE)
                     .then(|| StereoResampler::new(mix.sample_rate, OPUS_SAMPLE_RATE)),
+                discontinuity_fade: DiscontinuityFade::new(),
                 assembler,
                 queue: std::collections::VecDeque::new(),
                 discontinuity_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
@@ -477,7 +480,6 @@ impl WasapiPcmCapture {
             stereo = resampler.resample(&stereo);
         }
         apply_gain(&mut stereo, self.volume);
-        self.level.add(&stereo);
         stereo
     }
 
@@ -516,7 +518,12 @@ impl WasapiPcmCapture {
                 };
                 packet.release().map_err(lost)?;
                 let samples = samples?;
-                let stereo = self.stereo_samples(&samples);
+                let mut stereo = self.stereo_samples(&samples);
+                if data_discontinuous {
+                    self.discontinuity_fade.restart();
+                }
+                self.discontinuity_fade.apply(&mut stereo);
+                self.level.add(&stereo);
                 if let Some(pts_s) = pts_s {
                     let outcome = self.assembler.push_chunk(pts_s, &stereo);
                     if let Some(correction_s) = outcome.late_reanchor_s {

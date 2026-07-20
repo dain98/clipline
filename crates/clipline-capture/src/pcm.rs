@@ -12,8 +12,46 @@ const GAP_TOLERANCE_S: f64 = FRAME_DURATION_S / 2.0;
 /// A bogus device timestamp must not allocate unbounded silence.
 const MAX_GAP_FILL_S: f64 = 5.0;
 const FRAME_PAIRS: u64 = (FRAME_LEN / 2) as u64;
+const DISCONTINUITY_FADE_PAIRS: usize = 1_920; // 40 ms at 48 kHz.
 
 pub type PcmFrame = (f64, Vec<f32>);
+
+pub(crate) struct DiscontinuityFade {
+    remaining_pairs: usize,
+}
+
+impl DiscontinuityFade {
+    pub(crate) fn new() -> Self {
+        Self {
+            remaining_pairs: DISCONTINUITY_FADE_PAIRS,
+        }
+    }
+
+    pub(crate) fn restart(&mut self) {
+        self.remaining_pairs = DISCONTINUITY_FADE_PAIRS;
+    }
+
+    pub(crate) fn apply(&mut self, interleaved: &mut [f32]) {
+        if self.remaining_pairs == 0
+            || !interleaved
+                .chunks_exact(2)
+                .any(|pair| pair[0] != 0.0 || pair[1] != 0.0)
+        {
+            return;
+        }
+
+        for pair in interleaved.chunks_exact_mut(2) {
+            if self.remaining_pairs == 0 {
+                break;
+            }
+            let completed = DISCONTINUITY_FADE_PAIRS - self.remaining_pairs;
+            let gain = completed as f32 / (DISCONTINUITY_FADE_PAIRS - 1) as f32;
+            pair[0] *= gain;
+            pair[1] *= gain;
+            self.remaining_pairs -= 1;
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct PcmPushOutcome {
@@ -561,6 +599,33 @@ mod tests {
         let mut samples = vec![-0.6, 0.25, 0.75];
         apply_gain(&mut samples, 2.0);
         assert_eq!(samples, vec![-1.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn discontinuity_fade_crosses_buffers_and_waits_through_digital_silence() {
+        let mut fade = DiscontinuityFade::new();
+        let mut silence = pairs(960, 0.0);
+        fade.apply(&mut silence);
+        assert_eq!(fade.remaining_pairs, DISCONTINUITY_FADE_PAIRS);
+
+        let mut first = pairs(960, 1.0);
+        fade.apply(&mut first);
+        assert_eq!(&first[..2], &[0.0, 0.0]);
+        assert!((first[first.len() - 1] - 959.0 / 1_919.0).abs() < 1e-6);
+
+        let mut second = pairs(960, 1.0);
+        fade.apply(&mut second);
+        assert!((second[0] - 960.0 / 1_919.0).abs() < 1e-6);
+        assert_eq!(&second[second.len() - 2..], &[1.0, 1.0]);
+        assert_eq!(fade.remaining_pairs, 0);
+
+        let mut steady = pairs(4, 0.75);
+        fade.apply(&mut steady);
+        assert!(steady.iter().all(|sample| *sample == 0.75));
+
+        fade.restart();
+        fade.apply(&mut steady);
+        assert_eq!(&steady[..2], &[0.0, 0.0]);
     }
 
     #[test]
