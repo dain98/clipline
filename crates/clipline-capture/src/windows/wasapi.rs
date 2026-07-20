@@ -48,7 +48,7 @@ use crate::diagnostics::{emit_diagnostic, CaptureDiagnostic, DiagnosticRateLimit
 use crate::opus::{OpusFrameEncoder, FRAME_DURATION_S};
 use crate::pcm::{
     apply_gain, extract_mono_centered, extract_stereo, DiscontinuityFade, LoopbackAssembler,
-    PcmFrame, StereoResampler,
+    PcmFrame, StereoResampler, TimestampedChunkAligner,
 };
 use crate::traits::{AudioPacket, AudioSource, CaptureError};
 
@@ -266,6 +266,7 @@ struct WasapiPcmCapture {
     level: AudioLevelAccumulator,
     resampler: Option<StereoResampler>,
     discontinuity_fade: DiscontinuityFade,
+    timestamp_aligner: TimestampedChunkAligner,
     assembler: LoopbackAssembler,
     queue: std::collections::VecDeque<PcmFrame>,
     discontinuity_diagnostics: DiagnosticRateLimiter,
@@ -433,6 +434,7 @@ impl WasapiPcmCapture {
                 resampler: (mix.sample_rate != OPUS_SAMPLE_RATE)
                     .then(|| StereoResampler::new(mix.sample_rate, OPUS_SAMPLE_RATE)),
                 discontinuity_fade: DiscontinuityFade::new(),
+                timestamp_aligner: TimestampedChunkAligner::new(),
                 assembler,
                 queue: std::collections::VecDeque::new(),
                 discontinuity_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
@@ -485,6 +487,22 @@ impl WasapiPcmCapture {
         stereo
     }
 
+    fn push_timed_stereo(&mut self, pts_s: f64, stereo: &[f32]) {
+        let outcome = self.assembler.push_chunk(pts_s, stereo);
+        if let Some(correction_s) = outcome.late_reanchor_s {
+            if let Some(suppressed_since_last) = self.late_audio_diagnostics.observe(Instant::now())
+            {
+                emit_diagnostic(CaptureDiagnostic::WasapiLateAudioReanchored {
+                    source: self.mode.diagnostic_label(),
+                    correction_ms: (correction_s * 1_000.0).round() as u64,
+                    total_correction_ms: (outcome.total_correction_s * 1_000.0).round() as u64,
+                    chunk_ms: (outcome.chunk_duration_s * 1_000.0).round() as u64,
+                    suppressed_since_last,
+                });
+            }
+        }
+    }
+
     /// Drain everything the device has buffered into the assembler.
     fn drain_device(&mut self) -> Result<(), CaptureError> {
         let lost = |e: windows::core::Error| CaptureError::DeviceLost(format!("WASAPI: {e}"));
@@ -527,22 +545,15 @@ impl WasapiPcmCapture {
                 self.discontinuity_fade.apply(&mut stereo);
                 self.level.add(&stereo);
                 if let Some(pts_s) = pts_s {
-                    let outcome = self.assembler.push_chunk(pts_s, &stereo);
-                    if let Some(correction_s) = outcome.late_reanchor_s {
-                        if let Some(suppressed_since_last) =
-                            self.late_audio_diagnostics.observe(Instant::now())
-                        {
-                            emit_diagnostic(CaptureDiagnostic::WasapiLateAudioReanchored {
-                                source: self.mode.diagnostic_label(),
-                                correction_ms: (correction_s * 1_000.0).round() as u64,
-                                total_correction_ms: (outcome.total_correction_s * 1_000.0)
-                                    .round() as u64,
-                                chunk_ms: (outcome.chunk_duration_s * 1_000.0).round() as u64,
-                                suppressed_since_last,
-                            });
-                        }
+                    if let Some((aligned_pts_s, aligned)) =
+                        self.timestamp_aligner.push(pts_s, stereo)
+                    {
+                        self.push_timed_stereo(aligned_pts_s, &aligned);
                     }
                 } else {
+                    if let Some((pending_pts_s, pending)) = self.timestamp_aligner.finish() {
+                        self.push_timed_stereo(pending_pts_s, &pending);
+                    }
                     self.assembler.push_contiguous_chunk(&stereo);
                 }
                 if data_discontinuous {
@@ -567,8 +578,15 @@ impl WasapiPcmCapture {
         self.drain_device()?;
         if synthesize_silence {
             if let Some(horizon_pts_s) = audio_poll_silence_horizon(until_pts_s) {
+                if let Some((pending_pts_s, pending)) =
+                    self.timestamp_aligner.flush_before(horizon_pts_s)
+                {
+                    self.push_timed_stereo(pending_pts_s, &pending);
+                }
                 self.assembler.advance_with_silence(horizon_pts_s);
             }
+        } else if let Some((pending_pts_s, pending)) = self.timestamp_aligner.finish() {
+            self.push_timed_stereo(pending_pts_s, &pending);
         }
         while let Some(frame) = self.assembler.pop_frame() {
             self.queue.push_back(frame);

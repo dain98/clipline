@@ -17,6 +17,91 @@ const LATE_RECOVERY_FADE_PAIRS: usize = 240; // 5 ms at 48 kHz.
 
 pub type PcmFrame = (f64, Vec<f32>);
 
+/// Holds one device chunk so its sample count can be matched to the QPC
+/// interval ending at the following chunk. Some shared-mode drivers deliver
+/// a fixed number of samples whose nominal duration differs slightly from
+/// their clock cadence; passing those counts through unchanged accumulates a
+/// whole-packet timeline error and forces periodic discontinuous correction.
+#[derive(Default)]
+pub(crate) struct TimestampedChunkAligner {
+    pending: Option<PcmFrame>,
+}
+
+impl TimestampedChunkAligner {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn push(&mut self, pts_s: f64, samples: Vec<f32>) -> Option<PcmFrame> {
+        let previous = self.pending.replace((pts_s, samples))?;
+        Some(align_chunk_to_interval(previous, pts_s))
+    }
+
+    /// Release a chunk that can no longer wait for a following timestamp.
+    /// This keeps a silent endpoint and the terminal drain finite while the
+    /// normal live path retains one chunk of lookahead.
+    pub(crate) fn flush_before(&mut self, horizon_pts_s: f64) -> Option<PcmFrame> {
+        let (pts_s, samples) = self.pending.as_ref()?;
+        let nominal_end_pts_s = *pts_s + samples.len() as f64 / 2.0 / SAMPLE_RATE;
+        if !horizon_pts_s.is_finite() || horizon_pts_s + f64::EPSILON < nominal_end_pts_s {
+            return None;
+        }
+        self.pending.take()
+    }
+
+    pub(crate) fn finish(&mut self) -> Option<PcmFrame> {
+        self.pending.take()
+    }
+}
+
+fn align_chunk_to_interval((pts_s, samples): PcmFrame, next_pts_s: f64) -> PcmFrame {
+    let source_pairs = samples.len() / 2;
+    let nominal_duration_s = source_pairs as f64 / SAMPLE_RATE;
+    let interval_s = next_pts_s - pts_s;
+    let relative_interval = interval_s / nominal_duration_s;
+    let target_pairs = if source_pairs > 0
+        && relative_interval.is_finite()
+        && (0.5..=1.5).contains(&relative_interval)
+    {
+        (interval_s * SAMPLE_RATE).round().max(1.0) as usize
+    } else {
+        source_pairs
+    };
+    (pts_s, resample_stereo_to_pairs(&samples, target_pairs))
+}
+
+fn resample_stereo_to_pairs(samples: &[f32], target_pairs: usize) -> Vec<f32> {
+    let source_pairs = samples.len() / 2;
+    if source_pairs == target_pairs {
+        return samples.to_vec();
+    }
+    if source_pairs == 0 || target_pairs == 0 {
+        return Vec::new();
+    }
+    if source_pairs == 1 {
+        return std::iter::repeat_n([samples[0], samples[1]], target_pairs)
+            .flatten()
+            .collect();
+    }
+    if target_pairs == 1 {
+        return samples[..2].to_vec();
+    }
+
+    let mut output = Vec::with_capacity(target_pairs * 2);
+    let scale = (source_pairs - 1) as f64 / (target_pairs - 1) as f64;
+    for output_pair in 0..target_pairs {
+        let source_position = output_pair as f64 * scale;
+        let lower = source_position.floor() as usize;
+        let upper = (lower + 1).min(source_pairs - 1);
+        let fraction = (source_position - lower as f64) as f32;
+        output.push(samples[lower * 2] + (samples[upper * 2] - samples[lower * 2]) * fraction);
+        output.push(
+            samples[lower * 2 + 1] + (samples[upper * 2 + 1] - samples[lower * 2 + 1]) * fraction,
+        );
+    }
+    output
+}
+
 pub(crate) struct DiscontinuityFade {
     remaining_pairs: usize,
 }
@@ -207,8 +292,7 @@ impl LoopbackAssembler {
             .min(interleaved.len() / 2);
         self.buffered.reserve(interleaved.len());
         for pair in interleaved[..fade_pairs * 2].chunks_exact(2) {
-            let completed =
-                LATE_RECOVERY_FADE_PAIRS - self.late_recovery_fade_remaining_pairs;
+            let completed = LATE_RECOVERY_FADE_PAIRS - self.late_recovery_fade_remaining_pairs;
             let gain = completed as f32 / (LATE_RECOVERY_FADE_PAIRS - 1) as f32;
             self.buffered.push(pair[0] * gain);
             self.buffered.push(pair[1] * gain);
@@ -699,5 +783,71 @@ mod tests {
         let input_frames = 100_000f64;
         let expected = (input_frames * 48_000.0 / 44_100.0).ceil() as usize;
         assert_eq!(output_frames, expected);
+    }
+
+    #[test]
+    fn timestamped_chunk_aligner_matches_the_next_qpc_interval() {
+        let mut aligner = TimestampedChunkAligner::new();
+        let mut ramp = Vec::with_capacity(512 * 2);
+        for pair in 0..512 {
+            ramp.extend([pair as f32, -(pair as f32)]);
+        }
+
+        assert!(aligner.push(0.0, ramp).is_none());
+        let (pts_s, aligned) = aligner
+            .push(510.0 / SAMPLE_RATE, pairs(512, 0.25))
+            .expect("the second timestamp releases the first chunk");
+
+        assert_eq!(pts_s, 0.0);
+        assert_eq!(aligned.len() / 2, 510);
+        assert_eq!(&aligned[..2], &[0.0, -0.0]);
+        assert_eq!(&aligned[aligned.len() - 2..], &[511.0, -511.0]);
+    }
+
+    #[test]
+    fn timestamped_chunk_aligner_flushes_stale_pending_at_nominal_length() {
+        let mut aligner = TimestampedChunkAligner::new();
+        let start_pts_s = 1.0;
+        let duration_s = 512.0 / SAMPLE_RATE;
+        assert!(aligner.push(start_pts_s, pairs(512, 0.75)).is_none());
+
+        assert!(aligner
+            .flush_before(start_pts_s + duration_s - 1e-6)
+            .is_none());
+        let (pts_s, flushed) = aligner
+            .flush_before(start_pts_s + duration_s)
+            .expect("the stale chunk is released at its nominal end");
+        assert_eq!(pts_s, start_pts_s);
+        assert_eq!(flushed.len() / 2, 512);
+    }
+
+    #[test]
+    fn timestamped_chunk_aligner_does_not_stretch_a_real_gap() {
+        let mut aligner = TimestampedChunkAligner::new();
+        assert!(aligner.push(0.0, pairs(512, 0.5)).is_none());
+
+        let (_, aligned) = aligner
+            .push(1.0, pairs(512, 0.25))
+            .expect("the second timestamp releases the first chunk");
+
+        assert_eq!(aligned.len() / 2, 512);
+    }
+
+    #[test]
+    fn timestamped_chunk_alignment_prevents_periodic_packet_reanchors() {
+        let mut aligner = TimestampedChunkAligner::new();
+        let mut assembler = LoopbackAssembler::new();
+        assembler.push_chunk(0.0, &[]);
+
+        for index in 0..300 {
+            let pts_s = index as f64 * 510.0 / SAMPLE_RATE;
+            if let Some((aligned_pts_s, aligned)) = aligner.push(pts_s, pairs(512, 0.5)) {
+                let outcome = assembler.push_chunk(aligned_pts_s, &aligned);
+                assert_eq!(outcome.late_reanchor_s, None);
+            }
+        }
+
+        let (pts_s, pending) = aligner.finish().expect("one pending chunk remains");
+        assert_eq!(assembler.push_chunk(pts_s, &pending).late_reanchor_s, None);
     }
 }
