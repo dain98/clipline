@@ -167,6 +167,15 @@ recorded under `2026-07-20-wasapi-delivery-headroom.md` (initial plan/implementa
 alone; no periodic crackle, hard recovery edge, missing tail audio, or added tail silence should
 occur.
 
+That fresh replay's source tracks and generated review sidecars then produced identical encoded
+packet SHA-256 hashes, with no packet gaps or GOP-boundary impulses, ruling out replay buffering and
+sidecar extraction. The remaining throughout-the-clip artifact was isolated to WebView repeatedly
+time-stretching two sidecars between 0.95x, 1.00x, and 1.05x on the 500 ms drift timer. Stable
+requested-rate playback with the existing greater-than-500 ms emergency seek is recorded under
+`2026-07-20-review-sidecar-rate-artifacts.md` (plan `814e4ee`, implementation `a85ceae`). Retest the
+same replay with both tracks and each track alone, then seek and change playback speed; no continuous
+crackle, repeated fragment, or gross desynchronization should occur.
+
 - Elevated-game boundary: run a game as administrator while Clipline remains normal. Confirm the warning appears once for that process, recommends running the game without administrator privileges, contains no restart/UAC action, and ordinary Clipline recording remains unaffected after dismissal.
 - Large trim: export a range from a multi-gigabyte/full-session clip. Confirm Clipline memory stays broadly flat, the source remains playable, no partial clip appears during export, and the completed trim plays through its end.
 - Clipboard audio selection and contention: copy one clip with a single selected audio track and again with multiple tracks mixed. Paste each into another app; confirm video is intact, only the selected/mixed audio is audible, memory stays broadly flat, and no `.clipline-*-tmp` files remain after completion. Repeat once while a clipboard manager or another app holds the clipboard briefly and confirm Clipline retries then succeeds. Hold it longer than the retry window and confirm Clipline reports failure without claiming success; after releasing it, retry and paste the expected file normally.

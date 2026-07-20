@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): review sidecar rate artifacts
+
+The fresh replay `clip_1784527236.mp4` still sounded crackly throughout in Clipline. Its two Opus
+packet timelines are continuous, decoded samples have no impulses at two-second GOP boundaries,
+and the two generated review sidecars are packet-for-packet stream copies of the source tracks.
+Their encoded-packet SHA-256 hashes match exactly, ruling out replay materialization, muxing, capture,
+and sidecar extraction as the source of this symptom.
+
+The review transport checked each hidden audio element every 500 ms and changed its playback rate
+to 0.95x or 1.05x whenever ordinary drift exceeded 25 ms. Returning inside the deadband restored
+1.00x, so WebView continuously time-stretched two independent Opus decoders. Ordinary playing drift
+now keeps the video's requested playback rate. Forced seeks, paused alignment, invalid-sidecar
+recovery, and gross drift over 500 ms still seek; selected-track routing, mute/volume, preparation,
+and lifecycle behavior are unchanged. Focused sidecar tests, workspace tests, warning-denied
+workspace Clippy, and clean-cache app Clippy pass. Plan commit `814e4ee`; implementation commit
+`a85ceae`.
+
+Retest the same `clip_1784527236.mp4` in Clipline with both tracks, Output only, and Microphone only;
+a new recording is not required. Also seek while playing/paused and change playback speed. If the
+same file still crackles, compare it in an external player before changing capture again.
+
 ## Checkpoint (2026-07-20): smooth WASAPI late recovery
 
 The 30-second replay `clip_1784525638.mp4` began cleanly after the discontinuity fade, but crackled
