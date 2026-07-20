@@ -2784,7 +2784,7 @@ fn audio_preview_queue_applies_only_current_success_and_cancel_keeps_worker_slot
 }
 
 #[test]
-fn audio_sidecar_sync_smoothly_corrects_playing_drift_and_hard_seeks_discontinuities() {
+fn audio_sidecar_sync_keeps_requested_rate_and_hard_seeks_discontinuities() {
     let mut ctx = player_core_context();
     assert_eq!(
         eval_json(
@@ -2832,7 +2832,7 @@ fn audio_sidecar_sync_smoothly_corrects_playing_drift_and_hard_seeks_discontinui
             }))()
             "#,
         ),
-        r#"{"forced":{"seekTime":12.5,"playbackRate":1.5,"shouldPlay":true},"inSync":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"behind":{"seekTime":null,"playbackRate":1.05,"shouldPlay":true},"ahead":{"seekTime":null,"playbackRate":0.95,"shouldPlay":true},"discontinuity":{"seekTime":10,"playbackRate":1,"shouldPlay":true},"pausedDrift":{"seekTime":10,"playbackRate":1,"shouldPlay":false},"invalidSidecar":{"seekTime":4,"playbackRate":1,"shouldPlay":false},"invalidVideo":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"ended":{"seekTime":null,"playbackRate":2,"shouldPlay":false}}"#
+        r#"{"forced":{"seekTime":12.5,"playbackRate":1.5,"shouldPlay":true},"inSync":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"behind":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"ahead":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"discontinuity":{"seekTime":10,"playbackRate":1,"shouldPlay":true},"pausedDrift":{"seekTime":10,"playbackRate":1,"shouldPlay":false},"invalidSidecar":{"seekTime":4,"playbackRate":1,"shouldPlay":false},"invalidVideo":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"ended":{"seekTime":null,"playbackRate":2,"shouldPlay":false}}"#
     );
 }
 

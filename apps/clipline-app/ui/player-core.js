@@ -18,7 +18,6 @@ const PlayerCore = (() => {
   const QUICK_TRIM_WINDOW_S = 30;
   const AUDIO_SIDECAR_DRIFT_DEADBAND_S = 0.025;
   const AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S = 0.5;
-  const AUDIO_SIDECAR_RATE_CORRECTION = 0.05;
 
   // YouTube grammar: controls pin while paused, fade when playing and idle.
   const overlayVisible = (paused, idleMs) => paused || idleMs < OVERLAY_HIDE_MS;
@@ -1963,16 +1962,9 @@ const PlayerCore = (() => {
       || !validSidecarTime
       || (validVideoTime && driftMagnitude > AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S)
       || (validVideoTime && !shouldPlay && driftMagnitude > AUDIO_SIDECAR_DRIFT_DEADBAND_S);
-    const correction = validVideoTime
-      && validSidecarTime
-      && shouldPlay
-      && !forceSeek
-      && driftMagnitude > AUDIO_SIDECAR_DRIFT_DEADBAND_S
-      ? (drift > 0 ? AUDIO_SIDECAR_RATE_CORRECTION : -AUDIO_SIDECAR_RATE_CORRECTION)
-      : 0;
     return {
       seekTime: validVideoTime && forceSeek ? videoTime : null,
-      playbackRate: playbackRate * (1 + correction),
+      playbackRate,
       shouldPlay,
     };
   };
