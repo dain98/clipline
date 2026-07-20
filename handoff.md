@@ -4,6 +4,34 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): nominal WASAPI cadence and encoded MFT keyframes
+
+The next successful 30-second replays proved that the crackle fixes had introduced progressive A/V
+lead: `clip_1784530928.mp4` has 30.100 seconds of video but only 29.700 seconds of Output Audio and
+29.680 seconds of Microphone audio, and the user confirmed sound arrived before picture. The
+one-packet-lookahead path was converting each 512-pair MOTU packet to its roughly 510-pair QPC
+interval. That removed real PCM continuously and compressed about 0.4 seconds out of each 30-second
+track.
+
+Continuous WASAPI packets now retain every device sample and append at the nominal 48 kHz cadence.
+QPC is used only for the first anchor, after 100 ms of actual device-delivery idleness, or for an
+explicit `DATA_DISCONTINUITY`. Quiet loopback still receives finite synthetic silence, idle resume
+still gets the bounded late-recovery fade, terminal drain remains immediate, and no timestamped
+packet is held back. Neutral regressions reproduce the observed 512-pair packets on 510-pair QPC
+steps and require all 153,600 pairs to span 3.2 seconds exactly.
+
+The same long-running recorder later hit the ten-second pending-GOP safety bound. The AMD H.264 MFT
+path classified keyframes only from `MFSampleExtension_CleanPoint`, although the encoded H.264 IDR
+NAL is the authoritative signal and some hardware MFT output omits the optional flag. MFT packets
+now accept either CleanPoint or an encoded IDR, matching the FFmpeg path. The ten-second/byte limits
+remain unchanged, so a genuinely stalled encoder is still bounded instead of consuming memory.
+
+Plan commit `bb30ed1`; audio implementation `1fe0ce9`; keyframe implementation `93c3d5f`. The
+204-test capture suite, including real WGC, DXGI, WASAPI, MFT, shared-clock, and FFmpeg device tests,
+passes, as do workspace tests, warning-denied workspace Clippy, and clean-cache capture Clippy.
+Retest a fresh 30-second replay with a simultaneous visual/sound cue near both ends, then leave the
+buffer running and save multiple replays to exercise repeated keyframe boundaries.
+
 ## Checkpoint (2026-07-20): repeat replay save and review-audio EOF
 
 The first crackle-free replay, `clip_1784529665.mp4`, exposed two follow-on boundary bugs. Its video
