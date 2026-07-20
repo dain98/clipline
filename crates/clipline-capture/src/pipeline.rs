@@ -470,7 +470,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             track_cfgs.push(TrackConfig::Audio(cfg.clone()));
         }
         let timeline_origin_s = segments[0].pts_start_s;
-        drop_audio_before_replay_origin(&mut segments[0].audio, timeline_origin_s)?;
+        drop_segment_audio_before_replay_origin(&mut segments, timeline_origin_s)?;
         let mut writer = HybridMp4Writer::new_multi(w, track_cfgs)?;
         for seg in &segments {
             set_segment_decode_times(&mut writer, seg, &video_cfg, &audio_cfgs, timeline_origin_s)?;
@@ -802,6 +802,16 @@ fn drop_audio_before_replay_origin(
         drop(track.data.drain(..drop_bytes));
         drop(track.samples.drain(..drop_samples));
         track.pts_start_s = (!track.samples.is_empty()).then_some(sample_start_s);
+    }
+    Ok(())
+}
+
+fn drop_segment_audio_before_replay_origin(
+    segments: &mut [Segment],
+    timeline_start_s: f64,
+) -> io::Result<()> {
+    for segment in segments {
+        drop_audio_before_replay_origin(&mut segment.audio, timeline_start_s)?;
     }
     Ok(())
 }
@@ -1959,6 +1969,38 @@ mod tests {
             .save_replay(std::io::Cursor::new(Vec::new()), 0.25, None)
             .expect("a mid-stream replay must discard audio preceding its video origin");
         assert!(clipline_mp4::walker::movie_duration_s(&replay.into_inner()).is_some());
+    }
+
+    #[test]
+    fn replay_origin_filter_cleans_audio_from_every_selected_segment() {
+        let sample = || SampleInfo {
+            size: 1,
+            duration_s: 0.02,
+            is_sync: true,
+        };
+        let segment = |pts_start_s, audio_start_s, audio: Vec<u8>| Segment {
+            starts_with_keyframe: true,
+            pts_start_s,
+            duration_s: 1.0,
+            data: vec![0],
+            samples: vec![sample()],
+            audio: vec![TrackSamples {
+                pts_start_s: Some(audio_start_s),
+                samples: vec![sample(); audio.len()],
+                data: audio,
+            }],
+        };
+        let mut selected = vec![
+            segment(1.0, 1.0, vec![1]),
+            segment(2.0, 0.98, vec![2, 3, 4]),
+        ];
+
+        drop_segment_audio_before_replay_origin(&mut selected, 1.0).unwrap();
+
+        assert_eq!(selected[0].audio[0].data, vec![1]);
+        assert_eq!(selected[1].audio[0].pts_start_s, Some(1.0));
+        assert_eq!(selected[1].audio[0].data, vec![3, 4]);
+        assert_eq!(selected[1].audio[0].samples.len(), 2);
     }
 
     #[test]
