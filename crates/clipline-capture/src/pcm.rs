@@ -14,6 +14,7 @@ const MAX_GAP_FILL_S: f64 = 5.0;
 const FRAME_PAIRS: u64 = (FRAME_LEN / 2) as u64;
 const DISCONTINUITY_FADE_PAIRS: usize = 1_920; // 40 ms at 48 kHz.
 const LATE_RECOVERY_FADE_PAIRS: usize = 240; // 5 ms at 48 kHz.
+const PENDING_CHUNK_QUIET_GRACE_S: f64 = 0.1;
 
 pub type PcmFrame = (f64, Vec<f32>);
 
@@ -42,11 +43,21 @@ impl TimestampedChunkAligner {
     /// normal live path retains one chunk of lookahead.
     pub(crate) fn flush_before(&mut self, horizon_pts_s: f64) -> Option<PcmFrame> {
         let (pts_s, samples) = self.pending.as_ref()?;
-        let nominal_end_pts_s = *pts_s + samples.len() as f64 / 2.0 / SAMPLE_RATE;
-        if !horizon_pts_s.is_finite() || horizon_pts_s + f64::EPSILON < nominal_end_pts_s {
+        let flush_pts_s =
+            *pts_s + samples.len() as f64 / 2.0 / SAMPLE_RATE + PENDING_CHUNK_QUIET_GRACE_S;
+        if !horizon_pts_s.is_finite() || horizon_pts_s + f64::EPSILON < flush_pts_s {
             return None;
         }
         self.pending.take()
+    }
+
+    /// Real PCM already delivered by the device must take precedence over
+    /// poll-time synthetic silence while it waits for one timestamp of
+    /// lookahead.
+    pub(crate) fn synthesis_horizon(&self, requested_pts_s: f64) -> f64 {
+        self.pending
+            .as_ref()
+            .map_or(requested_pts_s, |(pts_s, _)| requested_pts_s.min(*pts_s))
     }
 
     pub(crate) fn finish(&mut self) -> Option<PcmFrame> {
@@ -805,20 +816,32 @@ mod tests {
     }
 
     #[test]
-    fn timestamped_chunk_aligner_flushes_stale_pending_at_nominal_length() {
+    fn timestamped_chunk_aligner_flushes_stale_pending_after_bounded_grace() {
         let mut aligner = TimestampedChunkAligner::new();
         let start_pts_s = 1.0;
         let duration_s = 512.0 / SAMPLE_RATE;
         assert!(aligner.push(start_pts_s, pairs(512, 0.75)).is_none());
 
         assert!(aligner
-            .flush_before(start_pts_s + duration_s - 1e-6)
+            .flush_before(start_pts_s + duration_s + 0.1 - 1e-6)
             .is_none());
         let (pts_s, flushed) = aligner
-            .flush_before(start_pts_s + duration_s)
-            .expect("the stale chunk is released at its nominal end");
+            .flush_before(start_pts_s + duration_s + 0.1)
+            .expect("the stale chunk is released after a bounded quiet grace");
         assert_eq!(pts_s, start_pts_s);
         assert_eq!(flushed.len() / 2, 512);
+    }
+
+    #[test]
+    fn timestamped_chunk_aligner_caps_silence_at_pending_real_audio() {
+        let mut aligner = TimestampedChunkAligner::new();
+        assert!(aligner.push(2.0, pairs(512, 0.75)).is_none());
+
+        assert_eq!(aligner.synthesis_horizon(2.05), 2.0);
+        assert_eq!(aligner.synthesis_horizon(1.95), 1.95);
+
+        aligner.finish();
+        assert_eq!(aligner.synthesis_horizon(2.05), 2.05);
     }
 
     #[test]

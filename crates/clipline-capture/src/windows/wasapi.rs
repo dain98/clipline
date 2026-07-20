@@ -583,7 +583,8 @@ impl WasapiPcmCapture {
                 {
                     self.push_timed_stereo(pending_pts_s, &pending);
                 }
-                self.assembler.advance_with_silence(horizon_pts_s);
+                self.assembler
+                    .advance_with_silence(self.timestamp_aligner.synthesis_horizon(horizon_pts_s));
             }
         } else if let Some((pending_pts_s, pending)) = self.timestamp_aligner.finish() {
             self.push_timed_stereo(pending_pts_s, &pending);
