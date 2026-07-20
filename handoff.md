@@ -4,27 +4,32 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-07-20): WASAPI delivery headroom
+## Checkpoint (2026-07-20): smooth WASAPI late recovery
 
 The 30-second replay `clip_1784525638.mp4` began cleanly after the discontinuity fade, but crackled
 throughout. Its Opus packet timelines are continuous; decoded PCM instead contains isolated deep
 10 ms holes (about 40 dB on Output Audio near 28.27 seconds and 21 dB on Microphone near 23.64
 seconds). Recorder diagnostics repeatedly reported `wasapi_late_audio_reanchored` every two to
-three seconds. Normal WASAPI buffers were arriving roughly 10--11 ms after the former 20 ms silence
-synthesis allowance, so synthesized silence could overtake live audio and leave a hard short gap
-when late-buffer recovery re-anchored it.
+three seconds. When a quiescent endpoint resumed behind already-committed synthetic silence, the
+late-buffer recovery correctly retained the complete live chunk but joined an arbitrary waveform
+sample directly to digital silence, creating a hard audible edge.
 
-Normal capture now retains 30 ms of delivery headroom before synthesizing silence. Stream finish
-uses a separate terminal drain: each audio source gets one final Opus-frame delivery interval, then
-only real buffered frames within the video boundary are encoded, without extending the recording
-with synthesized tail silence. Regressions cover the new poll horizon and audio exposed only during
-terminal drain. The real shared-clock hardware test passed with 8.3 ms maximum segment skew and
-16.7 ms total drift. Capture tests, workspace tests, warning-denied workspace Clippy, and
-clean-cache capture Clippy pass. Plan commit `1b13651`; implementation commit `58109ac`.
+Live experiments with both 30 ms and 60 ms normal-poll allowances produced the same recovery cadence,
+proving a fixed timeout cannot outwait endpoints that stop delivering while quiet. Normal capture
+therefore keeps 30 ms of active-delivery headroom, and every actual synthetic-silence-to-live
+recovery now receives a five-millisecond linear fade. The fade retains every live sample, reaches
+full amplitude inside the first Opus frame, and leaves following samples untouched. Stream finish
+separately waits three Opus frames, drains only real buffered audio within the video boundary, and
+does not synthesize tail silence. Regressions cover the fade shape and sample retention, poll
+horizon, and terminal-only audio. The real shared-clock hardware test passed with 20.0 ms maximum
+segment skew and total drift, inside the 45 ms contract. The 200-test capture suite, workspace
+tests, warning-denied workspace Clippy, and clean-cache capture Clippy pass. Initial plan/terminal
+drain commits `1b13651`/`58109ac`; final plan/implementation commits `565954e`/`b029b80`.
 
 Retest a fresh replay of at least 30 seconds with Output Audio and Microphone active throughout.
 Listen from start to finish with both selected, then each track alone. The old file is unchanged and
-will retain its encoded holes; only recordings made by this build receive the extra headroom.
+will retain its encoded holes and hard boundaries; only recordings made by this build receive the
+smoothed late recovery.
 
 ## Checkpoint (2026-07-20): WASAPI discontinuity onset fade
 

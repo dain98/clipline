@@ -156,12 +156,16 @@ normal volume must follow immediately after the brief ramp.
 
 The following 30-second replay began cleanly but contained repeated crackle. Continuous Opus packet
 timelines and isolated deep 10 ms decoded-PCM holes, together with recurring
-`wasapi_late_audio_reanchored` diagnostics, showed that normal 10--11 ms WASAPI delivery latency was
-exhausting the former 20 ms silence-synthesis allowance. A 30 ms normal-poll delivery allowance and
-a separate finite terminal drain are recorded under `2026-07-20-wasapi-delivery-headroom.md` (plan
-`1b13651`, implementation `58109ac`). Retest a fresh replay of at least 30 seconds with both sources
-active throughout, then listen with both tracks selected and each track alone; no periodic crackle,
-short hole, missing tail audio, or added tail silence should occur.
+`wasapi_late_audio_reanchored` diagnostics, isolated a hard synthetic-silence-to-live recovery edge.
+Live experiments with 30 ms and 60 ms normal-poll allowances left the recovery cadence unchanged,
+because quiescent endpoints can stop delivering longer than any sensible fixed timeout. The final
+path keeps 30 ms of active-delivery headroom, applies a five-millisecond fade only to recovered live
+samples, and uses a separate three-frame terminal drain without synthetic tail silence. It is
+recorded under `2026-07-20-wasapi-delivery-headroom.md` (initial plan/implementation
+`1b13651`/`58109ac`; final plan/implementation `565954e`/`b029b80`). Retest a fresh replay of at least
+30 seconds with both sources active throughout, then listen with both tracks selected and each track
+alone; no periodic crackle, hard recovery edge, missing tail audio, or added tail silence should
+occur.
 
 - Elevated-game boundary: run a game as administrator while Clipline remains normal. Confirm the warning appears once for that process, recommends running the game without administrator privileges, contains no restart/UAC action, and ordinary Clipline recording remains unaffected after dismissal.
 - Large trim: export a range from a multi-gigabyte/full-session clip. Confirm Clipline memory stays broadly flat, the source remains playable, no partial clip appears during export, and the completed trim plays through its end.
