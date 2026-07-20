@@ -11,17 +11,26 @@ for each source. The configured output (`Out 1-2`) and microphone (`In 1-2`) are
 Series USB interface, both configured for 48 kHz float stereo. The existing five-millisecond fade
 therefore masks, but does not remove, a repeated timeline correction close to one device packet.
 
+Live telemetry confirmed the mechanism. Each MOTU chunk is 11 ms; microphone accumulated 128 ms
+of correction over one 30-second diagnostic window, with ten suppressed events, and every individual
+correction was one complete 10--11 ms chunk. Nominal frame-count duration is therefore accumulating
+against the driver's QPC timestamps until the assembler takes a packet-sized step.
+
 ## Implementation
 
 - [ ] Extend the typed, rate-limited late-recovery diagnostic with device-chunk duration and total
       accumulated correction; cover formatting and assembler accounting deterministically.
 - [ ] Run the real recorder long enough to determine whether corrections accumulate one complete
-      packet at a time or reflect a stable sample-clock ratio.
+      packet at a time or reflect a stable sample-clock ratio. Confirmed: one complete packet at a
+      time, accumulating continuously.
 - [ ] Add a neutral failing fixture reproducing the observed sequence and requiring continuous PCM
       without packet-sized holes or repeated recovery fades.
-- [ ] Replace stepwise recovery with bounded continuous alignment appropriate to the measured
-      failure mode. Preserve monotonic timestamps, every real source interval not already committed,
-      gap bounding, Opus framing, and finite memory.
+- [ ] Hold one timestamped device chunk and interpolate it to the next chunk's QPC interval when
+      that interval is close to nominal. Flush at nominal length after a bounded wait when no next
+      chunk arrives, so quiet endpoints and stream finish remain finite.
+- [ ] Feed the timestamp-aligned samples to the existing assembler, eliminating packet-sized
+      stepwise recovery while preserving monotonic timestamps, explicit gaps, Opus framing, and
+      finite memory.
 - [ ] Retain startup/data-discontinuity protection, but remove the late-recovery fade once the
       underlying repeated step is eliminated.
 - [ ] Run focused capture tests, the real shared-clock hardware test, workspace tests,
