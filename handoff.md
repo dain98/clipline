@@ -4,6 +4,34 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): continuous QPC audio clock servo
+
+The nominal-cadence follow-up did not fix A/V sync. In `clip_1784581736.mp4`, video lasts exactly
+30.000 seconds while Output Audio ends at 29.618 seconds and Microphone at 29.598 seconds. The
+captured source was a synchronized YouTube osu! video, which made independent measurement possible:
+cross-correlation of audio spectral onsets against gameplay-region frame changes placed audio
+roughly 350--400 ms before video. Whole-section and two separate active-play windows all peaked
+near -367 ms, matching the missing tail and the user's VLC/Clipline observation.
+
+WGC `SystemRelativeTime` and WASAPI packet QPC are timestamps on the same synchronization clock.
+Keeping only the first audio anchor and then advancing at nominal 48 kHz let device-clock error
+accumulate across the full recorder uptime; a later 30-second replay selected earlier audio content
+and omitted its matching tail. Audio now holds one real packet for QPC lookahead and resamples it to
+a **cumulative** shared-clock sample frontier. Fractional device intervals therefore do not round
+into long-running drift. Half-open interpolation uses the following packet's first stereo pair at
+the boundary, avoiding forced packet endpoints and the periodic holes from discontinuous gap fill.
+
+The pending packet remains a hard silence-synthesis frontier. Actual delivery idle flushes after
+100 ms, terminal drain flushes immediately, timestamp-error input falls back to contiguous PCM,
+and explicit device discontinuities flush/reset before the existing 40 ms onset fade. Regressions
+cover cumulative 514.4-pair clock intervals, cross-packet waveform continuity, and finite idle
+flush. The 205-test capture suite (including WGC, DXGI, WASAPI, MFT, shared-clock, and FFmpeg device
+tests), workspace tests, warning-denied workspace Clippy, and clean-cache capture Clippy pass.
+
+Plan commit `ca62bda`; implementation `c332e2d`. Restart Clipline, let the buffer run for at least
+two minutes, then save another synchronized-source replay and compare its beginning/end in both VLC
+and Clipline. Also listen for any return of periodic crackle.
+
 ## Checkpoint (2026-07-20): nominal WASAPI cadence and encoded MFT keyframes
 
 The next successful 30-second replays proved that the crackle fixes had introduced progressive A/V
