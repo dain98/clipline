@@ -445,7 +445,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         window_s: f64,
         exclude_before_s: Option<f64>,
     ) -> io::Result<(W, f64)> {
-        let segments = self.save_window_segments(window_s, exclude_before_s)?;
+        let mut segments = self.save_window_segments(window_s, exclude_before_s)?;
         if segments.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -469,8 +469,9 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         for cfg in &audio_cfgs {
             track_cfgs.push(TrackConfig::Audio(cfg.clone()));
         }
-        let mut writer = HybridMp4Writer::new_multi(w, track_cfgs)?;
         let timeline_origin_s = segments[0].pts_start_s;
+        drop_audio_before_replay_origin(&mut segments[0].audio, timeline_origin_s)?;
+        let mut writer = HybridMp4Writer::new_multi(w, track_cfgs)?;
         for seg in &segments {
             set_segment_decode_times(&mut writer, seg, &video_cfg, &audio_cfgs, timeline_origin_s)?;
             let per_track = segment_fragment_refs(seg, &video_cfg, &audio_cfgs, timeline_origin_s)?;
@@ -732,6 +733,54 @@ fn drop_audio_before_timeline(pending_audio: &mut [Vec<AudioPacket>], timeline_s
     for pending in pending_audio {
         pending.retain(|packet| packet.pts_s >= timeline_start_s - 1e-9);
     }
+}
+
+fn drop_audio_before_replay_origin(
+    audio_tracks: &mut [TrackSamples],
+    timeline_start_s: f64,
+) -> io::Result<()> {
+    for track in audio_tracks {
+        if track.samples.is_empty() {
+            track.pts_start_s = None;
+            continue;
+        }
+        let Some(mut sample_start_s) = track.pts_start_s else {
+            continue;
+        };
+        let mut drop_samples = 0usize;
+        let mut drop_bytes = 0usize;
+        while sample_start_s < timeline_start_s - 1e-9 {
+            let Some(sample) = track.samples.get(drop_samples) else {
+                break;
+            };
+            if !sample.duration_s.is_finite() || sample.duration_s < 0.0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid media sample duration",
+                ));
+            }
+            drop_bytes = drop_bytes
+                .checked_add(sample.size as usize)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "sample byte range overflow")
+                })?;
+            sample_start_s += sample.duration_s;
+            drop_samples += 1;
+        }
+        if drop_samples == 0 {
+            continue;
+        }
+        if drop_bytes > track.data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sample metadata exceeds encoded track data",
+            ));
+        }
+        drop(track.data.drain(..drop_bytes));
+        drop(track.samples.drain(..drop_samples));
+        track.pts_start_s = (!track.samples.is_empty()).then_some(sample_start_s);
+    }
+    Ok(())
 }
 
 fn pending_byte_budget(max_buffer_bytes: usize) -> usize {
@@ -1803,6 +1852,41 @@ mod tests {
         assert!(
             clipline_mp4::walker::movie_duration_s(&std::fs::read(full_path).unwrap()).is_some()
         );
+    }
+
+    #[test]
+    fn replay_drops_audio_packet_straddling_selected_video_origin() {
+        use crate::mock::MockAudioSource;
+
+        let cap = OffsetCapture {
+            inner: MockCapture::new(60, 30),
+            // GOP boundaries land at x.51 s, halfway through x.50--x.52 s
+            // Opus packets.
+            offset_s: 0.51,
+        };
+        let mut recorder = Recorder::new(cap, MockEncoder::new(30, 30), usize::MAX)
+            .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+        recorder.run_to_end().unwrap();
+
+        let segments: Vec<_> = recorder.ring().unwrap().segments().collect();
+        assert_eq!(segments.len(), 2);
+        assert!(
+            segments[1].audio[0].pts_start_s.unwrap() < segments[1].pts_start_s,
+            "fixture must put a straddling Opus packet before the selected GOP origin"
+        );
+
+        let mut selected = recorder.save_window_segments(0.25, None).unwrap();
+        let origin = selected[0].pts_start_s;
+        drop_audio_before_replay_origin(&mut selected[0].audio, origin).unwrap();
+        assert!(
+            (selected[0].audio[0].pts_start_s.unwrap() - 1.52).abs() < 1e-9,
+            "discarding the 1.50--1.52 s packet must advance audio by exactly one packet"
+        );
+
+        let (replay, _) = recorder
+            .save_replay(std::io::Cursor::new(Vec::new()), 0.25, None)
+            .expect("a mid-stream replay must discard audio preceding its video origin");
+        assert!(clipline_mp4::walker::movie_duration_s(&replay.into_inner()).is_some());
     }
 
     #[test]
