@@ -16,6 +16,13 @@ of correction over one 30-second diagnostic window, with ten suppressed events, 
 correction was one complete 10--11 ms chunk. Nominal frame-count duration is therefore accumulating
 against the driver's QPC timestamps until the assembler takes a packet-sized step.
 
+The first one-chunk-lookahead build exposed a second ordering requirement. PID 22688 still reached
+162 ms of microphone correction and 158 ms of output correction in roughly 35 seconds because the
+poll-time silence horizon advanced the assembler past the real chunk held for its following QPC
+timestamp. The pending chunk must therefore be a hard synthesis frontier. Normal polling may not
+synthesize beyond its start; if no following timestamp arrives, a separate bounded quiet-endpoint
+grace flushes it at nominal length. Terminal drain flushes it immediately.
+
 ## Implementation
 
 - [ ] Extend the typed, rate-limited late-recovery diagnostic with device-chunk duration and total
@@ -28,6 +35,9 @@ against the driver's QPC timestamps until the assembler takes a packet-sized ste
 - [ ] Hold one timestamped device chunk and interpolate it to the next chunk's QPC interval when
       that interval is close to nominal. Flush at nominal length after a bounded wait when no next
       chunk arrives, so quiet endpoints and stream finish remain finite.
+- [ ] Cap poll-time silence synthesis at the start of a pending real chunk. Flush the pending chunk
+      only when the synthesis horizon exceeds its nominal end by the quiet-endpoint grace, then
+      resume silence synthesis; cover both the hard frontier and finite quiet flush with tests.
 - [ ] Feed the timestamp-aligned samples to the existing assembler, eliminating packet-sized
       stepwise recovery while preserving monotonic timestamps, explicit gaps, Opus framing, and
       finite memory.
