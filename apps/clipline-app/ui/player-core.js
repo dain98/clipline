@@ -1951,17 +1951,24 @@ const PlayerCore = (() => {
   const audioSidecarSyncDecision = (videoState, sidecarState, options = {}) => {
     const videoTime = Number(videoState && videoState.currentTime);
     const sidecarTime = Number(sidecarState && sidecarState.currentTime);
+    const sidecarDuration = Number(sidecarState && sidecarState.duration);
     const validVideoTime = Number.isFinite(videoTime) && videoTime >= 0;
+    const validSidecarDuration = Number.isFinite(sidecarDuration) && sidecarDuration >= 0;
     const rate = Number(videoState && videoState.playbackRate);
     const playbackRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
-    const shouldPlay = !(videoState && videoState.paused) && !(videoState && videoState.ended);
+    const sidecarExhausted = Boolean(sidecarState && sidecarState.ended)
+      && validVideoTime
+      && validSidecarDuration
+      && videoTime >= sidecarDuration - Number.EPSILON;
+    const videoShouldPlay = !(videoState && videoState.paused) && !(videoState && videoState.ended);
+    const shouldPlay = videoShouldPlay && !sidecarExhausted;
     const validSidecarTime = Number.isFinite(sidecarTime) && sidecarTime >= 0;
     const drift = validVideoTime && validSidecarTime ? videoTime - sidecarTime : 0;
     const driftMagnitude = Math.abs(drift);
     const forceSeek = options.forceSeek === true
       || !validSidecarTime
       || (validVideoTime && driftMagnitude > AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S)
-      || (validVideoTime && !shouldPlay && driftMagnitude > AUDIO_SIDECAR_DRIFT_DEADBAND_S);
+      || (validVideoTime && !videoShouldPlay && driftMagnitude > AUDIO_SIDECAR_DRIFT_DEADBAND_S);
     return {
       seekTime: validVideoTime && forceSeek ? videoTime : null,
       playbackRate,

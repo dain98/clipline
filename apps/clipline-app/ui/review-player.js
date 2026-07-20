@@ -161,7 +161,11 @@ async function syncReviewAudioSidecarSet(sidecars, options = {}) {
   for (const { element: audio } of sidecars || []) {
     const decision = PlayerCore.audioSidecarSyncDecision(
       videoState,
-      { currentTime: audio.currentTime },
+      {
+        currentTime: audio.currentTime,
+        duration: audio.duration,
+        ended: audio.ended,
+      },
       { forceSeek: options.forceSeek === true },
     );
     if (decision.seekTime != null) audio.currentTime = decision.seekTime;

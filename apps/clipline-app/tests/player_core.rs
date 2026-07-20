@@ -2837,6 +2837,30 @@ fn audio_sidecar_sync_keeps_requested_rate_and_hard_seeks_discontinuities() {
 }
 
 #[test]
+fn audio_sidecar_sync_does_not_restart_a_track_that_ends_before_video() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            r#"
+            (() => ({
+              exhausted: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 29.8, playbackRate: 1, paused: false, ended: false },
+                { currentTime: 29.64, duration: 29.64, ended: true },
+              ),
+              seekBack: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 10, playbackRate: 1, paused: false, ended: false },
+                { currentTime: 29.64, duration: 29.64, ended: true },
+                { forceSeek: true },
+              ),
+            }))()
+            "#,
+        ),
+        r#"{"exhausted":{"seekTime":null,"playbackRate":1,"shouldPlay":false},"seekBack":{"seekTime":10,"playbackRate":1,"shouldPlay":true}}"#
+    );
+}
+
+#[test]
 fn audio_sidecar_output_routes_only_the_selected_logical_source() {
     let mut ctx = player_core_context();
     assert_eq!(

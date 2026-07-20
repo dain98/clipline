@@ -2123,6 +2123,8 @@ fn audio_sidecar_transport_follows_only_the_video_clock() {
     let main = read_ui_js("main.js");
     let sync = js_function_body(&review, "syncReviewAudioSidecarSet");
     assert!(sync.contains("PlayerCore.audioSidecarSyncDecision("));
+    assert!(sync.contains("duration: audio.duration"));
+    assert!(sync.contains("ended: audio.ended"));
     assert!(sync.contains("audio.currentTime = decision.seekTime;"));
     assert!(sync.contains("audio.playbackRate = decision.playbackRate;"));
     assert!(!sync.contains("video.currentTime ="));
