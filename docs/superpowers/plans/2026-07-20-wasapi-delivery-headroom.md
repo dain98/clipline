@@ -10,18 +10,20 @@ The reported 30-second replay has continuous Opus packet timestamps, but decoded
 diagnostics show each source still invokes `wasapi_late_audio_reanchored` roughly every 2--3 seconds,
 including suppressed events at those positions.
 
-Clipline synthesizes silence only 20 ms behind the current video timestamp. Real WASAPI buffers on
-this machine periodically arrive another 10--11 ms later, after that silence has already been
-encoded. The recovery preserves the late live samples, preventing permanent lockout, but it cannot
-replace the committed silence; the resulting short hole and hard boundary are audible as crackle.
+Clipline originally synthesized silence only 20 ms behind the current video timestamp. The first
+implementation raised that allowance to 30 ms, but live validation on the same endpoints still
+reported a 10--11 ms correction about every three seconds (`suppressed_since_last=9` or `10` per
+30-second diagnostic window). That result shows the observed correction is the overlap after the
+synthetic frontier, not the complete device-delivery lag. The safe allowance must cover the
+roughly 40 ms end-to-end lag plus polling jitter.
 
 ## Implementation
 
-- [ ] Add deterministic coverage requiring ordinary audio polls to leave 30 ms of device-delivery
-      headroom rather than 20 ms.
+- [ ] Add deterministic coverage requiring ordinary audio polls to leave three Opus frames (60 ms)
+      of device-delivery headroom, covering the measured lag plus one frame of polling jitter.
 - [ ] Add an `AudioSource` finish-drain contract and a recorder regression proving terminal audio
       available only during that drain is retained through the final video boundary.
-- [ ] Have WASAPI terminal drain wait one Opus frame for outstanding device buffers, drain without
+- [ ] Have WASAPI terminal drain wait the same three-frame allowance for outstanding device buffers, drain without
       synthesizing new silence, and return only complete packets ending within the video timeline.
 - [ ] Keep monitor drains non-synthesizing and preserve timestamp, Opus framing, bounded queue, and
       replay/full-session mux behavior.
