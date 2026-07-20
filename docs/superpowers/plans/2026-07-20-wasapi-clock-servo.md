@@ -23,6 +23,12 @@ timestamp. The pending chunk must therefore be a hard synthesis frontier. Normal
 synthesize beyond its start; if no following timestamp arrives, a separate bounded quiet-endpoint
 grace flushes it at nominal length. Terminal drain flushes it immediately.
 
+The hard-frontier build also proved that QPC timestamp age cannot identify a quiet endpoint. It
+produced an exact 100 ms correction while both devices were still delivering packets, then resumed
+the former step pattern. The MOTU's reported source timeline drifts behind the video clock even as
+PCM arrives continuously. Quiet flushing must therefore use elapsed host time since the most recent
+WASAPI packet, not the difference between a packet timestamp and the video/synthesis horizon.
+
 ## Implementation
 
 - [ ] Extend the typed, rate-limited late-recovery diagnostic with device-chunk duration and total
@@ -36,8 +42,8 @@ grace flushes it at nominal length. Terminal drain flushes it immediately.
       that interval is close to nominal. Flush at nominal length after a bounded wait when no next
       chunk arrives, so quiet endpoints and stream finish remain finite.
 - [ ] Cap poll-time silence synthesis at the start of a pending real chunk. Flush the pending chunk
-      only when the synthesis horizon exceeds its nominal end by the quiet-endpoint grace, then
-      resume silence synthesis; cover both the hard frontier and finite quiet flush with tests.
+      only after no WASAPI packet has arrived for the quiet-endpoint grace, then resume silence
+      synthesis; cover both continuous-delivery protection and finite quiet flush with tests.
 - [ ] Feed the timestamp-aligned samples to the existing assembler, eliminating packet-sized
       stepwise recovery while preserving monotonic timestamps, explicit gaps, Opus framing, and
       finite memory.
