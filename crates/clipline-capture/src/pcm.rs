@@ -13,6 +13,7 @@ const GAP_TOLERANCE_S: f64 = FRAME_DURATION_S / 2.0;
 const MAX_GAP_FILL_S: f64 = 5.0;
 const FRAME_PAIRS: u64 = (FRAME_LEN / 2) as u64;
 const DISCONTINUITY_FADE_PAIRS: usize = 1_920; // 40 ms at 48 kHz.
+const LATE_RECOVERY_FADE_PAIRS: usize = 240; // 5 ms at 48 kHz.
 
 pub type PcmFrame = (f64, Vec<f32>);
 
@@ -77,6 +78,7 @@ pub struct LoopbackAssembler {
     /// than falling behind the synthetic frontier again.
     source_pts_correction_s: f64,
     synthesized_since_real: bool,
+    late_recovery_fade_remaining_pairs: usize,
     buffered: Vec<f32>, // interleaved stereo
     frames_popped: u64,
 }
@@ -101,6 +103,7 @@ impl LoopbackAssembler {
             self.source_pts_correction_s += correction_s;
             corrected_pts_s = expected;
             gap = 0.0;
+            self.late_recovery_fade_remaining_pairs = LATE_RECOVERY_FADE_PAIRS;
             Some(correction_s)
         } else {
             None
@@ -126,7 +129,7 @@ impl LoopbackAssembler {
             }
             samples = &interleaved[overlap_pairs * 2..];
         }
-        self.buffered.extend_from_slice(samples);
+        self.append_live_samples(samples);
         let chunk_duration_s = (samples.len() / 2) as f64 / SAMPLE_RATE;
         self.next_chunk_pts_s = Some(if gap > GAP_TOLERANCE_S {
             corrected_pts_s + chunk_duration_s
@@ -163,7 +166,7 @@ impl LoopbackAssembler {
     /// Append a chunk when the device explicitly marked its timestamp invalid.
     pub fn push_contiguous_chunk(&mut self, interleaved: &[f32]) {
         self.ensure_initial_anchor(0.0);
-        self.buffered.extend_from_slice(interleaved);
+        self.append_live_samples(interleaved);
         if let Some(next_chunk_pts_s) = &mut self.next_chunk_pts_s {
             *next_chunk_pts_s += (interleaved.len() / 2) as f64 / SAMPLE_RATE;
         }
@@ -192,6 +195,23 @@ impl LoopbackAssembler {
 
     fn written_pairs(&self) -> u64 {
         self.frames_popped * FRAME_PAIRS + (self.buffered.len() / 2) as u64
+    }
+
+    fn append_live_samples(&mut self, interleaved: &[f32]) {
+        let fade_pairs = self
+            .late_recovery_fade_remaining_pairs
+            .min(interleaved.len() / 2);
+        self.buffered.reserve(interleaved.len());
+        for pair in interleaved[..fade_pairs * 2].chunks_exact(2) {
+            let completed =
+                LATE_RECOVERY_FADE_PAIRS - self.late_recovery_fade_remaining_pairs;
+            let gain = completed as f32 / (LATE_RECOVERY_FADE_PAIRS - 1) as f32;
+            self.buffered.push(pair[0] * gain);
+            self.buffered.push(pair[1] * gain);
+            self.late_recovery_fade_remaining_pairs -= 1;
+        }
+        self.buffered
+            .extend_from_slice(&interleaved[fade_pairs * 2..]);
     }
 
     fn ensure_initial_anchor(&mut self, pts_s: f64) {
@@ -506,9 +526,28 @@ mod tests {
             .iter()
             .all(|(_, frame)| frame.iter().all(|&sample| sample == 0.0)));
         assert!((frames[5].0 - 0.10).abs() < 1e-9);
-        assert!(frames[5].1.iter().all(|&sample| sample == 0.75));
+        assert_eq!(&frames[5].1[..2], &[0.0, 0.0]);
+        assert!(frames[5].1[480..].iter().all(|&sample| sample == 0.75));
         assert!((frames[6].0 - 0.12).abs() < 1e-9);
         assert!(frames[6].1.iter().all(|&sample| sample == 0.75));
+    }
+
+    #[test]
+    fn late_live_recovery_fades_in_without_dropping_samples() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &[]);
+        asm.advance_with_silence(0.10);
+
+        let outcome = asm.push_chunk(0.08, &pairs(960, 1.0));
+        let frames: Vec<_> = std::iter::from_fn(|| asm.pop_frame()).collect();
+
+        assert!(outcome.late_reanchor_s.is_some());
+        assert_eq!(frames.len(), 6, "no live sample may be discarded");
+        let recovered = &frames[5].1;
+        assert_eq!(&recovered[..2], &[0.0, 0.0]);
+        assert!(recovered[240] > 0.49 && recovered[240] < 0.52);
+        assert_eq!(&recovered[478..482], &[1.0, 1.0, 1.0, 1.0]);
+        assert!(recovered[482..].iter().all(|&sample| sample == 1.0));
     }
 
     #[test]
@@ -534,7 +573,8 @@ mod tests {
             "late audio must resume instead of locking out"
         );
         assert!((resumed[0].0 - 0.10).abs() < 1e-9);
-        assert!(resumed[0].1.iter().all(|&sample| sample == 0.75));
+        assert_eq!(&resumed[0].1[..2], &[0.0, 0.0]);
+        assert!(resumed[0].1[480..].iter().all(|&sample| sample == 0.75));
         assert!((resumed[1].0 - 0.12).abs() < 1e-9);
         assert!(resumed[1].1.iter().all(|&sample| sample == 0.50));
     }
