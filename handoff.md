@@ -4,6 +4,35 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): delayed WASAPI audio recovery
+
+A real 989-second League full-session recording exposed both enabled audio tracks stuttering into
+permanent silence. FFprobe confirmed a valid 59,332-frame H.264 video and two complete 49,458-packet
+Opus tracks, ruling out truncation or missing mux samples. Output contained real audio only around
+7.40--13.74 seconds and microphone only during the opening seconds; the rest decoded as exact
+digital silence. Clipline logged no device-loss error, and the original 995 MB session and its
+sidecars were inspected read-only and remain untouched.
+
+The finite WASAPI poller advances a quiet source with synthesized silence to keep it aligned with
+video. With only one Opus frame of delivery allowance, a delayed real buffer could arrive entirely
+behind that synthetic frontier. The assembler discarded it, the next video poll synthesized more
+silence, and a consistently delayed endpoint could never catch up; partial overlap caused the
+audible stutter before lockout.
+
+The assembler now distinguishes synthetic advancement from genuine duplicate/late buffers. When
+silence has overtaken live audio, it preserves the complete real chunk at the current monotonic
+position and retains that one timestamp correction for following chunks. Late chunks without a
+synthetic advance keep the prior trimming behavior. A typed, per-source, 30-second-rate-limited
+`wasapi_late_audio_reanchored` diagnostic records the correction in milliseconds. Deterministic
+partial- and full-overlap fixtures failed under the old behavior and now preserve every live sample.
+The real shared-clock hardware test passed with 16.6 ms maximum segment skew and 43.3 ms total
+drift, inside the existing 45 ms contract. Capture tests, workspace tests, warning-denied workspace
+Clippy, and clean-cache capture Clippy pass. Plan commit `71e9977`; implementation commit `65f45ff`.
+
+Retest a five-minute full session with output and microphone activity near the beginning, middle,
+and end, plus one replay save. Confirm neither track stutters into silence, both remain synced, and
+any `wasapi_late_audio_reanchored` log line is rate-limited and followed by audible recording.
+
 ## Checkpoint (2026-07-20): replay audio-origin save
 
 Manual replay acceptance after the full-session startup fix exposed the same
