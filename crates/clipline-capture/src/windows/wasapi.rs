@@ -55,7 +55,7 @@ use crate::traits::{AudioPacket, AudioSource, CaptureError};
 const OPUS_SAMPLE_RATE: u32 = 48_000;
 const POLLING_BUFFER_DURATION_100NS: i64 = 10_000_000; // One second.
 const PROCESS_LOOPBACK_ACTIVATION_TIMEOUT: Duration = Duration::from_millis(1500);
-const AUDIO_DELIVERY_HEADROOM_S: f64 = FRAME_DURATION_S + 0.010;
+const AUDIO_DELIVERY_HEADROOM_S: f64 = FRAME_DURATION_S * 3.0;
 
 #[derive(Debug, Clone)]
 pub struct AudioDeviceInfo {
@@ -1285,7 +1285,7 @@ impl AudioSource for WasapiLoopback {
     }
 
     fn finish_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
-        std::thread::sleep(Duration::from_secs_f64(FRAME_DURATION_S));
+        std::thread::sleep(Duration::from_secs_f64(AUDIO_DELIVERY_HEADROOM_S));
         let frames = self.pcm.finish_frames(until_pts_s)?;
         self.encode_frames(frames)?;
         Ok(self.take_packets_until(until_pts_s))
@@ -1495,8 +1495,8 @@ mod tests {
     }
 
     #[test]
-    fn audio_poll_horizon_leaves_thirty_milliseconds_for_delivery() {
-        assert_eq!(audio_poll_silence_horizon(0.5), Some(0.47));
+    fn audio_poll_horizon_leaves_three_opus_frames_for_delivery() {
+        assert_eq!(audio_poll_silence_horizon(0.5), Some(0.44));
         assert_eq!(audio_poll_silence_horizon(0.01), Some(0.0));
     }
 
