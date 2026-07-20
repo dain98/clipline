@@ -2784,7 +2784,7 @@ fn audio_preview_queue_applies_only_current_success_and_cancel_keeps_worker_slot
 }
 
 #[test]
-fn audio_sidecar_sync_uses_video_as_the_authoritative_transport() {
+fn audio_sidecar_sync_smoothly_corrects_playing_drift_and_hard_seeks_discontinuities() {
     let mut ctx = player_core_context();
     assert_eq!(
         eval_json(
@@ -2796,17 +2796,25 @@ fn audio_sidecar_sync_uses_video_as_the_authoritative_transport() {
                 { currentTime: 12.49 },
                 { forceSeek: true },
               ),
-              exactTolerance: PlayerCore.audioSidecarSyncDecision(
+              inSync: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 10, playbackRate: 1, paused: false, ended: false },
+                { currentTime: 9.99 },
+              ),
+              behind: PlayerCore.audioSidecarSyncDecision(
                 { currentTime: 10, playbackRate: 1, paused: false, ended: false },
                 { currentTime: 9.9 },
               ),
-              belowTolerance: PlayerCore.audioSidecarSyncDecision(
+              ahead: PlayerCore.audioSidecarSyncDecision(
                 { currentTime: 10, playbackRate: 1, paused: false, ended: false },
-                { currentTime: 9.901 },
+                { currentTime: 10.1 },
               ),
-              aboveTolerance: PlayerCore.audioSidecarSyncDecision(
+              discontinuity: PlayerCore.audioSidecarSyncDecision(
                 { currentTime: 10, playbackRate: 1, paused: false, ended: false },
-                { currentTime: 9.899 },
+                { currentTime: 9.49 },
+              ),
+              pausedDrift: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 10, playbackRate: 1, paused: true, ended: false },
+                { currentTime: 9.9 },
               ),
               invalidSidecar: PlayerCore.audioSidecarSyncDecision(
                 { currentTime: 4, playbackRate: 0, paused: true, ended: false },
@@ -2824,7 +2832,7 @@ fn audio_sidecar_sync_uses_video_as_the_authoritative_transport() {
             }))()
             "#,
         ),
-        r#"{"forced":{"seekTime":12.5,"playbackRate":1.5,"shouldPlay":true},"exactTolerance":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"belowTolerance":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"aboveTolerance":{"seekTime":10,"playbackRate":1,"shouldPlay":true},"invalidSidecar":{"seekTime":4,"playbackRate":1,"shouldPlay":false},"invalidVideo":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"ended":{"seekTime":null,"playbackRate":2,"shouldPlay":false}}"#
+        r#"{"forced":{"seekTime":12.5,"playbackRate":1.5,"shouldPlay":true},"inSync":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"behind":{"seekTime":null,"playbackRate":1.05,"shouldPlay":true},"ahead":{"seekTime":null,"playbackRate":0.95,"shouldPlay":true},"discontinuity":{"seekTime":10,"playbackRate":1,"shouldPlay":true},"pausedDrift":{"seekTime":10,"playbackRate":1,"shouldPlay":false},"invalidSidecar":{"seekTime":4,"playbackRate":1,"shouldPlay":false},"invalidVideo":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"ended":{"seekTime":null,"playbackRate":2,"shouldPlay":false}}"#
     );
 }
 

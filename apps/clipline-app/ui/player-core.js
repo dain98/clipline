@@ -16,7 +16,9 @@ const PlayerCore = (() => {
   // Fine-step fallback when the clip's true frame rate is unknown.
   const DEFAULT_FINE_STEP_S = 1 / 60;
   const QUICK_TRIM_WINDOW_S = 30;
-  const AUDIO_SIDECAR_DRIFT_TOLERANCE_S = 0.1;
+  const AUDIO_SIDECAR_DRIFT_DEADBAND_S = 0.025;
+  const AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S = 0.5;
+  const AUDIO_SIDECAR_RATE_CORRECTION = 0.05;
 
   // YouTube grammar: controls pin while paused, fade when playing and idle.
   const overlayVisible = (paused, idleMs) => paused || idleMs < OVERLAY_HIDE_MS;
@@ -1951,15 +1953,27 @@ const PlayerCore = (() => {
     const videoTime = Number(videoState && videoState.currentTime);
     const sidecarTime = Number(sidecarState && sidecarState.currentTime);
     const validVideoTime = Number.isFinite(videoTime) && videoTime >= 0;
-    const driftRequiresSeek = !Number.isFinite(sidecarTime)
-      || Math.abs(videoTime - sidecarTime) > AUDIO_SIDECAR_DRIFT_TOLERANCE_S;
     const rate = Number(videoState && videoState.playbackRate);
+    const playbackRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    const shouldPlay = !(videoState && videoState.paused) && !(videoState && videoState.ended);
+    const validSidecarTime = Number.isFinite(sidecarTime) && sidecarTime >= 0;
+    const drift = validVideoTime && validSidecarTime ? videoTime - sidecarTime : 0;
+    const driftMagnitude = Math.abs(drift);
+    const forceSeek = options.forceSeek === true
+      || !validSidecarTime
+      || (validVideoTime && driftMagnitude > AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S)
+      || (validVideoTime && !shouldPlay && driftMagnitude > AUDIO_SIDECAR_DRIFT_DEADBAND_S);
+    const correction = validVideoTime
+      && validSidecarTime
+      && shouldPlay
+      && !forceSeek
+      && driftMagnitude > AUDIO_SIDECAR_DRIFT_DEADBAND_S
+      ? (drift > 0 ? AUDIO_SIDECAR_RATE_CORRECTION : -AUDIO_SIDECAR_RATE_CORRECTION)
+      : 0;
     return {
-      seekTime: validVideoTime && (options.forceSeek === true || driftRequiresSeek)
-        ? videoTime
-        : null,
-      playbackRate: Number.isFinite(rate) && rate > 0 ? rate : 1,
-      shouldPlay: !(videoState && videoState.paused) && !(videoState && videoState.ended),
+      seekTime: validVideoTime && forceSeek ? videoTime : null,
+      playbackRate: playbackRate * (1 + correction),
+      shouldPlay,
     };
   };
 
