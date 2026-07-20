@@ -49,11 +49,13 @@ fn late_audio_reanchor_diagnostic_names_source_delay_and_suppression() {
     let event = CaptureDiagnostic::WasapiLateAudioReanchored {
         source: "microphone",
         correction_ms: 37,
+        total_correction_ms: 143,
+        chunk_ms: 10,
         suppressed_since_last: 4,
     };
 
     assert_eq!(
         event.to_string(),
-        "capture event=wasapi_late_audio_reanchored source=microphone correction_ms=37 suppressed_since_last=4 action=preserve_live_audio"
+        "capture event=wasapi_late_audio_reanchored source=microphone correction_ms=37 total_correction_ms=143 chunk_ms=10 suppressed_since_last=4 action=preserve_live_audio"
     );
 }

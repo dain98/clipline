@@ -57,6 +57,8 @@ impl DiscontinuityFade {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct PcmPushOutcome {
     pub late_reanchor_s: Option<f64>,
+    pub total_correction_s: f64,
+    pub chunk_duration_s: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -139,6 +141,8 @@ impl LoopbackAssembler {
         self.synthesized_since_real = false;
         PcmPushOutcome {
             late_reanchor_s: correction,
+            total_correction_s: self.source_pts_correction_s,
+            chunk_duration_s,
         }
     }
 
@@ -521,6 +525,8 @@ mod tests {
             frames.push(frame);
         }
         assert!((outcome.late_reanchor_s.unwrap() - 0.02).abs() < 1e-9);
+        assert!((outcome.total_correction_s - 0.02).abs() < 1e-9);
+        assert!((outcome.chunk_duration_s - 0.04).abs() < 1e-9);
         assert_eq!(frames.len(), 7);
         assert!(frames[..5]
             .iter()

@@ -10,6 +10,8 @@ pub enum CaptureDiagnostic {
     WasapiLateAudioReanchored {
         source: &'static str,
         correction_ms: u64,
+        total_correction_ms: u64,
+        chunk_ms: u64,
         suppressed_since_last: u64,
     },
 }
@@ -26,10 +28,12 @@ impl fmt::Display for CaptureDiagnostic {
             Self::WasapiLateAudioReanchored {
                 source,
                 correction_ms,
+                total_correction_ms,
+                chunk_ms,
                 suppressed_since_last,
             } => write!(
                 formatter,
-                "capture event=wasapi_late_audio_reanchored source={source} correction_ms={correction_ms} suppressed_since_last={suppressed_since_last} action=preserve_live_audio"
+                "capture event=wasapi_late_audio_reanchored source={source} correction_ms={correction_ms} total_correction_ms={total_correction_ms} chunk_ms={chunk_ms} suppressed_since_last={suppressed_since_last} action=preserve_live_audio"
             ),
         }
     }

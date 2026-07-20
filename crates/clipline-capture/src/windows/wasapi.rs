@@ -535,6 +535,9 @@ impl WasapiPcmCapture {
                             emit_diagnostic(CaptureDiagnostic::WasapiLateAudioReanchored {
                                 source: self.mode.diagnostic_label(),
                                 correction_ms: (correction_s * 1_000.0).round() as u64,
+                                total_correction_ms: (outcome.total_correction_s * 1_000.0)
+                                    .round() as u64,
+                                chunk_ms: (outcome.chunk_duration_s * 1_000.0).round() as u64,
                                 suppressed_since_last,
                             });
                         }
