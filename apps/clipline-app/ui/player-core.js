@@ -1729,6 +1729,8 @@ const PlayerCore = (() => {
         return { kind: "next-edit" };
       case "KeyS":
         return { kind: "toggle-snap" };
+      case "KeyF":
+        return { kind: "toggle-fullscreen" };
       case "Escape":
         return { kind: "close" };
       default:

@@ -1224,6 +1224,35 @@ function syncPlayState() {
   updateOverlay();
 }
 
+function reviewFullscreenActive() {
+  return document.fullscreenElement === stageFrame;
+}
+
+function syncReviewFullscreenState() {
+  const active = reviewFullscreenActive();
+  const button = $("fullscreen-toggle");
+  button.classList.toggle("active", active);
+  button.setAttribute("aria-pressed", String(active));
+  button.setAttribute("aria-label", active ? "Exit full screen" : "Enter full screen");
+  button.title = active ? "Exit full screen (F or Esc)" : "Full screen (F)";
+  updateStageFrame();
+  noteActivity();
+}
+
+async function toggleReviewFullscreen() {
+  if (!currentClip) return;
+  $("error").textContent = "";
+  try {
+    if (reviewFullscreenActive()) {
+      await document.exitFullscreen();
+    } else {
+      await stageFrame.requestFullscreen();
+    }
+  } catch (error) {
+    $("error").textContent = `full screen: ${error}`;
+  }
+}
+
 function syncVolume() {
   $("mute-toggle").classList.toggle("muted", reviewAudioMuted || reviewAudioVolume === 0);
   $("volume-slider").value = String(reviewAudioMuted ? 0 : reviewAudioVolume);
@@ -1540,6 +1569,8 @@ async function exportRangeAsClip(startS, endS, {
     const exportedClip = {
       path: exported.path,
       name: exported.name,
+      title: title || null,
+      kind: "trim",
       session: sourceClip.session || null,
       size_mb: Number(exported.size_mb) || 0,
       modified_unix: exported.modified_unix || Math.floor(Date.now() / 1000),
@@ -1550,6 +1581,7 @@ async function exportRangeAsClip(startS, endS, {
     invalidateLocalClipsRefresh();
     clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
     renderClips();
+    setDeckStatusAction("Open clip", () => openClip(exportedClip));
     await refreshStorage();
   } catch (e) {
     setDeckStatus("");

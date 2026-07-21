@@ -404,11 +404,13 @@ mod tests {
     fn no_enabled_games_can_skip_window_enumeration() {
         assert!(!has_enabled_games(&GameSettings {
             auto_detect: true,
+            pause_when_no_game: false,
             plugins: settings_with_all_plugins_disabled().plugins,
             custom_games: Vec::new(),
         }));
         assert!(!has_enabled_games(&GameSettings {
             auto_detect: true,
+            pause_when_no_game: false,
             plugins: settings_with_all_plugins_disabled().plugins,
             custom_games: vec![CustomGameSettings {
                 enabled: false,
@@ -580,6 +582,7 @@ mod tests {
     fn disabling_built_in_league_allows_custom_rules_to_take_over() {
         let settings = GameSettings {
             auto_detect: true,
+            pause_when_no_game: false,
             plugins: settings_with_league(false, GameRecordingMode::FullSession).plugins,
             custom_games: vec![game()],
         };

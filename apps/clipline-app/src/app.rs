@@ -623,6 +623,8 @@ struct PreparedRuntimeRestart {
 struct PreparedServiceRestart {
     old_tx: Option<Sender<Cmd>>,
     replacement: Option<(ServiceOptions, u64)>,
+    waiting_for_game: bool,
+    waiting_generation: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -630,6 +632,28 @@ struct CommittedRuntimeRestart<T> {
     old_tx: Option<Sender<Cmd>>,
     replacement: Option<(T, u64)>,
     cleared_active_game: bool,
+    waiting_for_game: bool,
+    waiting_generation: Option<u64>,
+}
+
+fn recorder_should_run(settings: &AppSettings, active_game: Option<&DetectedGame>) -> bool {
+    !settings.games.auto_detect || !settings.games.pause_when_no_game || active_game.is_some()
+}
+
+fn waiting_for_game_status() -> Event {
+    Event::Status {
+        recording: false,
+        waiting_for_game: true,
+        segments: 0,
+        buffered_s: 0.0,
+        buffered_mb: 0.0,
+        full_session: false,
+        encoder: String::new(),
+    }
+}
+
+fn emit_waiting_for_game<R: Runtime>(app: &AppHandle<R>) {
+    let _ = app.emit("status", waiting_for_game_status());
 }
 
 impl RuntimeState {
@@ -680,6 +704,15 @@ impl RuntimeState {
         inner.recording_generation = inner.recording_generation.wrapping_add(1);
         inner.last_save_request = None;
         true
+    }
+
+    fn waiting_generation_is_current(&self, generation: u64) -> bool {
+        self.0.lock().is_ok_and(|inner| {
+            inner.recording_generation == generation
+                && inner.recording_desired
+                && inner.tx.is_none()
+                && !recorder_should_run(&inner.settings, inner.active_game.as_ref())
+        })
     }
 
     /// Replace the decodable-codec set from the frontend's canPlayType probe.
@@ -734,7 +767,9 @@ impl RuntimeState {
     }
 
     fn prepare_service_restart(inner: &mut RuntimeInner) -> Result<PreparedServiceRestart, String> {
-        let next_options = if inner.recording_desired {
+        let should_run = inner.recording_desired
+            && recorder_should_run(&inner.settings, inner.active_game.as_ref());
+        let next_options = if should_run {
             let mut options = match Self::options(inner) {
                 Ok(options) => options,
                 Err(error) => {
@@ -759,6 +794,8 @@ impl RuntimeState {
         Ok(PreparedServiceRestart {
             old_tx,
             replacement: next_options.map(|options| (options, generation)),
+            waiting_for_game: inner.recording_desired && !should_run,
+            waiting_generation: (inner.recording_desired && !should_run).then_some(generation),
         })
     }
 
@@ -788,7 +825,7 @@ impl RuntimeState {
         } else {
             inner.active_game.as_ref()
         };
-        if inner.recording_desired {
+        if inner.recording_desired && recorder_should_run(&settings, active_game) {
             Self::options_for(
                 &settings,
                 inner.lol_url.clone(),
@@ -815,7 +852,8 @@ impl RuntimeState {
         } else {
             inner.active_game.as_ref()
         };
-        let next_options = if inner.recording_desired {
+        let should_run = inner.recording_desired && recorder_should_run(&settings, active_game);
+        let next_options = if should_run {
             let mut options = Self::options_for(
                 &settings,
                 inner.lol_url.clone(),
@@ -832,19 +870,27 @@ impl RuntimeState {
         if cleared_active_game {
             inner.active_game = None;
         }
-        let (old_tx, replacement) = if let Some(options) = next_options {
-            let old_tx = inner.tx.take();
+        let old_tx = inner.tx.take();
+        let replacement = if let Some(options) = next_options {
             let (tx, spawned) = spawn(options);
             let generation = Self::install_recording_sender(inner, tx);
-            (old_tx, Some((spawned, generation)))
+            Some((spawned, generation))
         } else {
-            (None, None)
+            None
         };
+        let waiting_for_game = inner.recording_desired && !should_run;
+        if waiting_for_game && old_tx.is_some() {
+            inner.recording_generation = inner.recording_generation.wrapping_add(1);
+            inner.last_save_request = None;
+        }
+        let waiting_generation = waiting_for_game.then_some(inner.recording_generation);
 
         Ok(CommittedRuntimeRestart {
             old_tx,
             replacement,
             cleared_active_game,
+            waiting_for_game,
+            waiting_generation,
         })
     }
 
@@ -857,6 +903,8 @@ impl RuntimeState {
             old_tx,
             replacement,
             cleared_active_game,
+            waiting_for_game,
+            waiting_generation,
         } = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             Self::commit_prepared_restart_with(&mut inner, prepared, service::spawn)?
@@ -866,6 +914,12 @@ impl RuntimeState {
         }
         if let Some((rx, generation)) = replacement {
             pump_events(app.clone(), rx, generation);
+        }
+        if waiting_for_game
+            && waiting_generation
+                .is_some_and(|generation| self.waiting_generation_is_current(generation))
+        {
+            emit_waiting_for_game(&app);
         }
         if cleared_active_game {
             let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
@@ -1024,16 +1078,26 @@ impl RuntimeState {
     }
 
     fn start_recording<R: Runtime>(&self, app: AppHandle<R>) -> Result<bool, String> {
-        let (rx, generation) = {
+        let started = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             if inner.tx.is_some() {
                 return Ok(true);
             }
-            let (tx, rx) = service::spawn(Self::options(&inner)?);
-            let generation = Self::install_recording_sender(&mut inner, tx);
-            (rx, generation)
+            inner.recording_desired = true;
+            inner.last_save_request = None;
+            if recorder_should_run(&inner.settings, inner.active_game.as_ref()) {
+                let (tx, rx) = service::spawn(Self::options(&inner)?);
+                let generation = Self::install_recording_sender(&mut inner, tx);
+                Some((rx, generation))
+            } else {
+                None
+            }
         };
-        pump_events(app, rx, generation);
+        if let Some((rx, generation)) = started {
+            pump_events(app, rx, generation);
+        } else {
+            emit_waiting_for_game(&app);
+        }
         Ok(true)
     }
 
@@ -1077,6 +1141,8 @@ impl RuntimeState {
             }
         };
         if let Some(prepared) = prepared_restart {
+            let waiting_for_game = prepared.waiting_for_game;
+            let waiting_generation = prepared.waiting_generation;
             if let Some(tx) = prepared.old_tx {
                 let _ = tx.send(Cmd::Stop { announce: false });
             }
@@ -1092,6 +1158,12 @@ impl RuntimeState {
                         let _ = tx.send(Cmd::Stop { announce: false });
                     }
                 }
+            }
+            if waiting_for_game
+                && waiting_generation
+                    .is_some_and(|generation| self.waiting_generation_is_current(generation))
+            {
+                emit_waiting_for_game(&app);
             }
         }
         if emit_event {
@@ -1195,6 +1267,16 @@ fn active_game_still_configured(settings: &AppSettings, active: Option<&Detected
 #[tauri::command]
 fn save_replay(state: tauri::State<RuntimeState>) {
     state.request_save();
+}
+
+#[tauri::command]
+fn restart_as_administrator<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    if crate::windows::current_process_is_elevated()? {
+        return Ok(false);
+    }
+    crate::windows::launch_elevated_after(std::process::id())?;
+    quit_app(&app);
+    Ok(true)
 }
 
 #[tauri::command]
@@ -2073,6 +2155,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             save_replay,
+            restart_as_administrator,
             set_recording,
             get_settings,
             minimize_main_window,
@@ -3048,6 +3131,120 @@ mod tests {
             |_| Ok(true),
         );
         assert!(!unknown_clipline.elevated_hotkeys_blocked);
+    }
+
+    #[test]
+    fn games_only_policy_requires_detection_and_an_active_game() {
+        let mut settings = AppSettings::default();
+        settings.games.pause_when_no_game = true;
+
+        assert!(!recorder_should_run(&settings, None));
+        assert!(recorder_should_run(
+            &settings,
+            Some(&detected_game("custom-game", "Game", 42))
+        ));
+
+        settings.games.auto_detect = false;
+        assert!(recorder_should_run(&settings, None));
+
+        settings.games.auto_detect = true;
+        settings.games.pause_when_no_game = false;
+        assert!(recorder_should_run(&settings, None));
+    }
+
+    #[test]
+    fn game_restart_pauses_service_but_keeps_recorder_armed() {
+        let (tx, _rx) = mpsc::channel();
+        let mut settings = AppSettings::default();
+        settings.games.pause_when_no_game = true;
+        let mut inner = RuntimeInner {
+            tx: Some(tx),
+            recording_generation: 1,
+            recording_desired: true,
+            settings,
+            lol_url: None,
+            active_game: None,
+            osu_title_events: Vec::new(),
+            last_save_request: Some(Instant::now()),
+            decodable_codecs: vec![service::Codec::H264],
+        };
+
+        let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
+
+        assert!(prepared.old_tx.is_some());
+        assert!(prepared.replacement.is_none());
+        assert!(prepared.waiting_for_game);
+        assert!(inner.recording_desired);
+        assert!(inner.tx.is_none());
+    }
+
+    #[test]
+    fn game_restart_resumes_an_armed_policy_pause() {
+        let mut settings = AppSettings::default();
+        settings.games.pause_when_no_game = true;
+        let mut inner = RuntimeInner {
+            tx: None,
+            recording_generation: 4,
+            recording_desired: true,
+            settings,
+            lol_url: None,
+            active_game: Some(detected_game("custom-game", "Game", 42)),
+            osu_title_events: Vec::new(),
+            last_save_request: None,
+            decodable_codecs: vec![service::Codec::H264],
+        };
+
+        let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
+
+        assert!(prepared.old_tx.is_none());
+        assert!(prepared.replacement.is_some());
+        assert!(!prepared.waiting_for_game);
+        assert!(inner.recording_desired);
+    }
+
+    #[test]
+    fn manual_stop_invalidates_a_pending_waiting_status() {
+        let mut settings = AppSettings::default();
+        settings.games.pause_when_no_game = true;
+        let state = RuntimeState::new(settings, None);
+        let waiting_generation = {
+            let mut inner = state.0.lock().unwrap();
+            inner.recording_desired = true;
+            RuntimeState::prepare_service_restart(&mut inner)
+                .unwrap()
+                .waiting_generation
+                .expect("policy pause must carry its generation")
+        };
+
+        state.stop_recording().unwrap();
+
+        assert!(!state.waiting_generation_is_current(waiting_generation));
+    }
+
+    #[test]
+    fn enabling_games_only_policy_stops_fallback_capture_at_commit() {
+        let (tx, _rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+        let mut changed = AppSettings::default();
+        changed.games.pause_when_no_game = true;
+        let prepared = state.prepare_settings_restart(changed).unwrap();
+
+        let mut spawned = false;
+        let committed = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+                spawned = true;
+                let (replacement_tx, _replacement_rx) = mpsc::channel();
+                (replacement_tx, ())
+            })
+            .unwrap()
+        };
+
+        assert!(!spawned);
+        assert!(committed.old_tx.is_some());
+        assert!(committed.replacement.is_none());
+        assert!(committed.waiting_for_game);
+        assert!(state.0.lock().unwrap().recording_desired);
     }
 
     #[test]

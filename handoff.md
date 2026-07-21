@@ -4,6 +4,32 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): recorder and review quality-of-life bundle
+
+Four requested workflow features are implemented. Settings > Games now has an opt-in `Pause
+recorder when no game is open` toggle, defaulting off for legacy and new settings. With automatic
+game detection enabled, the recorder remains armed in a distinct `Waiting` state without owning a
+capture/encode service; Save Replay is disabled until an enabled game appears, game entry starts a
+fresh buffer, and game exit stops the active run instead of falling back to desktop capture. The
+service generation guard also owns waiting notifications, so a concurrent manual stop cannot be
+overwritten by a stale policy transition.
+
+The elevated-game warning again offers an explicit `Restart as Administrator` action. Ordinary
+launches remain `asInvoker`, UAC cancellation keeps the normal process and retry UI alive, and a
+successful launch uses only the current executable plus an exact parent PID/creation-time handoff
+before the elevated child enters Tauri. This is a per-launch choice and the dialog warns that the
+rolling replay buffer resets.
+
+Successful trim/play exports now show an `Open clip` action next to the transient export status;
+the action opens the exact result already inserted into the library cache. The review transport
+also has fullscreen enter/exit controls backed by the WebView fullscreen API, with `F` toggling and
+Escape reserved for leaving fullscreen before the existing close-review shortcut.
+
+Focused settings, runtime-state, Windows handoff, player-core, and 82 UI-contract tests pass. The
+full workspace test suite passes, including the native device-aware suites, and fresh-cache app
+Clippy plus workspace Clippy pass with warnings denied. Native interaction acceptance remains for
+the four user-facing flows.
+
 ## Checkpoint (2026-07-21): Nightly 0.1.37
 
 Nightly 0.1.37 is the first updater build containing PR #89's combined audit remediation and the

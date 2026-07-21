@@ -15,9 +15,12 @@ $('win-close').addEventListener('click', requestWindowClose);
 listen("status", (e) => {
   const s = e.payload;
   recordingActive = s.recording;
+  recorderWaitingForGame = !!s.waiting_for_game;
+  recordingRequested = recordingActive || recorderWaitingForGame;
   activeEncoderLabel = s.recording ? String(s.encoder || "") : "";
   fullSessionRecordingActive = Boolean(s.full_session);
-  $("rail-dot").className = "dot" + (s.recording ? " on" : "");
+  $("rail-dot").className = "dot"
+    + (s.recording ? " on" : recorderWaitingForGame ? " waiting" : "");
   updateCaptureStatus();
 });
 
@@ -168,12 +171,16 @@ $("update-cancel").addEventListener("click", () => {
   $("update-dialog").close();
 });
 $("elevation-cancel").addEventListener("click", () => {
-  $("elevation-dialog").close();
+  if (!elevationRestartInFlight) $("elevation-dialog").close();
 });
+$("elevation-restart").addEventListener("click", restartAsAdministrator);
 $("elevation-dialog").addEventListener("click", (ev) => {
-  if (ev.target === $("elevation-dialog")) {
+  if (ev.target === $("elevation-dialog") && !elevationRestartInFlight) {
     $("elevation-dialog").close();
   }
+});
+$("elevation-dialog").addEventListener("cancel", (ev) => {
+  if (elevationRestartInFlight) ev.preventDefault();
 });
 $("elevation-dialog").addEventListener("close", () => maybeWarnElevatedGame(activeDetectedGame));
 $("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);
@@ -188,7 +195,9 @@ $("cloud-host-url").addEventListener("input", syncCloudHttpWarning);
 $("cloud-host-url").addEventListener("change", syncCloudHttpWarning);
 $("cloud-connect").addEventListener("click", connectCloud);
 $("cloud-disconnect").addEventListener("click", disconnectCloud);
-$("set-games-auto-detect").addEventListener("change", updateGameDetectionStatus);
+for (const id of ["set-games-auto-detect", "set-games-pause-when-empty"]) {
+  $(id).addEventListener("change", updateGameDetectionStatus);
+}
 for (const id of [
   "set-buffer",
   "set-replay",
@@ -365,6 +374,8 @@ $("game-event-rail-toggle").addEventListener("click", () => {
   setGameEventRailCollapsed(!gameEventRailCollapsed);
 });
 $("mute-toggle").addEventListener("click", toggleMute);
+$("fullscreen-toggle").addEventListener("click", toggleReviewFullscreen);
+document.addEventListener("fullscreenchange", syncReviewFullscreenState);
 $("rate-select").addEventListener("change", () => {
   video.playbackRate = Number($("rate-select").value);
 });
@@ -376,6 +387,7 @@ $("volume-slider").addEventListener("input", () => {
 });
 
 $("export-clip").addEventListener("click", exportTrim);
+$("deck-status-action").addEventListener("click", runDeckStatusAction);
 $("delete-clip").addEventListener("click", () => deleteClip());
 $("open-folder").addEventListener("click", openFolder);
 $("copy-clip").addEventListener("click", copyClipToClipboard);
@@ -553,6 +565,7 @@ document.addEventListener("keydown", (ev) => {
     }
   }
   if (!currentClip) return;
+  if (ev.code === "Escape" && reviewFullscreenActive()) return;
   const intent = keyIntent(ev.code, ev.shiftKey);
   if (!intent) return;
   ev.preventDefault();
@@ -587,6 +600,7 @@ document.addEventListener("keydown", (ev) => {
     case "toggle-snap":
       if (legacyTimelineEnabled()) toggleSnap();
       break;
+    case "toggle-fullscreen": toggleReviewFullscreen(); break;
     case "close": closeReview(); break;
   }
 });
@@ -594,7 +608,7 @@ document.addEventListener("keydown", (ev) => {
 function maybeWarnElevatedGame(game) {
   const dialog = $("elevation-dialog");
   if (!game || !game.active || !game.elevated_hotkeys_blocked) {
-    if (dialog.open) dialog.close();
+    if (dialog.open && !elevationRestartInFlight) dialog.close();
     return;
   }
   const processInstanceId = String(game.process_instance_id || "");
@@ -604,6 +618,39 @@ function maybeWarnElevatedGame(game) {
   warnedElevatedGameProcesses.add(processInstanceId);
   $("elevation-game-name").textContent = game.name || game.exe_name || "This game";
   dialog.showModal();
+}
+
+async function restartAsAdministrator() {
+  const button = $("elevation-restart");
+  const cancel = $("elevation-cancel");
+  const dialog = $("elevation-dialog");
+  elevationRestartInFlight = true;
+  button.disabled = true;
+  cancel.disabled = true;
+  button.textContent = "Waiting for Windows...";
+  $("error").textContent = "";
+  try {
+    const restarted = await invoke("restart_as_administrator");
+    if (!restarted) {
+      button.disabled = false;
+      cancel.disabled = false;
+      button.textContent = "Restart as Administrator";
+    }
+  } catch (error) {
+    button.disabled = false;
+    cancel.disabled = false;
+    button.textContent = "Restart as Administrator";
+    $("error").textContent = String(error);
+    if (!dialog.open) {
+      const processInstanceId = String(
+        (activeDetectedGame && activeDetectedGame.process_instance_id) || "",
+      );
+      if (processInstanceId) warnedElevatedGameProcesses.delete(processInstanceId);
+    }
+  } finally {
+    elevationRestartInFlight = false;
+  }
+  maybeWarnElevatedGame(activeDetectedGame);
 }
 
 /* ---- boot ---- */

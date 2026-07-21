@@ -406,9 +406,9 @@ fn active_recording_status_identifies_the_selected_encoder() {
     );
     assert!(
         update_status.contains("Stop recording · ${activeEncoderLabel}")
-            && update_status.contains(
-                "$(\"rail-status\").title = recordingActive ? recordingTitle : `Start ${source} recording`;"
-            ),
+            && update_status.contains("$(\"rail-status\").title = recordingActive")
+            && update_status.contains("? recordingTitle")
+            && update_status.contains(": `Start ${source} recording`;"),
         "the active recorder status must assign the concrete encoder selected by Automatic mode to the visible tooltip"
     );
 }
@@ -446,13 +446,17 @@ fn update_dialog_body_can_drag_frameless_window() {
 }
 
 #[test]
-fn elevated_game_hotkey_warning_offers_safe_guidance_once_per_process() {
+fn elevated_game_hotkey_warning_offers_explicit_restart_once_per_process() {
     let html = index_html();
     let js = main_js();
     let css = styles_css();
     let warning = js_function_body(&js, "maybeWarnElevatedGame");
 
-    for required in ["id=\"elevation-dialog\"", "id=\"elevation-cancel\""] {
+    for required in [
+        "id=\"elevation-dialog\"",
+        "id=\"elevation-restart\"",
+        "id=\"elevation-cancel\"",
+    ] {
         assert!(
             html.contains(required),
             "missing elevated-game UI: {required}"
@@ -462,12 +466,11 @@ fn elevated_game_hotkey_warning_offers_safe_guidance_once_per_process() {
         js.contains("elevated_hotkeys_blocked")
             && warning.contains("game.process_instance_id")
             && js.contains("warnedElevatedGameProcesses")
-            && warning.contains("if (dialog.open) dialog.close();")
-            && !js.contains("restart_as_administrator")
-            && !js.contains("restartAsAdministrator")
-            && !html.contains("Restart as Administrator")
-            && html.contains("without administrator privileges"),
-        "game detection must warn once per process instance and offer only non-elevation guidance"
+            && js.contains("restart_as_administrator")
+            && js.contains("restartAsAdministrator")
+            && html.contains("Restart as Administrator")
+            && html.contains("resets the current rolling replay buffer"),
+        "game detection must warn once per process instance and offer an explicit one-launch elevation action"
     );
     assert!(
         css.contains("#elevation-dialog"),
@@ -476,7 +479,7 @@ fn elevated_game_hotkey_warning_offers_safe_guidance_once_per_process() {
 }
 
 #[test]
-fn app_has_no_full_application_elevation_entrypoint() {
+fn administrator_restart_uses_an_exact_parent_handoff() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let app = app_rs();
     let main = fs::read_to_string(root.join("src/main.rs")).expect("read src/main.rs");
@@ -484,25 +487,69 @@ fn app_has_no_full_application_elevation_entrypoint() {
         fs::read_to_string(root.join("src/windows/mod.rs")).expect("read src/windows/mod.rs");
     let ui = main_js();
 
-    for (name, source) in [
-        ("app", app.as_str()),
-        ("main", main.as_str()),
-        ("windows", windows.as_str()),
-        ("ui", ui.as_str()),
+    assert!(
+        app.contains("fn restart_as_administrator")
+            && app.contains("crate::windows::launch_elevated_after(std::process::id())")
+            && app.contains("restart_as_administrator,"),
+        "the shell must expose only the current-executable administrator restart"
+    );
+    assert!(
+        main.contains("wait_for_elevation_parent_from_args"),
+        "the elevated child must finish the parent handoff before starting Tauri"
+    );
+    for required in [
+        "launch_elevated_after",
+        "--clipline-elevated-after",
+        "wait_for_elevation_parent_from_args",
+        "query_process_identity",
+        "\"runas\"",
     ] {
-        for forbidden in [
-            "restart_as_administrator",
-            "launch_elevated_after",
-            "wait_for_elevation_parent_from_args",
-            "--clipline-elevated-after",
-            "\"runas\"",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{name} must not retain full-app elevation entrypoint {forbidden}"
-            );
-        }
+        assert!(
+            windows.contains(required),
+            "the Windows boundary must retain exact-process handoff primitive {required}"
+        );
     }
+    assert!(
+        ui.contains("restart_as_administrator"),
+        "the affirmative UI action must invoke the narrow restart command"
+    );
+}
+
+#[test]
+fn quality_of_life_features_are_wired_through_the_app_shell() {
+    let html = index_html();
+    let js = main_js();
+    let core = player_core_js();
+    let css = styles_css();
+
+    assert!(
+        html.contains("id=\"set-games-pause-when-empty\"")
+            && html.contains("Pause recorder when no game is open")
+            && js.contains("pause_when_no_game: false")
+            && js.contains("pause_when_no_game: $(\"set-games-pause-when-empty\").checked"),
+        "Games settings must persist and expose the opt-in no-game pause policy"
+    );
+    assert!(
+        js.contains("waiting_for_game")
+            && js.contains("recorderWaitingForGame")
+            && js.contains("\"Waiting\""),
+        "recorder status must distinguish policy waiting from a manual stop"
+    );
+    assert!(
+        html.contains("id=\"deck-status-action\"")
+            && js.contains("setDeckStatusAction")
+            && js.contains("openClip(exportedClip)"),
+        "successful exports must offer a direct action to open the exact new clip"
+    );
+    assert!(
+        html.contains("id=\"fullscreen-toggle\"")
+            && js.contains("stageFrame.requestFullscreen()")
+            && js.contains("document.exitFullscreen()")
+            && js.contains("fullscreenchange")
+            && core.contains("toggle-fullscreen")
+            && css.contains("#stage-frame:fullscreen"),
+        "the review stage must expose and synchronize standard fullscreen playback"
+    );
 }
 
 fn library_rs() -> String {
@@ -633,6 +680,7 @@ fn review_player_owns_all_controls() {
         "id=\"time-readout\"",
         "id=\"rate-select\"",
         "id=\"mute-toggle\"",
+        "id=\"fullscreen-toggle\"",
         "id=\"volume-slider\"",
         "id=\"export-clip\"",
         "id=\"trim-summary\"",
@@ -1360,6 +1408,7 @@ fn review_player_owns_all_controls() {
         "id=\"prev-marker\"",
         "id=\"next-marker\"",
         "id=\"mute-toggle\"",
+        "id=\"fullscreen-toggle\"",
         "id=\"upload-clip\"",
         "id=\"open-folder\"",
         "id=\"copy-clip\"",
