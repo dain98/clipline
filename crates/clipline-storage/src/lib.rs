@@ -116,13 +116,16 @@ pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport
             if !meta.is_file() {
                 continue;
             }
+            let old_marker = clip_ownership_marker_path(&path)?;
+            if !old_marker.is_file() {
+                ensure_clip_owned(&path)?;
+            }
             if meta.len() == 0 {
                 remove_file_if_exists(&path)?;
                 remove_clip_ownership_marker(&path)?;
                 report.deleted_empty += 1;
                 continue;
             }
-            let old_marker = clip_ownership_marker_path(&path)?;
             let final_path = recording_final_path(&path)
                 .map(|candidate| unique_recovered_path(&candidate, &old_marker))
                 .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "invalid recording name"))?;
@@ -324,17 +327,51 @@ fn is_managed_clip(path: &Path) -> bool {
     if marker.is_file() {
         return true;
     }
-    // A crash occurs before ordinary clip sidecars are written, so only the
-    // ownership marker can safely identify a temporary recording. This also
-    // avoids adopting an unrelated temp file because a same-stem JSON file
-    // happens to exist.
+    // New recordings are identified by their ownership marker. Pre-marker
+    // releases can be adopted only through Clipline's generated filename.
     if is_recording_mp4(path) {
-        return false;
+        return is_legacy_generated_clip(path);
     }
     // Conservative legacy signals. Poster files are deliberately excluded:
     // merely previewing an unrelated MP4 can create one.
     path.with_extension("markers.json").is_file()
         || path.with_extension("osu-enrichment.json").is_file()
+        || is_legacy_generated_clip(path)
+}
+
+fn is_legacy_generated_clip(path: &Path) -> bool {
+    let candidate = if is_recording_mp4(path) {
+        let Some(final_path) = recording_final_path(path) else {
+            return false;
+        };
+        final_path
+    } else {
+        path.to_path_buf()
+    };
+    let Some(stem) = candidate.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    let Some(generated) = stem
+        .strip_prefix("clip_")
+        .or_else(|| stem.strip_prefix("session_"))
+    else {
+        return false;
+    };
+    let mut parts = generated.split('_');
+    let Some(timestamp) = parts.next() else {
+        return false;
+    };
+    if !(9..=20).contains(&timestamp.len()) || !timestamp.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    match (parts.next(), parts.next()) {
+        (None, None) => true,
+        (Some(attempt), None) => {
+            !attempt.is_empty() && attempt.bytes().all(|byte| byte.is_ascii_digit())
+        }
+        _ => false,
+    }
 }
 
 fn unique_recovered_path(candidate: &Path, current_marker: &Path) -> PathBuf {
@@ -520,6 +557,19 @@ mod tests {
     }
 
     #[test]
+    fn status_counts_unmarked_legacy_clipline_filenames() {
+        let dir = TestDir::new("clipline-storage", "legacy-generated-status");
+        dir.write("clip_1784525638.mp4", 10);
+        dir.write("2026-07-20 01-31/session_1784525639_1.mp4", 12);
+        dir.write("ordinary.mp4", 90);
+
+        let status = storage_status(dir.path(), None).unwrap();
+
+        assert_eq!(status.clip_count, 2);
+        assert_eq!(status.total_bytes, 22);
+    }
+
+    #[test]
     fn enforce_quota_never_deletes_unmarked_mp4_files() {
         let dir = TestDir::new("clipline-storage", "preserve-unowned-mp4");
         let unrelated = dir.write("unrelated.mp4", 90);
@@ -535,6 +585,19 @@ mod tests {
         assert!(!owned.exists());
         assert!(!owned_marker.exists());
         assert_eq!(report.status.total_bytes, 0);
+    }
+
+    #[test]
+    fn enforce_quota_deletes_unmarked_legacy_clipline_filenames() {
+        let dir = TestDir::new("clipline-storage", "legacy-generated-quota");
+        let legacy = dir.write("clip_1784525638.mp4", 10);
+        let unrelated = dir.write("ordinary.mp4", 90);
+
+        let report = enforce_quota(dir.path(), Some(0), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(!legacy.exists());
+        assert!(unrelated.exists());
     }
 
     #[test]
@@ -723,6 +786,20 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some("session_1.mp4")
         );
+    }
+
+    #[test]
+    fn recovery_adopts_unmarked_legacy_clipline_recording() {
+        let dir = TestDir::new("clipline-storage", "legacy-recording-recovery");
+        let recording = dir.write("2026-07-20 01-31/session_1784525638.mp4.recording", 10);
+
+        let report = recover_recording_files(dir.path()).unwrap();
+
+        let recovered = dir.path().join("2026-07-20 01-31/session_1784525638.mp4");
+        assert!(!recording.exists());
+        assert_eq!(report.recovered, vec![recovered.clone()]);
+        assert!(recovered.exists());
+        assert!(recovered.with_extension("clipline.json").is_file());
     }
 
     #[test]
