@@ -4,6 +4,13 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-21): Nightly 0.1.37
+
+Nightly 0.1.37 is the first updater build containing PR #89's combined audit remediation and the
+follow-up capture, replay, cloud, and review fixes. The release is built from the synchronized
+`main` / `develop` promotion point after workspace tests, warning-denied Clippy, Windows and Ubuntu
+CI, RustSec, and manual replay/audio verification passed.
+
 ## Checkpoint (2026-07-21): second PR 89 review pass
 
 The presigned object-upload client now refuses every redirect, matching the authenticated/control
