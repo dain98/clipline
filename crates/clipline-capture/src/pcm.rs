@@ -99,10 +99,15 @@ impl DiscontinuityFade {
             return;
         }
 
+        let mut fade_started = self.remaining_pairs < DISCONTINUITY_FADE_PAIRS;
         for pair in interleaved.chunks_exact_mut(2) {
             if self.remaining_pairs == 0 {
                 break;
             }
+            if !fade_started && pair[0] == 0.0 && pair[1] == 0.0 {
+                continue;
+            }
+            fade_started = true;
             let completed = DISCONTINUITY_FADE_PAIRS - self.remaining_pairs;
             let gain = completed as f32 / (DISCONTINUITY_FADE_PAIRS - 1) as f32;
             pair[0] *= gain;
@@ -733,6 +738,20 @@ mod tests {
         fade.restart();
         fade.apply(&mut steady);
         assert_eq!(&steady[..2], &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn discontinuity_fade_waits_through_leading_silence_inside_a_live_buffer() {
+        let mut fade = DiscontinuityFade::new();
+        let mut mixed = pairs(480, 0.0);
+        mixed.extend(pairs(480, 1.0));
+
+        fade.apply(&mut mixed);
+
+        assert_eq!(fade.remaining_pairs, DISCONTINUITY_FADE_PAIRS - 480);
+        assert!(mixed[..960].iter().all(|sample| *sample == 0.0));
+        assert_eq!(&mixed[960..962], &[0.0, 0.0]);
+        assert!((mixed[mixed.len() - 1] - 479.0 / 1_919.0).abs() < 1e-6);
     }
 
     #[test]
