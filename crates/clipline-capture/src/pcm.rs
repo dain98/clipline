@@ -8,12 +8,15 @@ use crate::opus::{FRAME_DURATION_S, FRAME_LEN};
 
 const SAMPLE_RATE: f64 = 48_000.0;
 /// Gaps shorter than half a frame are treated as device jitter.
+#[cfg(any(windows, test))]
 const GAP_TOLERANCE_S: f64 = FRAME_DURATION_S / 2.0;
 /// A bogus device timestamp must not allocate unbounded silence.
 const MAX_GAP_FILL_S: f64 = 5.0;
 const FRAME_PAIRS: u64 = (FRAME_LEN / 2) as u64;
+#[cfg(any(windows, test))]
 const DISCONTINUITY_FADE_PAIRS: usize = 1_920; // 40 ms at 48 kHz.
 const LATE_RECOVERY_FADE_PAIRS: usize = 240; // 5 ms at 48 kHz.
+#[cfg(any(windows, test))]
 const DEVICE_PACKET_QUIET_GRACE_S: f64 = 0.1;
 
 pub type PcmFrame = (f64, Vec<f32>);
@@ -22,15 +25,18 @@ pub type PcmFrame = (f64, Vec<f32>);
 /// QPC establishes the initial anchor and re-anchors after genuine quiet;
 /// continuously arriving PCM keeps its authoritative sample-count cadence.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg(any(windows, test))]
 pub(crate) enum DevicePacketPlacement {
     Timestamped(f64),
     Contiguous,
 }
 
+#[cfg(any(windows, test))]
 pub(crate) struct DevicePacketTimeline {
     needs_timestamp_anchor: bool,
 }
 
+#[cfg(any(windows, test))]
 impl DevicePacketTimeline {
     pub(crate) fn new() -> Self {
         Self {
@@ -67,10 +73,12 @@ impl DevicePacketTimeline {
     }
 }
 
+#[cfg(any(windows, test))]
 pub(crate) struct DiscontinuityFade {
     remaining_pairs: usize,
 }
 
+#[cfg(any(windows, test))]
 impl DiscontinuityFade {
     pub(crate) fn new() -> Self {
         Self {
@@ -105,6 +113,7 @@ impl DiscontinuityFade {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg(any(windows, test))]
 pub(crate) struct PcmPushOutcome {
     pub late_reanchor_s: Option<f64>,
     pub total_correction_s: f64,
@@ -128,6 +137,7 @@ pub struct LoopbackAssembler {
     /// Persistent correction established when synthesized silence overtakes
     /// delayed source timestamps. Following chunks keep their cadence rather
     /// than falling behind the synthetic frontier again.
+    #[cfg(any(windows, test))]
     source_pts_correction_s: f64,
     synthesized_since_real: bool,
     late_recovery_fade_remaining_pairs: usize,
@@ -141,6 +151,7 @@ impl LoopbackAssembler {
     }
 
     /// `pts_s` stamps the first sample of `interleaved` (stereo pairs).
+    #[cfg(any(windows, test))]
     pub(crate) fn push_chunk(&mut self, pts_s: f64, interleaved: &[f32]) -> PcmPushOutcome {
         if !pts_s.is_finite() {
             self.push_contiguous_chunk(interleaved);
@@ -276,6 +287,7 @@ impl LoopbackAssembler {
         }
     }
 
+    #[cfg(any(windows, test))]
     fn reanchor_next_pair(&mut self, source_pts_s: f64) {
         let pair_index = self.written_pairs();
         let prior_grid_pts = self.anchors.back().map_or(source_pts_s, |anchor| {
