@@ -470,6 +470,18 @@ fn same_path(left: &Path, right: &Path) -> bool {
         && crate::settings::validation::same_or_nested_path(right, left)
 }
 
+fn display_media_folder_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    let lowercase = path.to_ascii_lowercase();
+    if lowercase.starts_with(r"\\?\unc\") {
+        format!(r"\\{}", &path[8..])
+    } else if lowercase.starts_with(r"\\?\") {
+        path[4..].to_string()
+    } else {
+        path.into_owned()
+    }
+}
+
 #[derive(Default)]
 struct MicTestState(Mutex<MicTestInner>);
 
@@ -1529,7 +1541,7 @@ async fn choose_media_folder(
         .canonicalize()
         .map_err(|e| format!("resolve selected media folder {selected:?}: {e}"))?;
     authorization.authorize(selected.clone());
-    Ok(Some(selected.display().to_string()))
+    Ok(Some(display_media_folder_path(&selected)))
 }
 
 #[tauri::command]
@@ -4061,5 +4073,21 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         authorization.commit(&selected);
         assert!(authorization.validate_change(&old, &selected).is_err());
         assert!(authorization.validate_change(&selected, &selected).is_ok());
+    }
+
+    #[test]
+    fn media_folder_display_path_removes_windows_verbatim_prefixes() {
+        assert_eq!(
+            display_media_folder_path(Path::new(r"\\?\C:\Users\tester\Videos\Clipline")),
+            r"C:\Users\tester\Videos\Clipline"
+        );
+        assert_eq!(
+            display_media_folder_path(Path::new(r"\\?\UNC\nas\clips")),
+            r"\\nas\clips"
+        );
+        assert_eq!(
+            display_media_folder_path(Path::new(r"D:\Clips")),
+            r"D:\Clips"
+        );
     }
 }

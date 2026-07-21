@@ -1844,6 +1844,27 @@ fn library_refresh_starts_osu_enrichment_retry() {
 }
 
 #[test]
+fn library_refresh_canonicalizes_the_media_root_once_before_scoping_clips() {
+    let library = library_rs();
+    let list_start = library
+        .find("pub async fn list_clips<R: Runtime>")
+        .expect("list_clips command");
+    let list_end = library[list_start..]
+        .find("\nfn list_clips_from_dir")
+        .map(|offset| list_start + offset)
+        .expect("list_clips helper follows command");
+    let list = &library[list_start..list_end];
+
+    assert!(list.contains("let canonical_scope_root = canonical_media_root(&scope_root)?;"));
+    assert!(list.contains("allow_local_clip_asset_from_canonical_root("));
+    assert_eq!(
+        list.matches("canonical_media_root(&scope_root)").count(),
+        1,
+        "the unchanging media root should be resolved once per Library refresh"
+    );
+}
+
+#[test]
 fn game_event_rail_does_not_run_on_every_animation_frame() {
     let js = main_js();
     let schedule_overlay = js_function_body(&js, "scheduleOverlayIdleCheck");

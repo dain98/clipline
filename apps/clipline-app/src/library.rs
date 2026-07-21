@@ -253,8 +253,13 @@ pub async fn list_clips<R: Runtime>(
     let scan = tauri::async_runtime::spawn_blocking(move || list_clips_from_dir(dir))
         .await
         .map_err(|e| format!("list clips task: {e}"))??;
+    let canonical_scope_root = canonical_media_root(&scope_root)?;
     for clip in &scan.clips {
-        allow_local_clip_asset(&app, &scope_root, Path::new(&clip.path))?;
+        allow_local_clip_asset_from_canonical_root(
+            &app,
+            &canonical_scope_root,
+            Path::new(&clip.path),
+        )?;
     }
     Ok(scan)
 }
@@ -409,6 +414,14 @@ fn allow_local_clip_asset<R: Runtime>(
     allow_local_media_asset(app, root, clip, &["mp4"])
 }
 
+fn allow_local_clip_asset_from_canonical_root<R: Runtime>(
+    app: &AppHandle<R>,
+    canonical_root: &Path,
+    clip: &Path,
+) -> Result<(), String> {
+    allow_local_media_asset_from_canonical_root(app, canonical_root, clip, &["mp4"])
+}
+
 fn allow_local_poster_asset<R: Runtime>(
     app: &AppHandle<R>,
     root: &Path,
@@ -423,13 +436,25 @@ fn allow_local_media_asset<R: Runtime>(
     asset: &Path,
     extensions: &[&str],
 ) -> Result<(), String> {
-    let canonical_root = root
-        .canonicalize()
-        .map_err(|e| format!("canonicalize media root {root:?}: {e}"))?;
+    let canonical_root = canonical_media_root(root)?;
+    allow_local_media_asset_from_canonical_root(app, &canonical_root, asset, extensions)
+}
+
+fn canonical_media_root(root: &Path) -> Result<PathBuf, String> {
+    root.canonicalize()
+        .map_err(|e| format!("canonicalize media root {root:?}: {e}"))
+}
+
+fn allow_local_media_asset_from_canonical_root<R: Runtime>(
+    app: &AppHandle<R>,
+    canonical_root: &Path,
+    asset: &Path,
+    extensions: &[&str],
+) -> Result<(), String> {
     let canonical_asset = asset
         .canonicalize()
         .map_err(|e| format!("canonicalize media asset {asset:?}: {e}"))?;
-    if !canonical_asset.starts_with(&canonical_root) {
+    if !canonical_asset.starts_with(canonical_root) {
         return Err(format!(
             "media asset {canonical_asset:?} escaped root {canonical_root:?}"
         ));
