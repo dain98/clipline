@@ -911,7 +911,7 @@ dependencies = [
  "clipline-storage",
  "clipline-test-utils",
  "httpmock",
- "png 0.17.16",
+ "png 0.18.1",
  "reqwest 0.12.28",
  "rfd",
  "rodio",
