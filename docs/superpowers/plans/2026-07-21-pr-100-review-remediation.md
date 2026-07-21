@@ -57,3 +57,14 @@ support `PROCESS_MEMORY_COUNTERS_EX2`.
 - [ ] Commit and push the implementation so PR #100 updates.
 - [ ] Rebuild and relaunch Clipline for manual testing.
 
+## Task 5: Guard the manual-start Waiting notification
+
+**Files:**
+- Modify: `apps/clipline-app/src/app.rs`
+- Modify: `apps/clipline-app/tests/ui_contract.rs`
+
+- [ ] Add a failing contract regression requiring `start_recording` to re-check the durable Waiting
+      state after releasing the runtime lock.
+- [ ] Emit the manual-start Waiting status only when `current_waiting_status` still reports Waiting.
+- [ ] Run the focused contract test, workspace tests, and fresh-cache warning-denied Clippy.
+- [ ] Update `handoff.md`, commit, push, rebuild, and relaunch Clipline.
