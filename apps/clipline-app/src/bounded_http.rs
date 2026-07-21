@@ -47,6 +47,7 @@ pub(crate) fn object_stream_client() -> Result<&'static reqwest::Client, String>
         reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(STREAM_READ_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| format!("build bounded object HTTP stream client: {error}"))
     })
@@ -186,5 +187,31 @@ mod tests {
             .unwrap_err();
 
         assert!(error.contains("too large"));
+    }
+
+    #[tokio::test]
+    async fn object_stream_client_does_not_follow_redirects() {
+        let destination = MockServer::start();
+        let destination_request = destination.mock(|when, then| {
+            when.method(PUT).path("/redirect-target");
+            then.status(200);
+        });
+        let source = MockServer::start();
+        let location = format!("{}/redirect-target", destination.base_url());
+        source.mock(|when, then| {
+            when.method(PUT).path("/presigned-object");
+            then.status(307).header("location", &location);
+        });
+
+        let response = object_stream_client()
+            .unwrap()
+            .put(format!("{}/presigned-object", source.base_url()))
+            .body("clip bytes")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(destination_request.hits(), 0);
     }
 }
