@@ -400,6 +400,23 @@ fn frontend_reports_webview_readiness_to_native_shell() {
 }
 
 #[test]
+fn manual_recorder_start_rechecks_waiting_state_before_emit() {
+    let app = app_rs();
+    let start_recording = app
+        .split_once("fn start_recording<R: Runtime>")
+        .map(|(_, remainder)| remainder)
+        .and_then(|remainder| remainder.split_once("fn stop_recording"))
+        .map(|(body, _)| body)
+        .expect("find RuntimeState::start_recording body");
+
+    assert!(
+        start_recording.contains("else if let Some(status) = self.current_waiting_status()")
+            && start_recording.contains("app.emit(\"status\", status)"),
+        "manual start must re-check durable Waiting state after releasing the runtime lock"
+    );
+}
+
+#[test]
 fn active_recording_status_identifies_the_selected_encoder() {
     let js = main_js();
     let update_status = js_function_body(&js, "updateCaptureStatus");

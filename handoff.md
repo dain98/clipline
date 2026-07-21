@@ -19,6 +19,12 @@ on older supported Windows builds. Child processes request `PROCESS_VM_READ` onl
 New runtime race, readiness replay, UI contract, and memory fallback regressions pass; the full
 workspace test suite and a fresh-cache warning-denied workspace Clippy pass are green.
 
+An independent follow-up review found one remaining non-blocking race in manual recorder start:
+the Waiting notification was emitted after releasing the runtime lock without re-checking state.
+`start_recording` now queries the durable Waiting state immediately before emitting, so a game that
+starts a service in that gap prevents the stale Waiting update. A structural regression protects
+the guard; workspace tests and fresh-cache warning-denied Clippy remain green.
+
 ## Checkpoint (2026-07-21): elevation decision and privilege-invariant RAM meter
 
 The elevated-game warning now requires an explicit button choice. Backdrop clicks and Escape no

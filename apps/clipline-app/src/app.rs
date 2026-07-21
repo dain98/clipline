@@ -1112,8 +1112,8 @@ impl RuntimeState {
         };
         if let Some((rx, generation)) = started {
             pump_events(app, rx, generation);
-        } else {
-            emit_waiting_for_game(&app);
+        } else if let Some(status) = self.current_waiting_status() {
+            let _ = app.emit("status", status);
         }
         Ok(true)
     }
