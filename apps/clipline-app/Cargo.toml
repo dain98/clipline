@@ -31,7 +31,7 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 chrono = "0.4.45"
 rfd = "0.15"
-png = "0.17"
+png = "0.18"
 base64 = "0.22"
 rodio = { version = "0.17", default-features = false, features = ["vorbis"] }
 windows-sys = { version = "0.61", features = [
@@ -60,5 +60,5 @@ shiguredo_opus = { workspace = true }
 boa_engine = "0.21.1"
 clipline-test-utils = { path = "../../crates/clipline-test-utils" }
 httpmock = { workspace = true }
-png = "0.17"
+png = "0.18"
 serde_json = { workspace = true }
