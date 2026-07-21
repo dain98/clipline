@@ -72,13 +72,9 @@ impl DiagnosticLogWriter {
         }
         let rotation_result = rotate_diagnostic_log(&self.path, self.max_bytes);
         let reopen_result = open_diagnostic_log_file(&self.path);
-        match reopen_result {
-            Ok(file) => {
-                self.bytes_written = file.metadata().map_or(0, |meta| meta.len());
-                self.file = Some(file);
-            }
-            Err(error) => return Err(error),
-        }
+        let file = reopen_result?;
+        self.bytes_written = file.metadata().map_or(0, |meta| meta.len());
+        self.file = Some(file);
         rotation_result
     }
 }
