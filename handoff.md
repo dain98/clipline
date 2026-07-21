@@ -4,6 +4,15 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-21): Nightly 0.1.38
+
+Nightly 0.1.38 contains PR #100's recorder and review quality-of-life release. It adds an optional
+games-only recorder pause with a durable Waiting state, explicit restart-as-administrator handling
+for elevated games, immediate opening of newly exported clips, and fullscreen review playback. The
+follow-up review remediation makes recorder transitions generation-safe, replays startup Waiting
+state after frontend readiness, and preserves accurate private-working-set RAM sampling across
+normal/elevated launches and older supported Windows builds.
+
 ## Checkpoint (2026-07-21): PR 100 review remediation
 
 All five unresolved PR 100 findings are addressed. Recorder status events are now accepted only
