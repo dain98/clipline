@@ -6,11 +6,17 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows_sys::Win32::System::ProcessStatus::{
-    K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
+use windows_sys::Win32::System::Memory::{
+    VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE,
 };
+use windows_sys::Win32::System::ProcessStatus::{
+    K32GetProcessMemoryInfo, K32QueryWorkingSetEx, PROCESS_MEMORY_COUNTERS,
+    PROCESS_MEMORY_COUNTERS_EX2, PSAPI_WORKING_SET_EX_INFORMATION,
+};
+use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_VM_READ,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -20,6 +26,7 @@ pub struct MemoryStatus {
 
 const MEMORY_SAMPLE_CACHE_TTL: Duration = Duration::from_secs(1);
 const MEMORY_QUERY_ACCESS: u32 = PROCESS_QUERY_LIMITED_INFORMATION;
+const LEGACY_MEMORY_QUERY_ACCESS: u32 = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ;
 
 struct CachedMemorySample {
     completed_at: Instant,
@@ -156,14 +163,30 @@ fn process_name_from_wide(name: &[u16]) -> String {
 }
 
 fn query_process_private_working_set_for_pid(pid: u32) -> Result<u64, String> {
-    let handle = unsafe { OpenProcess(MEMORY_QUERY_ACCESS, 0, pid) };
+    let primary = with_process_handle(pid, MEMORY_QUERY_ACCESS, |handle| {
+        query_process_private_working_set_ex2(handle)
+    });
+    query_with_fallback(primary, || {
+        let page_size = page_size()?;
+        with_process_handle(pid, LEGACY_MEMORY_QUERY_ACCESS, |handle| {
+            process_private_working_set_bytes(handle, page_size)
+        })
+    })
+}
+
+fn with_process_handle(
+    pid: u32,
+    access: u32,
+    query: impl FnOnce(HANDLE) -> Result<u64, String>,
+) -> Result<u64, String> {
+    let handle = unsafe { OpenProcess(access, 0, pid) };
     if handle.is_null() {
         return Err(format!(
-            "open process {pid} for memory counters: {}",
+            "open process {pid} for memory query: {}",
             std::io::Error::last_os_error()
         ));
     }
-    let result = query_process_private_working_set(handle);
+    let result = query(handle);
     unsafe {
         CloseHandle(handle);
     }
@@ -171,6 +194,12 @@ fn query_process_private_working_set_for_pid(pid: u32) -> Result<u64, String> {
 }
 
 fn query_process_private_working_set(handle: HANDLE) -> Result<u64, String> {
+    query_with_fallback(query_process_private_working_set_ex2(handle), || {
+        process_private_working_set_bytes(handle, page_size()?)
+    })
+}
+
+fn query_process_private_working_set_ex2(handle: HANDLE) -> Result<u64, String> {
     let mut counters = PROCESS_MEMORY_COUNTERS_EX2 {
         cb: size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32,
         ..Default::default()
@@ -189,6 +218,123 @@ fn query_process_private_working_set(handle: HANDLE) -> Result<u64, String> {
         ));
     }
     Ok(counters.PrivateWorkingSetSize as u64)
+}
+
+fn query_with_fallback(
+    primary: Result<u64, String>,
+    fallback: impl FnOnce() -> Result<u64, String>,
+) -> Result<u64, String> {
+    match primary {
+        Ok(bytes) => Ok(bytes),
+        Err(primary_error) => fallback().map_err(|fallback_error| {
+            format!("{primary_error}; legacy working set query: {fallback_error}")
+        }),
+    }
+}
+
+fn process_private_working_set_bytes(handle: HANDLE, page_size: usize) -> Result<u64, String> {
+    let mut addr = 0usize;
+    let mut total_pages = 0u64;
+    let mut saw_region = false;
+
+    loop {
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { zeroed() };
+        let read = unsafe {
+            VirtualQueryEx(
+                handle,
+                addr as *const _,
+                &mut info,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if read == 0 {
+            if !saw_region {
+                return Err(format!(
+                    "query process memory map: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            break;
+        }
+        saw_region = true;
+
+        let base = info.BaseAddress as usize;
+        let size = info.RegionSize;
+        if info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && size > 0 {
+            total_pages =
+                total_pages.saturating_add(resident_private_pages(handle, base, size, page_size)?);
+        }
+
+        let next = base.saturating_add(size);
+        if next <= addr {
+            break;
+        }
+        addr = next;
+    }
+
+    Ok(total_pages.saturating_mul(page_size as u64))
+}
+
+fn resident_private_pages(
+    handle: HANDLE,
+    base: usize,
+    size: usize,
+    page_size: usize,
+) -> Result<u64, String> {
+    const WS_VALID: usize = 1;
+    const WS_SHARED: usize = 1 << 15;
+    const CHUNK_PAGES: usize = 4096;
+
+    let pages = size.div_ceil(page_size);
+    if pages == 0 {
+        return Ok(0);
+    }
+
+    let mut resident = 0u64;
+    let mut page = 0usize;
+    while page < pages {
+        let count = (pages - page).min(CHUNK_PAGES);
+        let mut query: Vec<PSAPI_WORKING_SET_EX_INFORMATION> = (0..count)
+            .map(|i| PSAPI_WORKING_SET_EX_INFORMATION {
+                VirtualAddress: (base + (page + i) * page_size) as *mut _,
+                VirtualAttributes: Default::default(),
+            })
+            .collect();
+        let bytes = query
+            .len()
+            .checked_mul(size_of::<PSAPI_WORKING_SET_EX_INFORMATION>())
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| "working set query chunk is too large".to_string())?;
+
+        let ok = unsafe { K32QueryWorkingSetEx(handle, query.as_mut_ptr().cast(), bytes) };
+        if ok == 0 {
+            return Err(format!(
+                "query process working set: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        resident += query
+            .iter()
+            .filter(|entry| {
+                let flags = unsafe { entry.VirtualAttributes.Flags };
+                flags & WS_VALID != 0 && flags & WS_SHARED == 0
+            })
+            .count() as u64;
+        page += count;
+    }
+
+    Ok(resident)
+}
+
+fn page_size() -> Result<usize, String> {
+    let mut info: SYSTEM_INFO = unsafe { zeroed() };
+    unsafe {
+        GetSystemInfo(&mut info);
+    };
+    if info.dwPageSize == 0 {
+        return Err("could not read system page size".into());
+    }
+    Ok(info.dwPageSize as usize)
 }
 
 struct Snapshot {
@@ -244,6 +390,34 @@ mod tests {
             .expect("the current process should expose extended memory counters");
 
         assert!(bytes > 0);
+    }
+
+    #[test]
+    fn unavailable_ex2_query_uses_legacy_fallback() {
+        let fallback_called = std::cell::Cell::new(false);
+
+        let bytes = query_with_fallback(Err("EX2 unavailable".into()), || {
+            fallback_called.set(true);
+            Ok(42)
+        })
+        .unwrap();
+
+        assert_eq!(bytes, 42);
+        assert!(fallback_called.get());
+    }
+
+    #[test]
+    fn successful_ex2_query_skips_legacy_fallback() {
+        let fallback_called = std::cell::Cell::new(false);
+
+        let bytes = query_with_fallback(Ok(42), || {
+            fallback_called.set(true);
+            Ok(7)
+        })
+        .unwrap();
+
+        assert_eq!(bytes, 42);
+        assert!(!fallback_called.get());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

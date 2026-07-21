@@ -389,10 +389,17 @@ async fn memory_status(
 }
 
 #[tauri::command]
-fn frontend_ready(startup_warnings: tauri::State<StartupWarnings>) -> Vec<String> {
+fn frontend_ready<R: Runtime>(
+    app: AppHandle<R>,
+    runtime: tauri::State<RuntimeState>,
+    startup_warnings: tauri::State<StartupWarnings>,
+) -> Vec<String> {
     let was_ready = FRONTEND_READY.swap(true, Ordering::AcqRel);
     if !was_ready {
         log_diagnostic("frontend_ready received");
+    }
+    if let Some(status) = runtime.current_waiting_status() {
+        let _ = app.emit("status", status);
     }
     startup_warnings.take()
 }
@@ -692,18 +699,28 @@ impl RuntimeState {
         inner.recording_generation
     }
 
-    fn clear_recording_sender_for_generation(&self, generation: u64) -> bool {
+    fn accept_service_status(&self, generation: u64, recording: bool) -> bool {
         let Ok(mut inner) = self.0.lock() else {
             return false;
         };
         if inner.recording_generation != generation || inner.tx.is_none() {
             return false;
         }
-        inner.tx = None;
-        inner.recording_desired = false;
-        inner.recording_generation = inner.recording_generation.wrapping_add(1);
-        inner.last_save_request = None;
+        if !recording {
+            inner.tx = None;
+            inner.recording_desired = false;
+            inner.recording_generation = inner.recording_generation.wrapping_add(1);
+            inner.last_save_request = None;
+        }
         true
+    }
+
+    fn current_waiting_status(&self) -> Option<Event> {
+        let inner = self.0.lock().ok()?;
+        (inner.recording_desired
+            && inner.tx.is_none()
+            && !recorder_should_run(&inner.settings, inner.active_game.as_ref()))
+        .then(waiting_for_game_status)
     }
 
     fn waiting_generation_is_current(&self, generation: u64) -> bool {
@@ -879,7 +896,7 @@ impl RuntimeState {
             None
         };
         let waiting_for_game = inner.recording_desired && !should_run;
-        if waiting_for_game && old_tx.is_some() {
+        if waiting_for_game {
             inner.recording_generation = inner.recording_generation.wrapping_add(1);
             inner.last_save_request = None;
         }
@@ -2501,13 +2518,13 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
                     .state::<crate::library::StorageSettings>()
                     .set_media_dir(media_root);
             }
-            if let Event::Status {
-                recording: false, ..
-            } = &event
-            {
-                handle
+            if let Event::Status { recording, .. } = &event {
+                let accepted = handle
                     .state::<RuntimeState>()
-                    .clear_recording_sender_for_generation(generation);
+                    .accept_service_status(generation, *recording);
+                if !accepted {
+                    continue;
+                }
             }
             let _ = match &event {
                 Event::MediaRootResolved { .. } => Ok(()),
@@ -2968,7 +2985,7 @@ mod tests {
             inner.recording_generation
         };
 
-        assert!(state.clear_recording_sender_for_generation(generation));
+        assert!(state.accept_service_status(generation, false));
 
         let inner = state.0.lock().unwrap();
         assert!(inner.tx.is_none());
@@ -2987,9 +3004,49 @@ mod tests {
             RuntimeState::install_recording_sender(&mut inner, new_tx);
         }
 
-        assert!(!state.clear_recording_sender_for_generation(stale_generation));
+        assert!(!state.accept_service_status(stale_generation, false));
         assert!(state.send(Cmd::Save));
         assert!(matches!(new_rx.try_recv(), Ok(Cmd::Save)));
+    }
+
+    #[test]
+    fn stale_stopped_status_is_rejected_after_entering_waiting() {
+        let (tx, _rx) = mpsc::channel();
+        let mut settings = AppSettings::default();
+        settings.games.pause_when_no_game = true;
+        let state = RuntimeState::with_sender(tx, settings, None);
+        let stale_generation = state.0.lock().unwrap().recording_generation;
+
+        let waiting_generation = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::prepare_service_restart(&mut inner)
+                .unwrap()
+                .waiting_generation
+                .unwrap()
+        };
+
+        assert!(!state.accept_service_status(stale_generation, false));
+        assert!(state.waiting_generation_is_current(waiting_generation));
+    }
+
+    #[test]
+    fn armed_waiting_status_is_available_for_frontend_replay() {
+        let mut settings = AppSettings::default();
+        settings.games.pause_when_no_game = true;
+        let state = RuntimeState::new(settings, None);
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.recording_desired = true;
+        }
+
+        assert!(matches!(
+            state.current_waiting_status(),
+            Some(Event::Status {
+                recording: false,
+                waiting_for_game: true,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -3245,6 +3302,48 @@ mod tests {
         assert!(committed.replacement.is_none());
         assert!(committed.waiting_for_game);
         assert!(state.0.lock().unwrap().recording_desired);
+    }
+
+    #[test]
+    fn committed_waiting_invalidates_detector_restart_already_spawning() {
+        let (initial_tx, _initial_rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(initial_tx, AppSettings::default(), None);
+        let detector_restart = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::prepare_service_restart(&mut inner).unwrap()
+        };
+        let (_options, detector_generation) = detector_restart.replacement.unwrap();
+
+        let mut waiting_settings = AppSettings::default();
+        waiting_settings.games.pause_when_no_game = true;
+        let prepared = state.prepare_settings_restart(waiting_settings).unwrap();
+        let committed: CommittedRuntimeRestart<()> = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+                unreachable!("waiting must not spawn a recorder")
+            })
+            .unwrap()
+        };
+        assert!(committed.waiting_for_game);
+        assert!(committed.old_tx.is_none());
+
+        let (stale_tx, stale_rx) = mpsc::channel();
+        let rejected = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::install_prepared_service_restart(
+                &mut inner,
+                detector_generation,
+                stale_tx,
+            )
+            .unwrap_err()
+        };
+        rejected.send(Cmd::Stop { announce: false }).unwrap();
+
+        assert!(matches!(
+            stale_rx.try_recv(),
+            Ok(Cmd::Stop { announce: false })
+        ));
+        assert!(!state.send(Cmd::Save));
     }
 
     #[test]

@@ -384,8 +384,12 @@ fn frontend_reports_webview_readiness_to_native_shell() {
     let js = main_js();
 
     assert!(
-        app.contains("fn frontend_ready(startup_warnings:") && app.contains("frontend_ready,"),
-        "Rust shell must expose frontend_ready with durable startup diagnostics"
+        app.contains("fn frontend_ready<R: Runtime>(")
+            && app.contains("runtime: tauri::State<RuntimeState>")
+            && app.contains("startup_warnings: tauri::State<StartupWarnings>")
+            && app.contains("runtime.current_waiting_status()")
+            && app.contains("frontend_ready,"),
+        "Rust shell must expose frontend_ready with durable startup diagnostics and recorder status replay"
     );
     assert!(
         js.contains("invoke(\"frontend_ready\")")

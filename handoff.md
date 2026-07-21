@@ -4,6 +4,21 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-21): PR 100 review remediation
+
+All five unresolved PR 100 findings are addressed. Recorder status events are now accepted only
+from the currently installed service generation, so late stopped/recording events cannot overwrite
+the intentional games-only `Waiting` state after either game detection or a settings restart.
+Committing a waiting settings transition always advances the generation, including the no-sender
+race where a detector restart is already spawning. The frontend readiness handshake also replays
+the durable waiting status after its listeners exist, eliminating the startup-only lost event.
+
+The RAM sampler keeps the low-privilege `PROCESS_MEMORY_COUNTERS_EX2` fast path but falls back to
+the prior `VirtualQueryEx` / `QueryWorkingSetEx` resident-private-page walk when EX2 is unavailable
+on older supported Windows builds. Child processes request `PROCESS_VM_READ` only for that fallback.
+New runtime race, readiness replay, UI contract, and memory fallback regressions pass; the full
+workspace test suite and a fresh-cache warning-denied workspace Clippy pass are green.
+
 ## Checkpoint (2026-07-21): elevation decision and privilege-invariant RAM meter
 
 The elevated-game warning now requires an explicit button choice. Backdrop clicks and Escape no
