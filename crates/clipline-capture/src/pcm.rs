@@ -4,7 +4,9 @@
 
 use std::collections::VecDeque;
 
-use crate::opus::{FRAME_DURATION_S, FRAME_LEN};
+#[cfg(any(windows, test))]
+use crate::opus::FRAME_DURATION_S;
+use crate::opus::FRAME_LEN;
 
 const SAMPLE_RATE: f64 = 48_000.0;
 /// Gaps shorter than half a frame are treated as device jitter.
