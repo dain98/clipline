@@ -3139,6 +3139,10 @@ fn cloud_tab_click_forces_authoritative_refresh() {
             && records.contains("cloudClipsCache,"),
         "the renderer must distinguish an authoritative server response from an uninitialized cache"
     );
+    assert!(
+        !records.contains("Boolean(cloudClipsError)"),
+        "a failed refresh must preserve cached completed uploads"
+    );
 }
 
 #[test]
@@ -3278,7 +3282,8 @@ fn clipboard_copy_sends_selected_audio_tracks() {
             && library.contains("request: CopyClipToClipboardRequest")
             && library.contains("window: tauri::WebviewWindow")
             && library.contains(".hwnd()")
-            && library.contains("EmptyClipboard()"),
+            && library.contains("SetClipboardData(CF_HDROP as u32")
+            && !library.contains("EmptyClipboard()"),
         "clipboard command should accept selected audio while native clipboard ownership comes from the invoking Clipline window",
     );
     assert!(

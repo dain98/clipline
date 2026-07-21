@@ -1409,21 +1409,6 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     let target = validate_clip_path(&storage, &request.path)?;
     let settings = state.settings();
     let cloud = settings.cloud.clone();
-    if let Some(record) = existing_uploaded_record(&cloud, None, &request.path) {
-        return Ok(CloudUploadResult { record, clip: None });
-    }
-    let token_target = cloud
-        .credential_target
-        .clone()
-        .ok_or_else(|| "connect to Clipline Cloud first".to_string())?;
-    let token = read_credential(&token_target)?;
-    let client = connected_client(&cloud, &token)?;
-    let visibility = request
-        .visibility
-        .as_deref()
-        .map(normalize_cloud_visibility)
-        .unwrap_or_else(|| cloud.default_visibility.clone());
-    let description = normalize_upload_description(request.description.as_deref());
 
     let meta = std::fs::metadata(&target).map_err(|e| format!("read clip metadata: {e}"))?;
     if meta.len() == 0 {
@@ -1447,6 +1432,18 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     if let Some(record) = existing_uploaded_record(&cloud, Some(&local_clip_id), &request.path) {
         return Ok(CloudUploadResult { record, clip: None });
     }
+    let token_target = cloud
+        .credential_target
+        .clone()
+        .ok_or_else(|| "connect to Clipline Cloud first".to_string())?;
+    let token = read_credential(&token_target)?;
+    let client = connected_client(&cloud, &token)?;
+    let visibility = request
+        .visibility
+        .as_deref()
+        .map(normalize_cloud_visibility)
+        .unwrap_or_else(|| cloud.default_visibility.clone());
+    let description = normalize_upload_description(request.description.as_deref());
     let mut record = CloudUploadRecord {
         local_clip_id: local_clip_id.clone(),
         // Store the path exactly as `list_clips` emits it (non-canonical), so the
@@ -2075,11 +2072,8 @@ fn existing_uploaded_record(
             && record.remote_url.is_some()
             && record.upload_status.starts_with("uploaded_")
     };
-    if let Some(record) = local_clip_id
-        .and_then(|local_clip_id| cloud.uploads.get(local_clip_id))
-        .filter(uploaded)
-    {
-        return Some(record.clone());
+    if let Some(local_clip_id) = local_clip_id {
+        return cloud.uploads.get(local_clip_id).filter(uploaded).cloned();
     }
     cloud
         .uploads
@@ -2630,7 +2624,16 @@ mod tests {
 
         assert_eq!(
             existing_uploaded_record(&cloud, None, r"D:\Videos\Clipline\clip.mp4"),
-            Some(record)
+            Some(record.clone())
+        );
+        assert_eq!(
+            existing_uploaded_record(
+                &cloud,
+                Some("different-payload-hash"),
+                r"D:\Videos\Clipline\clip.mp4"
+            ),
+            None,
+            "a changed payload at the same path must not reuse an older upload"
         );
     }
 

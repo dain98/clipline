@@ -26,9 +26,7 @@ use clipline_mp4::{
 };
 use clipline_storage::storage_status as read_storage_status;
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
-use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
-};
+use windows_sys::Win32::System::DataExchange::{CloseClipboard, OpenClipboard, SetClipboardData};
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows_sys::Win32::System::Ole::CF_HDROP;
 use windows_sys::Win32::UI::Shell::DROPFILES;
@@ -1786,13 +1784,6 @@ fn copy_file_to_clipboard(path: &Path, owner: HWND) -> Result<(), String> {
             CloseClipboard();
         },
         || {
-            if unsafe { EmptyClipboard() } == 0 {
-                Err(last_os_error("empty clipboard"))
-            } else {
-                Ok(())
-            }
-        },
-        || {
             if unsafe { SetClipboardData(CF_HDROP as u32, transfer.handle()) }.is_null() {
                 Err(last_os_error("set clipboard data"))
             } else {
@@ -1808,7 +1799,6 @@ fn clipboard_transaction<E>(
     attempts: usize,
     mut open: impl FnMut() -> Result<(), E>,
     mut close: impl FnMut(),
-    mut empty: impl FnMut() -> Result<(), E>,
     mut set: impl FnMut() -> Result<(), E>,
     mut wait: impl FnMut(),
 ) -> Result<(), E> {
@@ -1816,7 +1806,7 @@ fn clipboard_transaction<E>(
     for attempt in 0..attempts.max(1) {
         match open() {
             Ok(()) => {
-                let result = empty().and_then(|()| set());
+                let result = set();
                 close();
                 return result;
             }
@@ -4128,10 +4118,6 @@ mod tests {
             },
             || events.borrow_mut().push("close"),
             || {
-                events.borrow_mut().push("empty");
-                Ok(())
-            },
-            || {
                 events.borrow_mut().push("set");
                 Ok(())
             },
@@ -4140,45 +4126,31 @@ mod tests {
         assert_eq!(result, Ok(()));
         assert_eq!(
             events.into_inner(),
-            vec!["open", "wait", "open", "wait", "open", "empty", "set", "close"]
+            vec!["open", "wait", "open", "wait", "open", "set", "close"]
         );
 
-        for (fail_empty, expected) in [
-            (true, vec!["open", "empty", "close"]),
-            (false, vec!["open", "empty", "set", "close"]),
-        ] {
-            let events = RefCell::new(Vec::new());
-            let result = clipboard_transaction(
-                1,
-                || {
-                    events.borrow_mut().push("open");
-                    Ok::<(), &str>(())
-                },
-                || events.borrow_mut().push("close"),
-                || {
-                    events.borrow_mut().push("empty");
-                    if fail_empty {
-                        Err("empty")
-                    } else {
-                        Ok(())
-                    }
-                },
-                || {
-                    events.borrow_mut().push("set");
-                    Err("set")
-                },
-                || unreachable!(),
-            );
-            assert!(result.is_err());
-            assert_eq!(events.into_inner(), expected);
-        }
+        let events = RefCell::new(Vec::new());
+        let result = clipboard_transaction(
+            1,
+            || {
+                events.borrow_mut().push("open");
+                Ok::<(), &str>(())
+            },
+            || events.borrow_mut().push("close"),
+            || {
+                events.borrow_mut().push("set");
+                Err("set")
+            },
+            || unreachable!(),
+        );
+        assert_eq!(result, Err("set"));
+        assert_eq!(events.into_inner(), vec!["open", "set", "close"]);
 
         let closes = Cell::new(0);
         let result = clipboard_transaction(
             2,
             || Err::<(), _>("busy"),
             || closes.set(closes.get() + 1),
-            || Ok(()),
             || Ok(()),
             || {},
         );

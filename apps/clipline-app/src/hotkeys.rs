@@ -213,10 +213,11 @@ where
 }
 
 pub fn set_save_hotkeys(hotkeys: &[&str]) -> Result<(), String> {
-    SAVE_HOOK
-        .get()
-        .ok_or_else(|| "save hotkey hook is not installed".to_string())?
-        .set_hotkeys(hotkeys)
+    if let Some(state) = SAVE_HOOK.get() {
+        state.set_hotkeys(hotkeys)
+    } else {
+        parse_hook_hotkeys(hotkeys).map(|_| ())
+    }
 }
 
 fn start_keyboard_hook() -> Result<KeyboardHookThread, String> {
@@ -628,9 +629,10 @@ mod tests {
     }
 
     #[test]
-    fn updating_hotkeys_requires_an_installed_hook() {
+    fn updating_hotkeys_without_an_installed_hook_still_validates_and_succeeds() {
         if SAVE_HOOK.get().is_none() {
-            assert!(set_save_hotkeys(&["Alt+F10"]).is_err());
+            assert_eq!(set_save_hotkeys(&["Alt+F10"]), Ok(()));
+            assert!(set_save_hotkeys(&["not a hotkey"]).is_err());
         }
     }
 

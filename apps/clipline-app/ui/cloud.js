@@ -197,7 +197,6 @@ function clipCloudVisibility(record) {
 function cloudLibraryRecords() {
   const cloudListAuthoritative = cloudClipsLoaded
     || cloudClipsLoading
-    || Boolean(cloudClipsError)
     || !cloudConnected();
   return PlayerCore.cloudLibraryEntries(
     cloudSettings().uploads || {},
