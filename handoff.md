@@ -4,6 +4,39 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): semi-static capture inflated video PTS
+
+Direct frontier measurement overturned the audio-clock diagnosis below. Two replay saves taken
+737.28 wall-clock seconds apart advanced the video frontier by 741.02 seconds (`1.00507x`) but the
+audio frontier by 737.44 seconds (`1.00021x`). Independent five-minute probes measured both raw
+MOTU endpoints at only +32 ppm versus QPC and the production `WasapiLoopback` sources within one
+Opus packet of wall time. League/game sessions with sustained real frames were audio-perfect;
+idle-desktop and test captures accumulated roughly 0.3--0.5% apparent audio lead. The audio path,
+MOTU clock, MP4 muxer, replay ring, and players are not the source of this drift.
+
+The defect was `CadencedCapture` in `apps/clipline-app/src/service.rs`. Timeout duplicates advance
+on a synthetic `1/fps` grid. When a backend returned before its requested timeout, the handler
+still emitted a full video cadence step and reset its wall anchor to `now`. Stale real-frame retries
+made that path repeat on semi-static content, so video PTS advanced faster than wall/QPC time. A
+moving game regularly supplied accepted QPC-stamped frames and hid the ratchet by re-anchoring it.
+
+Premature timeouts now remain timeouts until the existing cadence deadline. They neither emit a
+duplicate nor reset the wall anchor. Once a real wall interval has elapsed, duplicate PTS still
+advance on the configured grid, catch up across missed intervals, reuse the latest captured
+texture, and remain monotonic. A regression reproduces the failure: 120 one-millisecond early
+returns previously advanced PTS by 2.000 seconds in only 0.181 seconds; video PTS is now bounded by
+elapsed wall time.
+
+Plan commit `fc767ef`; implementation `aeeb7b0`. The 422-test app suite and the full workspace pass,
+including serial real-device WGC, DXGI, WASAPI, MFT, shared-clock, and FFmpeg tests. Warning-denied
+workspace Clippy and clean-cache app Clippy are clean. Manual acceptance is a ten-minute
+idle-desktop run followed by multiple 30-second replays, then a moving game test. Both audio tracks
+should reach the video tail within normal one-frame/Opus headroom with no crackle, startup
+transient, or keyframe regression.
+
+> The next two checkpoints record superseded audio-clock hypotheses and failed experiments. Keep
+> them only as history; the direct video/audio frontier measurements above are authoritative.
+
 ## Checkpoint (2026-07-20): QPC servo rejected and rolled back
 
 Manual testing rejected the continuous QPC audio clock servo. After the recorder had been running
