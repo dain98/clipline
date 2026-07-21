@@ -4,6 +4,70 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-21): PR 100 review remediation
+
+All five unresolved PR 100 findings are addressed. Recorder status events are now accepted only
+from the currently installed service generation, so late stopped/recording events cannot overwrite
+the intentional games-only `Waiting` state after either game detection or a settings restart.
+Committing a waiting settings transition always advances the generation, including the no-sender
+race where a detector restart is already spawning. The frontend readiness handshake also replays
+the durable waiting status after its listeners exist, eliminating the startup-only lost event.
+
+The RAM sampler keeps the low-privilege `PROCESS_MEMORY_COUNTERS_EX2` fast path but falls back to
+the prior `VirtualQueryEx` / `QueryWorkingSetEx` resident-private-page walk when EX2 is unavailable
+on older supported Windows builds. Child processes request `PROCESS_VM_READ` only for that fallback.
+New runtime race, readiness replay, UI contract, and memory fallback regressions pass; the full
+workspace test suite and a fresh-cache warning-denied workspace Clippy pass are green.
+
+An independent follow-up review found one remaining non-blocking race in manual recorder start:
+the Waiting notification was emitted after releasing the runtime lock without re-checking state.
+`start_recording` now queries the durable Waiting state immediately before emitting, so a game that
+starts a service in that gap prevents the stale Waiting update. A structural regression protects
+the guard; workspace tests and fresh-cache warning-denied Clippy remain green.
+
+## Checkpoint (2026-07-21): elevation decision and privilege-invariant RAM meter
+
+The elevated-game warning now requires an explicit button choice. Backdrop clicks and Escape no
+longer dismiss it; `Restart as Administrator` and `Not Now` remain available, while the dialog can
+still disappear when the elevated game itself is no longer active.
+
+The apparent administrator-mode RAM jump was a measurement-permission bug rather than evidence of
+a duplicate Clipline process. The old sampler requested `PROCESS_VM_READ` and silently omitted
+sandboxed WebView2 children during a normal launch, then counted them once elevation granted the
+read. It now uses `K32GetProcessMemoryInfo`'s `PROCESS_MEMORY_COUNTERS_EX2.PrivateWorkingSetSize`
+through `PROCESS_QUERY_LIMITED_INFORMATION`. A live normal-integrity probe succeeded against the
+WebView2 renderer, so the same process-tree private working set is visible before and after an
+administrator restart. Focused memory and elevation-dialog regressions pass. The workspace suite
+passes apart from the VM-only live WGC frame test timing out twice, and a fresh-cache workspace
+Clippy pass is clean. That WGC timeout is unchanged capture-device behavior and does not exercise
+the modal or memory sampler.
+
+## Checkpoint (2026-07-20): recorder and review quality-of-life bundle
+
+Four requested workflow features are implemented. Settings > Games now has an opt-in `Pause
+recorder when no game is open` toggle, defaulting off for legacy and new settings. With automatic
+game detection enabled, the recorder remains armed in a distinct `Waiting` state without owning a
+capture/encode service; Save Replay is disabled until an enabled game appears, game entry starts a
+fresh buffer, and game exit stops the active run instead of falling back to desktop capture. The
+service generation guard also owns waiting notifications, so a concurrent manual stop cannot be
+overwritten by a stale policy transition.
+
+The elevated-game warning again offers an explicit `Restart as Administrator` action. Ordinary
+launches remain `asInvoker`, UAC cancellation keeps the normal process and retry UI alive, and a
+successful launch uses only the current executable plus an exact parent PID/creation-time handoff
+before the elevated child enters Tauri. This is a per-launch choice and the dialog warns that the
+rolling replay buffer resets.
+
+Successful trim/play exports now show an `Open clip` action next to the transient export status;
+the action opens the exact result already inserted into the library cache. The review transport
+also has fullscreen enter/exit controls backed by the WebView fullscreen API, with `F` toggling and
+Escape reserved for leaving fullscreen before the existing close-review shortcut.
+
+Focused settings, runtime-state, Windows handoff, player-core, and 82 UI-contract tests pass. The
+full workspace test suite passes, including the native device-aware suites, and fresh-cache app
+Clippy plus workspace Clippy pass with warnings denied. Native interaction acceptance remains for
+the four user-facing flows.
+
 ## Checkpoint (2026-07-21): Nightly 0.1.37
 
 Nightly 0.1.37 is the first updater build containing PR #89's combined audit remediation and the

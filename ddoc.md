@@ -184,6 +184,7 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
 - **Audio-cue detection:** spikes/keywords (Powder added shouting/laughter detection) — lowest priority.
 
 ### 6. Replay Buffer Architecture
+- **Games-only recording is opt-in.** Desktop/fallback capture remains the default. When Settings > Games > `Pause recorder when no game is open` is enabled alongside automatic game detection, the recorder stays armed but owns no capture/encode service while no enabled game is detected. The rail shows `Waiting`, Save Replay is disabled, opening an enabled game starts a fresh buffer, and leaving the game finalizes/stops that run without immediately reopening the fallback desktop source.
 - Continuously encode video+audio; push **encoded** GOP-aligned segments into a ring buffer sized by `max_replay_time × bitrate`. CBR mode (like gpu-screen-recorder's `-bm cbr`) gives predictable RAM/disk usage in high-motion scenes; CQP/VBR is the default for quality.
 - **RAM by default** (avoiding constant disk writes — a commonly cited community rationale; OBS's buffer is RAM-only by design, though OBS forum staff consider SSD wear a non-issue on modern drives), with **disk-spill** for long buffers (gpu-screen-recorder's `-replay-storage disk`). OBS estimates RAM and warns when it would overflow; we expose the same estimator.
 - On **Save Replay** hotkey, flush from the oldest in-buffer keyframe to now into a Hybrid MP4. Provide a "don't re-clip overlapping footage" smart mode — OBS lacks this natively (users currently hack it with Advanced Scene Switcher macros that stop/restart the buffer and lose ~1 s between saves).
@@ -209,6 +210,7 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
 - **No account required**; Riot RSO is used only if a user opts into VALORANT post-match enrichment.
 - Event data is fetched only from local `127.0.0.1` endpoints; nothing leaves the machine without an explicit user action (e.g., manual upload/share).
 - **Capture hygiene:** display capture records the whole monitor, so the UI warns when it is active, offers pause-on-focus-loss, and prefers per-window capture wherever the game allows it. Accidentally recording a password manager or DM popup into a clip is treated as a privacy bug, not a cosmetic one.
+- **Elevated games require explicit consent.** Clipline normally remains `asInvoker`. If Windows reports that a detected game is elevated above Clipline, the warning may restart only Clipline's current executable through UAC for this launch; cancellation leaves the normal process alive, and the elevated child verifies the exact parent PID plus creation time before waiting for it to exit. The modal requires an explicit `Restart as Administrator` or `Not Now` choice rather than accepting backdrop clicks or Escape. The UI states that elevation resets the current replay buffer and never turns elevation into a saved startup preference.
 - Fully open source so privacy claims are auditable — the structural opposite of Overwolf/Outplayed's closed, ad-driven model.
 
 ### 10. Storage Management
@@ -221,6 +223,7 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
 - **Lossless trim:** keyframe-aligned stream copy (instant, no quality loss) for cuts on GOP boundaries; **re-encode only the boundary GOPs** for frame-accurate trims.
 - Timeline with event markers; in/out points; merge multiple replay clips into a montage (joining files, ShadowPlay-montage style).
 - **Export:** MP4 (H.264 for compatibility, AV1/HEVC for size), plus **GIF/WebM** for sharing.
+- A successful trim export adds the result to the local library immediately and exposes an **Open clip** action beside the success status, avoiding a back-to-library search. The review stage supports standard fullscreen playback through its transport control or `F`; `Esc` returns from fullscreen before the existing close-clip shortcut applies.
 - **Preview decodes natively** (FFmpeg + D3D11VA hardware decode), presenting frames to the UI as shared textures — WebView2's `<video>` cannot be assumed to play AV1/HEVC (§4), and frame-accurate scrubbing of high-bitrate streams needs our own decode loop regardless.
 
 ### 12. Risks & Mitigations

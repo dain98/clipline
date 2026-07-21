@@ -2690,11 +2690,11 @@ fn session_groups_bucket_and_sort_by_newest() {
 }
 
 #[test]
-fn removed_focus_mode_key_is_not_consumed() {
+fn fullscreen_key_maps_to_review_fullscreen() {
     let mut ctx = player_core_context();
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('KeyF', false)"),
-        "null"
+        r#"{"kind":"toggle-fullscreen"}"#
     );
 }
 

@@ -17,6 +17,7 @@ fn defaults_match_current_recorder_behavior() {
 
     assert_eq!(settings.capture_mode, CaptureMode::PrimaryMonitor);
     assert!(settings.games.auto_detect);
+    assert!(!settings.games.pause_when_no_game);
     assert!(settings.games.plugins.is_empty());
     assert!(settings.games.custom_games.is_empty());
     assert!(settings.audio.output_enabled);
@@ -24,6 +25,7 @@ fn defaults_match_current_recorder_behavior() {
     assert_eq!(settings.audio.output_volume, 1.0);
     assert!(!settings.audio.split_output_by_process);
     let serialized = serde_json::to_value(&settings).unwrap();
+    assert_eq!(serialized["games"]["pause_when_no_game"], false);
     assert_eq!(serialized["audio"]["split_output_by_process"], false);
     assert!(!settings.audio.mic_enabled);
     assert_eq!(settings.audio.mic_device_id, None);
@@ -46,6 +48,22 @@ fn defaults_match_current_recorder_behavior() {
     assert_eq!(settings.update_channel, UpdateChannel::Nightly);
     assert!(!settings.legacy_timeline_editor);
     assert_eq!(serialized["legacy_timeline_editor"], false);
+}
+
+#[test]
+fn legacy_games_default_no_game_pause_off() {
+    let settings: GameSettings = serde_json::from_str(
+        r#"{
+            "auto_detect": true,
+            "custom_games": []
+        }"#,
+    )
+    .unwrap();
+
+    assert!(settings.auto_detect);
+    assert!(!settings.pause_when_no_game);
+    let saved = serde_json::to_value(&settings).unwrap();
+    assert_eq!(saved["pause_when_no_game"], false);
 }
 
 #[test]
@@ -415,6 +433,7 @@ fn supported_game_review_settings_default_to_current_enhanced_view() {
     let settings = AppSettings {
         games: GameSettings {
             auto_detect: true,
+            pause_when_no_game: false,
             plugins: BTreeMap::from([(
                 "league_of_legends".into(),
                 GamePluginSettings {
@@ -1086,6 +1105,7 @@ fn settings_round_trip_json() {
         update_channel: UpdateChannel::Nightly,
         games: GameSettings {
             auto_detect: true,
+            pause_when_no_game: false,
             plugins: BTreeMap::from([(
                 "league_of_legends".into(),
                 GamePluginSettings {
@@ -1120,6 +1140,7 @@ fn validation_rejects_custom_game_without_match_identity() {
     let settings = AppSettings {
         games: GameSettings {
             auto_detect: true,
+            pause_when_no_game: false,
             plugins: BTreeMap::new(),
             custom_games: vec![CustomGameSettings {
                 id: "custom-empty".into(),

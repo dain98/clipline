@@ -1852,10 +1852,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn finish_packets(
-            &mut self,
-            until_pts_s: f64,
-        ) -> Result<Vec<AudioPacket>, CaptureError> {
+        fn finish_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
             if self.finished || until_pts_s + 1e-9 < 0.98 {
                 return Ok(Vec::new());
             }

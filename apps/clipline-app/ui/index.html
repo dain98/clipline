@@ -185,6 +185,10 @@
                     <span id="time-readout">0:00.0 / 0:00.0</span>
                   </div>
                   <div class="cluster right">
+                    <button id="fullscreen-toggle" title="Full screen (F)" aria-label="Enter full screen" aria-pressed="false">
+                      <svg class="i-fullscreen-enter" viewBox="0 0 24 24"><path d="M4 9V4h5v2H6v3H4zm11-5h5v5h-2V6h-3V4zM6 15v3h3v2H4v-5h2zm12 0h2v5h-5v-2h3v-3z"/></svg>
+                      <svg class="i-fullscreen-exit" viewBox="0 0 24 24"><path d="M9 4v5H4V7h3V4h2zm6 0h2v3h3v2h-5V4zM4 15h5v5H7v-3H4v-2zm11 0h5v2h-3v3h-2v-5z"/></svg>
+                    </button>
                     <select id="rate-select" title="Playback speed">
                       <option value="0.5">0.5x</option>
                       <option value="0.75">0.75x</option>
@@ -282,6 +286,7 @@
             </details>
 
             <span id="deck-status" class="deck-status"></span>
+            <button id="deck-status-action" class="deck-status-action" type="button" hidden></button>
 
             <div id="trim-action-panel" class="trim-action-panel">
               <button id="trim-mode-toggle" type="button" title="Trim clip" aria-label="Trim clip" aria-pressed="false">
@@ -509,6 +514,16 @@
               <label class="check-line">
                 <input id="set-games-auto-detect" type="checkbox" />
                 <span>Automatically switch to detected games</span>
+              </label>
+            </div>
+            <div class="setting-row" data-settings-key="games.pause_when_no_game">
+              <div class="setting-info">
+                <strong>Games-only recording</strong>
+                <span>Reduce background load by stopping capture until an enabled game is detected.</span>
+              </div>
+              <label class="check-line">
+                <input id="set-games-pause-when-empty" type="checkbox" />
+                <span>Pause recorder when no game is open</span>
               </label>
             </div>
             <div class="setting-row" data-settings-key="games.plugins">
@@ -839,10 +854,11 @@
     <div class="confirm-body">
       <strong>Administrator game blocks replay hotkeys</strong>
       <span><span id="elevation-game-name">This game</span> is running as administrator. Windows prevents Clipline from receiving Save Replay hotkeys while the game is focused.</span>
-      <span class="hint">For safe focused-game hotkeys, run the game without administrator privileges. Clipline does not elevate the full application.</span>
+      <span class="hint">Restarting Clipline as administrator fixes the hotkey, but resets the current rolling replay buffer. Clipline will continue to start normally in the future.</span>
     </div>
     <div class="confirm-actions">
-      <button id="elevation-cancel" class="primary">Got It</button>
+      <button id="elevation-restart" class="primary">Restart as Administrator</button>
+      <button id="elevation-cancel">Not Now</button>
     </div>
   </dialog>
 
@@ -974,6 +990,7 @@
       <section>
         <h4>General</h4>
         <dl>
+          <div><dt><kbd>F</kbd></dt><dd>Enter / exit full screen</dd></div>
           <div><dt><kbd>Esc</kbd></dt><dd>Close clip</dd></div>
         </dl>
       </section>

@@ -484,6 +484,10 @@ pub enum Event {
     },
     Status {
         recording: bool,
+        /// True when recording is armed but the games-only policy is waiting
+        /// for an enabled game before starting capture.
+        #[serde(default)]
+        waiting_for_game: bool,
         segments: usize,
         buffered_s: f64,
         buffered_mb: f64,
@@ -1648,6 +1652,7 @@ fn available_space_bytes(path: &Path) -> Result<u64, String> {
 fn send_stopped(events: &Sender<Event>) {
     let _ = events.send(Event::Status {
         recording: false,
+        waiting_for_game: false,
         segments: 0,
         buffered_s: 0.0,
         buffered_mb: 0.0,
@@ -1664,6 +1669,7 @@ fn send_recording_status(
 ) {
     let _ = events.send(Event::Status {
         recording: true,
+        waiting_for_game: false,
         segments: rec.ring_len(),
         buffered_s: rec.buffered_span_s(),
         buffered_mb: rec.ring_bytes() as f64 / (1024.0 * 1024.0),
