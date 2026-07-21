@@ -3114,6 +3114,34 @@ fn cloud_library_loader_guards_every_async_result_and_force_supersedes() {
 }
 
 #[test]
+fn cloud_tab_click_forces_authoritative_refresh() {
+    let main = read_ui_js("main.js");
+    let click_start = main
+        .find("$(\"gallery-source-tabs\").addEventListener(\"click\"")
+        .expect("gallery source tabs must have a click handler");
+    let click_end = main[click_start..]
+        .find("$(\"gallery-select-toggle\")")
+        .map(|offset| click_start + offset)
+        .expect("gallery source handler must precede the selection handler");
+    let click = &main[click_start..click_end];
+    assert!(click.contains("loadCloudClips({ force: true })"));
+    assert!(
+        click.find("loadCloudClips({ force: true })") < click.find("renderClips()"),
+        "Cloud selection must start its forced request before generic rendering can request cached data"
+    );
+
+    let cloud = read_ui_js("cloud.js");
+    let records = js_function_body(&cloud, "cloudLibraryRecords");
+    assert!(
+        records.contains("cloudListAuthoritative")
+            && records.contains("cloudClipsLoaded")
+            && records.contains("cloudClipsLoading")
+            && records.contains("cloudClipsCache,"),
+        "the renderer must distinguish an authoritative server response from an uninitialized cache"
+    );
+}
+
+#[test]
 fn rail_profile_identity_change_resets_and_refetches_cloud_library() {
     let cloud = read_ui_js("cloud.js");
     let refresh = js_function_body(&cloud, "refreshRailProfileIdentity");

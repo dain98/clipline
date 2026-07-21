@@ -18,6 +18,11 @@ An upload request for a completed record now returns that existing record before
 with a second local-clip-ID check after hashing as defense in depth. Regression coverage includes
 legacy verbatim paths, cloud-library availability, frontend wiring, and duplicate-upload prevention.
 
+The Cloud library tab starts a forced server request as soon as it is selected. While that request
+is active and after it succeeds, the server response is authoritative: finalized local upload
+history absent from the response is no longer rendered as generic, broken cloud cards. Active and
+still-processing upload records remain visible until the server begins returning them.
+
 ## Checkpoint (2026-07-20): semi-static capture inflated video PTS
 
 Direct frontier measurement overturned the audio-clock diagnosis below. Two replay saves taken

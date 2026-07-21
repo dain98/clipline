@@ -215,6 +215,37 @@ fn cloud_library_entries_match_legacy_windows_canonical_paths() {
 }
 
 #[test]
+fn authoritative_cloud_library_hides_deleted_upload_history_but_keeps_active_uploads() {
+    let mut ctx = player_core_context();
+    let entries = eval_json(
+        &mut ctx,
+        r#"PlayerCore.cloudLibraryEntries({
+          deleted: {
+            local_clip_id: 'deleted',
+            path: 'C:/Clips/deleted.mp4',
+            remote_clip_id: 'missing-remote',
+            remote_url: 'https://clips.example.com/missing-remote',
+            upload_status: 'uploaded_public',
+            updated_at_unix: 10
+          },
+          active: {
+            local_clip_id: 'active',
+            path: 'C:/Clips/active.mp4',
+            remote_clip_id: 'processing-remote',
+            remote_url: 'https://clips.example.com/processing-remote',
+            upload_status: 'uploaded_processing',
+            updated_at_unix: 20
+          }
+        }, [], [], true)"#,
+    );
+
+    assert_eq!(
+        entries,
+        r#"[{"local_clip_id":"active","path":"C:/Clips/active.mp4","title":"active","remote_url":"https://clips.example.com/processing-remote","visibility":"public","upload_status":"uploaded_processing","updated_at_unix":20,"local_available":false,"remote_clip_id":"processing-remote"}]"#
+    );
+}
+
+#[test]
 fn cloud_library_entries_prefer_authoritative_cloud_list() {
     let mut ctx = player_core_context();
     let entries = eval_json(

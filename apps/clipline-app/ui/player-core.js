@@ -71,7 +71,12 @@ const PlayerCore = (() => {
 
   const clipNameStem = PresentationCore.clipNameStem;
 
-  const cloudLibraryEntries = (uploads, localClips = [], cloudClips = []) => {
+  const cloudLibraryEntries = (
+    uploads,
+    localClips = [],
+    cloudClips = [],
+    cloudListAuthoritative = false,
+  ) => {
     const localPaths = (localClips || []).map((clip) => String(clip && clip.path || ""));
     const localPathAvailable = (path) => localPaths.some((localPath) => sameClipPath(localPath, path));
     const uploadRecords = Object.values(uploads || {});
@@ -118,6 +123,9 @@ const PlayerCore = (() => {
         if (record.local_clip_id && seenLocalIds.has(String(record.local_clip_id))) return false;
         if (record.remote_clip_id && seenRemoteIds.has(String(record.remote_clip_id))) return false;
         const status = String(record.upload_status || "");
+        const active = ["queued", "uploading", "processing", "retrying", "uploaded_processing"]
+          .includes(status);
+        if (cloudListAuthoritative && !active) return false;
         return status !== "failed" && status !== "not_uploaded";
       })
       .map((record) => {

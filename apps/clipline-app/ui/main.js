@@ -107,9 +107,12 @@ $("gallery-source-tabs").addEventListener("click", (ev) => {
   const tab = ev.target.closest(".source-tab");
   if (!tab) return;
   gallerySource = tab.dataset.gallerySource === "cloud" ? "cloud" : "local";
-  if (gallerySource === "cloud") exitSelectMode();
+  if (gallerySource === "cloud") {
+    exitSelectMode();
+    loadCloudClips({ force: true });
+    return;
+  }
   renderClips();
-  if (gallerySource === "cloud") loadCloudClips({ force: true });
 });
 $("gallery-select-toggle").addEventListener("click", () => {
   selectMode = !selectMode;

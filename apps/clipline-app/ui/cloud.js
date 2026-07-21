@@ -195,7 +195,16 @@ function clipCloudVisibility(record) {
 }
 
 function cloudLibraryRecords() {
-  return PlayerCore.cloudLibraryEntries(cloudSettings().uploads || {}, clipsCache, cloudClipsCache);
+  const cloudListAuthoritative = cloudClipsLoaded
+    || cloudClipsLoading
+    || Boolean(cloudClipsError)
+    || !cloudConnected();
+  return PlayerCore.cloudLibraryEntries(
+    cloudSettings().uploads || {},
+    clipsCache,
+    cloudClipsCache,
+    cloudListAuthoritative,
+  );
 }
 
 function cloudLocalClipForEntry(entry) {
