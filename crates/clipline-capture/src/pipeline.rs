@@ -1027,19 +1027,33 @@ fn set_segment_decode_times<W: Write + Seek>(
     audio_cfgs: &[clipline_mp4::AudioTrackConfig],
     timeline_origin_s: f64,
 ) -> io::Result<()> {
-    writer.set_track_decode_time(
+    set_track_decode_time_with_rounding_tolerance(
+        writer,
         0,
         relative_pts_ticks(seg.pts_start_s, timeline_origin_s, video_cfg.timescale)?,
     )?;
     for (index, (track, cfg)) in seg.audio.iter().zip(audio_cfgs).enumerate() {
         if let Some(start_s) = track.pts_start_s {
-            writer.set_track_decode_time(
+            set_track_decode_time_with_rounding_tolerance(
+                writer,
                 index + 1,
                 relative_pts_ticks(start_s, timeline_origin_s, cfg.sample_rate)?,
             )?;
         }
     }
     Ok(())
+}
+
+fn set_track_decode_time_with_rounding_tolerance<W: Write + Seek>(
+    writer: &mut HybridMp4Writer<W>,
+    track_index: usize,
+    requested: u64,
+) -> io::Result<()> {
+    let current = writer.track_decode_time(track_index)?;
+    if requested < current && current - requested == 1 {
+        return Ok(());
+    }
+    writer.set_track_decode_time(track_index, requested)
 }
 
 fn relative_pts_ticks(pts_s: f64, origin_s: f64, timescale: u32) -> io::Result<u64> {
@@ -1483,6 +1497,65 @@ mod tests {
             (duration - 3.0).abs() < 1e-3,
             "full-session file keeps all GOPs, got {duration}"
         );
+    }
+
+    #[test]
+    fn one_tick_segment_boundary_overlap_does_not_break_full_session_muxing() {
+        let video_cfg = MockEncoder::new(30, 30).track_config();
+        let timescale = f64::from(video_cfg.timescale);
+        let segment = |start_ticks: f64, duration_ticks: f64| {
+            Arc::new(Segment {
+                starts_with_keyframe: true,
+                pts_start_s: start_ticks / timescale,
+                duration_s: duration_ticks / timescale,
+                data: vec![0, 0, 0, 1],
+                samples: vec![SampleInfo {
+                    size: 4,
+                    duration_s: duration_ticks / timescale,
+                    is_sync: true,
+                }],
+                audio: Vec::new(),
+            })
+        };
+        let mut target: Option<Box<dyn WriteSeek>> =
+            Some(Box::new(std::io::Cursor::new(Vec::new())));
+        let mut writer = None;
+        let mut origin = None;
+
+        write_full_session_segment(
+            &mut target,
+            &mut writer,
+            &mut origin,
+            video_cfg.clone(),
+            Vec::new(),
+            segment(0.0, 101.0),
+        )
+        .unwrap();
+        write_full_session_segment(
+            &mut target,
+            &mut writer,
+            &mut origin,
+            video_cfg,
+            Vec::new(),
+            // Independent absolute rounding selects tick 100 even though the
+            // preceding segment's locally quantized duration ended at 101.
+            segment(100.0, 100.0),
+        )
+        .expect("a one-tick quantization overlap must clamp to the written frontier");
+        writer.unwrap().finalize().unwrap();
+    }
+
+    #[test]
+    fn segment_boundary_tolerance_still_rejects_real_timestamp_regressions() {
+        let cfg = MockEncoder::new(30, 30).track_config();
+        let mut writer = HybridMp4Writer::new(std::io::Cursor::new(Vec::new()), cfg).unwrap();
+        writer.set_track_decode_time(0, 100).unwrap();
+
+        set_track_decode_time_with_rounding_tolerance(&mut writer, 0, 99).unwrap();
+        assert_eq!(writer.track_decode_time(0).unwrap(), 100);
+        let error = set_track_decode_time_with_rounding_tolerance(&mut writer, 0, 98)
+            .expect_err("a two-tick regression is not a rounding tie");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

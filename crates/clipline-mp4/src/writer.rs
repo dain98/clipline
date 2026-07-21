@@ -149,6 +149,14 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         Ok(())
     }
 
+    /// Return the decode timestamp where this track's next sample will begin.
+    pub fn track_decode_time(&self, track_index: usize) -> io::Result<u64> {
+        self.tracks
+            .get(track_index)
+            .map(|state| state.next_decode_time)
+            .ok_or_else(|| invalid_config(format!("track index {track_index} is out of range")))
+    }
+
     /// One fragment carrying samples for each track, positionally aligned
     /// with the track list. Empty slices are allowed (track sat this
     /// fragment out).
@@ -982,6 +990,11 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         writer.set_track_decode_time(0, 100).unwrap();
+        assert_eq!(writer.track_decode_time(0).unwrap(), 100);
+        assert_eq!(
+            writer.track_decode_time(1).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
         assert_eq!(
             writer.set_track_decode_time(0, 99).unwrap_err().kind(),
             io::ErrorKind::InvalidInput

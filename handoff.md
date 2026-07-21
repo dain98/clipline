@@ -4,6 +4,19 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): one-tick full-session GOP boundary overlap
+
+A full-session writer failed after roughly 86 seconds with video track 0 attempting to move from
+decode tick 7,731,609 back to 7,731,608. Segment sample durations are quantized relative to each
+GOP while the next GOP start is quantized from the absolute recording origin. At an exact rounding
+boundary those equivalent timestamps can differ by one 90 kHz tick (about 11 microseconds).
+
+The MP4 writer remains strict about backward decode time and now exposes its current per-track
+frontier. The capture pipeline alone treats a one-tick overlap as a rounding tie and keeps the
+already-written frontier; regressions of two ticks or more still fail. Regression coverage writes
+the observed adjacent-segment shape through the full-session path and separately proves that the
+larger-regression guard remains intact.
+
 ## Checkpoint (2026-07-20): legacy cloud upload path identity
 
 Completed cloud records created by older builds can contain canonical Windows paths such as
