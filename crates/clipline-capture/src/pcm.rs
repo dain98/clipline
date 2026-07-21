@@ -47,16 +47,14 @@ impl DevicePacketTimeline {
     }
 
     pub(crate) fn placement(&mut self, pts_s: Option<f64>) -> DevicePacketPlacement {
-        let placement = if self.needs_timestamp_anchor {
-            pts_s.filter(|pts_s| pts_s.is_finite()).map_or(
-                DevicePacketPlacement::Contiguous,
-                DevicePacketPlacement::Timestamped,
-            )
-        } else {
-            DevicePacketPlacement::Contiguous
+        if !self.needs_timestamp_anchor {
+            return DevicePacketPlacement::Contiguous;
+        }
+        let Some(pts_s) = pts_s.filter(|pts_s| pts_s.is_finite()) else {
+            return DevicePacketPlacement::Contiguous;
         };
         self.needs_timestamp_anchor = false;
-        placement
+        DevicePacketPlacement::Timestamped(pts_s)
     }
 
     pub(crate) fn require_timestamp_anchor(&mut self) {
@@ -817,6 +815,7 @@ mod tests {
         );
 
         timeline.require_timestamp_anchor();
+        assert_eq!(timeline.placement(None), DevicePacketPlacement::Contiguous);
         assert_eq!(
             timeline.placement(Some(1.05)),
             DevicePacketPlacement::Timestamped(1.05)
