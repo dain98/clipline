@@ -174,13 +174,8 @@ $("elevation-cancel").addEventListener("click", () => {
   if (!elevationRestartInFlight) $("elevation-dialog").close();
 });
 $("elevation-restart").addEventListener("click", restartAsAdministrator);
-$("elevation-dialog").addEventListener("click", (ev) => {
-  if (ev.target === $("elevation-dialog") && !elevationRestartInFlight) {
-    $("elevation-dialog").close();
-  }
-});
 $("elevation-dialog").addEventListener("cancel", (ev) => {
-  if (elevationRestartInFlight) ev.preventDefault();
+  ev.preventDefault();
 });
 $("elevation-dialog").addEventListener("close", () => maybeWarnElevatedGame(activeDetectedGame));
 $("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);

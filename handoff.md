@@ -4,6 +4,23 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-21): elevation decision and privilege-invariant RAM meter
+
+The elevated-game warning now requires an explicit button choice. Backdrop clicks and Escape no
+longer dismiss it; `Restart as Administrator` and `Not Now` remain available, while the dialog can
+still disappear when the elevated game itself is no longer active.
+
+The apparent administrator-mode RAM jump was a measurement-permission bug rather than evidence of
+a duplicate Clipline process. The old sampler requested `PROCESS_VM_READ` and silently omitted
+sandboxed WebView2 children during a normal launch, then counted them once elevation granted the
+read. It now uses `K32GetProcessMemoryInfo`'s `PROCESS_MEMORY_COUNTERS_EX2.PrivateWorkingSetSize`
+through `PROCESS_QUERY_LIMITED_INFORMATION`. A live normal-integrity probe succeeded against the
+WebView2 renderer, so the same process-tree private working set is visible before and after an
+administrator restart. Focused memory and elevation-dialog regressions pass. The workspace suite
+passes apart from the VM-only live WGC frame test timing out twice, and a fresh-cache workspace
+Clippy pass is clean. That WGC timeout is unchanged capture-device behavior and does not exercise
+the modal or memory sampler.
+
 ## Checkpoint (2026-07-20): recorder and review quality-of-life bundle
 
 Four requested workflow features are implemented. Settings > Games now has an opt-in `Pause

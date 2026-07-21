@@ -476,6 +476,16 @@ fn elevated_game_hotkey_warning_offers_explicit_restart_once_per_process() {
         css.contains("#elevation-dialog"),
         "the elevation dialog must share the app's in-product modal styling"
     );
+    assert!(
+        !js.contains("if (ev.target === $(\"elevation-dialog\") && !elevationRestartInFlight)"),
+        "backdrop clicks must not dismiss the elevated-game decision"
+    );
+    assert!(
+        js.contains(
+            "$(\"elevation-dialog\").addEventListener(\"cancel\", (ev) => {\n  ev.preventDefault();\n});"
+        ),
+        "Escape must not dismiss the elevated-game decision without an explicit button choice"
+    );
 }
 
 #[test]
