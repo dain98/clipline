@@ -138,9 +138,8 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
         let wall_remaining = self
             .frame_interval
             .saturating_sub(now.saturating_duration_since(self.last_emit_wall));
-        let timeout = self
-            .retry_deadline
-            .take()
+        let retry_deadline = self.retry_deadline.take();
+        let timeout = retry_deadline
             .map(|deadline| deadline.saturating_duration_since(now).min(wall_remaining))
             .unwrap_or(wall_remaining);
         match self.inner.next_frame_timeout(timeout) {
@@ -178,6 +177,19 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
                 };
                 let now = Instant::now();
                 let elapsed = now.saturating_duration_since(self.last_emit_wall);
+                if elapsed < self.frame_interval {
+                    // A capture backend may report a timeout before the duration it was
+                    // asked to wait. Do not pay out a full video cadence slot until that
+                    // slot's wall-clock deadline has actually arrived.
+                    let wall_remaining = self.frame_interval - elapsed;
+                    if retry_deadline.is_some_and(|deadline| deadline > now) {
+                        self.retry_deadline = retry_deadline;
+                    }
+                    let retry_after = retry_deadline
+                        .map(|deadline| deadline.saturating_duration_since(now))
+                        .map_or(wall_remaining, |remaining| remaining.min(wall_remaining));
+                    return Err(CaptureError::Timeout(retry_after));
+                }
                 let elapsed_intervals =
                     (elapsed.as_secs_f64() / self.frame_interval_s).floor() as u64;
                 let intervals = elapsed_intervals.max(1);
@@ -188,14 +200,8 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
                     .max(min_pts);
                 self.last_emit_pts_s = Some(pts_s);
                 self.next_pts_s = Some(pts_s + self.frame_interval_s);
-                if elapsed >= self.frame_interval {
-                    self.last_emit_wall +=
-                        Duration::from_secs_f64(intervals as f64 * self.frame_interval_s);
-                } else {
-                    // A test double (or early platform timeout) may return before its
-                    // requested wait. Treat that return as the emission time.
-                    self.last_emit_wall = now;
-                }
+                self.last_emit_wall +=
+                    Duration::from_secs_f64(intervals as f64 * self.frame_interval_s);
                 Ok(Some(Frame { pts_s, data }))
             }
             Err(e) => Err(e),
@@ -2434,6 +2440,7 @@ mod tests {
 
     impl TimedFrameSource for TimeoutSource {
         fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+            std::thread::sleep(timeout);
             Err(CaptureError::Timeout(timeout))
         }
     }
@@ -2446,9 +2453,14 @@ mod tests {
     impl TimedFrameSource for ScriptedTimedSource {
         fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
             self.requested_timeouts.push(timeout);
-            self.outcomes
+            let outcome = self
+                .outcomes
                 .pop_front()
-                .expect("scripted timed source exhausted")
+                .expect("scripted timed source exhausted");
+            if matches!(outcome, Err(CaptureError::Timeout(_))) {
+                std::thread::sleep(timeout);
+            }
+            outcome
         }
     }
 
@@ -2465,6 +2477,7 @@ mod tests {
                 std::thread::sleep(self.delay);
                 Ok(Some(frame))
             } else {
+                std::thread::sleep(timeout);
                 Err(CaptureError::Timeout(timeout))
             }
         }
@@ -2479,6 +2492,20 @@ mod tests {
             self.requested_timeouts.push(timeout);
             std::thread::sleep(timeout);
             Err(CaptureError::Timeout(timeout))
+        }
+    }
+
+    struct PrematureTimeoutSource {
+        delay: Duration,
+    }
+
+    impl TimedFrameSource for PrematureTimeoutSource {
+        fn next_frame_timeout(
+            &mut self,
+            _timeout: Duration,
+        ) -> Result<Option<Frame>, CaptureError> {
+            std::thread::sleep(self.delay);
+            Err(CaptureError::Timeout(self.delay))
         }
     }
 
@@ -2963,6 +2990,40 @@ mod tests {
     }
 
     #[test]
+    fn cadenced_capture_premature_timeouts_cannot_inflate_pts_past_wall_time() {
+        let fps = 60;
+        let frame_interval_s = 1.0 / fps as f64;
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![7, 8, 9]),
+        };
+        let mut cap = CadencedCapture::new(
+            PrematureTimeoutSource {
+                delay: Duration::from_millis(1),
+            },
+            fps,
+            &seed,
+        );
+        let started = Instant::now();
+        let mut last_pts_s = seed.pts_s;
+
+        for _ in 0..120 {
+            match cap.next_frame() {
+                Ok(Some(frame)) => last_pts_s = frame.pts_s,
+                Err(CaptureError::Timeout(_)) => {}
+                other => panic!("unexpected capture result: {other:?}"),
+            }
+        }
+
+        let wall_elapsed_s = started.elapsed().as_secs_f64();
+        let pts_elapsed_s = last_pts_s - seed.pts_s;
+        assert!(
+            pts_elapsed_s <= wall_elapsed_s + frame_interval_s,
+            "premature timeouts inflated PTS: pts={pts_elapsed_s:.6}s wall={wall_elapsed_s:.6}s"
+        );
+    }
+
+    #[test]
     fn cadenced_capture_propagates_target_closure_instead_of_duplicating() {
         let seed = Frame {
             pts_s: 1.0,
@@ -3025,7 +3086,12 @@ mod tests {
         assert!(cap.inner.requested_timeouts[1] <= cap.frame_interval);
         assert!(cap.inner.requested_timeouts[2] <= skipped_for);
         let remaining_s = skipped_for.as_secs_f64();
-        assert!((remaining_s - (scheduled_pts_s - stale_pts_s)).abs() < 1e-9);
+        let pts_remaining_s = scheduled_pts_s - stale_pts_s;
+        assert!(remaining_s <= pts_remaining_s + 1e-9);
+        assert!(
+            remaining_s >= pts_remaining_s - 0.005,
+            "stale retry lost its deadline: remaining={remaining_s:.6}s expected={pts_remaining_s:.6}s"
+        );
     }
 
     #[test]
