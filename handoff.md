@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-21): PR 89 review regressions
+
+Seven actionable PR review findings are fixed. Settings saves continue when the optional low-level
+save hook failed to install, while hotkey syntax is still validated. WASAPI keeps a requested QPC
+anchor across packets with missing or invalid timestamps and consumes it only when a finite
+timestamp arrives.
+
+The storage ownership boundary now includes a narrow pre-marker migration signal: only MP4s using
+Clipline's generated `clip_<timestamp>[_attempt]` or `session_<timestamp>[_attempt]` names are
+adopted without a sidecar. This restores quota accounting/GC for legacy replays and recovery for
+legacy `session_*.mp4.recording` files while arbitrary unmarked MP4s remain untouched. Recovered
+legacy recordings receive an ownership marker before finalization.
+
+Clipboard sharing replaces only `CF_HDROP` and no longer empties the entire clipboard before the
+new handle is accepted. A failed Cloud tab refresh remains non-authoritative so cached completed
+uploads stay visible. Cloud duplicate detection now hashes the requested payload first and skips
+only an exact local clip ID; changing audio selection or replacing media at the same path starts a
+new upload, while exact re-uploads still return the completed record.
+
+Focused regressions and the full workspace test suite pass. Fresh-cache warning-denied workspace
+Clippy is clean.
+
 ## Checkpoint (2026-07-20): one-tick full-session GOP boundary overlap
 
 A full-session writer failed after roughly 86 seconds with video track 0 attempting to move from
