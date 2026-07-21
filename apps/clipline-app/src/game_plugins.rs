@@ -18,9 +18,8 @@ use crate::settings::{
     GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings,
 };
 
-pub const LEAGUE_OF_LEGENDS_ID: &str = "league_of_legends";
+pub use crate::game_identity::{LEAGUE_OF_LEGENDS_ID, OSU_ID};
 pub const LEAGUE_LIVE_CLIENT_EVENT_SOURCE: &str = "league_live_client";
-pub const OSU_ID: &str = "osu";
 pub const GAME_PROFILE_SCHEMA_VERSION: u32 = 1;
 
 pub type EventSourceSpawner = fn(GameEventSourceContext) -> Receiver<PollerMsg>;
@@ -226,7 +225,21 @@ impl GamePlugin {
             .unwrap_or_else(|| self.default_settings())
     }
 
-    pub fn info(&self) -> GamePluginInfo {
+    #[cfg(test)]
+    fn info(&self) -> GamePluginInfo {
+        self.info_with_icon(self.icon_string())
+    }
+
+    fn immutable_info(&self) -> GamePluginInfo {
+        let icon = if self.uses_extracted_icon() {
+            None
+        } else {
+            self.icon_string()
+        };
+        self.info_with_icon(icon)
+    }
+
+    fn info_with_icon(&self, icon: Option<String>) -> GamePluginInfo {
         let default_settings = self.default_settings();
         GamePluginInfo {
             id: self.id().into(),
@@ -242,7 +255,7 @@ impl GamePlugin {
                 .and_then(event_source_spawner)
                 .is_some(),
             presentation: self.presentation_value(),
-            icon: self.icon_string(),
+            icon,
         }
     }
 
@@ -256,14 +269,13 @@ impl GamePlugin {
     /// Resolve the profile's icon for the UI: prefer the bundled icon, else a
     /// previously-cached icon extracted from the running game's executable.
     fn icon_string(&self) -> Option<String> {
-        match self.manifest.icon.as_ref()? {
-            GameProfileIcon::UiAsset { path } => Some(path.clone()),
-            GameProfileIcon::DataUrl { data } => Some(data.clone()),
-            GameProfileIcon::File { path } => first_party_asset_data_url(path),
-            GameProfileIcon::Extracted => {
+        match self.manifest.icon.as_ref() {
+            Some(GameProfileIcon::UiAsset { path }) => Some(path.clone()),
+            Some(GameProfileIcon::DataUrl { data }) => Some(data.clone()),
+            Some(GameProfileIcon::File { path }) => first_party_asset_data_url(path),
+            Some(GameProfileIcon::Extracted) | None => {
                 let cache = game_profile_icon_cache_path(self.id())?;
-                let bytes = std::fs::read(&cache).ok()?;
-                Some(crate::game_icon::png_data_url(&bytes))
+                extracted_icon_data_url(&cache)
             }
         }
     }
@@ -313,6 +325,11 @@ impl GamePlugin {
     fn uses_extracted_icon(&self) -> bool {
         matches!(self.manifest.icon, Some(GameProfileIcon::Extracted) | None)
     }
+}
+
+fn extracted_icon_data_url(cache: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(cache).ok()?;
+    Some(crate::game_icon::png_data_url(&bytes))
 }
 
 fn resolve_profile_asset_value(icon_value: &mut serde_json::Value) {
@@ -378,22 +395,28 @@ pub fn all() -> &'static [GamePlugin] {
         .as_slice()
 }
 
-pub fn catalog() -> &'static [GamePluginInfo] {
+fn catalog_base() -> &'static [GamePluginInfo] {
     static CATALOG: OnceLock<Vec<GamePluginInfo>> = OnceLock::new();
     CATALOG
-        .get_or_init(|| all().iter().map(GamePlugin::info).collect())
+        .get_or_init(|| all().iter().map(GamePlugin::immutable_info).collect())
         .as_slice()
 }
 
-pub fn contains(id: &str) -> bool {
-    all().iter().any(|profile| profile.id() == id)
+pub fn catalog() -> Vec<GamePluginInfo> {
+    let mut catalog = catalog_base().to_vec();
+    for (profile, info) in all().iter().zip(&mut catalog) {
+        if profile.uses_extracted_icon() {
+            info.icon = profile.icon_string();
+        }
+    }
+    catalog
 }
 
 pub fn plugin_id_for_game_id(game_id: GameId) -> &'static str {
     match game_id {
         GameId::LeagueOfLegends => LEAGUE_OF_LEGENDS_ID,
-        GameId::Valorant => "valorant",
-        GameId::Cs2 => "cs2",
+        GameId::Valorant => crate::game_identity::VALORANT_ID,
+        GameId::Cs2 => crate::game_identity::CS2_ID,
         GameId::Osu => OSU_ID,
     }
 }
@@ -734,6 +757,7 @@ mod league_of_legends {
 mod tests {
     use super::*;
     use clipline_capture::windows::CapturableWindow;
+    use clipline_test_utils::TestDir;
 
     fn window(
         handle: isize,
@@ -1013,14 +1037,17 @@ mod tests {
     }
 
     #[test]
-    fn profile_records_and_resolved_info_are_cached() {
+    fn profile_records_and_immutable_catalog_data_are_cached() {
         let first_profiles = all();
         let second_profiles = all();
         assert_eq!(first_profiles.as_ptr(), second_profiles.as_ptr());
 
+        let first_base = catalog_base();
+        let second_base = catalog_base();
+        assert_eq!(first_base.as_ptr(), second_base.as_ptr());
         let first_catalog = catalog();
         let second_catalog = catalog();
-        assert_eq!(first_catalog.as_ptr(), second_catalog.as_ptr());
+        assert_ne!(first_catalog.as_ptr(), second_catalog.as_ptr());
         assert!(first_catalog[0]
             .presentation
             .as_ref()
@@ -1032,6 +1059,19 @@ mod tests {
             .as_ref()
             .and_then(|presentation| presentation.pointer("/event_rail/actor_icons/0/asset"))
             .and_then(serde_json::Value::as_str)
+            .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+    }
+
+    #[test]
+    fn extracted_icon_resolver_observes_a_file_created_after_a_missing_read() {
+        let dir = TestDir::new("clipline-game-plugins", "late-extracted-icon");
+        let cache = dir.path().join("future-game.png");
+
+        assert!(extracted_icon_data_url(&cache).is_none());
+        std::fs::write(&cache, [0x89, b'P', b'N', b'G', 1, 2, 3, 4]).unwrap();
+
+        assert!(extracted_icon_data_url(&cache)
+            .as_deref()
             .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
     }
 

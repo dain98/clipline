@@ -1,23 +1,17 @@
 //! Direct osu! API integration for play-block enrichment.
 
-use std::ffi::OsStr;
-use std::path::PathBuf;
-use std::ptr;
-use std::slice;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use windows_sys::Win32::Security::Credentials::{
-    CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
-};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 use crate::app::RuntimeState;
 use crate::library::StorageSettings;
 use crate::settings::OsuApiSettings;
-use crate::util::{last_os_error, wide_null};
+use crate::windows::CredentialStore;
 
 const OSU_TOKEN_URL: &str = "https://osu.ppy.sh/oauth/token";
 const OSU_API_VERSION: &str = "20220705";
@@ -25,6 +19,38 @@ const RECENT_LIMIT: usize = 100;
 const RECENT_SCORE_CEILING: usize = 500;
 const OSU_RECENT_MODE: &str = "osu";
 const CREDENTIAL_PREFIX: &str = "Clipline osu!";
+const OSU_CREDENTIALS: CredentialStore = CredentialStore::new("osu! client secret");
+static ENRICHMENT_PASSES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+struct EnrichmentPassLease {
+    root: PathBuf,
+}
+
+impl EnrichmentPassLease {
+    fn try_acquire(root: &Path) -> Result<Option<Self>, String> {
+        let root = root
+            .canonicalize()
+            .map_err(|e| format!("canonicalize osu! enrichment worker root {root:?}: {e}"))?;
+        let mut active = ENRICHMENT_PASSES
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .map_err(|e| format!("lock osu! enrichment worker registry: {e}"))?;
+        if !active.insert(root.clone()) {
+            return Ok(None);
+        }
+        Ok(Some(Self { root }))
+    }
+}
+
+impl Drop for EnrichmentPassLease {
+    fn drop(&mut self) {
+        let mut active = ENRICHMENT_PASSES
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.remove(&self.root);
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct SaveOsuApiSettingsRequest {
@@ -76,6 +102,9 @@ struct OsuRecentFetch {
 pub fn osu_api_status(
     state: tauri::State<'_, RuntimeState>,
 ) -> Result<OsuApiConnectionStatus, String> {
+    if let Err(error) = reconcile_osu_credential_cleanup(&state) {
+        eprintln!("reconcile pending osu! credentials: {error}");
+    }
     Ok(status_from_settings(&state.settings().osu))
 }
 
@@ -110,20 +139,35 @@ pub fn save_osu_api_settings(
         old_target.as_deref(),
         old_secret.as_deref(),
     )?;
-    if let Some(secret) = plan.secret_to_write.as_deref() {
-        write_secret(&plan.target, &user, secret)?;
-    }
-
-    let settings = state.update_osu(|osu| {
-        osu.client_id = Some(client_id.clone());
-        osu.user = Some(user.clone());
-        osu.credential_target = Some(plan.target.clone());
-        if old_target.as_deref() != Some(plan.target.as_str()) {
-            osu.last_connected_username = None;
-        }
-    })?;
-    if let Some(delete_target) = plan.delete_target {
-        let _ = delete_secret(&delete_target);
+    let persist = || {
+        state.update_osu(|osu| {
+            osu.client_id = Some(client_id.clone());
+            osu.user = Some(user.clone());
+            osu.credential_target = Some(plan.target.clone());
+            if let Some(delete_target) = plan.delete_target.clone() {
+                osu.credential_cleanup_targets.push(delete_target);
+            }
+            if old_target.as_deref() != Some(plan.target.as_str()) {
+                osu.last_connected_username = None;
+            }
+        })
+    };
+    let settings = if let Some(secret) = plan.secret_to_write.as_deref() {
+        let previous_target_secret = read_secret(&plan.target).ok();
+        crate::credential_transaction::write_then_persist(
+            &plan.target,
+            &user,
+            secret,
+            previous_target_secret.as_deref(),
+            write_secret,
+            delete_secret_if_present,
+            persist,
+        )?
+    } else {
+        persist()?
+    };
+    if let Err(error) = reconcile_osu_credential_cleanup(&state) {
+        eprintln!("reconcile old osu! credentials: {error}");
     }
     Ok(status_from_settings(&settings.osu))
 }
@@ -139,19 +183,36 @@ pub async fn test_osu_api_connection(
     let username = fetch.username.clone();
     let user_id = fetch.user_id.clone();
     let target = credential_target(&config.client_id, &user_id);
-    if settings.credential_target.as_deref() != Some(target.as_str()) {
-        write_secret(&target, &user_id, &config.client_secret)?;
-        if let Some(old_target) = settings.credential_target.as_deref() {
-            let _ = delete_secret(old_target);
-        }
+    let old_target = settings.credential_target.clone();
+    let persist = || {
+        state.update_osu(|osu| {
+            osu.user = Some(user_id.clone());
+            osu.credential_target = Some(target.clone());
+            if let Some(old) = old_target.as_deref().filter(|old| *old != target) {
+                osu.credential_cleanup_targets.push(old.to_string());
+            }
+            if let Some(username) = username.clone() {
+                osu.last_connected_username = Some(username);
+            }
+        })
+    };
+    let next = if old_target.as_deref() != Some(target.as_str()) {
+        let previous_target_secret = read_secret(&target).ok();
+        crate::credential_transaction::write_then_persist(
+            &target,
+            &user_id,
+            &config.client_secret,
+            previous_target_secret.as_deref(),
+            write_secret,
+            delete_secret_if_present,
+            persist,
+        )?
+    } else {
+        persist()?
+    };
+    if let Err(error) = reconcile_osu_credential_cleanup(&state) {
+        eprintln!("reconcile migrated osu! credentials: {error}");
     }
-    let next = state.update_osu(|osu| {
-        osu.user = Some(user_id.clone());
-        osu.credential_target = Some(target.clone());
-        if let Some(username) = username.clone() {
-            osu.last_connected_username = Some(username);
-        }
-    })?;
     let status = status_from_settings(&next.osu);
     let media_root = storage.media_dir();
     if let Err(e) = retry_pending_enrichment_with_settings(&next.osu, media_root).await {
@@ -193,6 +254,9 @@ async fn retry_pending_enrichment_with_settings(
     settings: &OsuApiSettings,
     media_root: PathBuf,
 ) -> Result<bool, String> {
+    let Some(_lease) = EnrichmentPassLease::try_acquire(&media_root)? else {
+        return Ok(false);
+    };
     let config = match config_from_settings(settings) {
         Ok(config) => config,
         Err(e) => {
@@ -203,19 +267,34 @@ async fn retry_pending_enrichment_with_settings(
             return Ok(false);
         }
     };
-    let pending = crate::osu_enrichment::discover_pending(&media_root)?;
+    let now_unix = crate::util::unix_now();
+    let pending: Vec<_> = crate::osu_enrichment::discover_pending(&media_root)?
+        .into_iter()
+        .filter(|job| job.retry_due(now_unix))
+        .collect();
     if pending.is_empty() {
         return Ok(false);
     }
     let earliest = pending
         .iter()
-        .map(|record| record.recording_start_unix)
+        .map(|job| job.record().recording_start_unix)
         .min();
-    let fetch = fetch_recent_scores(&config, earliest).await?;
+    let fetch = match fetch_recent_scores(&config, earliest).await {
+        Ok(fetch) => fetch,
+        Err(error) => {
+            for job in &pending {
+                let _ = crate::osu_enrichment::mark_pending_retry(
+                    job,
+                    &format!("osu! API fetch failed; retrying later: {error}"),
+                );
+            }
+            return Err(error);
+        }
+    };
     let mut updated = false;
-    for record in pending {
+    for job in pending {
         match crate::osu_enrichment::apply_scores_to_pending(
-            &record,
+            &job,
             &fetch.scores,
             fetch.pagination_ceiling_reached,
         ) {
@@ -225,13 +304,16 @@ async fn retry_pending_enrichment_with_settings(
                 }
                 eprintln!(
                     "osu! enrichment complete for {}: {} play(s)",
-                    record.clip_path,
+                    job.clip_path().display(),
                     mapped.plays.len()
                 );
             }
             Err(e) => {
-                eprintln!("osu! enrichment failed for {}: {e}", record.clip_path);
-                let _ = crate::osu_enrichment::mark_pending_failed(&record, &e);
+                eprintln!(
+                    "osu! enrichment failed for {}: {e}",
+                    job.clip_path().display()
+                );
+                let _ = crate::osu_enrichment::mark_pending_failed(&job, &e);
             }
         }
     }
@@ -242,9 +324,9 @@ async fn fetch_recent_scores(
     config: &OsuApiConfig,
     stop_before_unix: Option<i64>,
 ) -> Result<OsuRecentFetch, String> {
-    let token = request_app_token(config).await?;
-    let client = reqwest::Client::new();
-    let resolved_user = resolve_osu_user(&client, &token, &config.user).await?;
+    let client = crate::bounded_http::control_client()?;
+    let token = request_app_token(client, config).await?;
+    let resolved_user = resolve_osu_user(client, &token, &config.user).await?;
     let mut offset = 0usize;
     let mut scores = Vec::new();
     let mut failed_count = 0usize;
@@ -254,7 +336,7 @@ async fn fetch_recent_scores(
     let mut pagination_ceiling_reached = false;
 
     while offset < RECENT_SCORE_CEILING {
-        let raw = request_recent_page(&client, &token, &resolved_user.id, offset).await?;
+        let raw = request_recent_page(client, &token, &resolved_user.id, offset).await?;
         if raw.is_empty() {
             break;
         }
@@ -355,27 +437,23 @@ async fn resolve_osu_user(
         .await
         .map_err(|e| format!("resolve osu! user: {e}"))?;
     let status = response.status();
-    if !status.is_success() {
-        let message = response.text().await.unwrap_or_else(|_| status.to_string());
-        return Err(format!("resolve osu! user failed with {status}: {message}"));
-    }
-    let user: UserResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("parse osu! user lookup response: {e}"))?;
+    let user: UserResponse = osu_json_response(response, status, "resolve osu! user").await?;
     Ok(ResolvedOsuUser {
         id: user.id.to_string(),
         username: user.username,
     })
 }
 
-async fn request_app_token(config: &OsuApiConfig) -> Result<String, String> {
+async fn request_app_token(
+    client: &reqwest::Client,
+    config: &OsuApiConfig,
+) -> Result<String, String> {
     #[derive(Deserialize)]
     struct TokenResponse {
         access_token: String,
     }
 
-    let response = reqwest::Client::new()
+    let response = client
         .post(OSU_TOKEN_URL)
         .form(&[
             ("client_id", config.client_id.as_str()),
@@ -387,16 +465,7 @@ async fn request_app_token(config: &OsuApiConfig) -> Result<String, String> {
         .await
         .map_err(|e| format!("request osu! token: {e}"))?;
     let status = response.status();
-    if !status.is_success() {
-        let message = response.text().await.unwrap_or_else(|_| status.to_string());
-        return Err(format!(
-            "request osu! token failed with {status}: {message}"
-        ));
-    }
-    let token: TokenResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("parse osu! token response: {e}"))?;
+    let token: TokenResponse = osu_json_response(response, status, "request osu! token").await?;
     Ok(token.access_token)
 }
 
@@ -428,16 +497,24 @@ async fn request_recent_page(
         .await
         .map_err(|e| format!("fetch osu! recent scores: {e}"))?;
     let status = response.status();
+    osu_json_response(response, status, "fetch osu! recent scores").await
+}
+
+async fn osu_json_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    status: reqwest::StatusCode,
+    context: &str,
+) -> Result<T, String> {
     if !status.is_success() {
-        let message = response.text().await.unwrap_or_else(|_| status.to_string());
-        return Err(format!(
-            "fetch osu! recent scores failed with {status}: {message}"
-        ));
+        let message = crate::bounded_http::response_error_message(response, status, context).await;
+        return Err(format!("{context} failed with {status}: {message}"));
     }
-    response
-        .json()
-        .await
-        .map_err(|e| format!("parse osu! recent scores: {e}"))
+    crate::bounded_http::response_json_limited(
+        response,
+        crate::bounded_http::CONTROL_JSON_MAX_BYTES,
+        context,
+    )
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -729,93 +806,39 @@ fn osu_user_lookup_segment(user: &str) -> String {
 }
 
 fn write_secret(target: &str, username: &str, secret: &str) -> Result<(), String> {
-    let mut target_w = wide_null(OsStr::new(target));
-    let mut username_w = wide_null(OsStr::new(username));
-    let mut blob = secret.as_bytes().to_vec();
-    let blob_len =
-        u32::try_from(blob.len()).map_err(|_| "osu! client secret is too large".to_string())?;
-    let credential = CREDENTIALW {
-        Flags: 0,
-        Type: CRED_TYPE_GENERIC,
-        TargetName: target_w.as_mut_ptr(),
-        Comment: ptr::null_mut(),
-        LastWritten: Default::default(),
-        CredentialBlobSize: blob_len,
-        CredentialBlob: blob.as_mut_ptr(),
-        Persist: CRED_PERSIST_LOCAL_MACHINE,
-        AttributeCount: 0,
-        Attributes: ptr::null_mut(),
-        TargetAlias: ptr::null_mut(),
-        UserName: username_w.as_mut_ptr(),
-    };
-    if unsafe { CredWriteW(&credential, 0) } == 0 {
-        return Err(last_os_error("store osu! client secret"));
-    }
-    Ok(())
+    OSU_CREDENTIALS.write(target, username, secret)
 }
 
 fn read_secret(target: &str) -> Result<String, String> {
-    let target_w = wide_null(OsStr::new(target));
-    let mut raw: *mut CREDENTIALW = ptr::null_mut();
-    if unsafe { CredReadW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0, &mut raw) } == 0 {
-        return Err(last_os_error("read osu! client secret"));
-    }
-    let _free = CredentialFree(raw);
-    let credential = unsafe { &*raw };
-    let bytes = unsafe {
-        slice::from_raw_parts(
-            credential.CredentialBlob,
-            credential.CredentialBlobSize as usize,
-        )
-    };
-    String::from_utf8(bytes.to_vec())
-        .map_err(|_| "osu! client secret is not valid UTF-8".to_string())
+    OSU_CREDENTIALS.read(target)
 }
 
-fn delete_secret(target: &str) -> Result<(), String> {
-    let target_w = wide_null(OsStr::new(target));
-    if unsafe {
-        windows_sys::Win32::Security::Credentials::CredDeleteW(
-            target_w.as_ptr(),
-            CRED_TYPE_GENERIC,
-            0,
-        )
-    } == 0
-    {
-        return Err(last_os_error("delete osu! client secret"));
-    }
-    Ok(())
+fn delete_secret_if_present(target: &str) -> Result<(), String> {
+    OSU_CREDENTIALS.delete_if_present(target)
 }
 
-struct CredentialFree(*mut CREDENTIALW);
-
-impl Drop for CredentialFree {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                CredFree(self.0.cast());
-            }
-        }
+fn reconcile_osu_credential_cleanup(state: &RuntimeState) -> Result<(), String> {
+    let targets = state.settings().osu.credential_cleanup_targets;
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let report = crate::credential_transaction::cleanup_targets(targets, delete_secret_if_present);
+    let deleted = report.deleted;
+    if !deleted.is_empty() {
+        state.update_osu(|osu| {
+            osu.credential_cleanup_targets
+                .retain(|target| !deleted.contains(target));
+        })?;
+    }
+    if report.failures.is_empty() {
+        Ok(())
+    } else {
+        Err(report.failures.join(", "))
     }
 }
 
 fn open_path(path: &std::path::Path, context: &str) -> Result<(), String> {
-    let operation = wide_null(OsStr::new("open"));
-    let target = wide_null(path.as_os_str());
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            target.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    if result as isize <= 32 {
-        return Err(format!("{context} failed with shell code {result:?}"));
-    }
-    Ok(())
+    crate::windows::open_with_shell(path.as_os_str(), context)
 }
 
 fn osu_setup_guide_html() -> &'static str {
@@ -979,6 +1002,34 @@ mod tests {
         assert!(
             !changed,
             "missing osu! API credentials should not trigger an osu-enrichment-updated refresh loop"
+        );
+    }
+
+    #[test]
+    fn enrichment_pass_lease_coalesces_per_root_and_releases_on_drop() {
+        let first = TestDir::new("clipline-osu-api", "single-flight-first");
+        let second = TestDir::new("clipline-osu-api", "single-flight-second");
+
+        let lease = EnrichmentPassLease::try_acquire(first.path())
+            .unwrap()
+            .expect("first pass owns root");
+        assert!(
+            EnrichmentPassLease::try_acquire(first.path())
+                .unwrap()
+                .is_none(),
+            "overlapping pass is coalesced"
+        );
+        let other = EnrichmentPassLease::try_acquire(second.path())
+            .unwrap()
+            .expect("another root remains independent");
+        drop(other);
+        drop(lease);
+
+        assert!(
+            EnrichmentPassLease::try_acquire(first.path())
+                .unwrap()
+                .is_some(),
+            "root is released after the pass"
         );
     }
 }

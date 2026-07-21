@@ -1,8 +1,8 @@
 //! Thin safe wrappers over D3D11 device/texture creation, shared by WGC
 //! capture now and the Media Foundation encoder milestone later.
 
-use windows::core::{Interface, Result as WinResult};
-use windows::Win32::Foundation::HMODULE;
+use windows::core::{Error as WinError, Interface, Result as WinResult};
+use windows::Win32::Foundation::{E_FAIL, HMODULE};
 #[cfg(test)]
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE};
@@ -28,7 +28,21 @@ pub(super) fn create_device_for_tests() -> WinResult<(ID3D11Device, ID3D11Device
     create_device_with(D3D_DRIVER_TYPE_WARP)
 }
 
+#[cfg(test)]
+pub(super) fn create_unprotected_device_for_tests() -> WinResult<(ID3D11Device, ID3D11DeviceContext)>
+{
+    create_device_unprotected_with(D3D_DRIVER_TYPE_WARP)
+}
+
 fn create_device_with(driver: D3D_DRIVER_TYPE) -> WinResult<(ID3D11Device, ID3D11DeviceContext)> {
+    let (device, context) = create_device_unprotected_with(driver)?;
+    ensure_multithread_protected(&device)?;
+    Ok((device, context))
+}
+
+fn create_device_unprotected_with(
+    driver: D3D_DRIVER_TYPE,
+) -> WinResult<(ID3D11Device, ID3D11DeviceContext)> {
     let mut device = None;
     let mut context = None;
     // SAFETY: out-params receive valid COM pointers on success; we pass no
@@ -47,13 +61,25 @@ fn create_device_with(driver: D3D_DRIVER_TYPE) -> WinResult<(ID3D11Device, ID3D1
         )?;
     }
     let device = device.expect("device out-param set on Ok");
-    // MF's DXGI device manager shares this device across threads —
-    // multithread protection is required for D3D-aware MFTs.
-    let mt: ID3D10Multithread = device.cast()?;
-    // SAFETY: trivial setter on a valid interface (returns the previous
-    // value, which we don't need).
-    let _ = unsafe { mt.SetMultithreadProtected(true) };
     Ok((device, context.expect("context out-param set on Ok")))
+}
+
+/// Establish the immediate-context serialization required whenever capture,
+/// conversion, readback, and encoding share a caller-provided device.
+pub(crate) fn ensure_multithread_protected(device: &ID3D11Device) -> WinResult<()> {
+    let mt: ID3D10Multithread = device.cast()?;
+    // SAFETY: these are trivial accessors on a live COM interface. The setter
+    // returns the previous value, so query again to verify the invariant.
+    if !unsafe { mt.GetMultithreadProtected() }.as_bool() {
+        let _ = unsafe { mt.SetMultithreadProtected(true) };
+    }
+    if !unsafe { mt.GetMultithreadProtected() }.as_bool() {
+        return Err(WinError::new(
+            E_FAIL,
+            "D3D11 device did not enable multithread protection",
+        ));
+    }
+    Ok(())
 }
 
 /// Default-usage BGRA texture, e.g. the destination for a capture-frame
@@ -202,5 +228,24 @@ pub(super) fn copy_texture_region(
     };
     unsafe {
         context.CopySubresourceRegion(dst, 0, 0, 0, 0, src, 0, Some(&src_box));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multithread_guard_enables_an_unprotected_caller_device_idempotently() {
+        let (device, _context) =
+            create_unprotected_device_for_tests().expect("unprotected WARP device");
+        let multithread: ID3D10Multithread = device.cast().expect("ID3D10Multithread");
+        assert!(!unsafe { multithread.GetMultithreadProtected() }.as_bool());
+
+        ensure_multithread_protected(&device).expect("enable multithread protection");
+        assert!(unsafe { multithread.GetMultithreadProtected() }.as_bool());
+
+        ensure_multithread_protected(&device).expect("idempotent protection check");
+        assert!(unsafe { multithread.GetMultithreadProtected() }.as_bool());
     }
 }

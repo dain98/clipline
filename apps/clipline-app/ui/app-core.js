@@ -88,6 +88,8 @@ var cloudClipsLoaded = false;
 var cloudClipsLoading = false;
 var cloudClipsError = "";
 var cloudClipsRequestGate = CloudCore.createRequestGate();
+var localClipsRequestGate = CloudCore.createRequestGate();
+var localLibraryWarning = "";
 var railProfileAvatarKey = "";
 var railProfileAvatarRequest = 0;
 var galleryFilter = "all";
@@ -123,7 +125,6 @@ var selectedDetectedGameIds = new Set();
 var detectedGamesScanId = 0;
 var activeDetectedGame = null;
 var warnedElevatedGameProcesses = new Set();
-var elevationRestartInFlight = false;
 var captureTargetDirty = false;
 // Codecs WebView2 can decode in the review player (H.264 always; HEVC/AV1
 // probed at startup). Drives the playback caveat and the recorder's

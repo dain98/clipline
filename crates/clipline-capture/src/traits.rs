@@ -27,6 +27,17 @@ pub enum CaptureError {
     DeviceLost(String),
     #[error("no frame arrived within {0:?}")]
     Timeout(std::time::Duration),
+    #[error("{operation} timed out after {after:?}")]
+    OperationTimeout {
+        operation: String,
+        after: std::time::Duration,
+    },
+}
+
+impl CaptureError {
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Timeout(_) | Self::OperationTimeout { .. })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -89,6 +100,11 @@ pub struct AudioPacket {
 /// model: return every packet that ends at or before `until_pts_s`.
 pub trait AudioSource {
     fn poll_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError>;
+    /// Final opportunity to drain device/encoder latency through the video
+    /// boundary. Sources without delayed delivery use ordinary polling.
+    fn finish_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
+        self.poll_packets(until_pts_s)
+    }
     /// Track parameters for muxing this source's stream.
     fn track_config(&self) -> AudioTrackConfig;
 }
@@ -197,6 +213,13 @@ mod tests {
         assert!(format!("{err}").contains("gone"));
         let err = CaptureError::Timeout(std::time::Duration::from_millis(500));
         assert!(format!("{err}").contains("500ms"));
+        assert!(err.is_timeout());
+        let err = CaptureError::OperationTimeout {
+            operation: "process loopback activation".into(),
+            after: std::time::Duration::from_millis(1500),
+        };
+        assert!(err.is_timeout());
+        assert!(format!("{err}").contains("process loopback activation"));
     }
 
     #[test]

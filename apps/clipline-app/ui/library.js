@@ -48,13 +48,9 @@ function renderRailGame() {
   }
 }
 
-function clipFileStem(name) {
-  return String(name || "").replace(/\.(mp4|mov|mkv|webm)$/i, "").trim();
-}
-
 function clipDisplayTitle(clip) {
   const title = String(clip && clip.title || "").trim();
-  return title || clipFileStem(clip && clip.name);
+  return title || PresentationCore.clipNameStem(clip && clip.name);
 }
 
 function replacePosterCachePath(oldPath, newPath) {
@@ -64,6 +60,7 @@ function replacePosterCachePath(oldPath, newPath) {
 }
 
 function replaceClipInCache(oldPath, renamed) {
+  invalidateLocalClipsRefresh();
   clipsCache = clipsCache.map((clip) => (clip.path === oldPath ? renamed : clip));
   if (oldPath !== renamed.path && selectedClipPaths.delete(oldPath)) {
     selectedClipPaths.add(renamed.path);
@@ -71,8 +68,39 @@ function replaceClipInCache(oldPath, renamed) {
   replacePosterCachePath(oldPath, renamed.path);
 }
 
+function invalidateLocalClipsRefresh() {
+  localClipsRequestGate.invalidate();
+}
+
+function applyLocalLibraryWarnings(warnings) {
+  const error = $("error");
+  if (localLibraryWarning && error.textContent === localLibraryWarning) {
+    error.textContent = "";
+  }
+  const normalized = Array.isArray(warnings)
+    ? warnings.map((warning) => String(warning || "").trim()).filter(Boolean)
+    : [];
+  localLibraryWarning = normalized.join(" ");
+  if (localLibraryWarning) {
+    error.textContent = localLibraryWarning;
+  }
+}
+
 async function refreshClips(preferredCurrentPath = null) {
-  clipsCache = await invoke("list_clips");
+  const request = localClipsRequestGate.begin("local-library");
+  const isCurrent = () => localClipsRequestGate.isCurrent(request, "local-library");
+  let freshClips;
+  let result;
+  try {
+    result = await invoke("list_clips");
+    freshClips = Array.isArray(result.clips) ? result.clips : [];
+  } catch (error) {
+    if (!isCurrent()) return false;
+    throw error;
+  }
+  if (!isCurrent()) return false;
+  applyLocalLibraryWarnings(result.warnings);
+  clipsCache = freshClips;
   if (currentClip) {
     const currentPath = preferredCurrentPath || currentClip.path;
     const fresh = clipsCache.find((clip) => clip.path === currentPath);
@@ -86,6 +114,7 @@ async function refreshClips(preferredCurrentPath = null) {
     }
   }
   renderClips();
+  return true;
 }
 // Leading icon per clip kind. Static markup (no clip data) — innerHTML is safe.
 const CLIP_KIND_ICONS = {
@@ -140,16 +169,26 @@ function gamePlaceholderEl() {
   return el;
 }
 
+function customGameForRecordedGame(recordedGame) {
+  if (!recordedGame || !recordedGame.id) return null;
+  const exact = customGames.find((custom) => custom.id === recordedGame.id);
+  if (exact) return exact;
+  return customGames.find((custom) =>
+    custom.name === recordedGame.name &&
+    Array.isArray(custom.legacy_ids) && custom.legacy_ids.includes(recordedGame.id)
+  ) || null;
+}
+
 // Resolve a clip's recorded game to an icon, reusing the icons shown in
-// settings: a plugin's bundled icon, or a custom game's extracted icon.
-// Returns null for clips with no game, or a game no longer configured.
+// settings. Migrated custom records win by their old id plus name so an old
+// built-in collision keeps its custom icon without gaining plugin behavior.
 function clipGameIcon(clip) {
   const g = clip && clip.game;
   if (!g || !g.id) return null;
+  const custom = customGameForRecordedGame(g);
+  if (custom && custom.icon) return { url: custom.icon, label: custom.name };
   const plugin = gamePlugins.find((p) => p.id === g.id);
   if (plugin && plugin.icon) return { url: plugin.icon, label: plugin.name };
-  const custom = customGames.find((c) => c.id === g.id);
-  if (custom && custom.icon) return { url: custom.icon, label: custom.name };
   return null;
 }
 
@@ -159,6 +198,7 @@ function pluginForGameId(gameId) {
 
 function pluginForClip(clip) {
   const gameId = clip && clip.game && clip.game.id;
+  if (clip && customGameForRecordedGame(clip.game)) return null;
   return gameId ? pluginForGameId(gameId) : null;
 }
 
@@ -179,26 +219,16 @@ function pluginGalleryPolicy(clip) {
 
 function markerDisplayLabel(marker, presentation) {
   const kind = marker && marker.kind ? marker.kind : "Other";
-  const configured = presentation
-    && presentation.marker_kinds
-    && presentation.marker_kinds[kind]
-    && typeof presentation.marker_kinds[kind] === "object"
-      ? presentation.marker_kinds[kind]
-      : null;
-  const label = configured && configured.label ? configured.label : kind.replace(/([a-z])([A-Z])/g, "$1 $2");
+  const configured = PlayerCore.markerKindConfig(kind, presentation);
+  const label = PresentationCore.markerKindLabel(kind, configured && configured.label);
   const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
   return `${fmtDur(marker.t_s)} ${label}${actor}`;
 }
 
 function markerEventText(marker, presentation) {
   const kind = marker && marker.kind ? marker.kind : "Other";
-  const configured = presentation
-    && presentation.marker_kinds
-    && presentation.marker_kinds[kind]
-    && typeof presentation.marker_kinds[kind] === "object"
-      ? presentation.marker_kinds[kind]
-      : null;
-  const label = configured && configured.label ? configured.label : kind.replace(/([a-z])([A-Z])/g, "$1 $2");
+  const configured = PlayerCore.markerKindConfig(kind, presentation);
+  const label = PresentationCore.markerKindLabel(kind, configured && configured.label);
   const actor = marker && marker.actor ? ` · ${marker.actor}` : "";
   return `${label}${actor}`;
 }
@@ -1137,9 +1167,6 @@ function sortGalleryClips(clips) {
   return out;
 }
 
-const GALLERY_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const GALLERY_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
 // Bucket clips by an arbitrary key. Clips keep the caller's incoming order
 // (already sorted by the chosen gallery sort), so Largest / Most markers
 // survives inside each group; only the group order is by recency. A
@@ -1163,7 +1190,7 @@ function galleryDayGroups(clips) {
   return bucketGroups(
     clips,
     (c) => { const d = new Date(c.modified_unix * 1000); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; },
-    (c) => { const d = new Date(c.modified_unix * 1000); return `${GALLERY_DAYS[d.getDay()]}, ${GALLERY_MONTHS[d.getMonth()]} ${d.getDate()}`; },
+    (c) => PresentationCore.formatGalleryDay(new Date(c.modified_unix * 1000)),
   );
 }
 

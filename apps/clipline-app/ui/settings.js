@@ -483,6 +483,7 @@ function normalizeGamePluginSettingsMap(settings) {
 function normalizeCustomGame(game) {
   return {
     id: String(game.id || `custom-${Date.now()}`),
+    legacy_ids: Array.isArray(game.legacy_ids) ? game.legacy_ids.map(String) : [],
     name: String(game.name || game.exe_name || game.window_title || "Custom game").trim(),
     enabled: game.enabled !== false,
     exe_name: String(game.exe_name || "").trim(),
@@ -1849,6 +1850,7 @@ function customGameId(name) {
 }
 
 function uniqueCustomGameId(name, usedIds = new Set(customGames.map((game) => game.id))) {
+  for (const plugin of gamePlugins) usedIds.add(plugin.id);
   const baseId = customGameId(name);
   let candidateId = baseId;
   let suffix = 2;
@@ -2173,7 +2175,7 @@ async function addCustomGameFromWindow(win) {
   let icon = null;
   if (win.exe_path) {
     try {
-      icon = await invoke("extract_window_icon", { exePath: win.exe_path });
+      icon = await invoke("extract_window_icon", { processId: win.process_id });
     } catch (e) {
       icon = null;
     }

@@ -1,6 +1,6 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use clipline_lol::{poll_once, EventTracker, LiveClient};
+use clipline_lol::{poll_once, poll_once_with_continuity, EventTracker, LiveClient};
 use httpmock::prelude::*;
 use serde_json::json;
 
@@ -66,4 +66,84 @@ async fn polls_dedupe_and_stamp_recording_offsets() {
         .unwrap();
     assert_eq!(batch2.len(), 1);
     assert_eq!(batch2[0].subtype.as_deref(), Some("2"));
+}
+
+#[tokio::test]
+async fn poll_rejects_an_anchor_before_recording_without_fetching_events() {
+    let server = MockServer::start();
+    mount_gamestats(&server, 100.0);
+    let events = mount_events(
+        &server,
+        json!([{ "EventID": 1, "EventName": "ChampionKill", "EventTime": 95.0 }]),
+    );
+    let client = LiveClient::new(server.base_url()).unwrap();
+    let mut tracker = EventTracker::default();
+    let future_recording_start = Instant::now() + Duration::from_secs(60);
+
+    let error = poll_once(&client, &mut tracker, "Me", future_recording_start, 0.0)
+        .await
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("clock anchor predates recording start"));
+    events.assert_hits(0);
+}
+
+#[tokio::test]
+async fn transient_failure_preserves_the_cumulative_event_watermark() {
+    let server = MockServer::start();
+    let mut stats = mount_gamestats(&server, 100.0);
+    let mut events = mount_events(
+        &server,
+        json!([
+            { "EventID": 0, "EventName": "GameStart", "EventTime": 0.05 },
+            { "EventID": 1, "EventName": "ChampionKill", "EventTime": 95.0,
+              "KillerName": "Me", "VictimName": "Them", "Assisters": [] }
+        ]),
+    );
+    let client = LiveClient::new(server.base_url()).unwrap();
+    let mut tracker = EventTracker::default();
+    let t0 = Instant::now();
+
+    let first = poll_once_with_continuity(&client, &mut tracker, "Me", t0, 0.0)
+        .await
+        .unwrap();
+    assert_eq!(first.events.len(), 2);
+    assert!(!first.new_match);
+
+    stats.delete();
+    events.delete();
+    let mut failed_stats = server.mock(|when, then| {
+        when.method(GET).path("/liveclientdata/gamestats");
+        then.status(503);
+    });
+    assert!(
+        poll_once_with_continuity(&client, &mut tracker, "Me", t0, 0.0)
+            .await
+            .is_err()
+    );
+
+    failed_stats.delete();
+    mount_gamestats(&server, 110.0);
+    mount_events(
+        &server,
+        json!([
+            { "EventID": 0, "EventName": "GameStart", "EventTime": 0.05 },
+            { "EventID": 1, "EventName": "ChampionKill", "EventTime": 95.0,
+              "KillerName": "Me", "VictimName": "Them", "Assisters": [] },
+            { "EventID": 2, "EventName": "DragonKill", "EventTime": 109.0,
+              "KillerName": "Me", "DragonType": "Infernal", "Assisters": [] }
+        ]),
+    );
+
+    let recovered = poll_once_with_continuity(&client, &mut tracker, "Me", t0, 0.0)
+        .await
+        .unwrap();
+    assert_eq!(recovered.events.len(), 1);
+    assert_eq!(
+        recovered.events[0].kind,
+        clipline_events::EventKind::DragonKill
+    );
+    assert!(!recovered.new_match);
 }

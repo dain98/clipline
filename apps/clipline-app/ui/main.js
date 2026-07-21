@@ -21,6 +21,12 @@ listen("status", (e) => {
   updateCaptureStatus();
 });
 
+function requestRefresh() {
+  refresh().catch((error) => {
+    $("error").textContent = String(error);
+  });
+}
+
 listen("saved", (e) => {
   $("error").textContent = "";
   const s = e.payload;
@@ -28,11 +34,11 @@ listen("saved", (e) => {
   setNotice(s.gc_deleted
     ? `cleaned up ${s.gc_deleted} old clip${s.gc_deleted > 1 ? "s" : ""} (${fmtBytes(s.gc_freed_bytes)})`
     : `saved ${fmtDur(s.seconds)} ${savedKind}`, { transient: true });
-  refresh();
+  requestRefresh();
 });
 
 listen("osu-enrichment-updated", () => {
-  refresh();
+  requestRefresh();
 });
 
 listen("error", (e) => { $("error").textContent = e.payload; });
@@ -65,6 +71,7 @@ listen("suspend-review-playback", () => suspendReviewPlayback());
 
 listen("game-detection", (e) => {
   activeDetectedGame = e.payload || null;
+  if (activeDetectedGame?.active) loadGamePlugins();
   updateCaptureStatus();
   updateGameDetectionStatus();
   maybeWarnElevatedGame(activeDetectedGame);
@@ -72,7 +79,7 @@ listen("game-detection", (e) => {
 
 listen("cloud-upload-progress", (e) => {
   const progress = e.payload || {};
-  upsertCloudProgress(progress);
+  const update = upsertCloudProgress(progress);
   if (progress.error) {
     $("error").textContent = progress.error;
   } else if (progress.upload_status === "uploading") {
@@ -84,7 +91,7 @@ listen("cloud-upload-progress", (e) => {
   } else if (progress.upload_status === "processing") {
     setDeckStatus("cloud upload processing");
   }
-  renderClips();
+  if (update.renderRequired) renderClips();
 });
 
 /* ---- wiring ---- */
@@ -100,9 +107,12 @@ $("gallery-source-tabs").addEventListener("click", (ev) => {
   const tab = ev.target.closest(".source-tab");
   if (!tab) return;
   gallerySource = tab.dataset.gallerySource === "cloud" ? "cloud" : "local";
-  if (gallerySource === "cloud") exitSelectMode();
+  if (gallerySource === "cloud") {
+    exitSelectMode();
+    loadCloudClips({ force: true });
+    return;
+  }
   renderClips();
-  if (gallerySource === "cloud") loadCloudClips({ force: true });
 });
 $("gallery-select-toggle").addEventListener("click", () => {
   selectMode = !selectMode;
@@ -158,16 +168,12 @@ $("update-cancel").addEventListener("click", () => {
   $("update-dialog").close();
 });
 $("elevation-cancel").addEventListener("click", () => {
-  if (!elevationRestartInFlight) $("elevation-dialog").close();
+  $("elevation-dialog").close();
 });
-$("elevation-restart").addEventListener("click", restartAsAdministrator);
 $("elevation-dialog").addEventListener("click", (ev) => {
-  if (ev.target === $("elevation-dialog") && !elevationRestartInFlight) {
+  if (ev.target === $("elevation-dialog")) {
     $("elevation-dialog").close();
   }
-});
-$("elevation-dialog").addEventListener("cancel", (ev) => {
-  if (elevationRestartInFlight) ev.preventDefault();
 });
 $("elevation-dialog").addEventListener("close", () => maybeWarnElevatedGame(activeDetectedGame));
 $("set-replay-disk-enabled").addEventListener("change", syncReplayStorageFields);
@@ -516,15 +522,7 @@ $("timeline").addEventListener("pointercancel", endDrag);
 $("timeline").addEventListener("lostpointercapture", endDrag);
 
 document.addEventListener("keydown", (ev) => {
-  if (
-    $("confirm-dialog").open ||
-    $("quit-dialog").open ||
-    $("update-dialog").open ||
-    $("elevation-dialog").open ||
-    $("upload-dialog").open ||
-    $("game-plugin-settings-dialog").open ||
-    $("keys-dialog").open
-  ) return; // a dialog owns the keyboard
+  if (document.querySelector("dialog[open]")) return; // a dialog owns the keyboard
   if (ev.code === "Escape" && settingsOpen) {
     ev.preventDefault();
     requestSettingsClose();
@@ -596,9 +594,7 @@ document.addEventListener("keydown", (ev) => {
 function maybeWarnElevatedGame(game) {
   const dialog = $("elevation-dialog");
   if (!game || !game.active || !game.elevated_hotkeys_blocked) {
-    // Keep the dialog up while UAC is in flight so a transient inactive
-    // detection cannot erase the only retry path for this PID.
-    if (dialog.open && !elevationRestartInFlight) dialog.close();
+    if (dialog.open) dialog.close();
     return;
   }
   const processInstanceId = String(game.process_instance_id || "");
@@ -610,44 +606,6 @@ function maybeWarnElevatedGame(game) {
   dialog.showModal();
 }
 
-async function restartAsAdministrator() {
-  const button = $("elevation-restart");
-  const cancel = $("elevation-cancel");
-  const dialog = $("elevation-dialog");
-  elevationRestartInFlight = true;
-  button.disabled = true;
-  cancel.disabled = true;
-  button.textContent = "Waiting for Windows...";
-  $("error").textContent = "";
-  try {
-    const restarted = await invoke("restart_as_administrator");
-    if (!restarted) {
-      button.disabled = false;
-      cancel.disabled = false;
-      button.textContent = "Restart as Administrator";
-    }
-  } catch (error) {
-    // Leave the dialog open so UAC cancel can retry (PID already warned).
-    // If dismiss still happened during the wait, clear the warned PID so the
-    // post-flight reconcile can re-offer the warning.
-    button.disabled = false;
-    cancel.disabled = false;
-    button.textContent = "Restart as Administrator";
-    $("error").textContent = String(error);
-    if (!dialog.open) {
-      const processInstanceId = String(
-        (activeDetectedGame && activeDetectedGame.process_instance_id) || "",
-      );
-      if (processInstanceId) warnedElevatedGameProcesses.delete(processInstanceId);
-    }
-  } finally {
-    elevationRestartInFlight = false;
-  }
-  // After in-flight clears: restore a closed retry path, or close a stale
-  // dialog that could not be closed while UAC suppressed inactive detection.
-  maybeWarnElevatedGame(activeDetectedGame);
-}
-
 /* ---- boot ---- */
 
 updateViews();
@@ -655,7 +613,13 @@ syncPlayState();
 syncVolume();
 syncAllRangeProgress();
 function reportFrontendReady() {
-  invoke("frontend_ready").catch((e) => console.warn("frontend_ready failed:", e));
+  invoke("frontend_ready")
+    .then((warnings) => {
+      if (Array.isArray(warnings) && warnings.length) {
+        $("error").textContent = warnings.join(" ");
+      }
+    })
+    .catch((e) => console.warn("frontend_ready failed:", e));
 }
 async function loadInitialSettings() {
   await loadGamePlugins();
@@ -683,4 +647,9 @@ afterNextPaint().then(() => {
   }, 750);
 });
 reportFrontendReady();
-setInterval(refreshMemoryUsage, 2000);
+setInterval(() => {
+  if (!document.hidden) refreshMemoryUsage();
+}, 2000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshMemoryUsage();
+});

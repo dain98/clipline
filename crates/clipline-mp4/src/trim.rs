@@ -1,12 +1,13 @@
 //! Keyframe-aligned stream-copy trim for finalized Clipline MP4s.
 
 use std::collections::BTreeSet;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use audiopus::coder::Encoder;
-use audiopus::{Application, Channels, SampleRate};
+use shiguredo_opus::{Decoder, DecoderConfig, Encoder, EncoderConfig};
 
 use crate::walker::{children, find, walk, BoxInfo};
 use crate::{
@@ -18,6 +19,13 @@ use crate::{
 /// reader will load into memory. Real Clipline sample tables are far smaller;
 /// this rejects corrupt or hostile declarations before allocation.
 const MAX_FINALIZED_MOOV_BYTES: u64 = 64 * 1024 * 1024;
+/// Upper bound for per-track sample metadata. At 60 FPS this still permits
+/// more than 18 hours of video while preventing tiny hostile tables from
+/// expanding into multi-gigabyte allocations.
+const MAX_PARSED_SAMPLES: usize = 4_000_000;
+const MAX_OPUS_PACKET_BYTES: u32 = 1024 * 1024;
+const TEMP_FILE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrimInfo {
@@ -82,30 +90,36 @@ fn trim_keyframe_aligned_to_writer<W: Write + Seek>(
     let selection = select_trim_range(&movie, start_s, end_s)?;
 
     let mut selected: Vec<Vec<FragSample>> = Vec::with_capacity(movie.tracks.len());
+    let mut starts: Vec<Vec<u64>> = Vec::with_capacity(movie.tracks.len());
     for (idx, track) in movie.tracks.iter().enumerate() {
-        let samples: Vec<FragSample> = if idx == selection.video_idx {
+        let records: Vec<&SampleRecord> = if idx == selection.video_idx {
             track.samples[selection.start_idx..selection.end_idx]
                 .iter()
-                .map(|s| s.to_frag_sample(input))
-                .collect::<Result<_, _>>()?
+                .collect()
         } else {
             track
                 .samples
                 .iter()
-                .filter(|s| {
-                    let start = s.start_s(track.timescale);
-                    start >= selection.aligned_start_s && start < selection.aligned_end_s
-                })
-                .map(|s| s.to_frag_sample(input))
-                .collect::<Result<_, _>>()?
+                .filter(|sample| selection.contains_start(sample.start_ticks, track.timescale))
+                .collect()
         };
-        selected.push(samples);
+        starts.push(
+            records
+                .iter()
+                .map(|sample| selection.rebase_start(sample.start_ticks, track.timescale))
+                .collect::<Result<_, _>>()?,
+        );
+        selected.push(
+            records
+                .iter()
+                .map(|sample| sample.to_frag_sample(input))
+                .collect::<Result<_, _>>()?,
+        );
     }
 
     let tracks: Vec<TrackConfig> = movie.tracks.iter().map(|t| t.cfg.clone()).collect();
     let mut writer = HybridMp4Writer::new_multi(output, tracks)?;
-    let refs: Vec<&[FragSample]> = selected.iter().map(Vec::as_slice).collect();
-    writer.write_fragment_multi(&refs)?;
+    write_timed_frag_samples(&mut writer, &selected, &starts)?;
     let _ = writer.finalize()?;
 
     Ok(selection.info(start_s, end_s))
@@ -119,38 +133,173 @@ pub fn trim_keyframe_aligned_file(
 ) -> Result<TrimInfo, TrimError> {
     validate_range(start_s, end_s)?;
     reject_same_file(source, target)?;
-    let input = std::fs::read(source)?;
-    let movie = parse_movie(&input)?;
+    let mut source_file = File::open(source)?;
+    let movie = parse_movie_reader(&mut source_file)?;
     let selection = select_trim_range(&movie, start_s, end_s)?;
     let mut per_track: Vec<Vec<SourceSample>> = Vec::with_capacity(movie.tracks.len());
+    let mut starts: Vec<Vec<u64>> = Vec::with_capacity(movie.tracks.len());
     for (idx, track) in movie.tracks.iter().enumerate() {
-        let samples: Vec<SourceSample> = if idx == selection.video_idx {
+        let records: Vec<&SampleRecord> = if idx == selection.video_idx {
             track.samples[selection.start_idx..selection.end_idx]
                 .iter()
-                .map(SampleRecord::to_source_sample)
                 .collect()
         } else {
             track
                 .samples
                 .iter()
-                .filter(|s| {
-                    let start = s.start_s(track.timescale);
-                    start >= selection.aligned_start_s && start < selection.aligned_end_s
-                })
-                .map(SampleRecord::to_source_sample)
+                .filter(|sample| selection.contains_start(sample.start_ticks, track.timescale))
                 .collect()
         };
-        per_track.push(samples);
+        starts.push(
+            records
+                .iter()
+                .map(|sample| selection.rebase_start(sample.start_ticks, track.timescale))
+                .collect::<Result<_, _>>()?,
+        );
+        per_track.push(
+            records
+                .into_iter()
+                .map(SampleRecord::to_source_sample)
+                .collect(),
+        );
     }
 
     let tracks: Vec<TrackConfig> = movie.tracks.iter().map(|t| t.cfg.clone()).collect();
-    let mut source_file = File::open(source)?;
-    let target_file = File::create(target)?;
-    let mut writer = HybridMp4Writer::new_multi(target_file, tracks)?;
-    let refs: Vec<&[SourceSample]> = per_track.iter().map(Vec::as_slice).collect();
-    writer.write_fragment_multi_from_source(&mut source_file, &refs)?;
-    let _ = writer.finalize()?;
+    write_file_atomically(target, |target_file| {
+        let mut writer = HybridMp4Writer::new_multi(target_file, tracks)?;
+        write_timed_source_samples(&mut writer, &mut source_file, &per_track, &starts)?;
+        Ok(writer.finalize()?)
+    })?;
     Ok(selection.info(start_s, end_s))
+}
+
+pub fn remux_with_selected_audio_tracks_file(
+    source: &Path,
+    target: &Path,
+    selected_audio_track_indices: &[u32],
+) -> Result<(), TrimError> {
+    reject_same_file(source, target)?;
+    let mut source_file = File::open(source)?;
+    let movie = parse_movie_reader(&mut source_file)?;
+    let selected = selected_audio_index_set(&movie, selected_audio_track_indices)?;
+
+    let mut tracks = Vec::new();
+    let mut per_track = Vec::new();
+    let mut starts = Vec::new();
+    let mut audio_index = 0_usize;
+    for track in &movie.tracks {
+        let keep = match track.cfg {
+            TrackConfig::Video(_) => true,
+            TrackConfig::Audio(_) => {
+                let keep = selected.contains(&audio_index);
+                audio_index += 1;
+                keep
+            }
+        };
+        if keep {
+            tracks.push(track.cfg.clone());
+            starts.push(
+                track
+                    .samples
+                    .iter()
+                    .map(|sample| sample.start_ticks)
+                    .collect(),
+            );
+            per_track.push(
+                track
+                    .samples
+                    .iter()
+                    .map(SampleRecord::to_source_sample)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    write_file_atomically(target, |target_file| {
+        let mut writer = HybridMp4Writer::new_multi(target_file, tracks)?;
+        write_timed_source_samples(&mut writer, &mut source_file, &per_track, &starts)?;
+        Ok(writer.finalize()?)
+    })
+}
+
+pub fn remux_with_mixed_audio_track_file(
+    source: &Path,
+    target: &Path,
+    selected_audio_track_indices: &[u32],
+) -> Result<(), TrimError> {
+    reject_same_file(source, target)?;
+    let mut source_file = File::open(source)?;
+    let movie = parse_movie_reader(&mut source_file)?;
+    let selected = selected_audio_index_set(&movie, selected_audio_track_indices)?;
+    if selected.is_empty() {
+        return remux_with_selected_audio_tracks_file(source, target, selected_audio_track_indices);
+    }
+
+    let selected_audio = selected_audio_tracks(&movie, &selected);
+    let mut spool = OwnedTempFile::create_near(target, "mix")?;
+    let mixed = mix_selected_opus_audio_tracks_to_spool(
+        &mut source_file,
+        &selected_audio,
+        spool.file_mut(),
+    )?;
+    spool.file_mut().flush()?;
+
+    let mut tracks = Vec::new();
+    let mut per_track = Vec::new();
+    let mut starts = Vec::new();
+    for track in &movie.tracks {
+        if matches!(track.cfg, TrackConfig::Video(_)) {
+            tracks.push(track.cfg.clone());
+            starts.push(
+                track
+                    .samples
+                    .iter()
+                    .map(|sample| sample.start_ticks)
+                    .collect(),
+            );
+            per_track.push(
+                track
+                    .samples
+                    .iter()
+                    .map(SampleRecord::to_source_sample)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+    if !mixed.samples.is_empty() {
+        tracks.push(TrackConfig::Audio(mixed.cfg));
+        per_track.push(mixed.samples);
+        starts.push(mixed.start_ticks);
+    }
+
+    let video_sources = tracks
+        .iter()
+        .filter(|track| matches!(track, TrackConfig::Video(_)))
+        .count();
+    let mut sources = (0..video_sources)
+        .map(|_| File::open(source))
+        .collect::<Result<Vec<_>, _>>()?;
+    if tracks
+        .last()
+        .is_some_and(|track| matches!(track, TrackConfig::Audio(_)))
+    {
+        sources.push(File::open(spool.path())?);
+    }
+
+    write_file_atomically(target, |target_file| {
+        let mut writer = HybridMp4Writer::new_multi(target_file, tracks)?;
+        let mut source_refs: Vec<&mut dyn crate::writer::ReadSeek> = sources
+            .iter_mut()
+            .map(|file| file as &mut dyn crate::writer::ReadSeek)
+            .collect();
+        write_timed_source_samples_from_sources(
+            &mut writer,
+            &mut source_refs,
+            &per_track,
+            &starts,
+        )?;
+        Ok(writer.finalize()?)
+    })
 }
 
 pub fn remux_with_selected_audio_tracks(
@@ -162,6 +311,7 @@ pub fn remux_with_selected_audio_tracks(
 
     let mut tracks = Vec::new();
     let mut selected_samples: Vec<Vec<FragSample>> = Vec::new();
+    let mut starts = Vec::new();
     let mut audio_idx = 0usize;
     for track in &movie.tracks {
         let keep = match track.cfg {
@@ -176,6 +326,13 @@ pub fn remux_with_selected_audio_tracks(
             continue;
         }
         tracks.push(track.cfg.clone());
+        starts.push(
+            track
+                .samples
+                .iter()
+                .map(|sample| sample.start_ticks)
+                .collect(),
+        );
         selected_samples.push(
             track
                 .samples
@@ -187,8 +344,7 @@ pub fn remux_with_selected_audio_tracks(
 
     let mut out = Cursor::new(Vec::new());
     let mut writer = HybridMp4Writer::new_multi(&mut out, tracks)?;
-    let refs: Vec<&[FragSample]> = selected_samples.iter().map(Vec::as_slice).collect();
-    writer.write_fragment_multi(&refs)?;
+    write_timed_frag_samples(&mut writer, &selected_samples, &starts)?;
     let _ = writer.finalize()?;
     Ok(out.into_inner())
 }
@@ -200,6 +356,12 @@ pub fn media_track_counts(input: &[u8]) -> Result<MediaTrackCounts, TrimError> {
 pub fn media_track_counts_file(path: &Path) -> Result<MediaTrackCounts, TrimError> {
     let mut file = File::open(path)?;
     media_track_counts_reader(&mut file)
+}
+
+pub fn movie_duration_s_file(path: &Path) -> Result<Option<f64>, TrimError> {
+    let mut file = File::open(path)?;
+    let moov = read_finalized_moov_bytes(&mut file)?;
+    Ok(crate::walker::movie_duration_s(&moov))
 }
 
 fn media_track_counts_reader<R: Read + Seek>(
@@ -246,9 +408,17 @@ pub fn remux_with_mixed_audio_track(
 
     let mut tracks = Vec::new();
     let mut selected_samples: Vec<Vec<FragSample>> = Vec::new();
+    let mut starts = Vec::new();
     for track in &movie.tracks {
         if matches!(track.cfg, TrackConfig::Video(_)) {
             tracks.push(track.cfg.clone());
+            starts.push(
+                track
+                    .samples
+                    .iter()
+                    .map(|sample| sample.start_ticks)
+                    .collect(),
+            );
             selected_samples.push(
                 track
                     .samples
@@ -264,12 +434,12 @@ pub fn remux_with_mixed_audio_track(
     if !mixed_audio.samples.is_empty() {
         tracks.push(TrackConfig::Audio(mixed_audio.cfg));
         selected_samples.push(mixed_audio.samples);
+        starts.push(mixed_audio.start_ticks);
     }
 
     let mut out = Cursor::new(Vec::new());
     let mut writer = HybridMp4Writer::new_multi(&mut out, tracks)?;
-    let refs: Vec<&[FragSample]> = selected_samples.iter().map(Vec::as_slice).collect();
-    writer.write_fragment_multi(&refs)?;
+    write_timed_frag_samples(&mut writer, &selected_samples, &starts)?;
     let _ = writer.finalize()?;
     Ok(out.into_inner())
 }
@@ -321,6 +491,229 @@ fn selected_audio_tracks<'a>(
 struct MixedAudioTrack {
     cfg: AudioTrackConfig,
     samples: Vec<FragSample>,
+    start_ticks: Vec<u64>,
+}
+
+struct MixedAudioSource {
+    cfg: AudioTrackConfig,
+    samples: Vec<SourceSample>,
+    start_ticks: Vec<u64>,
+}
+
+fn timed_ranges(starts: &[u64], durations: &[u32]) -> Result<Vec<Range<usize>>, TrimError> {
+    if starts.len() != durations.len() {
+        return Err(TrimError::Corrupt(
+            "timed sample start/duration count mismatch".into(),
+        ));
+    }
+    let mut ranges = Vec::new();
+    let mut range_start = 0_usize;
+    for index in 0..starts.len() {
+        let end = starts[index]
+            .checked_add(u64::from(durations[index]))
+            .ok_or_else(|| TrimError::Corrupt("sample timeline overflow".into()))?;
+        if let Some(&next_start) = starts.get(index + 1) {
+            if next_start < end {
+                return Err(TrimError::Unsupported(
+                    "overlapping or backward sample presentation times".into(),
+                ));
+            }
+            if next_start != end {
+                ranges.push(range_start..index + 1);
+                range_start = index + 1;
+            }
+        }
+    }
+    if range_start < starts.len() {
+        ranges.push(range_start..starts.len());
+    }
+    Ok(ranges)
+}
+
+fn write_timed_frag_samples<W: Write + Seek>(
+    writer: &mut HybridMp4Writer<W>,
+    samples: &[Vec<FragSample>],
+    starts: &[Vec<u64>],
+) -> Result<(), TrimError> {
+    let ranges = prepare_timed_ranges(samples, starts, |sample| sample.duration)?;
+    let iterations = ranges.iter().map(Vec::len).max().unwrap_or(0);
+    for run_index in 0..iterations {
+        for (track_index, track_ranges) in ranges.iter().enumerate() {
+            if let Some(range) = track_ranges.get(run_index) {
+                writer.set_track_decode_time(track_index, starts[track_index][range.start])?;
+            }
+        }
+        let refs: Vec<&[FragSample]> = samples
+            .iter()
+            .zip(&ranges)
+            .map(|(track, track_ranges)| {
+                track_ranges
+                    .get(run_index)
+                    .map_or(&[][..], |range| &track[range.clone()])
+            })
+            .collect();
+        writer.write_fragment_multi(&refs)?;
+    }
+    Ok(())
+}
+
+fn write_timed_source_samples<R: Read + Seek, W: Write + Seek>(
+    writer: &mut HybridMp4Writer<W>,
+    source: &mut R,
+    samples: &[Vec<SourceSample>],
+    starts: &[Vec<u64>],
+) -> Result<(), TrimError> {
+    let ranges = prepare_timed_ranges(samples, starts, |sample| sample.duration)?;
+    let iterations = ranges.iter().map(Vec::len).max().unwrap_or(0);
+    for run_index in 0..iterations {
+        for (track_index, track_ranges) in ranges.iter().enumerate() {
+            if let Some(range) = track_ranges.get(run_index) {
+                writer.set_track_decode_time(track_index, starts[track_index][range.start])?;
+            }
+        }
+        let refs: Vec<&[SourceSample]> = samples
+            .iter()
+            .zip(&ranges)
+            .map(|(track, track_ranges)| {
+                track_ranges
+                    .get(run_index)
+                    .map_or(&[][..], |range| &track[range.clone()])
+            })
+            .collect();
+        writer.write_fragment_multi_from_source(source, &refs)?;
+    }
+    Ok(())
+}
+
+fn write_timed_source_samples_from_sources<W: Write + Seek>(
+    writer: &mut HybridMp4Writer<W>,
+    sources: &mut [&mut dyn crate::writer::ReadSeek],
+    samples: &[Vec<SourceSample>],
+    starts: &[Vec<u64>],
+) -> Result<(), TrimError> {
+    let ranges = prepare_timed_ranges(samples, starts, |sample| sample.duration)?;
+    let iterations = ranges.iter().map(Vec::len).max().unwrap_or(0);
+    for run_index in 0..iterations {
+        for (track_index, track_ranges) in ranges.iter().enumerate() {
+            if let Some(range) = track_ranges.get(run_index) {
+                writer.set_track_decode_time(track_index, starts[track_index][range.start])?;
+            }
+        }
+        let refs: Vec<&[SourceSample]> = samples
+            .iter()
+            .zip(&ranges)
+            .map(|(track, track_ranges)| {
+                track_ranges
+                    .get(run_index)
+                    .map_or(&[][..], |range| &track[range.clone()])
+            })
+            .collect();
+        writer.write_fragment_multi_from_sources(sources, &refs)?;
+    }
+    Ok(())
+}
+
+fn prepare_timed_ranges<T>(
+    samples: &[Vec<T>],
+    starts: &[Vec<u64>],
+    duration: impl Fn(&T) -> u32 + Copy,
+) -> Result<Vec<Vec<Range<usize>>>, TrimError> {
+    if samples.len() != starts.len() {
+        return Err(TrimError::Corrupt(
+            "timed track sample/start count mismatch".into(),
+        ));
+    }
+    samples
+        .iter()
+        .zip(starts)
+        .map(|(track, starts)| {
+            let durations: Vec<u32> = track.iter().map(duration).collect();
+            timed_ranges(starts, &durations)
+        })
+        .collect()
+}
+
+fn mix_selected_opus_audio_tracks_to_spool<R: Read + Seek, W: Write + Seek>(
+    input: &mut R,
+    selected_audio_tracks: &[&ParsedTrack],
+    spool: &mut W,
+) -> Result<MixedAudioSource, TrimError> {
+    for track in selected_audio_tracks {
+        ensure_mixable_audio_track(track)?;
+    }
+    let source_pre_skip = common_source_pre_skip(selected_audio_tracks)?;
+    let mut encoder = Encoder::new(EncoderConfig::new(48_000, 2))
+        .map_err(|e| TrimError::Unsupported(format!("create Opus encoder for audio mix: {e}")))?;
+    let encoder_pre_skip = encoder
+        .get_lookahead()
+        .map_err(|e| TrimError::Unsupported(format!("read Opus lookahead: {e}")))?;
+    let pre_skip = source_pre_skip
+        .checked_add(u32::from(encoder_pre_skip))
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or_else(|| TrimError::Unsupported("mixed Opus pre-skip is too large".into()))?;
+    let mut decoders = (0..selected_audio_tracks.len())
+        .map(|_| {
+            Decoder::new(DecoderConfig::new(48_000, 2)).map_err(|e| {
+                TrimError::Unsupported(format!("create Opus decoder for audio mix: {e}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut positions = vec![0_usize; selected_audio_tracks.len()];
+    let mut samples = Vec::new();
+    let mut start_ticks = Vec::new();
+    while let Some(next_tick) = next_audio_mix_tick(selected_audio_tracks, &positions) {
+        let mut duration = None;
+        let mut frames = Vec::with_capacity(selected_audio_tracks.len());
+        for (track_index, track) in selected_audio_tracks.iter().enumerate() {
+            let Some(sample) = track.samples.get(positions[track_index]) else {
+                frames.push(None);
+                continue;
+            };
+            if sample.start_ticks != next_tick {
+                frames.push(None);
+                continue;
+            }
+            let decoded = decode_opus_sample_reader(input, sample, &mut decoders[track_index])?;
+            let decoded_duration = (decoded.len() / 2) as u32;
+            match duration {
+                Some(existing) if existing != decoded_duration => {
+                    return Err(TrimError::Unsupported(
+                        "selected audio tracks have mismatched Opus frame durations".into(),
+                    ));
+                }
+                Some(_) => {}
+                None => duration = Some(decoded_duration),
+            }
+            frames.push(Some(decoded));
+            positions[track_index] += 1;
+        }
+        let duration = duration.ok_or_else(|| {
+            TrimError::Unsupported("audio mix cursor did not decode a frame".into())
+        })?;
+        let mixed = mix_optional_frames(&frames, duration as usize * 2)?;
+        let data = encoder
+            .encode_f32(&mixed)
+            .map_err(|e| TrimError::Unsupported(format!("encode mixed Opus audio: {e}")))?;
+        let offset = spool.stream_position()?;
+        spool.write_all(&data)?;
+        samples.push(SourceSample {
+            offset,
+            size: u32::try_from(data.len())
+                .map_err(|_| TrimError::Corrupt("mixed Opus packet is too large".into()))?,
+            duration,
+            is_sync: true,
+        });
+        start_ticks.push(next_tick);
+    }
+    Ok(MixedAudioSource {
+        cfg: AudioTrackConfig {
+            channels: 2,
+            sample_rate: 48_000,
+            pre_skip,
+        },
+        samples,
+        start_ticks,
+    })
 }
 
 fn mix_selected_opus_audio_tracks(
@@ -332,24 +725,25 @@ fn mix_selected_opus_audio_tracks(
     }
     let source_pre_skip = common_source_pre_skip(selected_audio_tracks)?;
 
-    let encoder = Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio)
+    let mut encoder = Encoder::new(EncoderConfig::new(48_000, 2))
         .map_err(|e| TrimError::Unsupported(format!("create Opus encoder for audio mix: {e}")))?;
     let encoder_pre_skip = encoder
-        .lookahead()
+        .get_lookahead()
         .map_err(|e| TrimError::Unsupported(format!("read Opus lookahead: {e}")))?;
     let pre_skip = source_pre_skip
-        .checked_add(encoder_pre_skip)
+        .checked_add(u32::from(encoder_pre_skip))
         .and_then(|value| u16::try_from(value).ok())
         .ok_or_else(|| TrimError::Unsupported("mixed Opus pre-skip is too large".into()))?;
     let mut decoders = (0..selected_audio_tracks.len())
         .map(|_| {
-            audiopus::coder::Decoder::new(SampleRate::Hz48000, Channels::Stereo).map_err(|e| {
+            Decoder::new(DecoderConfig::new(48_000, 2)).map_err(|e| {
                 TrimError::Unsupported(format!("create Opus decoder for audio mix: {e}"))
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut positions = vec![0usize; selected_audio_tracks.len()];
     let mut out = Vec::new();
+    let mut start_ticks = Vec::new();
     while let Some(next_tick) = next_audio_mix_tick(selected_audio_tracks, positions.as_slice()) {
         let mut duration = None;
         let mut frames = Vec::with_capacity(selected_audio_tracks.len());
@@ -380,16 +774,15 @@ fn mix_selected_opus_audio_tracks(
             TrimError::Unsupported("audio mix cursor did not decode a frame".into())
         })?;
         let mixed = mix_optional_frames(&frames, duration as usize * 2)?;
-        let mut data = vec![0u8; 4000];
-        let len = encoder
-            .encode_float(&mixed, &mut data)
+        let data = encoder
+            .encode_f32(&mixed)
             .map_err(|e| TrimError::Unsupported(format!("encode mixed Opus audio: {e}")))?;
-        data.truncate(len);
         out.push(FragSample {
             data,
             duration,
             is_sync: true,
         });
+        start_ticks.push(next_tick);
     }
     Ok(MixedAudioTrack {
         cfg: AudioTrackConfig {
@@ -398,6 +791,7 @@ fn mix_selected_opus_audio_tracks(
             pre_skip,
         },
         samples: out,
+        start_ticks,
     })
 }
 
@@ -452,15 +846,31 @@ fn common_source_pre_skip(selected_audio_tracks: &[&ParsedTrack]) -> Result<u32,
 fn decode_opus_sample(
     input: &[u8],
     sample: &SampleRecord,
-    decoder: &mut audiopus::coder::Decoder,
+    decoder: &mut Decoder,
 ) -> Result<Vec<f32>, TrimError> {
     let packet = sample.to_frag_sample(input)?;
-    let mut pcm = vec![0.0f32; 5760 * 2];
-    let frames = decoder
-        .decode_float(Some(packet.data.as_slice()), pcm.as_mut_slice(), false)
-        .map_err(|e| TrimError::Unsupported(format!("decode Opus audio for mix: {e}")))?;
-    pcm.truncate(frames * 2);
-    Ok(pcm)
+    decoder
+        .decode_f32(packet.data.as_slice())
+        .map_err(|e| TrimError::Unsupported(format!("decode Opus audio for mix: {e}")))
+}
+
+fn decode_opus_sample_reader<R: Read + Seek>(
+    input: &mut R,
+    sample: &SampleRecord,
+    decoder: &mut Decoder,
+) -> Result<Vec<f32>, TrimError> {
+    if sample.size > MAX_OPUS_PACKET_BYTES {
+        return Err(TrimError::Corrupt(format!(
+            "Opus packet exceeds {} byte mix limit",
+            MAX_OPUS_PACKET_BYTES
+        )));
+    }
+    let mut packet = vec![0_u8; sample.size as usize];
+    input.seek(SeekFrom::Start(sample.offset as u64))?;
+    input.read_exact(&mut packet)?;
+    decoder
+        .decode_f32(&packet)
+        .map_err(|e| TrimError::Unsupported(format!("decode Opus audio for mix: {e}")))
 }
 
 fn mix_optional_frames(
@@ -493,16 +903,190 @@ fn mix_optional_frames(
 }
 
 fn reject_same_file(source: &Path, target: &Path) -> Result<(), TrimError> {
-    let source = std::fs::canonicalize(source)?;
-    if let Ok(target) = std::fs::canonicalize(target) {
-        if source == target {
-            return Err(TrimError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "trim source and target must be different files",
-            )));
-        }
+    let source_canonical = std::fs::canonicalize(source)?;
+    let same_identity = target.exists() && files_have_same_identity(source, target)?;
+    let same_path = std::fs::canonicalize(target)
+        .is_ok_and(|target_canonical| source_canonical == target_canonical);
+    if same_identity || same_path {
+        return Err(TrimError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "MP4 source and target must be different files",
+        )));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn files_have_same_identity(source: &Path, target: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let source = std::fs::metadata(source)?;
+    let target = std::fs::metadata(target)?;
+    Ok(source.dev() == target.dev() && source.ino() == target.ino())
+}
+
+#[cfg(windows)]
+fn files_have_same_identity(source: &Path, target: &Path) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    fn identity(path: &Path) -> std::io::Result<(u32, u64)> {
+        let file = File::open(path)?;
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        let result =
+            unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+        Ok((info.dwVolumeSerialNumber, index))
+    }
+
+    Ok(identity(source)? == identity(target)?)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn files_have_same_identity(source: &Path, target: &Path) -> std::io::Result<bool> {
+    Ok(std::fs::canonicalize(source)? == std::fs::canonicalize(target)?)
+}
+
+struct OwnedTempFile {
+    path: PathBuf,
+    file: Option<File>,
+}
+
+impl OwnedTempFile {
+    fn create_near(target: &Path, purpose: &str) -> Result<Self, TrimError> {
+        let file_name = target.file_name().ok_or_else(|| {
+            TrimError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "MP4 target must include a file name",
+            ))
+        })?;
+        if let Some(parent) = target.parent() {
+            prune_abandoned_transform_temps(parent);
+        }
+        for _ in 0..128 {
+            let suffix = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let mut temp_name = file_name.to_os_string();
+            temp_name.push(format!(
+                ".clipline-tmp-{purpose}-{}-{suffix}.tmp",
+                std::process::id()
+            ));
+            let path = target.with_file_name(temp_name);
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => {
+                    return Ok(Self {
+                        path,
+                        file: Some(file),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(TrimError::Io(error)),
+            }
+        }
+        Err(TrimError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate a unique MP4 temporary file",
+        )))
+    }
+
+    fn file_mut(&mut self) -> &mut File {
+        self.file.as_mut().expect("owned temp file is open")
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn take_file(&mut self) -> File {
+        self.file.take().expect("owned temp file is open")
+    }
+
+    fn disarm(mut self) {
+        self.file.take();
+        self.path.clear();
+    }
+}
+
+fn prune_abandoned_transform_temps(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_transform_temp = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains(".clipline-tmp-") && name.ends_with(".tmp"));
+        let abandoned = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= TEMP_FILE_MAX_AGE);
+        if is_transform_temp && abandoned {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+impl Drop for OwnedTempFile {
+    fn drop(&mut self) {
+        self.file.take();
+        if !self.path.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn write_file_atomically(
+    target: &Path,
+    write: impl FnOnce(File) -> Result<File, TrimError>,
+) -> Result<(), TrimError> {
+    let mut temp = OwnedTempFile::create_near(target, "output")?;
+    let file = temp.take_file();
+    let file = write(file)?;
+    file.sync_all()?;
+    drop(file);
+    replace_file(temp.path(), target)?;
+    temp.disarm();
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let from_w: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to_w: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    let result = unsafe {
+        MoveFileExW(
+            from_w.as_ptr(),
+            to_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
 }
 
 struct ParsedMovie {
@@ -515,6 +1099,9 @@ struct TrimSelection {
     end_idx: usize,
     aligned_start_s: f64,
     aligned_end_s: f64,
+    aligned_start_ticks: u64,
+    aligned_end_ticks: u64,
+    video_timescale: u32,
 }
 
 struct ParsedTrack {
@@ -523,6 +1110,7 @@ struct ParsedTrack {
     samples: Vec<SampleRecord>,
 }
 
+#[derive(Clone)]
 struct SampleRecord {
     offset: usize,
     size: u32,
@@ -541,10 +1129,6 @@ impl ParsedTrack {
 }
 
 impl SampleRecord {
-    fn start_s(&self, timescale: u32) -> f64 {
-        self.start_ticks as f64 / timescale as f64
-    }
-
     fn end_s(&self, timescale: u32) -> f64 {
         (self.start_ticks + self.duration as u64) as f64 / timescale as f64
     }
@@ -585,6 +1169,26 @@ impl TrimSelection {
             duration_s: self.aligned_end_s - self.aligned_start_s,
         }
     }
+
+    fn contains_start(&self, start_ticks: u64, timescale: u32) -> bool {
+        let start = u128::from(start_ticks) * u128::from(self.video_timescale);
+        let lower = u128::from(self.aligned_start_ticks) * u128::from(timescale);
+        let upper = u128::from(self.aligned_end_ticks) * u128::from(timescale);
+        start >= lower && start < upper
+    }
+
+    fn rebase_start(&self, start_ticks: u64, timescale: u32) -> Result<u64, TrimError> {
+        let start = u128::from(start_ticks) * u128::from(self.video_timescale);
+        let origin = u128::from(self.aligned_start_ticks) * u128::from(timescale);
+        let delta = start.checked_sub(origin).ok_or_else(|| {
+            TrimError::Corrupt("selected sample begins before trim origin".into())
+        })?;
+        let rounded = delta
+            .checked_add(u128::from(self.video_timescale / 2))
+            .ok_or_else(|| TrimError::Corrupt("trim timestamp rounding overflow".into()))?
+            / u128::from(self.video_timescale);
+        u64::try_from(rounded).map_err(|_| TrimError::Corrupt("trim timestamp overflow".into()))
+    }
 }
 
 fn select_trim_range(
@@ -603,11 +1207,13 @@ fn select_trim_range(
         return Err(TrimError::InvalidRange("start is past the clip end".into()));
     }
 
+    let requested_start_ticks = seconds_to_ticks_floor(start_s, video.timescale)?;
+    let requested_end_ticks = seconds_to_ticks_ceil(end_s, video.timescale)?;
     let start_idx = video
         .samples
         .iter()
         .enumerate()
-        .filter(|(_, s)| s.is_sync && s.start_s(video.timescale) <= start_s)
+        .filter(|(_, s)| s.is_sync && s.start_ticks <= requested_start_ticks)
         .map(|(i, _)| i)
         .next_back()
         .or_else(|| video.samples.iter().position(|s| s.is_sync))
@@ -618,16 +1224,21 @@ fn select_trim_range(
         .iter()
         .enumerate()
         .skip(start_idx + 1)
-        .find(|(_, s)| s.is_sync && s.start_s(video.timescale) >= end_s)
+        .find(|(_, s)| s.is_sync && s.start_ticks >= requested_end_ticks)
         .map(|(i, _)| i)
         .unwrap_or(video.samples.len());
 
-    let aligned_start_s = video.samples[start_idx].start_s(video.timescale);
-    let aligned_end_s = if end_idx < video.samples.len() {
-        video.samples[end_idx].start_s(video.timescale)
+    let aligned_start_ticks = video.samples[start_idx].start_ticks;
+    let aligned_end_ticks = if end_idx < video.samples.len() {
+        video.samples[end_idx].start_ticks
     } else {
-        video.track_end_s()
+        video
+            .samples
+            .last()
+            .map_or(0, |sample| sample.start_ticks + u64::from(sample.duration))
     };
+    let aligned_start_s = aligned_start_ticks as f64 / video.timescale as f64;
+    let aligned_end_s = aligned_end_ticks as f64 / video.timescale as f64;
     if aligned_end_s <= aligned_start_s {
         return Err(TrimError::InvalidRange(
             "aligned range does not contain a video sample".into(),
@@ -639,10 +1250,37 @@ fn select_trim_range(
         end_idx,
         aligned_start_s,
         aligned_end_s,
+        aligned_start_ticks,
+        aligned_end_ticks,
+        video_timescale: video.timescale,
     })
 }
 
+fn seconds_to_ticks_floor(seconds: f64, timescale: u32) -> Result<u64, TrimError> {
+    let ticks = seconds * f64::from(timescale);
+    if !ticks.is_finite() || ticks < 0.0 || ticks > u64::MAX as f64 {
+        return Err(TrimError::InvalidRange(
+            "trim boundary is outside the supported timeline".into(),
+        ));
+    }
+    Ok(ticks.floor() as u64)
+}
+
+fn seconds_to_ticks_ceil(seconds: f64, timescale: u32) -> Result<u64, TrimError> {
+    let ticks = seconds * f64::from(timescale);
+    if !ticks.is_finite() || ticks < 0.0 || ticks > u64::MAX as f64 {
+        return Err(TrimError::InvalidRange(
+            "trim boundary is outside the supported timeline".into(),
+        ));
+    }
+    Ok(ticks.ceil() as u64)
+}
+
 fn parse_movie(input: &[u8]) -> Result<ParsedMovie, TrimError> {
+    parse_movie_with_source_len(input, input.len())
+}
+
+fn parse_movie_with_source_len(input: &[u8], source_len: usize) -> Result<ParsedMovie, TrimError> {
     let top = walk(input);
     let moov = find(&top, b"moov")
         .ok_or_else(|| TrimError::Unsupported("missing finalized moov".into()))?
@@ -653,11 +1291,14 @@ fn parse_movie(input: &[u8]) -> Result<ParsedMovie, TrimError> {
             "fragmented/unfinalized files are not trim-ready".into(),
         ));
     }
+    let mvhd = find(&moov_children, b"mvhd")
+        .ok_or_else(|| TrimError::Unsupported("missing mvhd".into()))?;
+    let movie_timescale = parse_header_timescale(input, mvhd, "mvhd")?;
 
     let tracks: Vec<ParsedTrack> = moov_children
         .iter()
         .filter(|b| &b.fourcc == b"trak")
-        .map(|trak| parse_track(input, trak))
+        .map(|trak| parse_track(input, trak, source_len, movie_timescale))
         .collect::<Result<_, _>>()?;
     if tracks.is_empty() {
         return Err(TrimError::Unsupported("no tracks found".into()));
@@ -665,14 +1306,27 @@ fn parse_movie(input: &[u8]) -> Result<ParsedMovie, TrimError> {
     Ok(ParsedMovie { tracks })
 }
 
-fn parse_track(input: &[u8], trak: &BoxInfo) -> Result<ParsedTrack, TrimError> {
+fn parse_movie_reader<R: Read + Seek>(reader: &mut R) -> Result<ParsedMovie, TrimError> {
+    let source_len = usize::try_from(reader.seek(SeekFrom::End(0))?)
+        .map_err(|_| TrimError::Unsupported("source file is too large to address".into()))?;
+    let moov = read_finalized_moov_bytes(reader)?;
+    parse_movie_with_source_len(&moov, source_len)
+}
+
+fn parse_track(
+    input: &[u8],
+    trak: &BoxInfo,
+    source_len: usize,
+    movie_timescale: u32,
+) -> Result<ParsedTrack, TrimError> {
     let cfg = parse_track_cfg(input, trak)?;
     let mdia = require_child(input, trak, b"mdia")?;
     let mdhd = require_child(input, &mdia, b"mdhd")?;
     let timescale = parse_mdhd_timescale(input, &mdhd)?;
     let minf = require_child(input, &mdia, b"minf")?;
     let stbl = require_child(input, &minf, b"stbl")?;
-    let samples = parse_sample_table(input, &stbl)?;
+    let samples = parse_sample_table(input, &stbl, source_len)?;
+    let samples = apply_track_edit_list(input, trak, samples, timescale, movie_timescale)?;
     if samples.is_empty() {
         return Err(TrimError::Unsupported("track has no samples".into()));
     }
@@ -681,6 +1335,155 @@ fn parse_track(input: &[u8], trak: &BoxInfo) -> Result<ParsedTrack, TrimError> {
         timescale,
         samples,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParsedEdit {
+    duration_movie_ts: u64,
+    media_time: i64,
+}
+
+fn apply_track_edit_list(
+    input: &[u8],
+    trak: &BoxInfo,
+    samples: Vec<SampleRecord>,
+    track_timescale: u32,
+    movie_timescale: u32,
+) -> Result<Vec<SampleRecord>, TrimError> {
+    let Some(edts) = child(input, trak, b"edts") else {
+        return Ok(samples);
+    };
+    let elst = require_child(input, &edts, b"elst")?;
+    let edits = parse_elst(input, &elst)?;
+    if edits.is_empty() {
+        return Err(TrimError::Corrupt("empty elst".into()));
+    }
+
+    let mut output = Vec::with_capacity(samples.len());
+    let mut presentation_cursor_movie = 0_u64;
+    let mut previous_media_end = 0_u64;
+    let mut saw_media = false;
+    for edit in edits {
+        let presentation_start =
+            rescale_ticks(presentation_cursor_movie, movie_timescale, track_timescale)?;
+        presentation_cursor_movie = presentation_cursor_movie
+            .checked_add(edit.duration_movie_ts)
+            .ok_or_else(|| TrimError::Corrupt("edit-list duration overflow".into()))?;
+        if edit.media_time == -1 {
+            continue;
+        }
+        let media_start = u64::try_from(edit.media_time)
+            .map_err(|_| TrimError::Unsupported("negative edit-list media time".into()))?;
+        if saw_media && media_start < previous_media_end {
+            return Err(TrimError::Unsupported(
+                "overlapping or backward edit-list media ranges".into(),
+            ));
+        }
+        let first = samples
+            .iter()
+            .position(|sample| sample.start_ticks == media_start)
+            .ok_or_else(|| {
+                TrimError::Unsupported("edit-list media time begins within a sample".into())
+            })?;
+        let duration_scaled = u128::from(edit.duration_movie_ts) * u128::from(track_timescale);
+        let duration_scale = u128::from(movie_timescale);
+        let mut copied = 0_usize;
+        for sample in samples.iter().skip(first) {
+            let relative_start = sample
+                .start_ticks
+                .checked_sub(media_start)
+                .ok_or_else(|| TrimError::Unsupported("backward edit-list media range".into()))?;
+            if u128::from(relative_start) * duration_scale >= duration_scaled {
+                break;
+            }
+            let mut mapped = sample.clone();
+            mapped.start_ticks = presentation_start
+                .checked_add(relative_start)
+                .ok_or_else(|| TrimError::Corrupt("mapped sample time overflow".into()))?;
+            output.push(mapped);
+            copied += 1;
+        }
+        if copied == 0 {
+            return Err(TrimError::Unsupported(
+                "edit-list media segment contains no complete sample start".into(),
+            ));
+        }
+        previous_media_end = samples[first + copied - 1]
+            .start_ticks
+            .checked_add(u64::from(samples[first + copied - 1].duration))
+            .ok_or_else(|| TrimError::Corrupt("sample end overflow".into()))?;
+        let presented_media = previous_media_end
+            .checked_sub(media_start)
+            .ok_or_else(|| TrimError::Unsupported("backward edit-list media range".into()))?;
+        if u128::from(presented_media) * u128::from(movie_timescale) != duration_scaled {
+            return Err(TrimError::Unsupported(
+                "edit-list media segment must end on a sample boundary".into(),
+            ));
+        }
+        saw_media = true;
+    }
+    if output.is_empty() {
+        return Err(TrimError::Unsupported(
+            "edit list presents no track samples".into(),
+        ));
+    }
+    Ok(output)
+}
+
+fn parse_elst(input: &[u8], elst: &BoxInfo) -> Result<Vec<ParsedEdit>, TrimError> {
+    let p = elst.payload_offset as usize;
+    let end = box_end(elst)?;
+    let version = *input
+        .get(p)
+        .filter(|_| p < end)
+        .ok_or_else(|| TrimError::Corrupt("truncated elst".into()))?;
+    let entry_size = match version {
+        0 => 12,
+        1 => 20,
+        _ => return Err(TrimError::Unsupported("unknown elst version".into())),
+    };
+    let count = read_u32_bounded(input, p + 4, end, "elst")? as usize;
+    validate_table_entries(count, p + 8, end, entry_size, "elst")?;
+    let mut edits = Vec::with_capacity(count);
+    let mut pos = p + 8;
+    for _ in 0..count {
+        let (duration_movie_ts, media_time, rate_offset) = if version == 1 {
+            (
+                read_u64_bounded(input, pos, end, "elst")?,
+                read_u64_bounded(input, pos + 8, end, "elst")? as i64,
+                pos + 16,
+            )
+        } else {
+            (
+                u64::from(read_u32_bounded(input, pos, end, "elst")?),
+                i64::from(read_u32_bounded(input, pos + 4, end, "elst")? as i32),
+                pos + 8,
+            )
+        };
+        if read_u32_bounded(input, rate_offset, end, "elst")? != 0x0001_0000 {
+            return Err(TrimError::Unsupported(
+                "edit-list media rates other than 1.0 are unsupported".into(),
+            ));
+        }
+        if duration_movie_ts == 0 {
+            return Err(TrimError::Corrupt("zero-duration edit-list entry".into()));
+        }
+        edits.push(ParsedEdit {
+            duration_movie_ts,
+            media_time,
+        });
+        pos += entry_size;
+    }
+    Ok(edits)
+}
+
+fn rescale_ticks(
+    value: u64,
+    source_timescale: u32,
+    target_timescale: u32,
+) -> Result<u64, TrimError> {
+    let scaled = u128::from(value) * u128::from(target_timescale) / u128::from(source_timescale);
+    u64::try_from(scaled).map_err(|_| TrimError::Corrupt("timestamp rescale overflow".into()))
 }
 
 fn parse_track_cfg(input: &[u8], trak: &BoxInfo) -> Result<TrackConfig, TrimError> {
@@ -713,25 +1516,31 @@ fn validate_range(start_s: f64, end_s: f64) -> Result<(), TrimError> {
 }
 
 fn parse_mdhd_timescale(input: &[u8], mdhd: &BoxInfo) -> Result<u32, TrimError> {
-    let p = mdhd.payload_offset as usize;
+    parse_header_timescale(input, mdhd, "mdhd")
+}
+
+fn parse_header_timescale(input: &[u8], header: &BoxInfo, label: &str) -> Result<u32, TrimError> {
+    let p = header.payload_offset as usize;
+    let end = box_end(header)?;
     let version = *input
         .get(p)
-        .ok_or_else(|| TrimError::Corrupt("truncated mdhd".into()))?;
+        .filter(|_| p < end)
+        .ok_or_else(|| TrimError::Corrupt(format!("truncated {label}")))?;
     let ts_off = match version {
         0 => p + 12,
         1 => p + 20,
-        _ => return Err(TrimError::Unsupported("unknown mdhd version".into())),
+        _ => return Err(TrimError::Unsupported(format!("unknown {label} version"))),
     };
-    let timescale = read_u32(input, ts_off)?;
+    let timescale = read_u32_bounded(input, ts_off, end, label)?;
     if timescale == 0 {
-        return Err(TrimError::Corrupt("zero track timescale".into()));
+        return Err(TrimError::Corrupt(format!("zero {label} timescale")));
     }
     Ok(timescale)
 }
 
 fn parse_hdlr(input: &[u8], hdlr: &BoxInfo) -> Result<[u8; 4], TrimError> {
     let p = hdlr.payload_offset as usize;
-    read_fourcc(input, p + 8)
+    read_fourcc_bounded(input, p + 8, box_end(hdlr)?, "hdlr")
 }
 
 fn parse_stsd(
@@ -741,13 +1550,14 @@ fn parse_stsd(
     timescale: u32,
 ) -> Result<TrackConfig, TrimError> {
     let p = stsd.payload_offset as usize;
-    let entry_count = read_u32(input, p + 4)?;
+    let stsd_end = box_end(stsd)?;
+    let entry_count = read_u32_bounded(input, p + 4, stsd_end, "stsd")?;
     if entry_count != 1 {
         return Err(TrimError::Unsupported(
             "expected exactly one sample description".into(),
         ));
     }
-    let entry = read_box_at(input, p + 8, box_end(stsd)?)?;
+    let entry = read_box_at(input, p + 8, stsd_end)?;
     match &handler {
         b"vide" => parse_video_stsd(input, &entry, timescale),
         b"soun" => parse_audio_stsd(input, &entry),
@@ -824,8 +1634,9 @@ fn parse_audio_stsd(input: &[u8], entry: &BoxInfo) -> Result<TrackConfig, TrimEr
     let dops = find_box_between(input, p + 28, entry_end, b"dOps")?
         .ok_or_else(|| TrimError::Unsupported("missing dOps".into()))?;
     let dp = dops.payload_offset as usize;
-    let pre_skip = read_u16(input, dp + 2)?;
-    let sample_rate = read_u32(input, dp + 4)?;
+    let dops_end = box_end(&dops)?;
+    let pre_skip = read_u16_bounded(input, dp + 2, dops_end, "dOps")?;
+    let sample_rate = read_u32_bounded(input, dp + 4, dops_end, "dOps")?;
     Ok(TrackConfig::Audio(AudioTrackConfig {
         channels,
         sample_rate,
@@ -833,7 +1644,9 @@ fn parse_audio_stsd(input: &[u8], entry: &BoxInfo) -> Result<TrackConfig, TrimEr
     }))
 }
 
-fn parse_avcc(input: &[u8], avcc: &BoxInfo) -> Result<(Vec<u8>, Vec<u8>), TrimError> {
+type H264ParamSets = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+
+fn parse_avcc(input: &[u8], avcc: &BoxInfo) -> Result<H264ParamSets, TrimError> {
     let p = avcc.payload_offset as usize;
     let end = box_end(avcc)?;
     if p + 7 > end {
@@ -844,15 +1657,13 @@ fn parse_avcc(input: &[u8], avcc: &BoxInfo) -> Result<(Vec<u8>, Vec<u8>), TrimEr
         return Err(TrimError::Unsupported("avcC has no SPS".into()));
     }
     let mut pos = p + 6;
-    let mut sps = None;
-    for i in 0..sps_count {
-        let len = read_u16(input, pos)? as usize;
+    let mut sps = Vec::with_capacity(sps_count as usize);
+    for _ in 0..sps_count {
+        let len = read_u16_bounded(input, pos, end, "avcC")? as usize;
         pos += 2;
         let data = read_slice(input, pos, len, end)?.to_vec();
         pos += len;
-        if i == 0 {
-            sps = Some(data);
-        }
+        sps.push(data);
     }
     let pps_count = *input
         .get(pos)
@@ -861,16 +1672,20 @@ fn parse_avcc(input: &[u8], avcc: &BoxInfo) -> Result<(Vec<u8>, Vec<u8>), TrimEr
     if pps_count == 0 {
         return Err(TrimError::Unsupported("avcC has no PPS".into()));
     }
-    let pps_len = read_u16(input, pos)? as usize;
-    pos += 2;
-    let pps = read_slice(input, pos, pps_len, end)?.to_vec();
-    Ok((sps.unwrap(), pps))
+    let mut pps = Vec::with_capacity(pps_count as usize);
+    for _ in 0..pps_count {
+        let pps_len = read_u16_bounded(input, pos, end, "avcC")? as usize;
+        pos += 2;
+        pps.push(read_slice(input, pos, pps_len, end)?.to_vec());
+        pos += pps_len;
+    }
+    Ok((sps, pps))
 }
 
 /// (VPS, SPS, PPS) raw NAL units recovered from an `hvcC` record.
-type HevcParamSets = (Vec<u8>, Vec<u8>, Vec<u8>);
+type HevcParamSets = (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>);
 
-/// Recover the first VPS/SPS/PPS NAL from an `hvcC` NAL-array section.
+/// Recover every VPS/SPS/PPS NAL from an `hvcC` NAL-array section.
 fn parse_hvcc(input: &[u8], hvcc: &BoxInfo) -> Result<HevcParamSets, TrimError> {
     let p = hvcc.payload_offset as usize;
     let end = box_end(hvcc)?;
@@ -880,35 +1695,34 @@ fn parse_hvcc(input: &[u8], hvcc: &BoxInfo) -> Result<HevcParamSets, TrimError> 
     }
     let num_arrays = input[p + 22];
     let mut pos = p + 23;
-    let mut vps = None;
-    let mut sps = None;
-    let mut pps = None;
+    let mut vps = Vec::new();
+    let mut sps = Vec::new();
+    let mut pps = Vec::new();
     for _ in 0..num_arrays {
         let nal_type = *input
             .get(pos)
             .ok_or_else(|| TrimError::Corrupt("truncated hvcC array header".into()))?
             & 0x3F;
         pos += 1;
-        let num_nalus = read_u16(input, pos)?;
+        let num_nalus = read_u16_bounded(input, pos, end, "hvcC")?;
         pos += 2;
-        for i in 0..num_nalus {
-            let len = read_u16(input, pos)? as usize;
+        for _ in 0..num_nalus {
+            let len = read_u16_bounded(input, pos, end, "hvcC")? as usize;
             pos += 2;
             let data = read_slice(input, pos, len, end)?.to_vec();
             pos += len;
-            if i == 0 {
-                match nal_type {
-                    32 => vps = Some(data),
-                    33 => sps = Some(data),
-                    34 => pps = Some(data),
-                    _ => {}
-                }
+            match nal_type {
+                32 => vps.push(data),
+                33 => sps.push(data),
+                34 => pps.push(data),
+                _ => {}
             }
         }
     }
-    match (vps, sps, pps) {
-        (Some(vps), Some(sps), Some(pps)) => Ok((vps, sps, pps)),
-        _ => Err(TrimError::Unsupported("hvcC missing VPS/SPS/PPS".into())),
+    if vps.is_empty() || sps.is_empty() || pps.is_empty() {
+        Err(TrimError::Unsupported("hvcC missing VPS/SPS/PPS".into()))
+    } else {
+        Ok((vps, sps, pps))
     }
 }
 
@@ -927,18 +1741,15 @@ fn parse_av1c(input: &[u8], av1c: &BoxInfo) -> Result<Vec<u8>, TrimError> {
     Ok(obu)
 }
 
-fn parse_sample_table(input: &[u8], stbl: &BoxInfo) -> Result<Vec<SampleRecord>, TrimError> {
-    let stts = require_child(input, stbl, b"stts")?;
-    let durations = parse_stts(input, &stts)?;
+fn parse_sample_table(
+    input: &[u8],
+    stbl: &BoxInfo,
+    source_len: usize,
+) -> Result<Vec<SampleRecord>, TrimError> {
     let stsz = require_child(input, stbl, b"stsz")?;
     let sizes = parse_stsz(input, &stsz)?;
-    if durations.len() != sizes.len() {
-        return Err(TrimError::Corrupt(format!(
-            "stts/stsz sample count mismatch: {} vs {}",
-            durations.len(),
-            sizes.len()
-        )));
-    }
+    let stts = require_child(input, stbl, b"stts")?;
+    let durations = parse_stts(input, &stts, sizes.len())?;
     let sync = match child(input, stbl, b"stss") {
         Some(stss) => parse_stss(input, &stss, sizes.len())?,
         None => vec![true; sizes.len()],
@@ -952,7 +1763,7 @@ fn parse_sample_table(input: &[u8], stbl: &BoxInfo) -> Result<Vec<SampleRecord>,
     };
     let samples_per_chunk = parse_stsc(input, &stsc, chunk_offsets.len())?;
     records_from_tables(
-        input,
+        source_len,
         &sizes,
         &durations,
         &sync,
@@ -961,20 +1772,38 @@ fn parse_sample_table(input: &[u8], stbl: &BoxInfo) -> Result<Vec<SampleRecord>,
     )
 }
 
-fn parse_stts(input: &[u8], stts: &BoxInfo) -> Result<Vec<u32>, TrimError> {
+fn parse_stts(
+    input: &[u8],
+    stts: &BoxInfo,
+    expected_sample_count: usize,
+) -> Result<Vec<u32>, TrimError> {
     let p = stts.payload_offset as usize;
     let count = read_u32(input, p + 4)? as usize;
     let end = box_end(stts)?;
     let mut pos = p + 8;
-    let mut out = Vec::new();
+    validate_table_entries(count, pos, end, 8, "stts")?;
+    validate_sample_count(expected_sample_count, "stts")?;
+    let mut out = Vec::with_capacity(expected_sample_count);
     for _ in 0..count {
-        if pos + 8 > end {
-            return Err(TrimError::Corrupt("truncated stts".into()));
-        }
-        let sample_count = read_u32(input, pos)?;
+        let sample_count = read_u32(input, pos)? as usize;
         let delta = read_u32(input, pos + 4)?;
-        out.extend(std::iter::repeat_n(delta, sample_count as usize));
+        let expanded = out
+            .len()
+            .checked_add(sample_count)
+            .ok_or_else(|| TrimError::Corrupt("stts sample count overflow".into()))?;
+        if expanded > expected_sample_count || expanded > MAX_PARSED_SAMPLES {
+            return Err(TrimError::Corrupt(
+                "stts sample count exceeds limit or stsz count".into(),
+            ));
+        }
+        out.extend(std::iter::repeat_n(delta, sample_count));
         pos += 8;
+    }
+    if out.len() != expected_sample_count {
+        return Err(TrimError::Corrupt(format!(
+            "stts/stsz sample count mismatch: {} vs {expected_sample_count}",
+            out.len()
+        )));
     }
     Ok(out)
 }
@@ -983,16 +1812,15 @@ fn parse_stsz(input: &[u8], stsz: &BoxInfo) -> Result<Vec<u32>, TrimError> {
     let p = stsz.payload_offset as usize;
     let sample_size = read_u32(input, p + 4)?;
     let sample_count = read_u32(input, p + 8)? as usize;
+    validate_sample_count(sample_count, "stsz")?;
     if sample_size != 0 {
         return Ok(vec![sample_size; sample_count]);
     }
     let end = box_end(stsz)?;
     let mut pos = p + 12;
+    validate_table_entries(sample_count, pos, end, 4, "stsz")?;
     let mut out = Vec::with_capacity(sample_count);
     for _ in 0..sample_count {
-        if pos + 4 > end {
-            return Err(TrimError::Corrupt("truncated stsz".into()));
-        }
         out.push(read_u32(input, pos)?);
         pos += 4;
     }
@@ -1004,11 +1832,14 @@ fn parse_stss(input: &[u8], stss: &BoxInfo, sample_count: usize) -> Result<Vec<b
     let entry_count = read_u32(input, p + 4)? as usize;
     let end = box_end(stss)?;
     let mut pos = p + 8;
+    validate_table_entries(entry_count, pos, end, 4, "stss")?;
+    if entry_count > sample_count {
+        return Err(TrimError::Corrupt(
+            "stss entry count exceeds sample count".into(),
+        ));
+    }
     let mut sync = vec![false; sample_count];
     for _ in 0..entry_count {
-        if pos + 4 > end {
-            return Err(TrimError::Corrupt("truncated stss".into()));
-        }
         let n = read_u32(input, pos)? as usize;
         if n == 0 || n > sample_count {
             return Err(TrimError::Corrupt("stss sample number out of range".into()));
@@ -1024,11 +1855,10 @@ fn parse_co64(input: &[u8], co64: &BoxInfo) -> Result<Vec<u64>, TrimError> {
     let count = read_u32(input, p + 4)? as usize;
     let end = box_end(co64)?;
     let mut pos = p + 8;
+    validate_sample_count(count, "co64")?;
+    validate_table_entries(count, pos, end, 8, "co64")?;
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
-        if pos + 8 > end {
-            return Err(TrimError::Corrupt("truncated co64".into()));
-        }
         out.push(read_u64(input, pos)?);
         pos += 8;
     }
@@ -1040,11 +1870,10 @@ fn parse_stco(input: &[u8], stco: &BoxInfo) -> Result<Vec<u64>, TrimError> {
     let count = read_u32(input, p + 4)? as usize;
     let end = box_end(stco)?;
     let mut pos = p + 8;
+    validate_sample_count(count, "stco")?;
+    validate_table_entries(count, pos, end, 4, "stco")?;
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
-        if pos + 4 > end {
-            return Err(TrimError::Corrupt("truncated stco".into()));
-        }
         out.push(read_u32(input, pos)? as u64);
         pos += 4;
     }
@@ -1059,11 +1888,10 @@ fn parse_stsc(input: &[u8], stsc: &BoxInfo, chunk_count: usize) -> Result<Vec<u3
     }
     let end = box_end(stsc)?;
     let mut pos = p + 8;
+    validate_sample_count(entry_count, "stsc")?;
+    validate_table_entries(entry_count, pos, end, 12, "stsc")?;
     let mut entries = Vec::with_capacity(entry_count);
     for _ in 0..entry_count {
-        if pos + 12 > end {
-            return Err(TrimError::Corrupt("truncated stsc".into()));
-        }
         let first_chunk = read_u32(input, pos)?;
         let samples_per_chunk = read_u32(input, pos + 4)?;
         if first_chunk == 0 || samples_per_chunk == 0 {
@@ -1093,7 +1921,7 @@ fn parse_stsc(input: &[u8], stsc: &BoxInfo, chunk_count: usize) -> Result<Vec<u3
 }
 
 fn records_from_tables(
-    input: &[u8],
+    source_len: usize,
     sizes: &[u32],
     durations: &[u32],
     sync: &[bool],
@@ -1119,7 +1947,7 @@ fn records_from_tables(
             let end = offset
                 .checked_add(size as usize)
                 .ok_or_else(|| TrimError::Corrupt("sample offset overflow".into()))?;
-            if end > input.len() {
+            if end > source_len {
                 return Err(TrimError::Corrupt(
                     "sample points outside source file".into(),
                 ));
@@ -1176,20 +2004,18 @@ fn read_box_at(input: &[u8], offset: usize, limit: usize) -> Result<BoxInfo, Tri
     }
     let size32 = read_u32(input, offset)?;
     let fourcc = read_fourcc(input, offset + 4)?;
-    let (size, header) = if size32 == 1 {
+    let large_size = if crate::box_header::uses_large_size(size32) {
         if offset + 16 > limit || offset + 16 > input.len() {
             return Err(TrimError::Corrupt("truncated largesize box header".into()));
         }
-        (read_u64(input, offset + 8)?, 16u64)
-    } else if size32 == 0 {
-        ((limit - offset) as u64, 8u64)
+        Some(read_u64(input, offset + 8)?)
     } else {
-        (size32 as u64, 8u64)
+        None
     };
-    let end = offset
-        .checked_add(size as usize)
-        .ok_or_else(|| TrimError::Corrupt("box size overflow".into()))?;
-    if size < header || end > limit || end > input.len() {
+    let decoded =
+        crate::box_header::decode_box_header(size32, large_size, offset as u64, limit as u64)
+            .map_err(|error| box_header_error(error, &fourcc))?;
+    if decoded.end > input.len() as u64 {
         return Err(TrimError::Corrupt(format!(
             "invalid {} box size",
             fourcc_str(&fourcc)
@@ -1198,8 +2024,8 @@ fn read_box_at(input: &[u8], offset: usize, limit: usize) -> Result<BoxInfo, Tri
     Ok(BoxInfo {
         fourcc,
         offset: offset as u64,
-        size,
-        payload_offset: offset as u64 + header,
+        size: decoded.size,
+        payload_offset: decoded.payload_offset,
     })
 }
 
@@ -1243,35 +2069,37 @@ fn read_top_level_box<R: Read + Seek>(
     let size32 = u32::from_be_bytes(header[..4].try_into().unwrap());
     let fourcc = header[4..8].try_into().unwrap();
 
-    let (size, header_len) = if size32 == 1 {
+    let large_size = if crate::box_header::uses_large_size(size32) {
         if offset.checked_add(16).is_none_or(|end| end > limit) {
             return Err(TrimError::Corrupt("truncated largesize box header".into()));
         }
         let mut large = [0_u8; 8];
         reader.read_exact(&mut large)?;
-        (u64::from_be_bytes(large), 16_u64)
-    } else if size32 == 0 {
-        (limit - offset, 8_u64)
+        Some(u64::from_be_bytes(large))
     } else {
-        (u64::from(size32), 8_u64)
+        None
     };
-
-    let end = offset
-        .checked_add(size)
-        .ok_or_else(|| TrimError::Corrupt("box size overflow".into()))?;
-    if size < header_len || end > limit {
-        return Err(TrimError::Corrupt(format!(
-            "invalid {} box size",
-            fourcc_str(&fourcc)
-        )));
-    }
+    let decoded = crate::box_header::decode_box_header(size32, large_size, offset, limit)
+        .map_err(|error| box_header_error(error, &fourcc))?;
 
     Ok(BoxInfo {
         fourcc,
         offset,
-        size,
-        payload_offset: offset + header_len,
+        size: decoded.size,
+        payload_offset: decoded.payload_offset,
     })
+}
+
+fn box_header_error(error: crate::box_header::BoxHeaderError, fourcc: &[u8; 4]) -> TrimError {
+    match error {
+        crate::box_header::BoxHeaderError::SizeOverflow => {
+            TrimError::Corrupt("box size overflow".into())
+        }
+        crate::box_header::BoxHeaderError::MissingLargeSize
+        | crate::box_header::BoxHeaderError::InvalidExtent => {
+            TrimError::Corrupt(format!("invalid {} box size", fourcc_str(fourcc)))
+        }
+    }
 }
 
 fn read_box_bytes<R: Read + Seek>(reader: &mut R, b: &BoxInfo) -> Result<Vec<u8>, TrimError> {
@@ -1290,8 +2118,39 @@ fn read_box_bytes<R: Read + Seek>(reader: &mut R, b: &BoxInfo) -> Result<Vec<u8>
 }
 
 fn box_end(b: &BoxInfo) -> Result<usize, TrimError> {
-    usize::try_from(b.offset + b.size)
-        .map_err(|_| TrimError::Corrupt("box end offset too large".into()))
+    let end = b
+        .offset
+        .checked_add(b.size)
+        .ok_or_else(|| TrimError::Corrupt("box end offset overflow".into()))?;
+    usize::try_from(end).map_err(|_| TrimError::Corrupt("box end offset too large".into()))
+}
+
+fn validate_sample_count(count: usize, table: &str) -> Result<(), TrimError> {
+    if count > MAX_PARSED_SAMPLES {
+        return Err(TrimError::Corrupt(format!(
+            "{table} sample count exceeds limit of {MAX_PARSED_SAMPLES}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_table_entries(
+    count: usize,
+    start: usize,
+    end: usize,
+    entry_size: usize,
+    table: &str,
+) -> Result<(), TrimError> {
+    let byte_len = count
+        .checked_mul(entry_size)
+        .ok_or_else(|| TrimError::Corrupt(format!("{table} entry byte count overflow")))?;
+    let required_end = start
+        .checked_add(byte_len)
+        .ok_or_else(|| TrimError::Corrupt(format!("{table} entry range overflow")))?;
+    if required_end > end {
+        return Err(TrimError::Corrupt(format!("truncated {table}")));
+    }
+    Ok(())
 }
 
 fn read_slice(input: &[u8], offset: usize, len: usize, limit: usize) -> Result<&[u8], TrimError> {
@@ -1318,6 +2177,17 @@ fn read_u16(input: &[u8], offset: usize) -> Result<u16, TrimError> {
     ))
 }
 
+fn read_u16_bounded(
+    input: &[u8],
+    offset: usize,
+    limit: usize,
+    label: &str,
+) -> Result<u16, TrimError> {
+    let bytes = read_slice(input, offset, 2, limit)
+        .map_err(|_| TrimError::Corrupt(format!("truncated {label}")))?;
+    Ok(u16::from_be_bytes(bytes.try_into().unwrap()))
+}
+
 fn read_u32(input: &[u8], offset: usize) -> Result<u32, TrimError> {
     Ok(u32::from_be_bytes(
         input
@@ -1326,6 +2196,17 @@ fn read_u32(input: &[u8], offset: usize) -> Result<u32, TrimError> {
             .try_into()
             .unwrap(),
     ))
+}
+
+fn read_u32_bounded(
+    input: &[u8],
+    offset: usize,
+    limit: usize,
+    label: &str,
+) -> Result<u32, TrimError> {
+    let bytes = read_slice(input, offset, 4, limit)
+        .map_err(|_| TrimError::Corrupt(format!("truncated {label}")))?;
+    Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
 }
 
 fn read_u64(input: &[u8], offset: usize) -> Result<u64, TrimError> {
@@ -1338,6 +2219,17 @@ fn read_u64(input: &[u8], offset: usize) -> Result<u64, TrimError> {
     ))
 }
 
+fn read_u64_bounded(
+    input: &[u8],
+    offset: usize,
+    limit: usize,
+    label: &str,
+) -> Result<u64, TrimError> {
+    let bytes = read_slice(input, offset, 8, limit)
+        .map_err(|_| TrimError::Corrupt(format!("truncated {label}")))?;
+    Ok(u64::from_be_bytes(bytes.try_into().unwrap()))
+}
+
 fn read_fourcc(input: &[u8], offset: usize) -> Result<[u8; 4], TrimError> {
     let mut out = [0u8; 4];
     out.copy_from_slice(
@@ -1348,6 +2240,20 @@ fn read_fourcc(input: &[u8], offset: usize) -> Result<[u8; 4], TrimError> {
     Ok(out)
 }
 
+fn read_fourcc_bounded(
+    input: &[u8],
+    offset: usize,
+    limit: usize,
+    label: &str,
+) -> Result<[u8; 4], TrimError> {
+    let mut output = [0_u8; 4];
+    output.copy_from_slice(
+        read_slice(input, offset, 4, limit)
+            .map_err(|_| TrimError::Corrupt(format!("truncated {label}")))?,
+    );
+    Ok(output)
+}
+
 fn fourcc_str(fourcc: &[u8; 4]) -> String {
     String::from_utf8_lossy(fourcc).into_owned()
 }
@@ -1356,9 +2262,16 @@ fn fourcc_str(fourcc: &[u8; 4]) -> String {
 mod tests {
     use super::*;
     use crate::{AudioTrackConfig, VideoTrackConfig};
-    use audiopus::coder::{Decoder, Encoder};
-    use audiopus::{Application, Channels, SampleRate};
+    use shiguredo_opus::{Decoder, DecoderConfig, Encoder, EncoderConfig};
     use std::io::{Read, Seek, SeekFrom};
+
+    #[test]
+    fn bounded_scalar_reads_do_not_borrow_bytes_from_a_sibling_box() {
+        let bytes = [0_u8, 0, 0, 1, 0, 0, 0, 2];
+        assert!(read_u32_bounded(&bytes, 2, 4, "test box").is_err());
+        assert!(read_u16_bounded(&bytes, 3, 4, "test box").is_err());
+        assert!(read_fourcc_bounded(&bytes, 2, 4, "test box").is_err());
+    }
 
     fn video_track() -> TrackConfig {
         TrackConfig::Video(VideoTrackConfig::h264(
@@ -1407,8 +2320,7 @@ mod tests {
     }
 
     fn opus_audio_packets(amplitude: f32) -> Vec<FragSample> {
-        let encoder =
-            Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio).unwrap();
+        let mut encoder = Encoder::new(EncoderConfig::new(48_000, 2)).unwrap();
         (0..50)
             .map(|frame_idx| {
                 let mut pcm = Vec::with_capacity(960 * 2);
@@ -1417,9 +2329,7 @@ mod tests {
                     let sample = (t * 440.0 * std::f32::consts::TAU).sin() * amplitude;
                     pcm.extend([sample, sample]);
                 }
-                let mut encoded = vec![0u8; 4000];
-                let len = encoder.encode_float(&pcm, &mut encoded).unwrap();
-                encoded.truncate(len);
+                let encoded = encoder.encode_f32(&pcm).unwrap();
                 FragSample {
                     data: encoded,
                     duration: 960,
@@ -1450,15 +2360,11 @@ mod tests {
             TrackConfig::Audio(cfg) => cfg,
             TrackConfig::Video(_) => unreachable!("selected audio track"),
         };
-        let mut decoder = Decoder::new(SampleRate::Hz48000, Channels::Stereo).unwrap();
+        let mut decoder = Decoder::new(DecoderConfig::new(48_000, 2)).unwrap();
         let mut pcm = Vec::new();
         for sample in &audio.samples {
             let sample = sample.to_frag_sample(input).unwrap();
-            let mut decoded = vec![0.0f32; 5760 * 2];
-            let frames = decoder
-                .decode_float(Some(sample.data.as_slice()), decoded.as_mut_slice(), false)
-                .unwrap();
-            decoded.truncate(frames * 2);
+            let decoded = decoder.decode_f32(sample.data.as_slice()).unwrap();
             pcm.extend(decoded);
         }
         let skip = cfg.pre_skip as usize * cfg.channels as usize;
@@ -1496,6 +2402,26 @@ mod tests {
             w.write_fragment_multi(&[&v, &a]).unwrap();
         }
         w.finalize().unwrap().into_inner()
+    }
+
+    fn clipline_gap_fixture() -> Vec<u8> {
+        let mut writer = HybridMp4Writer::new_multi(Cursor::new(Vec::new()), tracks()).unwrap();
+        let empty: &[FragSample] = &[];
+        writer
+            .write_fragment_multi(&[&video_gop(0), empty])
+            .unwrap();
+        writer.set_track_decode_time(1, 47_520).unwrap();
+        writer
+            .write_fragment_multi(&[&video_gop(10), &audio_packets(0)])
+            .unwrap();
+        writer
+            .write_fragment_multi(&[&video_gop(20), empty])
+            .unwrap();
+        writer.set_track_decode_time(1, 144_000).unwrap();
+        writer
+            .write_fragment_multi(&[&video_gop(30), &audio_packets(50)])
+            .unwrap();
+        writer.finalize().unwrap().into_inner()
     }
 
     fn tracks_two_audio() -> Vec<TrackConfig> {
@@ -1538,6 +2464,61 @@ mod tests {
         assert!(movie.tracks[0].samples[0].is_sync);
         assert!(movie.tracks[0].samples[10].is_sync);
         assert!(!movie.tracks[0].samples[11].is_sync);
+    }
+
+    #[test]
+    fn remux_preserves_leading_and_internal_track_gaps() {
+        let fixture = clipline_gap_fixture();
+        let parsed = parse_movie(&fixture).unwrap();
+        assert_eq!(parsed.tracks[1].samples[0].start_ticks, 47_520);
+        assert_eq!(parsed.tracks[1].samples[50].start_ticks, 144_000);
+
+        let output = remux_with_selected_audio_tracks(&fixture, &[0]).unwrap();
+        let remuxed = parse_movie(&output).unwrap();
+        assert_eq!(remuxed.tracks[1].samples[0].start_ticks, 47_520);
+        assert_eq!(remuxed.tracks[1].samples[50].start_ticks, 144_000);
+    }
+
+    #[test]
+    fn malformed_edit_lists_are_rejected_instead_of_retimed() {
+        let fixture = clipline_gap_fixture();
+        let fourcc = fixture
+            .windows(4)
+            .position(|window| window == b"elst")
+            .unwrap();
+        let payload = fourcc + 4;
+        let entries = payload + 8;
+
+        let mut mid_sample = fixture.clone();
+        mid_sample[entries + 12 + 4..entries + 12 + 8].copy_from_slice(&1_i32.to_be_bytes());
+        assert!(parse_movie(&mid_sample).is_err());
+
+        let mut overlapping = fixture.clone();
+        overlapping[entries + 36 + 4..entries + 36 + 8].copy_from_slice(&0_i32.to_be_bytes());
+        assert!(parse_movie(&overlapping).is_err());
+
+        let mut adjusted_rate = fixture;
+        adjusted_rate[entries + 8..entries + 12].copy_from_slice(&0x0002_0000_u32.to_be_bytes());
+        assert!(parse_movie(&adjusted_rate).is_err());
+    }
+
+    #[test]
+    fn trim_uses_integer_boundaries_without_shifting_audio_early() {
+        let fixture = clipline_gap_fixture();
+        let (output, info) = trim_keyframe_aligned(&fixture, 1.2, 3.2).unwrap();
+        assert_eq!(info.aligned_start_s, 1.0);
+        assert_eq!(info.aligned_end_s, 4.0);
+
+        let trimmed = parse_movie(&output).unwrap();
+        let audio = &trimmed.tracks[1];
+        assert_eq!(
+            audio.samples[0].start_ticks, 480,
+            "first packet remains 10 ms late"
+        );
+        assert_eq!(
+            audio.samples[49].start_ticks, 96_000,
+            "later audio run keeps its two-second offset"
+        );
     }
 
     #[test]
@@ -1594,10 +2575,13 @@ mod tests {
 
     #[test]
     fn trims_hevc_clip_recovering_parameter_sets() {
+        let second_vps = [HEVC_VPS, &[0x55]].concat();
+        let second_sps = [HEVC_SPS, &[0x66]].concat();
+        let second_pps = [HEVC_PPS, &[0x77]].concat();
         let fixture = single_video_fixture(VideoCodecParams::Hevc {
-            vps: HEVC_VPS.to_vec(),
-            sps: HEVC_SPS.to_vec(),
-            pps: HEVC_PPS.to_vec(),
+            vps: vec![HEVC_VPS.to_vec(), second_vps.clone()],
+            sps: vec![HEVC_SPS.to_vec(), second_sps.clone()],
+            pps: vec![HEVC_PPS.to_vec(), second_pps.clone()],
         });
         let (out, info) = trim_keyframe_aligned(&fixture, 0.4, 1.2).unwrap();
         let movie = parse_movie(&out).unwrap();
@@ -1609,13 +2593,43 @@ mod tests {
                 codec: VideoCodecParams::Hevc { vps, sps, pps },
                 ..
             }) => {
-                assert_eq!(vps.as_slice(), HEVC_VPS);
-                assert_eq!(sps.as_slice(), HEVC_SPS);
-                assert_eq!(pps.as_slice(), HEVC_PPS);
+                assert_eq!(vps.as_slice(), &[HEVC_VPS.to_vec(), second_vps]);
+                assert_eq!(sps.as_slice(), &[HEVC_SPS.to_vec(), second_sps]);
+                assert_eq!(pps.as_slice(), &[HEVC_PPS.to_vec(), second_pps]);
             }
             other => panic!("expected HEVC track, got {other:?}"),
         }
         assert!(out.windows(4).any(|w| w == b"hvc1"));
+    }
+
+    #[test]
+    fn remux_preserves_all_h264_parameter_sets() {
+        let sps = vec![
+            vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+            vec![0x67, 0x64, 0x00, 0x0A, 0xAD],
+        ];
+        let pps = vec![vec![0x68, 0xEE, 0x38, 0x80], vec![0x68, 0xEE, 0x38, 0x81]];
+        let fixture = single_video_fixture(VideoCodecParams::H264 {
+            sps: sps.clone(),
+            pps: pps.clone(),
+        });
+
+        let output = remux_with_selected_audio_tracks(&fixture, &[]).unwrap();
+        let movie = parse_movie(&output).unwrap();
+        match &movie.tracks[0].cfg {
+            TrackConfig::Video(VideoTrackConfig {
+                codec:
+                    VideoCodecParams::H264 {
+                        sps: output_sps,
+                        pps: output_pps,
+                    },
+                ..
+            }) => {
+                assert_eq!(output_sps, &sps);
+                assert_eq!(output_pps, &pps);
+            }
+            other => panic!("expected H.264 track, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1692,6 +2706,131 @@ mod tests {
     }
 
     #[test]
+    fn file_trim_rejects_hard_link_target_without_truncating_source() {
+        let input = clipline_fixture();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-trim-hard-link-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        let target = dir.join("target.mp4");
+        std::fs::write(&source, &input).unwrap();
+        std::fs::hard_link(&source, &target).unwrap();
+
+        let err = trim_keyframe_aligned_file(&source, &target, 0.4, 1.2).unwrap_err();
+        let source_after = std::fs::read(&source).unwrap();
+        let target_after = std::fs::read(&target).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(matches!(
+            err,
+            TrimError::Io(ref e) if e.kind() == std::io::ErrorKind::InvalidInput
+        ));
+        assert_eq!(source_after, input);
+        assert_eq!(target_after, input);
+    }
+
+    #[test]
+    fn file_remux_matches_in_memory_output_and_preserves_existing_target_on_error() {
+        let input = clipline_two_audio_fixture();
+        let expected = remux_with_selected_audio_tracks(&input, &[1]).unwrap();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-remux-file-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        let target = dir.join("target.mp4");
+        std::fs::write(&source, &input).unwrap();
+
+        remux_with_selected_audio_tracks_file(&source, &target, &[1]).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), expected);
+
+        let sentinel = b"existing target must survive";
+        std::fs::write(&target, sentinel).unwrap();
+        let err = remux_with_selected_audio_tracks_file(&source, &target, &[2]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("outside the clip's 2 audio tracks"));
+        assert_eq!(std::fs::read(&target).unwrap(), sentinel);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_file_transform_preserves_target_and_cleans_partial_on_late_failure() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-atomic-transform-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target.mp4");
+        std::fs::write(&target, b"previous complete clip").unwrap();
+
+        let error = write_file_atomically(&target, |mut temporary| {
+            temporary.write_all(b"partial replacement")?;
+            Err(TrimError::Io(std::io::Error::other(
+                "injected finalize failure",
+            )))
+        })
+        .unwrap_err();
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(error.to_string().contains("injected finalize failure"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"previous complete clip");
+        assert_eq!(leftovers, vec!["target.mp4"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn abandoned_transform_temp_prune_is_scoped_and_age_gated() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-transform-prune-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let abandoned = dir.join("clip.mp4.clipline-tmp-output-1-1.tmp");
+        let active = dir.join("clip.mp4.clipline-tmp-output-1-2.tmp");
+        let unrelated = dir.join("editor.tmp");
+        for path in [&abandoned, &active, &unrelated] {
+            std::fs::write(path, b"temp").unwrap();
+        }
+        File::options()
+            .write(true)
+            .open(&abandoned)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+
+        prune_abandoned_transform_temps(&dir);
+
+        assert!(!abandoned.exists());
+        assert!(active.exists());
+        assert!(unrelated.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn remux_with_selected_audio_tracks_keeps_only_requested_audio() {
         let input = clipline_two_audio_fixture();
 
@@ -1731,6 +2870,60 @@ mod tests {
                 .contains("outside the clip's 2 audio tracks"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn stts_rejects_an_excessive_expanded_sample_count() {
+        let mut payload = vec![0_u8; 4];
+        payload.extend(1_u32.to_be_bytes());
+        payload.extend(4_000_001_u32.to_be_bytes());
+        payload.extend(1_500_u32.to_be_bytes());
+        let input = crate::boxes::mp4_box(*b"stts", payload);
+        let info = walk(&input).remove(0);
+
+        let err = parse_stts(&input, &info, 4_000_000).unwrap_err();
+        assert!(err.to_string().contains("sample count exceeds limit"));
+    }
+
+    #[test]
+    fn fixed_stsz_rejects_an_excessive_sample_count() {
+        let mut payload = vec![0_u8; 4];
+        payload.extend(1_u32.to_be_bytes());
+        payload.extend(4_000_001_u32.to_be_bytes());
+        let input = crate::boxes::mp4_box(*b"stsz", payload);
+        let info = walk(&input).remove(0);
+
+        let err = parse_stsz(&input, &info).unwrap_err();
+        assert!(err.to_string().contains("sample count exceeds limit"));
+    }
+
+    #[test]
+    fn offset_and_chunk_tables_reject_excessive_entry_counts() {
+        fn table(fourcc: [u8; 4]) -> (Vec<u8>, BoxInfo) {
+            let mut payload = vec![0_u8; 4];
+            payload.extend(4_000_001_u32.to_be_bytes());
+            let input = crate::boxes::mp4_box(fourcc, payload);
+            let info = walk(&input).remove(0);
+            (input, info)
+        }
+
+        let (co64, co64_info) = table(*b"co64");
+        assert!(parse_co64(&co64, &co64_info)
+            .unwrap_err()
+            .to_string()
+            .contains("sample count exceeds limit"));
+
+        let (stco, stco_info) = table(*b"stco");
+        assert!(parse_stco(&stco, &stco_info)
+            .unwrap_err()
+            .to_string()
+            .contains("sample count exceeds limit"));
+
+        let (stsc, stsc_info) = table(*b"stsc");
+        assert!(parse_stsc(&stsc, &stsc_info, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("sample count exceeds limit"));
     }
 
     #[test]
@@ -1811,6 +3004,27 @@ mod tests {
             "expected bounded reads, got {} bytes for moov size {moov_size}",
             reader.bytes_read
         );
+    }
+
+    #[test]
+    fn movie_reader_skips_mdat_payload_while_recovering_sample_offsets() {
+        let fixture = clipline_two_audio_fixture();
+        let top = walk(&fixture);
+        let mdat = find(&top, b"mdat").expect("fixture has top-level mdat");
+        let moov = find(&top, b"moov").expect("fixture has finalized moov");
+        let moov_size = usize::try_from(moov.size).unwrap();
+        let mut reader =
+            TrackingCursor::new(fixture, mdat.payload_offset..(mdat.offset + mdat.size));
+
+        let movie = parse_movie_reader(&mut reader).unwrap();
+
+        assert_eq!(movie.tracks.len(), 3);
+        let first_offset = movie.tracks[0].samples[0].offset as u64;
+        assert!(
+            first_offset >= mdat.payload_offset && first_offset < mdat.offset + mdat.size,
+            "sample offset {first_offset} should remain inside the source mdat"
+        );
+        assert!(reader.bytes_read <= moov_size + 128);
     }
 
     #[test]
@@ -2033,14 +3247,43 @@ mod tests {
     }
 
     #[test]
+    fn file_audio_mix_streams_video_and_emits_audible_mixed_track() {
+        let input = clipline_two_real_opus_audio_fixture();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("clipline-mix-file-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        let target = dir.join("target.mp4");
+        std::fs::write(&source, input).unwrap();
+
+        remux_with_mixed_audio_track_file(&source, &target, &[0, 1]).unwrap();
+        let out = std::fs::read(&target).unwrap();
+        let movie = parse_movie(&out).unwrap();
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("clipline-tmp"))
+            .collect::<Vec<_>>();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(movie.tracks.len(), 2);
+        assert!(decoded_audible_audio_rms(&out) > 0.10);
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[test]
     fn mixed_audio_track_preserves_source_and_encoder_pre_skip() {
         let input = clipline_two_real_opus_audio_fixture();
 
         let out = remux_with_mixed_audio_track(&input, &[0, 1]).unwrap();
         let mixed = first_audio_config(&out);
-        let encoder =
-            Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio).unwrap();
-        let expected_pre_skip = 312 + encoder.lookahead().unwrap() as u16;
+        let encoder = Encoder::new(EncoderConfig::new(48_000, 2)).unwrap();
+        let expected_pre_skip = 312 + encoder.get_lookahead().unwrap();
 
         assert_eq!(mixed.pre_skip, expected_pre_skip);
     }

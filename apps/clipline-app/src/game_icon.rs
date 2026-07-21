@@ -3,9 +3,8 @@
 //! file path the user pointed us at — no injection, no game memory. Every GDI
 //! handle is released before returning.
 
-use std::ffi::OsStr;
 use std::mem::size_of;
-use std::os::windows::ffi::OsStrExt;
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use base64::Engine as _;
 use windows_sys::Win32::Graphics::Gdi::{
@@ -18,14 +17,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICO
 
 /// The shell's "large" icon is 32x32 — plenty for a list badge.
 pub fn extract_exe_icon_png(exe_path: &str) -> Option<Vec<u8>> {
-    let trimmed = exe_path.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let wide: Vec<u16> = OsStr::new(trimmed)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let path = validated_local_exe_path(Path::new(exe_path.trim()))?;
+    let wide = crate::windows::wide_null(path.as_os_str());
 
     unsafe {
         let mut info: SHFILEINFOW = std::mem::zeroed();
@@ -43,6 +36,35 @@ pub fn extract_exe_icon_png(exe_path: &str) -> Option<Vec<u8>> {
         DestroyIcon(info.hIcon);
         png
     }
+}
+
+fn validated_local_exe_path(path: &Path) -> Option<PathBuf> {
+    if path.as_os_str().is_empty()
+        || path.as_os_str().to_string_lossy().contains('\0')
+        || !path.is_absolute()
+        || !has_local_disk_prefix(path, false)
+        || !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
+        return None;
+    }
+
+    let canonical = path.canonicalize().ok()?;
+    if !has_local_disk_prefix(&canonical, true) || !std::fs::metadata(&canonical).ok()?.is_file() {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
+fn has_local_disk_prefix(path: &Path, allow_verbatim: bool) -> bool {
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_))
+                || (allow_verbatim && matches!(prefix.kind(), Prefix::VerbatimDisk(_)))
+    )
 }
 
 /// Wrap PNG bytes as a `data:` URL the webview can use directly in `<img src>`.
@@ -145,4 +167,23 @@ pub fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> 
         writer.write_image_data(rgba).ok()?;
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executable_icon_paths_are_existing_local_exe_files() {
+        let current_exe = std::env::current_exe().unwrap();
+        assert_eq!(validated_local_exe_path(&current_exe), Some(current_exe));
+
+        assert!(validated_local_exe_path(Path::new("relative.exe")).is_none());
+        assert!(validated_local_exe_path(Path::new(r"\\server\share\game.exe")).is_none());
+        assert!(validated_local_exe_path(Path::new(r"\\?\C:\Games\game.exe")).is_none());
+        assert!(validated_local_exe_path(Path::new(r"\\.\C:\Games\game.exe")).is_none());
+        assert!(validated_local_exe_path(Path::new(r"C:\Games\notes.txt")).is_none());
+        assert!(validated_local_exe_path(Path::new(r"C:\missing\game.exe")).is_none());
+        assert!(validated_local_exe_path(&std::env::temp_dir()).is_none());
+    }
 }

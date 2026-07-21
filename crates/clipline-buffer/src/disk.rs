@@ -28,6 +28,7 @@ pub struct DiskSegment {
 
 #[derive(Debug, Clone)]
 struct DiskTrack {
+    pts_start_s: Option<f64>,
     offset: usize,
     len: usize,
     samples: Vec<SampleInfo>,
@@ -46,17 +47,25 @@ impl DiskReplayRing {
     }
 
     pub fn push(&mut self, seg: Segment) -> io::Result<()> {
+        self.push_ref(&seg)
+    }
+
+    /// Persist a borrowed segment so another immutable consumer can retain
+    /// the same payload without a deep clone.
+    pub fn push_ref(&mut self, seg: &Segment) -> io::Result<()> {
         let id = self.next_id;
-        self.next_id += 1;
         let path = self.dir.join(format!("seg_{id:08}.bin"));
         let tmp = self.dir.join(format!("seg_{id:08}.tmp"));
-        let mut file = File::create(&tmp)?;
+        let created = File::create(&tmp)?;
+        let mut tmp_owner = OwnedFile::new(tmp.clone());
+        let mut file = created;
         file.write_all(&seg.data)?;
         let mut offset = seg.data.len();
         let mut audio = Vec::with_capacity(seg.audio.len());
         for track in &seg.audio {
             file.write_all(&track.data)?;
             audio.push(DiskTrack {
+                pts_start_s: track.pts_start_s,
                 offset,
                 len: track.data.len(),
                 samples: track.samples.clone(),
@@ -66,6 +75,8 @@ impl DiskReplayRing {
         file.flush()?;
         drop(file);
         fs::rename(&tmp, &path)?;
+        tmp_owner.disarm();
+        let mut final_owner = OwnedFile::new(path.clone());
 
         let stored = DiskSegment {
             starts_with_keyframe: seg.starts_with_keyframe,
@@ -74,20 +85,28 @@ impl DiskReplayRing {
             path,
             byte_len: seg.byte_len(),
             video_len: seg.data.len(),
-            samples: seg.samples,
+            samples: seg.samples.clone(),
             audio,
         };
-        self.bytes += stored.byte_len;
-        self.segments.push_back(stored);
-        while self.bytes > self.max_bytes && self.segments.len() > 1 {
+        let evict = crate::planning::eviction_count(
+            self.segments.iter().map(DiskSegment::byte_len),
+            self.bytes,
+            stored.byte_len,
+            self.max_bytes,
+        );
+        for _ in 0..evict {
             let front = self
                 .segments
                 .front()
-                .expect("len > 1 implies a front segment exists");
+                .expect("non-empty ring has a front segment");
             fs::remove_file(&front.path)?;
             let front = self.segments.pop_front().expect("front segment exists");
-            self.bytes -= front.byte_len;
+            self.bytes = self.bytes.saturating_sub(front.byte_len);
         }
+        self.bytes = self.bytes.saturating_add(stored.byte_len);
+        self.segments.push_back(stored);
+        self.next_id += 1;
+        final_owner.disarm();
         Ok(())
     }
 
@@ -108,47 +127,42 @@ impl DiskReplayRing {
     }
 
     pub fn save_window(&self, window_s: f64, exclude_before_s: Option<f64>) -> Vec<&DiskSegment> {
-        let Some(last) = self.segments.back() else {
+        let Some(idx) =
+            crate::planning::replay_window_start_index(&self.segments, window_s, exclude_before_s)
+        else {
             return Vec::new();
         };
-        let mut start_target = last.pts_end_s() - window_s;
-        if let Some(x) = exclude_before_s {
-            start_target = start_target.max(x);
-        }
-
-        let mut start_idx = self
-            .segments
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.starts_with_keyframe && s.pts_start_s <= start_target)
-            .map(|(i, _)| i)
-            .next_back();
-        if start_idx.is_none() {
-            start_idx = self.segments.iter().position(|s| s.starts_with_keyframe);
-        }
-        let Some(mut idx) = start_idx else {
-            return Vec::new();
-        };
-
-        if let Some(x) = exclude_before_s {
-            while idx < self.segments.len() && self.segments[idx].pts_end_s() <= x {
-                idx += 1;
-            }
-            while idx < self.segments.len() && !self.segments[idx].starts_with_keyframe {
-                idx += 1;
-            }
-        }
-
         self.segments.iter().skip(idx).collect()
     }
 }
 
 impl Drop for DiskReplayRing {
     fn drop(&mut self) {
-        for seg in self.segments.drain(..) {
-            let _ = fs::remove_file(seg.path);
+        self.segments.clear();
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+struct OwnedFile {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl OwnedFile {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for OwnedFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
         }
-        let _ = fs::remove_dir(&self.dir);
     }
 }
 
@@ -178,6 +192,7 @@ impl DiskSegment {
                 let start = track.offset;
                 let end = start + track.len;
                 TrackSamples {
+                    pts_start_s: track.pts_start_s,
                     data: buf[start..end].to_vec(),
                     samples: track.samples.clone(),
                 }
@@ -215,6 +230,7 @@ mod tests {
                 is_sync: key,
             }],
             audio: vec![TrackSamples {
+                pts_start_s: Some(pts),
                 data: vec![b'a'; bytes / 2],
                 samples: vec![SampleInfo {
                     size: (bytes / 2) as u32,
@@ -249,5 +265,54 @@ mod tests {
 
         assert_eq!(ring.len(), 1);
         assert!(!first.exists());
+    }
+
+    #[test]
+    fn failed_publish_cleans_owned_temp_without_touching_collision() {
+        let dir = TestDir::new("clipline-disk-ring", "publish-failure");
+        let run = dir.path().join("run");
+        let mut ring = DiskReplayRing::new(10_000, run.clone()).unwrap();
+        let collision = run.join("seg_00000000.bin");
+        std::fs::create_dir(&collision).unwrap();
+
+        let error = ring.push(seg(0.0, 1.0, 100, true)).unwrap_err();
+
+        assert_ne!(error.kind(), io::ErrorKind::NotFound);
+        assert!(!run.join("seg_00000000.tmp").exists());
+        assert!(collision.is_dir());
+        assert_eq!(ring.len(), 0);
+        assert_eq!(ring.bytes(), 0);
+    }
+
+    #[test]
+    fn eviction_failure_discards_new_segment_and_keeps_bookkeeping_bounded() {
+        let dir = TestDir::new("clipline-disk-ring", "eviction-failure");
+        let run = dir.path().join("run");
+        let mut ring = DiskReplayRing::new(200, run.clone()).unwrap();
+        ring.push(seg(0.0, 1.0, 100, true)).unwrap();
+        let first = ring.segments().next().unwrap().path().to_path_buf();
+        std::fs::remove_file(&first).unwrap();
+        std::fs::create_dir(&first).unwrap();
+
+        let error = ring.push(seg(1.0, 1.0, 100, true)).unwrap_err();
+
+        assert_ne!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(ring.len(), 1);
+        assert_eq!(ring.bytes(), 150);
+        assert!(!run.join("seg_00000001.bin").exists());
+        assert!(!run.join("seg_00000001.tmp").exists());
+    }
+
+    #[test]
+    fn drop_removes_owned_run_directory_including_orphan_temps() {
+        let dir = TestDir::new("clipline-disk-ring", "drop-run");
+        let run = dir.path().join("run");
+        let mut ring = DiskReplayRing::new(10_000, run.clone()).unwrap();
+        ring.push(seg(0.0, 1.0, 100, true)).unwrap();
+        std::fs::write(run.join("orphan.tmp"), b"partial").unwrap();
+
+        drop(ring);
+
+        assert!(!run.exists());
     }
 }

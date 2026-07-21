@@ -11,16 +11,16 @@ pub fn parse_hotkey(raw: &str) -> Result<Shortcut, String> {
 
 pub fn is_global_shortcut_hotkey(raw: &str) -> Result<bool, String> {
     Ok(matches!(
-        normalize_hotkey_parts(raw)?.1,
+        parse_hotkey_spec(raw)?.key,
         HotkeyKey::Function(_)
     ))
 }
 
 pub fn normalize_hotkey(raw: &str) -> Result<String, String> {
-    normalize_hotkey_parts(raw).map(|(normalized, _)| normalized)
+    parse_hotkey_spec(raw).map(|spec| spec.normalized())
 }
 
-fn normalize_hotkey_parts(raw: &str) -> Result<(String, HotkeyKey), String> {
+pub(crate) fn parse_hotkey_spec(raw: &str) -> Result<HotkeySpec, String> {
     let mut ctrl = false;
     let mut alt = false;
     let mut shift = false;
@@ -72,29 +72,48 @@ fn normalize_hotkey_parts(raw: &str) -> Result<(String, HotkeyKey), String> {
     }
 
     let key = key.ok_or("hotkey needs a key")?;
-    validate_hotkey_combination(key.clone(), ctrl, alt, shift)?;
+    validate_hotkey_combination(&key, ctrl, alt, shift)?;
 
-    let mut parts = Vec::new();
-    if ctrl {
-        parts.push("Ctrl".to_string());
+    Ok(HotkeySpec {
+        ctrl,
+        alt,
+        shift,
+        key,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HotkeySpec {
+    pub(crate) ctrl: bool,
+    pub(crate) alt: bool,
+    pub(crate) shift: bool,
+    pub(crate) key: HotkeyKey,
+}
+
+impl HotkeySpec {
+    fn normalized(&self) -> String {
+        let mut parts = Vec::new();
+        if self.ctrl {
+            parts.push("Ctrl".to_string());
+        }
+        if self.alt {
+            parts.push("Alt".to_string());
+        }
+        if self.shift {
+            parts.push("Shift".to_string());
+        }
+        parts.push(self.key.label());
+        parts.join("+")
     }
-    if alt {
-        parts.push("Alt".to_string());
-    }
-    if shift {
-        parts.push("Shift".to_string());
-    }
-    parts.push(key.label());
-    Ok((parts.join("+"), key))
 }
 
 fn validate_hotkey_combination(
-    key: HotkeyKey,
+    key: &HotkeyKey,
     ctrl: bool,
     alt: bool,
     shift: bool,
 ) -> Result<(), String> {
-    match &key {
+    match key {
         HotkeyKey::Keyboard(label) => {
             if !ctrl && !alt && !shift {
                 return Err("keyboard hotkeys need Ctrl, Alt, or Shift".into());
@@ -115,7 +134,7 @@ fn validate_hotkey_combination(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum HotkeyKey {
+pub(crate) enum HotkeyKey {
     Function(u8),
     Keyboard(String),
     Middle,

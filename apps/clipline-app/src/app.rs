@@ -1,13 +1,11 @@
 //! Tauri shell: tray, Alt+F10 global hotkey, status webview — all thin
 //! wiring around the recorder service thread.
 
-use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
@@ -20,6 +18,8 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_updater::UpdaterExt;
 
+use clipline_capture::diagnostics::install_diagnostic_handler;
+
 use crate::game_discovery::DetectedGameCandidate;
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
@@ -30,12 +30,19 @@ use crate::settings::{
     CustomGameSettings, GameRecordingMode,
 };
 use crate::updates::UpdateChannel;
+use crate::util::unix_now_i64;
 
-const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 1_048_576;
+#[path = "app/diagnostic_log.rs"]
+mod diagnostic_log;
+use diagnostic_log::{diagnostic_log_path, log_diagnostic};
+#[cfg(test)]
+use diagnostic_log::{
+    diagnostic_log_path_from_appdata, format_diagnostic_log_line, DiagnosticLogWriter,
+};
+
 const MAIN_WINDOW_LABEL: &str = "main";
 const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const GAME_DETECTOR_INTERVAL: Duration = Duration::from_millis(500);
-static DIAGNOSTIC_LOG: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_READY_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_REPAIR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -152,70 +159,8 @@ impl GameDetectionEvent {
     }
 }
 
-fn diagnostic_log_path_from_appdata(appdata: &Path) -> PathBuf {
-    appdata.join("Clipline").join("clipline.log")
-}
-
-fn diagnostic_log_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .map(|appdata| diagnostic_log_path_from_appdata(&appdata))
-}
-
-fn open_diagnostic_log() -> Result<File, String> {
-    let path = diagnostic_log_path().ok_or_else(|| "APPDATA is not set".to_string())?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create log directory: {e}"))?;
-    }
-    rotate_diagnostic_log_if_needed(&path)?;
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("open diagnostic log {path:?}: {e}"))
-}
-
-fn rotate_diagnostic_log_if_needed(path: &Path) -> Result<(), String> {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return Ok(());
-    };
-    if metadata.len() <= DIAGNOSTIC_LOG_MAX_BYTES {
-        return Ok(());
-    }
-
-    let rotated = path.with_file_name("clipline.old.log");
-    if let Err(e) = std::fs::remove_file(&rotated) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(format!("remove old diagnostic log {rotated:?}: {e}"));
-        }
-    }
-    std::fs::rename(path, &rotated).map_err(|e| format!("rotate diagnostic log: {e}"))
-}
-
-fn diagnostic_log() -> &'static Mutex<Option<File>> {
-    DIAGNOSTIC_LOG.get_or_init(|| Mutex::new(open_diagnostic_log().ok()))
-}
-
-fn format_diagnostic_log_line(
-    timestamp: chrono::DateTime<chrono::Utc>,
-    pid: u32,
-    message: &str,
-) -> String {
-    let message = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    format!(
-        "{} pid={pid} {message}",
-        timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-    )
-}
-
-fn log_diagnostic(message: impl AsRef<str>) {
-    let line = format_diagnostic_log_line(chrono::Utc::now(), std::process::id(), message.as_ref());
-    if let Ok(mut log) = diagnostic_log().lock() {
-        if let Some(file) = log.as_mut() {
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
-        }
-    }
+fn should_log_window_event(event: &WindowEvent) -> bool {
+    !matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_))
 }
 
 fn configure_bundled_ffmpeg<R: Runtime>(app: &tauri::App<R>) {
@@ -437,15 +382,36 @@ fn webview2_runtime_diagnostic() -> String {
 }
 
 #[tauri::command]
-fn memory_status() -> Result<crate::memory::MemoryStatus, String> {
-    crate::memory::current_process_tree_memory()
+async fn memory_status(
+    sampler: tauri::State<'_, crate::memory::MemorySampler>,
+) -> Result<crate::memory::MemoryStatus, String> {
+    sampler.sample().await
 }
 
 #[tauri::command]
-fn frontend_ready() {
+fn frontend_ready(startup_warnings: tauri::State<StartupWarnings>) -> Vec<String> {
     let was_ready = FRONTEND_READY.swap(true, Ordering::AcqRel);
     if !was_ready {
         log_diagnostic("frontend_ready received");
+    }
+    startup_warnings.take()
+}
+
+#[derive(Default)]
+struct StartupWarnings(Mutex<Vec<String>>);
+
+impl StartupWarnings {
+    fn new(warnings: Vec<String>) -> Self {
+        Self(Mutex::new(warnings))
+    }
+
+    fn take(&self) -> Vec<String> {
+        match self.0.lock() {
+            Ok(mut warnings) => std::mem::take(&mut *warnings),
+            Err(error) => vec![format!(
+                "startup diagnostics could not be read because their lock was poisoned: {error}"
+            )],
+        }
     }
 }
 
@@ -460,19 +426,163 @@ struct MicMonitorEvent {
 }
 
 #[derive(Default)]
-struct MicTestState(Mutex<Option<Sender<()>>>);
+struct NativeMediaFolderAuthorization(Mutex<Option<PathBuf>>);
+
+impl NativeMediaFolderAuthorization {
+    fn authorize(&self, path: PathBuf) {
+        if let Ok(mut pending) = self.0.lock() {
+            *pending = Some(path);
+        }
+    }
+
+    fn validate_change(&self, current: &Path, requested: &Path) -> Result<(), String> {
+        if same_path(current, requested) {
+            return Ok(());
+        }
+        let pending = self
+            .0
+            .lock()
+            .map_err(|_| "native media-folder authorization is unavailable".to_string())?;
+        if pending
+            .as_deref()
+            .is_some_and(|authorized| same_path(authorized, requested))
+        {
+            Ok(())
+        } else {
+            Err("choose a new media folder with the native folder picker first".into())
+        }
+    }
+
+    fn commit(&self, path: &Path) {
+        if let Ok(mut pending) = self.0.lock() {
+            if pending
+                .as_deref()
+                .is_some_and(|authorized| same_path(authorized, path))
+            {
+                *pending = None;
+            }
+        }
+    }
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    crate::settings::validation::same_or_nested_path(left, right)
+        && crate::settings::validation::same_or_nested_path(right, left)
+}
+
+fn display_media_folder_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    let lowercase = path.to_ascii_lowercase();
+    if lowercase.starts_with(r"\\?\unc\") {
+        format!(r"\\{}", &path[8..])
+    } else if lowercase.starts_with(r"\\?\") {
+        path[4..].to_string()
+    } else {
+        path.into_owned()
+    }
+}
+
+#[derive(Default)]
+struct MicTestState(Mutex<MicTestInner>);
+
+#[derive(Default)]
+struct MicTestInner {
+    last_generation: u64,
+    active: Option<MicTestSession>,
+}
+
+struct MicTestSession {
+    generation: u64,
+    stop: Sender<()>,
+}
 
 impl MicTestState {
+    fn begin(&self) -> Result<(u64, Receiver<()>), String> {
+        let (stop, receiver) = mpsc::channel();
+        let mut inner = self
+            .0
+            .lock()
+            .map_err(|_| "mic test state lock poisoned".to_string())?;
+        inner.last_generation = inner.last_generation.wrapping_add(1).max(1);
+        let generation = inner.last_generation;
+        let previous = inner.active.replace(MicTestSession { generation, stop });
+        if let Some(previous) = previous {
+            // Sending is non-blocking for this unbounded control channel. Keep
+            // replacement and stop notification in one critical section so a
+            // concurrent start cannot create an untracked interval.
+            let _ = previous.stop.send(());
+        }
+        Ok((generation, receiver))
+    }
+
+    #[cfg(test)]
+    fn is_active(&self, generation: u64) -> bool {
+        self.0
+            .lock()
+            .map(|inner| {
+                inner
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.generation == generation)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Run a publication while this generation still owns the session lock.
+    /// Replacement cannot install a newer generation between the ownership
+    /// check and the event, which keeps event order authoritative for the UI.
+    fn publish_if_active(&self, generation: u64, publish: impl FnOnce()) -> bool {
+        let Ok(inner) = self.0.lock() else {
+            return false;
+        };
+        if inner
+            .active
+            .as_ref()
+            .is_none_or(|active| active.generation != generation)
+        {
+            return false;
+        }
+        publish();
+        true
+    }
+
+    fn finish_if_active_with(&self, generation: u64, finish: impl FnOnce()) -> bool {
+        let Ok(mut inner) = self.0.lock() else {
+            return false;
+        };
+        if inner
+            .active
+            .as_ref()
+            .is_none_or(|active| active.generation != generation)
+        {
+            return false;
+        }
+        inner.active.take();
+        finish();
+        true
+    }
+
+    fn finish_if_active(&self, generation: u64) -> bool {
+        self.finish_if_active_with(generation, || {})
+    }
+
     fn stop(&self) {
         match self.0.lock() {
-            Ok(mut guard) => {
-                if let Some(tx) = guard.take() {
+            Ok(mut inner) => {
+                if let Some(session) = inner.active.take() {
                     // Receiver gone means the test thread already exited — not an error.
-                    let _ = tx.send(());
+                    let _ = session.stop.send(());
                 }
             }
             Err(e) => eprintln!("mic test state lock poisoned: {e}"),
         }
+    }
+}
+
+fn mic_test_should_stop(receiver: &Receiver<()>) -> bool {
+    match receiver.try_recv() {
+        Ok(()) | Err(TryRecvError::Disconnected) => true,
+        Err(TryRecvError::Empty) => false,
     }
 }
 
@@ -495,6 +605,7 @@ impl<R: Runtime> TrayItems<R> {
 struct RuntimeInner {
     tx: Option<Sender<Cmd>>,
     recording_generation: u64,
+    recording_desired: bool,
     settings: AppSettings,
     lol_url: Option<String>,
     active_game: Option<DetectedGame>,
@@ -507,6 +618,11 @@ struct RuntimeInner {
 
 struct PreparedRuntimeRestart {
     settings: AppSettings,
+}
+
+struct PreparedServiceRestart {
+    old_tx: Option<Sender<Cmd>>,
+    replacement: Option<(ServiceOptions, u64)>,
 }
 
 #[derive(Debug)]
@@ -530,6 +646,7 @@ impl RuntimeState {
         let mut inner = RuntimeInner {
             tx: None,
             recording_generation: 0,
+            recording_desired: false,
             settings,
             lol_url,
             active_game: None,
@@ -545,6 +662,7 @@ impl RuntimeState {
 
     fn install_recording_sender(inner: &mut RuntimeInner, tx: Sender<Cmd>) -> u64 {
         inner.recording_generation = inner.recording_generation.wrapping_add(1);
+        inner.recording_desired = true;
         inner.tx = Some(tx);
         inner.last_save_request = None;
         inner.recording_generation
@@ -558,6 +676,8 @@ impl RuntimeState {
             return false;
         }
         inner.tx = None;
+        inner.recording_desired = false;
+        inner.recording_generation = inner.recording_generation.wrapping_add(1);
         inner.last_save_request = None;
         true
     }
@@ -596,13 +716,8 @@ impl RuntimeState {
                 title: game.window_title.clone(),
             };
             opts.recording_mode = game.recording_mode.into();
-            if crate::game_plugins::contains(&game.id) {
-                opts.active_game_plugin_id = Some(game.id.clone());
-            }
-            // Tag clips with the active game (plugin or custom) so the library
-            // can show its icon; this is independent of the plugin-only id above.
             opts.active_game = Some(service::ActiveGame {
-                id: game.id.clone(),
+                identity: game.identity.clone(),
                 name: game.name.clone(),
             });
         }
@@ -618,17 +733,47 @@ impl RuntimeState {
         )
     }
 
-    fn prepare_service_restart(
-        inner: &mut RuntimeInner,
-    ) -> Result<(Option<Sender<Cmd>>, Option<ServiceOptions>), String> {
-        if inner.tx.is_none() {
-            return Ok((None, None));
-        }
-        let mut next_options = Self::options(inner)?;
-        next_options.recover_abandoned_recordings = false;
+    fn prepare_service_restart(inner: &mut RuntimeInner) -> Result<PreparedServiceRestart, String> {
+        let next_options = if inner.recording_desired {
+            let mut options = match Self::options(inner) {
+                Ok(options) => options,
+                Err(error) => {
+                    // A sender means the current service is still authoritative,
+                    // so preserve it on an option error. With no sender, a prior
+                    // restart is already spawning; invalidate that stale plan.
+                    if inner.tx.is_none() {
+                        inner.recording_generation = inner.recording_generation.wrapping_add(1);
+                    }
+                    return Err(error);
+                }
+            };
+            options.recover_abandoned_recordings = false;
+            Some(options)
+        } else {
+            None
+        };
         let old_tx = inner.tx.take();
+        inner.recording_generation = inner.recording_generation.wrapping_add(1);
+        let generation = inner.recording_generation;
         inner.last_save_request = None;
-        Ok((old_tx, Some(next_options)))
+        Ok(PreparedServiceRestart {
+            old_tx,
+            replacement: next_options.map(|options| (options, generation)),
+        })
+    }
+
+    fn install_prepared_service_restart(
+        inner: &mut RuntimeInner,
+        generation: u64,
+        tx: Sender<Cmd>,
+    ) -> Result<u64, Sender<Cmd>> {
+        if !inner.recording_desired
+            || inner.recording_generation != generation
+            || inner.tx.is_some()
+        {
+            return Err(tx);
+        }
+        Ok(Self::install_recording_sender(inner, tx))
     }
 
     fn prepare_settings_restart(
@@ -643,7 +788,7 @@ impl RuntimeState {
         } else {
             inner.active_game.as_ref()
         };
-        if inner.tx.is_some() {
+        if inner.recording_desired {
             Self::options_for(
                 &settings,
                 inner.lol_url.clone(),
@@ -670,7 +815,7 @@ impl RuntimeState {
         } else {
             inner.active_game.as_ref()
         };
-        let next_options = if inner.tx.is_some() {
+        let next_options = if inner.recording_desired {
             let mut options = Self::options_for(
                 &settings,
                 inner.lol_url.clone(),
@@ -768,7 +913,7 @@ impl RuntimeState {
         let Some(start) = start else {
             return Vec::new();
         };
-        let end = end.unwrap_or_else(unix_now);
+        let end = end.unwrap_or_else(unix_now_i64);
         self.0
             .lock()
             .map(|inner| filter_osu_title_events(&inner.osu_title_events, start, end))
@@ -786,36 +931,66 @@ impl RuntimeState {
     where
         F: FnOnce(&mut crate::settings::CloudSettings),
     {
+        self.update_cloud_with(update, AppSettings::save)
+    }
+
+    fn update_cloud_with<F>(
+        &self,
+        update: F,
+        save: impl FnOnce(&AppSettings) -> Result<(), String>,
+    ) -> Result<AppSettings, String>
+    where
+        F: FnOnce(&mut crate::settings::CloudSettings),
+    {
         // Serialize cloud settings saves so concurrent uploads preserve their
         // read-modify-write order without holding runtime state during disk I/O.
         let _save_guard = CLOUD_SETTINGS_SAVE_LOCK
             .lock()
             .map_err(|_| "cloud settings save lock poisoned")?;
-        let next = {
-            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            update(&mut inner.settings.cloud);
-            inner.settings.cloud.normalize();
-            inner.settings.clone()
-        };
-        next.save()?;
-        Ok(next)
+        let mut next = self
+            .0
+            .lock()
+            .map_err(|_| "runtime state lock poisoned")?
+            .settings
+            .clone();
+        update(&mut next.cloud);
+        next.cloud.normalize();
+        save(&next)?;
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        inner.settings.cloud = next.cloud;
+        Ok(inner.settings.clone())
     }
 
     pub(crate) fn update_osu<F>(&self, update: F) -> Result<AppSettings, String>
     where
         F: FnOnce(&mut crate::settings::OsuApiSettings),
     {
+        self.update_osu_with(update, AppSettings::save)
+    }
+
+    fn update_osu_with<F>(
+        &self,
+        update: F,
+        save: impl FnOnce(&AppSettings) -> Result<(), String>,
+    ) -> Result<AppSettings, String>
+    where
+        F: FnOnce(&mut crate::settings::OsuApiSettings),
+    {
         let _save_guard = CLOUD_SETTINGS_SAVE_LOCK
             .lock()
             .map_err(|_| "settings save lock poisoned")?;
-        let next = {
-            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            update(&mut inner.settings.osu);
-            inner.settings.osu.normalize();
-            inner.settings.clone()
-        };
-        next.save()?;
-        Ok(next)
+        let mut next = self
+            .0
+            .lock()
+            .map_err(|_| "runtime state lock poisoned")?
+            .settings
+            .clone();
+        update(&mut next.osu);
+        next.osu.normalize();
+        save(&next)?;
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        inner.settings.osu = next.osu;
+        Ok(inner.settings.clone())
     }
 
     fn lock_cloud_settings_save() -> Result<MutexGuard<'static, ()>, String> {
@@ -865,6 +1040,8 @@ impl RuntimeState {
     fn stop_recording(&self) -> Result<bool, String> {
         let tx = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            inner.recording_desired = false;
+            inner.recording_generation = inner.recording_generation.wrapping_add(1);
             let tx = inner.tx.take();
             inner.last_save_request = None;
             tx
@@ -881,36 +1058,41 @@ impl RuntimeState {
         detected: Option<DetectedGame>,
     ) -> Result<(), String> {
         let event = GameDetectionEvent::from_detected(detected.as_ref());
-        let (old_tx, next_options, emit_event) = {
+        let (prepared_restart, emit_event) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            record_osu_title_event(&mut inner, detected.as_ref(), unix_now());
+            record_osu_title_event(&mut inner, detected.as_ref(), unix_now_i64());
             if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
                 if game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref()) {
                     inner.active_game = detected;
-                    let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
-                    (old_tx, next_options, true)
+                    (Some(Self::prepare_service_restart(&mut inner)?), true)
                 } else if inner.active_game != detected {
                     inner.active_game = detected;
-                    (None, None, true)
+                    (None, true)
                 } else {
-                    (None, None, false)
+                    (None, false)
                 }
             } else {
                 inner.active_game = detected;
-                let (old_tx, next_options) = Self::prepare_service_restart(&mut inner)?;
-                (old_tx, next_options, true)
+                (Some(Self::prepare_service_restart(&mut inner)?), true)
             }
         };
-        if let Some(tx) = old_tx {
-            let _ = tx.send(Cmd::Stop { announce: false });
-        }
-        if let Some(options) = next_options {
-            let (tx, rx) = service::spawn(options);
-            let generation = {
-                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-                Self::install_recording_sender(&mut inner, tx)
-            };
-            pump_events(app.clone(), rx, generation);
+        if let Some(prepared) = prepared_restart {
+            if let Some(tx) = prepared.old_tx {
+                let _ = tx.send(Cmd::Stop { announce: false });
+            }
+            if let Some((options, restart_generation)) = prepared.replacement {
+                let (tx, rx) = service::spawn(options);
+                let installed = {
+                    let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+                    Self::install_prepared_service_restart(&mut inner, restart_generation, tx)
+                };
+                match installed {
+                    Ok(generation) => pump_events(app.clone(), rx, generation),
+                    Err(tx) => {
+                        let _ = tx.send(Cmd::Stop { announce: false });
+                    }
+                }
+            }
         }
         if emit_event {
             let _ = app.emit("game-detection", event);
@@ -919,19 +1101,15 @@ impl RuntimeState {
     }
 }
 
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
-
 fn record_osu_title_event(inner: &mut RuntimeInner, detected: Option<&DetectedGame>, unix_s: i64) {
     const MAX_OSU_TITLE_EVENTS: usize = 512;
     let Some(game) = detected else {
         return;
     };
-    if game.id != crate::game_plugins::OSU_ID {
+    if !game
+        .identity
+        .is_built_in_plugin(crate::game_plugins::OSU_ID)
+    {
         return;
     }
     let title = game.window_title.trim();
@@ -972,13 +1150,16 @@ fn preserve_backend_owned_settings_fields(settings: &mut AppSettings, backend: &
     settings.cloud.connected_username = backend.cloud.connected_username.clone();
     settings.cloud.connected_display_name = backend.cloud.connected_display_name.clone();
     settings.cloud.credential_target = backend.cloud.credential_target.clone();
+    settings.cloud.credential_cleanup_targets = backend.cloud.credential_cleanup_targets.clone();
     settings.cloud.uploads = backend.cloud.uploads.clone();
     settings.osu = backend.osu.clone();
 }
 
 fn same_game_window(current: Option<&DetectedGame>, next: Option<&DetectedGame>) -> bool {
     match (current, next) {
-        (Some(current), Some(next)) => current.id == next.id && current.hwnd == next.hwnd,
+        (Some(current), Some(next)) => {
+            current.identity == next.identity && current.hwnd == next.hwnd
+        }
         (None, None) => true,
         _ => false,
     }
@@ -996,28 +1177,24 @@ fn game_recording_mode_changed(
 
 fn active_game_still_configured(settings: &AppSettings, active: Option<&DetectedGame>) -> bool {
     let Some(active) = active else { return true };
-    settings.games.auto_detect
-        && (crate::games::built_in_game_still_configured(&settings.games, &active.id)
-            || settings
-                .games
-                .custom_games
-                .iter()
-                .any(|game| game.enabled && game.id == active.id))
+    if !settings.games.auto_detect {
+        return false;
+    }
+    match &active.identity {
+        crate::game_identity::GameIdentity::BuiltInPlugin(_) => {
+            crate::games::built_in_game_still_configured(&settings.games, &active.identity)
+        }
+        crate::game_identity::GameIdentity::Custom(id) => settings
+            .games
+            .custom_games
+            .iter()
+            .any(|game| game.enabled && game.id == *id),
+    }
 }
 
 #[tauri::command]
 fn save_replay(state: tauri::State<RuntimeState>) {
     state.request_save();
-}
-
-#[tauri::command]
-fn restart_as_administrator<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
-    if crate::windows::current_process_is_elevated()? {
-        return Ok(false);
-    }
-    crate::windows::launch_elevated_after(std::process::id())?;
-    quit_app(&app);
-    Ok(true)
 }
 
 #[tauri::command]
@@ -1125,16 +1302,33 @@ where
             }
         }
     }
+    let mut removed = Vec::new();
     for shortcut in old {
         if new.contains(shortcut) || !is_registered(*shortcut) {
             continue;
         }
         if let Err(e) = unregister(*shortcut) {
-            for shortcut in added {
-                let _ = unregister(shortcut);
+            let mut rollback_errors = Vec::new();
+            for shortcut in removed.into_iter().rev() {
+                if let Err(rollback) = register(shortcut) {
+                    rollback_errors.push(format!("re-register {shortcut}: {rollback}"));
+                }
             }
-            return Err(format!("replace hotkey: {e}"));
+            for shortcut in added {
+                if let Err(rollback) = unregister(shortcut) {
+                    rollback_errors.push(format!("unregister {shortcut}: {rollback}"));
+                }
+            }
+            let mut message = format!("replace hotkey: {e}");
+            if !rollback_errors.is_empty() {
+                message.push_str(&format!(
+                    "; rollback incomplete: {}",
+                    rollback_errors.join(", ")
+                ));
+            }
+            return Err(message);
         }
+        removed.push(*shortcut);
     }
     Ok(warnings)
 }
@@ -1309,52 +1503,62 @@ fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
     state.settings()
 }
 
-#[tauri::command]
-async fn choose_media_folder(
-    state: tauri::State<'_, RuntimeState>,
-    current: Option<String>,
-) -> Result<Option<String>, String> {
-    let current_dir = current
-        .as_deref()
-        .and_then(|path| crate::settings::normalize_media_dir(path).ok())
-        .filter(|path| path.exists())
-        .or_else(|| state.settings().media_dir_path().ok())
-        .unwrap_or_else(service::default_clips_dir);
-
+async fn choose_folder_dialog(
+    title: &'static str,
+    current_dir: PathBuf,
+) -> Result<Option<PathBuf>, String> {
     // Run the native modal off the main thread so recorder status and other
     // IPC keep flowing while the picker is open.
     tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Media Folder");
+        let mut dialog = rfd::FileDialog::new().set_title(title);
         if current_dir.exists() {
             dialog = dialog.set_directory(current_dir);
         }
-        dialog.pick_folder().map(|path| path.display().to_string())
+        dialog.pick_folder()
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn choose_media_folder(
+    state: tauri::State<'_, RuntimeState>,
+    authorization: tauri::State<'_, NativeMediaFolderAuthorization>,
+) -> Result<Option<String>, String> {
+    let current_dir = state
+        .settings()
+        .media_dir_path()
+        .ok()
+        .filter(|path| path.exists())
+        .unwrap_or_else(service::default_clips_dir);
+
+    let selected = choose_folder_dialog("Choose Clipline Media Folder", current_dir).await?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let selected = crate::settings::normalize_media_dir(&selected.display().to_string())?;
+    let selected = selected
+        .canonicalize()
+        .map_err(|e| format!("resolve selected media folder {selected:?}: {e}"))?;
+    authorization.authorize(selected.clone());
+    Ok(Some(display_media_folder_path(&selected)))
 }
 
 #[tauri::command]
 async fn choose_replay_cache_folder(
     state: tauri::State<'_, RuntimeState>,
-    current: Option<String>,
 ) -> Result<Option<String>, String> {
-    let current_dir = current
-        .as_deref()
-        .and_then(|path| crate::settings::normalize_replay_cache_dir(path).ok())
-        .filter(|path| path.exists())
-        .or_else(|| state.settings().media_dir_path().ok())
-        .unwrap_or_else(service::default_clips_dir);
+    let settings = state.settings();
+    let current_dir =
+        crate::settings::normalize_replay_cache_dir(&settings.replay_storage.disk_dir)
+            .ok()
+            .filter(|path| path.exists())
+            .or_else(|| settings.media_dir_path().ok())
+            .unwrap_or_else(service::default_clips_dir);
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = rfd::FileDialog::new().set_title("Choose Clipline Replay Cache Folder");
-        if current_dir.exists() {
-            dialog = dialog.set_directory(current_dir);
-        }
-        dialog.pick_folder().map(|path| path.display().to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())
+    choose_folder_dialog("Choose Clipline Replay Cache Folder", current_dir)
+        .await
+        .map(|selected| selected.map(|path| path.display().to_string()))
 }
 
 #[tauri::command]
@@ -1430,8 +1634,12 @@ fn detect_installed_games(
 /// Extract an executable's icon as a PNG `data:` URL for the custom-games UI.
 /// Returns `None` when the path has no usable icon.
 #[tauri::command]
-fn extract_window_icon(exe_path: String) -> Option<String> {
-    crate::game_icon::extract_exe_icon_data_url(&exe_path)
+fn extract_window_icon(process_id: u32) -> Option<String> {
+    let path = crate::games::list_game_windows()
+        .into_iter()
+        .find(|window| window.process_id == process_id)?
+        .exe_path?;
+    crate::game_icon::extract_exe_icon_data_url(&path)
 }
 
 #[tauri::command]
@@ -1455,60 +1663,72 @@ fn start_microphone_test<R: Runtime>(
     volume: f64,
     mono: bool,
 ) -> Result<(), String> {
-    state.stop();
     let channels = if mono {
         clipline_capture::windows::wasapi::WasapiChannelMode::Mono
     } else {
         clipline_capture::windows::wasapi::WasapiChannelMode::Stereo
     };
-    let (stop_tx, stop_rx) = mpsc::channel();
-    {
-        let mut guard = state.0.lock().map_err(|_| "mic test state lock poisoned")?;
-        *guard = Some(stop_tx);
-    }
-    std::thread::spawn(move || {
-        let run = || -> Result<(), String> {
-            let clock = clipline_capture::clock::RelativeClock::new(
-                clipline_capture::windows::qpc_now_ticks_100ns().map_err(|e| e.to_string())?,
-            );
-            let mut source = clipline_capture::windows::wasapi::WasapiLoopback::start_microphone(
-                clock,
-                device_id.as_deref(),
-                volume,
-                channels,
-            )
-            .map_err(|e| e.to_string())?;
-            loop {
-                if stop_rx.try_recv().is_ok() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(30));
-                let chunk = source.poll_monitor_chunk().map_err(|e| e.to_string())?;
-                let samples = chunk
-                    .samples
-                    .into_iter()
-                    .map(|sample| {
-                        let scaled = (sample.clamp(-1.0, 1.0) * 32_768.0).round();
-                        scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16
-                    })
-                    .collect();
-                let _ = app.emit(
-                    "mic-test",
-                    MicMonitorEvent {
-                        rms: chunk.level.rms,
-                        peak: chunk.level.peak,
-                        sample_count: chunk.level.sample_count,
-                        samples,
-                    },
+    let (generation, stop_rx) = state.begin()?;
+    let worker_app = app.clone();
+    let worker = std::thread::Builder::new()
+        .name(format!("clipline-mic-test-{generation}"))
+        .spawn(move || {
+            let run = || -> Result<(), String> {
+                let clock = clipline_capture::clock::RelativeClock::new(
+                    clipline_capture::windows::qpc_now_ticks_100ns().map_err(|e| e.to_string())?,
                 );
+                let mut source =
+                    clipline_capture::windows::wasapi::WasapiLoopback::start_microphone(
+                        clock,
+                        device_id.as_deref(),
+                        volume,
+                        channels,
+                    )
+                    .map_err(|e| e.to_string())?;
+                loop {
+                    if mic_test_should_stop(&stop_rx) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(30));
+                    if mic_test_should_stop(&stop_rx) {
+                        break;
+                    }
+                    let chunk = source.poll_monitor_chunk().map_err(|e| e.to_string())?;
+                    let samples = chunk
+                        .samples
+                        .into_iter()
+                        .map(|sample| {
+                            let scaled = (sample.clamp(-1.0, 1.0) * 32_768.0).round();
+                            scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                        })
+                        .collect();
+                    let mic_state = worker_app.state::<MicTestState>();
+                    mic_state.publish_if_active(generation, || {
+                        let _ = worker_app.emit(
+                            "mic-test",
+                            MicMonitorEvent {
+                                rms: chunk.level.rms,
+                                peak: chunk.level.peak,
+                                sample_count: chunk.level.sample_count,
+                                samples,
+                            },
+                        );
+                    });
+                }
+                Ok(())
+            };
+            if let Err(e) = run() {
+                let mic_state = worker_app.state::<MicTestState>();
+                mic_state.finish_if_active_with(generation, || {
+                    let _ = worker_app.emit("mic-test-error", e);
+                    let _ = worker_app.emit("mic-test-stopped", ());
+                });
             }
-            Ok(())
-        };
-        if let Err(e) = run() {
-            let _ = app.emit("mic-test-error", e);
-            let _ = app.emit("mic-test-stopped", ());
-        }
-    });
+        });
+    if let Err(error) = worker {
+        state.finish_if_active(generation);
+        return Err(format!("could not start microphone test thread: {error}"));
+    }
     Ok(())
 }
 
@@ -1541,6 +1761,7 @@ fn save_hotkey_label(settings: &AppSettings) -> String {
     settings.hotkeys().join(" / ")
 }
 
+#[cfg(test)]
 fn run_before_releasing_settings_save_lock<T>(
     save_guard: MutexGuard<'_, ()>,
     operation: impl FnOnce() -> Result<T, String>,
@@ -1550,12 +1771,71 @@ fn run_before_releasing_settings_save_lock<T>(
     result
 }
 
+#[derive(Default)]
+struct AppliedSettingsSideEffects {
+    global_hotkeys: bool,
+    hook_hotkeys: bool,
+    tray_label: bool,
+    autostart: bool,
+}
+
+fn rollback_settings_side_effects<R: Runtime>(
+    app: &AppHandle<R>,
+    tray_items: &TrayItems<R>,
+    old: &AppSettings,
+    old_global_hotkeys: &[Shortcut],
+    new_global_hotkeys: &[Shortcut],
+    applied: &AppliedSettingsSideEffects,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if applied.autostart {
+        if let Err(error) = set_autostart(app, old.open_on_startup) {
+            errors.push(format!("restore Windows startup registration: {error}"));
+        }
+    }
+    if applied.tray_label {
+        if let Err(error) = tray_items.set_hotkey_label(&save_hotkey_label(old)) {
+            errors.push(format!("restore tray hotkey label: {error}"));
+        }
+    }
+    if applied.hook_hotkeys {
+        if let Err(error) = crate::hotkeys::set_save_hotkeys(&old.hotkeys()) {
+            errors.push(format!("restore low-level save hotkeys: {error}"));
+        }
+    }
+    if applied.global_hotkeys {
+        let shortcuts = app.global_shortcut();
+        if let Err(error) = sync_global_hotkeys(
+            new_global_hotkeys,
+            old_global_hotkeys,
+            |shortcut| shortcuts.is_registered(shortcut),
+            |shortcut| shortcuts.register(shortcut),
+            |shortcut| shortcuts.unregister(shortcut),
+        ) {
+            errors.push(format!("restore global save hotkeys: {error}"));
+        }
+    }
+    errors
+}
+
+fn settings_transaction_error(primary: String, rollback_errors: Vec<String>) -> String {
+    if rollback_errors.is_empty() {
+        primary
+    } else {
+        format!(
+            "{primary}; settings rollback incomplete: {}",
+            rollback_errors.join(", ")
+        )
+    }
+}
+
 #[tauri::command]
 fn save_settings<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<RuntimeState>,
     tray_items: tauri::State<TrayItems<R>>,
     storage_settings: tauri::State<crate::library::StorageSettings>,
+    media_folder_authorization: tauri::State<NativeMediaFolderAuthorization>,
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
     settings.hotkey = crate::settings::normalize_hotkey(&settings.hotkey)?;
@@ -1563,17 +1843,15 @@ fn save_settings<R: Runtime>(
         Some(raw) if !raw.trim().is_empty() => Some(crate::settings::normalize_hotkey(raw)?),
         _ => None,
     };
+    settings.games.normalize();
     settings.validate()?;
     let media_dir = settings.media_dir_path()?;
-    std::fs::create_dir_all(&media_dir)
-        .map_err(|e| format!("create media folder {media_dir:?}: {e}"))?;
-    // Extend the asset-protocol scope to the (possibly custom) root so the
-    // webview can play clips from it, without granting the whole disk.
-    app.asset_protocol_scope()
-        .allow_directory(&media_dir, true)
-        .map_err(|e| format!("scope media folder for playback: {e}"))?;
-
+    let cloud_save_guard = RuntimeState::lock_cloud_settings_save()?;
     let old = state.settings();
+    preserve_backend_owned_settings_fields(&mut settings, &old);
+    let old_media_dir = old.media_dir_path()?;
+    media_folder_authorization.validate_change(&old_media_dir, &media_dir)?;
+    service::prepare_writable_media_directory(&media_dir)?;
 
     // Apply the autostart registry change before persisting so settings.json
     // can never say "enabled" while the Run key update failed. Debug builds
@@ -1584,16 +1862,11 @@ fn save_settings<R: Runtime>(
         requested_open_on_startup,
         old.open_on_startup,
     );
-    if settings.open_on_startup != old.open_on_startup
-        && autostart_should_mutate_for_current_build()
-    {
-        settings.open_on_startup = set_autostart(&app, settings.open_on_startup)
-            .map_err(|e| format!("update Windows startup registration: {e}"))?;
-    }
-
     let old_global_hotkeys = global_hotkeys(&old)?;
     let new_global_hotkeys = global_hotkeys(&settings)?;
+    let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
     let shortcuts = app.global_shortcut();
+    let mut applied = AppliedSettingsSideEffects::default();
     let warnings = sync_global_hotkeys(
         &old_global_hotkeys,
         &new_global_hotkeys,
@@ -1601,45 +1874,117 @@ fn save_settings<R: Runtime>(
         |shortcut| shortcuts.register(shortcut),
         |shortcut| shortcuts.unregister(shortcut),
     )?;
+    applied.global_hotkeys = true;
+    if let Err(primary) = crate::hotkeys::set_save_hotkeys(&settings.hotkeys()) {
+        let rollback = rollback_settings_side_effects(
+            &app,
+            &tray_items,
+            &old,
+            &old_global_hotkeys,
+            &new_global_hotkeys,
+            &applied,
+        );
+        return Err(settings_transaction_error(primary, rollback));
+    }
+    applied.hook_hotkeys = true;
+    if let Err(primary) = tray_items.set_hotkey_label(&save_hotkey_label(&settings)) {
+        let rollback = rollback_settings_side_effects(
+            &app,
+            &tray_items,
+            &old,
+            &old_global_hotkeys,
+            &new_global_hotkeys,
+            &applied,
+        );
+        return Err(settings_transaction_error(primary, rollback));
+    }
+    applied.tray_label = true;
+    if settings.open_on_startup != old.open_on_startup
+        && autostart_should_mutate_for_current_build()
+    {
+        match set_autostart(&app, settings.open_on_startup) {
+            Ok(actual) => {
+                settings.open_on_startup = actual;
+                applied.autostart = true;
+            }
+            Err(primary) => {
+                let rollback = rollback_settings_side_effects(
+                    &app,
+                    &tray_items,
+                    &old,
+                    &old_global_hotkeys,
+                    &new_global_hotkeys,
+                    &applied,
+                );
+                return Err(settings_transaction_error(
+                    format!("update Windows startup registration: {primary}"),
+                    rollback,
+                ));
+            }
+        }
+    }
+    let prepared_restart = match state.prepare_settings_restart(settings.clone()) {
+        Ok(prepared) => prepared,
+        Err(primary) => {
+            let rollback = rollback_settings_side_effects(
+                &app,
+                &tray_items,
+                &old,
+                &old_global_hotkeys,
+                &new_global_hotkeys,
+                &applied,
+            );
+            return Err(settings_transaction_error(primary, rollback));
+        }
+    };
+    if let Err(error) = settings.save() {
+        let rollback = rollback_settings_side_effects(
+            &app,
+            &tray_items,
+            &old,
+            &old_global_hotkeys,
+            &new_global_hotkeys,
+            &applied,
+        );
+        return Err(settings_transaction_error(error, rollback));
+    }
+    if let Err(primary) = state.finish_prepared_restart(app.clone(), prepared_restart) {
+        let mut rollback = Vec::new();
+        if let Err(error) = old.save() {
+            rollback.push(format!("restore settings.json: {error}"));
+        }
+        rollback.extend(rollback_settings_side_effects(
+            &app,
+            &tray_items,
+            &old,
+            &old_global_hotkeys,
+            &new_global_hotkeys,
+            &applied,
+        ));
+        return Err(settings_transaction_error(primary, rollback));
+    }
+    drop(cloud_save_guard);
     for message in warnings {
         eprintln!("{message}");
         let _ = app.emit("error", message);
     }
-
-    let cloud_save_guard = RuntimeState::lock_cloud_settings_save()?;
-    // Cloud connection/upload state and osu credential metadata are backend-owned
-    // (mutated through dedicated commands). A settings Save carries the frontend's
-    // snapshot of these fields, which can be stale; keep the authoritative backend
-    // values while allowing user-editable Cloud preferences from the payload.
-    preserve_backend_owned_settings_fields(&mut settings, &state.settings());
-    // (Cloud default_visibility, delete_local_after_upload, auto_upload_rules stay as sent.)
-
-    let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
-    let prepared_restart = state.prepare_settings_restart(settings.clone())?;
-    if let Err(error) = settings.save() {
-        // Best-effort revert to the old registrations.
-        let shortcuts = app.global_shortcut();
-        let _ = sync_global_hotkeys(
-            &new_global_hotkeys,
-            &old_global_hotkeys,
-            |shortcut| shortcuts.is_registered(shortcut),
-            |shortcut| shortcuts.register(shortcut),
-            |shortcut| shortcuts.unregister(shortcut),
-        );
-        return Err(error);
-    }
-    tray_items.set_hotkey_label(&save_hotkey_label(&settings))?;
-    crate::hotkeys::set_save_hotkeys(&settings.hotkeys())?;
-    run_before_releasing_settings_save_lock(cloud_save_guard, || {
-        state.finish_prepared_restart(app, prepared_restart)
-    })?;
     storage_settings.set_quota_bytes(quota_bytes);
-    storage_settings.set_media_dir(media_dir);
+    storage_settings.set_media_dir(media_dir.clone());
+    media_folder_authorization.commit(&media_dir);
     Ok(settings)
 }
 
 pub fn run() {
-    let mut settings = AppSettings::load_or_default();
+    if let Err(error) = install_diagnostic_handler(|event| log_diagnostic(event.to_string())) {
+        log_diagnostic(format!("capture diagnostic setup: {error}"));
+    }
+    let startup_load = AppSettings::load_for_startup();
+    let mut settings = startup_load.settings;
+    let mut startup_warnings = startup_load.warnings;
+    for warning in &startup_warnings {
+        log_diagnostic(format!("settings recovery: {warning}"));
+        eprintln!("{warning}");
+    }
     let args: Vec<String> = std::env::args().collect();
     log_diagnostic(format!(
         "run start version={} args={args:?} log_path={:?}",
@@ -1672,8 +2017,12 @@ pub fn run() {
         }
     }
     if let Err(e) = settings.validate() {
-        log_diagnostic(format!("settings invalid; using defaults: {e}"));
-        eprintln!("invalid settings, using defaults: {e}");
+        let warning = format!(
+            "Clipline started with safe defaults because command-line settings were invalid: {e}"
+        );
+        log_diagnostic(&warning);
+        eprintln!("{warning}");
+        startup_warnings.push(warning);
         settings = AppSettings::default();
     }
 
@@ -1682,15 +2031,16 @@ pub fn run() {
     let media_dir = settings
         .media_dir_path()
         .unwrap_or_else(|_| service::default_clips_dir());
-    let scope_dir = media_dir.clone();
     let media_dir_for_setup = media_dir.clone();
-    let audio_preview_scope_dir = crate::settings::audio_preview_cache_dir();
     let startup_global_hotkeys =
         global_hotkeys(&settings).unwrap_or_else(|_| vec![parse_hotkey("Alt+F10").unwrap()]);
 
     tauri::Builder::default()
         .manage(RuntimeState::new(settings.clone(), lol_url))
+        .manage(StartupWarnings::new(startup_warnings))
         .manage(MicTestState::default())
+        .manage(crate::memory::MemorySampler::default())
+        .manage(NativeMediaFolderAuthorization::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             let launched_by_autostart = args.iter().any(|arg| arg == "--autostart");
@@ -1723,7 +2073,6 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             save_replay,
-            restart_as_administrator,
             set_recording,
             get_settings,
             minimize_main_window,
@@ -1756,7 +2105,7 @@ pub fn run() {
             crate::cloud::cloud_user_profile,
             crate::cloud::cloud_user_avatar,
             crate::cloud::open_cloud_user_profile,
-            crate::cloud::open_cloud_clip_url,
+            crate::cloud::open_cloud_clip,
             crate::osu_api::osu_api_status,
             crate::osu_api::save_osu_api_settings,
             crate::osu_api::test_osu_api_connection,
@@ -1801,24 +2150,6 @@ pub fn run() {
                 let message = format!("low-level save hotkey unavailable: {e}");
                 eprintln!("{message}");
                 let _ = app.handle().emit("error", message);
-            }
-            // Bound the asset protocol to the configured media folder so clips
-            // under a custom root play back, while the static config scope stays
-            // narrow (the default Videos/Clipline location).
-            if let Err(e) = app.asset_protocol_scope().allow_directory(&scope_dir, true) {
-                eprintln!("could not scope media folder {scope_dir:?} for playback: {e}");
-            }
-            if let Err(e) = std::fs::create_dir_all(&audio_preview_scope_dir) {
-                eprintln!(
-                    "could not create audio preview cache {audio_preview_scope_dir:?}: {e}"
-                );
-            } else if let Err(e) = app
-                .asset_protocol_scope()
-                .allow_directory(&audio_preview_scope_dir, true)
-            {
-                eprintln!(
-                    "could not scope audio preview cache {audio_preview_scope_dir:?} for playback: {e}"
-                );
             }
             if let Err(e) = crate::library::prune_audio_preview_cache_on_startup() {
                 eprintln!("could not prune audio preview cache on startup: {e}");
@@ -1943,7 +2274,9 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::WindowEvent { label, event, .. } => {
-                log_diagnostic(format!("window event: label={label} event={event:?}"));
+                if should_log_window_event(&event) {
+                    log_diagnostic(format!("window event: label={label} event={event:?}"));
+                }
             }
             tauri::RunEvent::ExitRequested {
                 code: None, api, ..
@@ -2079,6 +2412,12 @@ where
 fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, generation: u64) {
     std::thread::spawn(move || {
         for event in event_rx {
+            if let Event::MediaRootResolved { path, .. } = &event {
+                let media_root = PathBuf::from(path);
+                handle
+                    .state::<crate::library::StorageSettings>()
+                    .set_media_dir(media_root);
+            }
             if let Event::Status {
                 recording: false, ..
             } = &event
@@ -2088,6 +2427,7 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
                     .clear_recording_sender_for_generation(generation);
             }
             let _ = match &event {
+                Event::MediaRootResolved { .. } => Ok(()),
                 Event::Status { .. } => handle.emit("status", &event),
                 Event::Saved { .. } => handle.emit("saved", &event),
                 Event::Error { message } => handle.emit("error", message.clone()),
@@ -2122,11 +2462,9 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
                 match crate::osu_enrichment::write_pending_for_saved_clip(&saved) {
                     Ok(Some(_)) => {
                         let app = handle.clone();
-                        let media_root = saved
-                            .path
-                            .parent()
-                            .map(std::path::Path::to_path_buf)
-                            .unwrap_or_else(|| std::path::PathBuf::from("."));
+                        let media_root = handle
+                            .state::<crate::library::StorageSettings>()
+                            .media_dir();
                         tauri::async_runtime::spawn(async move {
                             if let Err(e) =
                                 crate::osu_api::retry_pending_enrichment(&app, media_root).await
@@ -2190,6 +2528,7 @@ mod tests {
     use crate::settings::{
         CloudUploadRecord, GameRecordingMode, ReplayStorageMode, ReplayStorageSettings,
     };
+    use clipline_test_utils::TestDir;
 
     #[test]
     fn quota_parser_converts_gib_to_bytes() {
@@ -2206,6 +2545,135 @@ mod tests {
     fn quota_parser_rejects_negative_or_non_numeric_values() {
         assert!(parse_quota_gb("-1").is_err());
         assert!(parse_quota_gb("nope").is_err());
+    }
+
+    #[test]
+    fn startup_warnings_are_delivered_once_after_frontend_readiness() {
+        let warnings = StartupWarnings::new(vec!["settings recovered".into()]);
+
+        assert_eq!(warnings.take(), vec!["settings recovered"]);
+        assert!(warnings.take().is_empty());
+    }
+
+    #[test]
+    fn microphone_test_stop_channel_treats_disconnect_as_shutdown() {
+        let (sender, receiver) = mpsc::channel();
+        assert!(!mic_test_should_stop(&receiver));
+        sender.send(()).unwrap();
+        assert!(mic_test_should_stop(&receiver));
+
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        assert!(mic_test_should_stop(&receiver));
+    }
+
+    #[test]
+    fn concurrent_microphone_test_starts_leave_one_tracked_generation() {
+        const STARTS: usize = 12;
+        let state = std::sync::Arc::new(MicTestState::default());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(STARTS));
+        let workers = (0..STARTS)
+            .map(|_| {
+                let state = state.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    state.begin().expect("session replacement")
+                })
+            })
+            .collect::<Vec<_>>();
+        let sessions = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+
+        let active = sessions
+            .iter()
+            .filter(|(generation, _)| state.is_active(*generation))
+            .count();
+        assert_eq!(active, 1);
+        for (generation, receiver) in &sessions {
+            assert_eq!(
+                mic_test_should_stop(receiver),
+                !state.is_active(*generation),
+                "every superseded receiver must observe shutdown"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_microphone_test_cannot_publish_or_finish_active_generation() {
+        let state = MicTestState::default();
+        let (old_generation, _old_receiver) = state.begin().unwrap();
+        let (active_generation, _active_receiver) = state.begin().unwrap();
+        let published = std::sync::atomic::AtomicUsize::new(0);
+
+        assert!(!state.publish_if_active(old_generation, || {
+            published.fetch_add(1, Ordering::Relaxed);
+        }));
+        assert!(state.publish_if_active(active_generation, || {
+            published.fetch_add(1, Ordering::Relaxed);
+        }));
+        assert_eq!(published.load(Ordering::Relaxed), 1);
+
+        assert!(!state.finish_if_active(old_generation));
+        assert!(state.is_active(active_generation));
+        assert!(state.finish_if_active(active_generation));
+        assert!(!state.is_active(active_generation));
+    }
+
+    #[test]
+    fn failed_cloud_settings_save_leaves_live_state_unchanged() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+
+        let error = state
+            .update_cloud_with(
+                |cloud| cloud.host_url = "https://new.example".into(),
+                |candidate| {
+                    assert_eq!(candidate.cloud.host_url, "https://new.example");
+                    Err("disk full".into())
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error, "disk full");
+        assert!(state.settings().cloud.host_url.is_empty());
+    }
+
+    #[test]
+    fn failed_osu_settings_save_leaves_live_state_unchanged() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+
+        let error = state
+            .update_osu_with(
+                |osu| osu.client_id = Some("1234".into()),
+                |candidate| {
+                    assert_eq!(candidate.osu.client_id.as_deref(), Some("1234"));
+                    Err("settings denied".into())
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error, "settings denied");
+        assert!(state.settings().osu.client_id.is_none());
+    }
+
+    #[test]
+    fn settings_transaction_error_preserves_primary_and_rollback_failures() {
+        assert_eq!(
+            settings_transaction_error("save failed".into(), Vec::new()),
+            "save failed"
+        );
+        let error = settings_transaction_error(
+            "save failed".into(),
+            vec![
+                "restore autostart failed".into(),
+                "restore hotkey failed".into(),
+            ],
+        );
+        assert!(error.starts_with("save failed"), "{error}");
+        assert!(error.contains("restore autostart failed"), "{error}");
+        assert!(error.contains("restore hotkey failed"), "{error}");
     }
 
     #[test]
@@ -2305,6 +2773,60 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(unregistered, vec![removed, secondary]);
+    }
+
+    #[test]
+    fn sync_global_hotkeys_restores_earlier_removals_when_a_later_one_fails() {
+        let first = parse_hotkey("Alt+F10").unwrap();
+        let second = parse_hotkey("Ctrl+F8").unwrap();
+        let mut registered = Vec::new();
+        let mut unregistered = Vec::new();
+
+        let result = sync_global_hotkeys(
+            &[first, second],
+            &[],
+            |_| true,
+            |shortcut| {
+                registered.push(shortcut);
+                Ok::<_, &'static str>(())
+            },
+            |shortcut| {
+                unregistered.push(shortcut);
+                if shortcut == second {
+                    Err("second removal failed")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(unregistered, vec![first, second]);
+        assert_eq!(registered, vec![first]);
+    }
+
+    #[test]
+    fn sync_global_hotkeys_surfaces_rollback_failures() {
+        let first = parse_hotkey("Alt+F10").unwrap();
+        let second = parse_hotkey("Ctrl+F8").unwrap();
+
+        let error = sync_global_hotkeys(
+            &[first, second],
+            &[],
+            |_| true,
+            |_| Err::<(), _>("restore failed"),
+            |shortcut| {
+                if shortcut == second {
+                    Err("second removal failed")
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("rollback incomplete"), "{error}");
+        assert!(error.contains("restore failed"), "{error}");
     }
 
     #[test]
@@ -2449,7 +2971,20 @@ mod tests {
 
     fn detected_game(id: &str, name: &str, hwnd: isize) -> DetectedGame {
         DetectedGame {
-            id: id.into(),
+            identity: crate::game_identity::GameIdentity::custom(id),
+            name: name.into(),
+            hwnd,
+            window_title: format!("{name} Window"),
+            process_id: hwnd as u32,
+            exe_name: format!("{name}.exe"),
+            recording_mode: GameRecordingMode::FullSession,
+        }
+    }
+
+    fn detected_built_in_game(id: &str, name: &str, hwnd: isize) -> DetectedGame {
+        DetectedGame {
+            identity: crate::game_identity::GameIdentity::built_in_plugin(id)
+                .expect("test built-in id"),
             name: name.into(),
             hwnd,
             window_title: format!("{name} Window"),
@@ -2520,7 +3055,7 @@ mod tests {
         let (initial_tx, _initial_rx) = mpsc::channel();
         let state = RuntimeState::with_sender(initial_tx, AppSettings::default(), None);
         {
-            state.0.lock().unwrap().active_game = Some(detected_game(
+            state.0.lock().unwrap().active_game = Some(detected_built_in_game(
                 crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
                 "League",
                 41,
@@ -2537,7 +3072,11 @@ mod tests {
         let mut committed_options = None;
         let committed = {
             let mut inner = state.0.lock().unwrap();
-            inner.active_game = Some(detected_game(crate::game_plugins::OSU_ID, "osu!", 84));
+            inner.active_game = Some(detected_built_in_game(
+                crate::game_plugins::OSU_ID,
+                "osu!",
+                84,
+            ));
             RuntimeState::install_recording_sender(&mut inner, newer_tx);
             RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |options| {
                 committed_options = Some(options);
@@ -2556,7 +3095,7 @@ mod tests {
             }
         );
         assert_eq!(
-            options.active_game.as_ref().map(|game| game.id.as_str()),
+            options.active_game.as_ref().map(|game| game.identity.id()),
             Some(crate::game_plugins::OSU_ID)
         );
         committed.old_tx.unwrap().send(Cmd::Save).unwrap();
@@ -2606,10 +3145,11 @@ mod tests {
         };
         let prepared = state.prepare_settings_restart(changed).unwrap();
 
+        state.stop_recording().unwrap();
+
         let mut spawned = false;
         let committed = {
             let mut inner = state.0.lock().unwrap();
-            inner.tx.take();
             RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
                 spawned = true;
                 let (replacement_tx, _replacement_rx) = mpsc::channel();
@@ -2658,6 +3198,7 @@ mod tests {
         let mut inner = RuntimeInner {
             tx: Some(tx),
             recording_generation: 1,
+            recording_desired: true,
             settings: invalid_disk_replay_settings(),
             lol_url: None,
             active_game: None,
@@ -2673,6 +3214,8 @@ mod tests {
 
         assert!(err.contains("replay cache folder"), "{err}");
         assert!(inner.tx.is_some(), "failed options must not drop sender");
+        assert!(inner.recording_desired);
+        assert_eq!(inner.recording_generation, 1);
         assert!(
             inner.last_save_request.is_some(),
             "failed options must not clear debounce state"
@@ -2685,6 +3228,7 @@ mod tests {
         let mut inner = RuntimeInner {
             tx: Some(tx),
             recording_generation: 1,
+            recording_desired: true,
             settings: AppSettings::default(),
             lol_url: None,
             active_game: None,
@@ -2693,12 +3237,120 @@ mod tests {
             decodable_codecs: vec![service::Codec::H264],
         };
 
-        let (_old_tx, next_options) = RuntimeState::prepare_service_restart(&mut inner).unwrap();
+        let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
+        let (next_options, _generation) = prepared.replacement.unwrap();
 
         assert!(
-            !next_options.unwrap().recover_abandoned_recordings,
+            !next_options.recover_abandoned_recordings,
             "internal recorder restarts must not recover another active recorder's temp file"
         );
+    }
+
+    #[test]
+    fn game_restart_gap_does_not_resurrect_after_user_stop() {
+        let (initial_tx, _initial_rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(initial_tx, AppSettings::default(), None);
+        let prepared = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::prepare_service_restart(&mut inner).unwrap()
+        };
+        let (_options, restart_generation) = prepared.replacement.unwrap();
+
+        state.stop_recording().unwrap();
+        let (replacement_tx, replacement_rx) = mpsc::channel();
+        let rejected = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::install_prepared_service_restart(
+                &mut inner,
+                restart_generation,
+                replacement_tx,
+            )
+            .unwrap_err()
+        };
+        rejected.send(Cmd::Stop { announce: false }).unwrap();
+
+        assert!(
+            !state.send(Cmd::Save),
+            "a replacement spawned before Stop must not resurrect recording"
+        );
+        assert!(matches!(
+            replacement_rx.try_recv(),
+            Ok(Cmd::Stop { announce: false })
+        ));
+    }
+
+    #[test]
+    fn game_restart_gap_does_not_overwrite_a_newer_manual_start() {
+        let (initial_tx, _initial_rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(initial_tx, AppSettings::default(), None);
+        let prepared = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::prepare_service_restart(&mut inner).unwrap()
+        };
+        let (_options, restart_generation) = prepared.replacement.unwrap();
+
+        let (newer_tx, newer_rx) = mpsc::channel();
+        let (stale_tx, stale_rx) = mpsc::channel();
+        let rejected = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::install_recording_sender(&mut inner, newer_tx);
+            RuntimeState::install_prepared_service_restart(&mut inner, restart_generation, stale_tx)
+                .unwrap_err()
+        };
+        rejected.send(Cmd::Stop { announce: false }).unwrap();
+
+        assert!(state.send(Cmd::Save));
+        assert!(
+            matches!(newer_rx.try_recv(), Ok(Cmd::Save)),
+            "the manual start must remain the active sender"
+        );
+        assert!(matches!(
+            stale_rx.try_recv(),
+            Ok(Cmd::Stop { announce: false })
+        ));
+    }
+
+    #[test]
+    fn newer_game_restart_supersedes_a_restart_already_spawning() {
+        let (initial_tx, _initial_rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(initial_tx, AppSettings::default(), None);
+        let first = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::prepare_service_restart(&mut inner).unwrap()
+        };
+        let (_first_options, first_generation) = first.replacement.unwrap();
+
+        let second = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::prepare_service_restart(&mut inner).unwrap()
+        };
+        let (_second_options, second_generation) = second.replacement.unwrap();
+
+        let (first_tx, first_rx) = mpsc::channel();
+        let (second_tx, second_rx) = mpsc::channel();
+        let first_rejected = {
+            let mut inner = state.0.lock().unwrap();
+            let rejected = RuntimeState::install_prepared_service_restart(
+                &mut inner,
+                first_generation,
+                first_tx,
+            )
+            .unwrap_err();
+            RuntimeState::install_prepared_service_restart(
+                &mut inner,
+                second_generation,
+                second_tx,
+            )
+            .unwrap();
+            rejected
+        };
+        first_rejected.send(Cmd::Stop { announce: false }).unwrap();
+        assert!(matches!(
+            first_rx.try_recv(),
+            Ok(Cmd::Stop { announce: false })
+        ));
+        assert!(state.send(Cmd::Save));
+        assert!(matches!(second_rx.try_recv(), Ok(Cmd::Save)));
     }
 
     #[test]
@@ -2707,10 +3359,11 @@ mod tests {
         let mut inner = RuntimeInner {
             tx: Some(tx),
             recording_generation: 1,
+            recording_desired: true,
             settings: invalid_disk_replay_settings(),
             lol_url: None,
             active_game: Some(DetectedGame {
-                id: "custom-game".into(),
+                identity: crate::game_identity::GameIdentity::custom("custom-game"),
                 name: "Game".into(),
                 hwnd: 42,
                 window_title: "Game".into(),
@@ -2737,6 +3390,26 @@ mod tests {
     }
 
     #[test]
+    fn failed_newer_game_restart_invalidates_a_plan_already_spawning() {
+        let mut inner = RuntimeInner {
+            tx: None,
+            recording_generation: 7,
+            recording_desired: true,
+            settings: invalid_disk_replay_settings(),
+            lol_url: None,
+            active_game: None,
+            osu_title_events: Vec::new(),
+            last_save_request: None,
+            decodable_codecs: vec![service::Codec::H264],
+        };
+
+        assert!(RuntimeState::prepare_service_restart(&mut inner).is_err());
+        assert_eq!(inner.recording_generation, 8);
+        assert!(inner.recording_desired);
+        assert!(inner.tx.is_none());
+    }
+
+    #[test]
     fn preserve_backend_owned_settings_fields_keeps_upload_state_but_allows_preferences() {
         let mut frontend = AppSettings::default();
         frontend.cloud.host_url = "https://stale.example.com".into();
@@ -2756,6 +3429,7 @@ mod tests {
         backend.cloud.connected_username = Some("dain".into());
         backend.cloud.connected_display_name = Some("Dain".into());
         backend.cloud.credential_target = Some("clipline:user-1".into());
+        backend.cloud.credential_cleanup_targets = vec!["clipline:old-user".into()];
         backend.cloud.uploads.insert(
             "local-1".into(),
             CloudUploadRecord {
@@ -2790,6 +3464,10 @@ mod tests {
             frontend.cloud.credential_target,
             backend.cloud.credential_target
         );
+        assert_eq!(
+            frontend.cloud.credential_cleanup_targets,
+            backend.cloud.credential_cleanup_targets
+        );
         assert_eq!(frontend.cloud.uploads, backend.cloud.uploads);
         assert_eq!(frontend.cloud.default_visibility, "public");
         assert!(frontend.cloud.delete_local_after_upload);
@@ -2808,6 +3486,7 @@ mod tests {
         backend.osu.client_id = Some("61835".into());
         backend.osu.user = Some("3426414".into());
         backend.osu.credential_target = Some("Clipline osu!:61835:3426414".into());
+        backend.osu.credential_cleanup_targets = vec!["Clipline osu!:old".into()];
         backend.osu.last_connected_username = Some("Dain".into());
 
         preserve_backend_owned_settings_fields(&mut frontend, &backend);
@@ -2818,7 +3497,7 @@ mod tests {
     #[test]
     fn detected_game_identity_ignores_volatile_window_title() {
         let current = DetectedGame {
-            id: "custom-game".into(),
+            identity: crate::game_identity::GameIdentity::custom("custom-game"),
             name: "Game".into(),
             hwnd: 42,
             window_title: "Loading".into(),
@@ -2854,7 +3533,7 @@ mod tests {
     #[test]
     fn detected_game_recording_mode_change_requires_service_restart() {
         let current = DetectedGame {
-            id: "custom-game".into(),
+            identity: crate::game_identity::GameIdentity::custom("custom-game"),
             name: "Game".into(),
             hwnd: 42,
             window_title: "Game".into(),
@@ -2887,6 +3566,7 @@ mod tests {
         let mut inner = RuntimeInner {
             tx: None,
             recording_generation: 0,
+            recording_desired: false,
             settings: AppSettings::default(),
             lol_url: None,
             active_game: None,
@@ -2895,7 +3575,10 @@ mod tests {
             decodable_codecs: vec![service::Codec::H264],
         };
         let osu = DetectedGame {
-            id: crate::game_plugins::OSU_ID.into(),
+            identity: crate::game_identity::GameIdentity::built_in_plugin(
+                crate::game_plugins::OSU_ID,
+            )
+            .unwrap(),
             name: "osu!".into(),
             hwnd: 42,
             window_title: "osu! - xi - Blue Zenith [FOUR DIMENSIONS]".into(),
@@ -2904,7 +3587,10 @@ mod tests {
             recording_mode: GameRecordingMode::FullSession,
         };
         let league = DetectedGame {
-            id: crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+            identity: crate::game_identity::GameIdentity::built_in_plugin(
+                crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+            )
+            .unwrap(),
             name: "League of Legends".into(),
             window_title: "League".into(),
             exe_name: "League of Legends.exe".into(),
@@ -2914,6 +3600,17 @@ mod tests {
         record_osu_title_event(&mut inner, Some(&osu), 100);
         record_osu_title_event(&mut inner, Some(&osu), 101);
         record_osu_title_event(&mut inner, Some(&league), 102);
+        record_osu_title_event(
+            &mut inner,
+            Some(&DetectedGame {
+                identity: crate::game_identity::GameIdentity::custom(crate::game_plugins::OSU_ID),
+                name: "Custom impostor".into(),
+                window_title: "must not be tracked".into(),
+                exe_name: "impostor.exe".into(),
+                ..osu.clone()
+            }),
+            102,
+        );
         record_osu_title_event(
             &mut inner,
             Some(&DetectedGame {
@@ -2975,7 +3672,10 @@ mod tests {
     #[test]
     fn built_in_league_profile_counts_as_active_game_configuration() {
         let active = DetectedGame {
-            id: crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+            identity: crate::game_identity::GameIdentity::built_in_plugin(
+                crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+            )
+            .unwrap(),
             name: "League of Legends".into(),
             hwnd: 42,
             window_title: "League of Legends (TM) Client".into(),
@@ -3203,6 +3903,67 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
     }
 
     #[test]
+    fn diagnostic_log_rotates_repeatedly_and_keeps_both_generations_bounded() {
+        let dir = TestDir::new("clipline-app", "diagnostic-log-rotation");
+        let path = dir.path().join("clipline.log");
+        let mut log = DiagnosticLogWriter::open_at(path.clone(), 128).unwrap();
+
+        for index in 0..20 {
+            log.write_line(&format!("entry-{index:02}-{}", "x".repeat(48)))
+                .unwrap();
+        }
+        drop(log);
+
+        let rotated = path.with_file_name("clipline.old.log");
+        assert!(std::fs::metadata(&path).unwrap().len() <= 128);
+        assert!(std::fs::metadata(&rotated).unwrap().len() <= 128);
+        assert!(std::fs::read_to_string(path).unwrap().contains("entry-19"));
+    }
+
+    #[test]
+    fn diagnostic_log_truncates_one_oversized_line_to_its_generation_cap() {
+        let dir = TestDir::new("clipline-app", "diagnostic-log-long-line");
+        let path = dir.path().join("clipline.log");
+        let mut log = DiagnosticLogWriter::open_at(path.clone(), 96).unwrap();
+
+        log.write_line(&"é".repeat(100)).unwrap();
+        drop(log);
+
+        let bytes = std::fs::read(path).unwrap();
+        assert!(bytes.len() <= 96);
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        assert!(std::str::from_utf8(&bytes).is_ok());
+    }
+
+    #[test]
+    fn diagnostic_log_open_bounds_an_oversized_legacy_generation() {
+        let dir = TestDir::new("clipline-app", "diagnostic-log-legacy");
+        let path = dir.path().join("clipline.log");
+        let mut legacy = vec![b'a'; 512];
+        legacy[511] = b'z';
+        std::fs::write(&path, legacy).unwrap();
+
+        drop(DiagnosticLogWriter::open_at(path.clone(), 96).unwrap());
+
+        let rotated = path.with_file_name("clipline.old.log");
+        let retained = std::fs::read(rotated).unwrap();
+        assert!(retained.len() <= 96);
+        assert_eq!(retained.last(), Some(&b'z'));
+    }
+
+    #[test]
+    fn diagnostic_window_event_filter_drops_move_and_resize_noise() {
+        assert!(!should_log_window_event(&WindowEvent::Moved(
+            tauri::PhysicalPosition::new(10, 20)
+        )));
+        assert!(!should_log_window_event(&WindowEvent::Resized(
+            tauri::PhysicalSize::new(800, 600)
+        )));
+        assert!(should_log_window_event(&WindowEvent::Focused(true)));
+        assert!(should_log_window_event(&WindowEvent::Destroyed));
+    }
+
+    #[test]
     fn disabled_stable_channel_cannot_check_updates_yet() {
         assert!(!UpdateChannel::Stable.enabled());
         assert!(UpdateChannel::Nightly.enabled());
@@ -3221,10 +3982,13 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         let inner = RuntimeInner {
             tx: None,
             recording_generation: 0,
+            recording_desired: false,
             settings: AppSettings::default(),
             lol_url: None,
             active_game: Some(DetectedGame {
-                id: "custom-game".into(),
+                identity: crate::game_identity::GameIdentity::custom(
+                    crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+                ),
                 name: "Game".into(),
                 hwnd: 42,
                 window_title: "Game Window".into(),
@@ -3239,7 +4003,12 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
 
         let opts = RuntimeState::options(&inner).unwrap();
 
-        assert_eq!(opts.active_game_plugin_id, None);
+        assert_eq!(
+            opts.active_game
+                .as_ref()
+                .and_then(|game| game.identity.plugin_id()),
+            None
+        );
         assert_eq!(opts.recording_mode, service::RecordingMode::FullSession);
         assert_eq!(
             opts.capture_source,
@@ -3255,10 +4024,14 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         let inner = RuntimeInner {
             tx: None,
             recording_generation: 0,
+            recording_desired: false,
             settings: AppSettings::default(),
             lol_url: Some("http://mock".into()),
             active_game: Some(DetectedGame {
-                id: crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+                identity: crate::game_identity::GameIdentity::built_in_plugin(
+                    crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+                )
+                .unwrap(),
                 name: "League of Legends".into(),
                 hwnd: 42,
                 window_title: "League".into(),
@@ -3274,9 +4047,47 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         let opts = RuntimeState::options(&inner).unwrap();
 
         assert_eq!(
-            opts.active_game_plugin_id.as_deref(),
+            opts.active_game
+                .as_ref()
+                .and_then(|game| game.identity.plugin_id()),
             Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID)
         );
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
+    }
+
+    #[test]
+    fn native_media_folder_authorization_is_exact_retryable_and_consumed_on_commit() {
+        let authorization = NativeMediaFolderAuthorization::default();
+        let old = PathBuf::from(r"C:\Users\tester\Videos\Clipline");
+        let selected = PathBuf::from(r"D:\Recordings\Clipline");
+        let other = PathBuf::from(r"D:\Other");
+
+        assert!(authorization.validate_change(&old, &old).is_ok());
+        assert!(authorization.validate_change(&old, &selected).is_err());
+
+        authorization.authorize(selected.clone());
+        assert!(authorization.validate_change(&old, &selected).is_ok());
+        assert!(authorization.validate_change(&old, &selected).is_ok());
+        assert!(authorization.validate_change(&old, &other).is_err());
+
+        authorization.commit(&selected);
+        assert!(authorization.validate_change(&old, &selected).is_err());
+        assert!(authorization.validate_change(&selected, &selected).is_ok());
+    }
+
+    #[test]
+    fn media_folder_display_path_removes_windows_verbatim_prefixes() {
+        assert_eq!(
+            display_media_folder_path(Path::new(r"\\?\C:\Users\tester\Videos\Clipline")),
+            r"C:\Users\tester\Videos\Clipline"
+        );
+        assert_eq!(
+            display_media_folder_path(Path::new(r"\\?\UNC\nas\clips")),
+            r"\\nas\clips"
+        );
+        assert_eq!(
+            display_media_folder_path(Path::new(r"D:\Clips")),
+            r"D:\Clips"
+        );
     }
 }

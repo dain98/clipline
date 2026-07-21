@@ -2,7 +2,7 @@
 //! Owns the legacy `recording_mode` migration (a top-level field on `games`
 //! that applied to every custom game) via a custom `Deserialize`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -203,6 +203,26 @@ impl GameSettings {
             .collect();
         for game in &mut self.custom_games {
             game.normalize();
+        }
+        let mut occupied = self
+            .custom_games
+            .iter()
+            .filter(|game| crate::game_identity::validate_custom_game_id(&game.id).is_ok())
+            .map(|game| game.id.clone())
+            .collect::<HashSet<_>>();
+        for game in &mut self.custom_games {
+            if crate::game_identity::validate_custom_game_id(&game.id).is_err() {
+                let legacy_id = game.id.clone();
+                game.id = crate::game_identity::unique_migrated_custom_game_id(
+                    &game.id,
+                    &game.name,
+                    &mut occupied,
+                );
+                if !legacy_id.is_empty() && !game.legacy_ids.contains(&legacy_id) {
+                    game.legacy_ids.push(legacy_id);
+                }
+                game.normalize();
+            }
         }
     }
 }

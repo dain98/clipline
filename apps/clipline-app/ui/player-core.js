@@ -1,6 +1,6 @@
 // Pure review-player logic: formatting, trim clamping, timeline math, marker
 // navigation, keyboard intents. No DOM, no Tauri — tests/player_core.rs
-// evaluates this file in Boa, so it must stay dependency-free.
+// evaluates this file with presentation-core.js in Boa, so both stay DOM-free.
 const PlayerCore = (() => {
   const MIN_TRIM_GAP_S = 0.1;
   const MARKER_EPSILON_S = 0.05;
@@ -16,7 +16,8 @@ const PlayerCore = (() => {
   // Fine-step fallback when the clip's true frame rate is unknown.
   const DEFAULT_FINE_STEP_S = 1 / 60;
   const QUICK_TRIM_WINDOW_S = 30;
-  const AUDIO_SIDECAR_DRIFT_TOLERANCE_S = 0.1;
+  const AUDIO_SIDECAR_DRIFT_DEADBAND_S = 0.025;
+  const AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S = 0.5;
 
   // YouTube grammar: controls pin while paused, fade when playing and idle.
   const overlayVisible = (paused, idleMs) => paused || idleMs < OVERLAY_HIDE_MS;
@@ -44,10 +45,40 @@ const PlayerCore = (() => {
     return text.split(/[\\/]/).filter(Boolean).pop() || text;
   };
 
-  const clipNameStem = (name) => String(name || "").replace(/\.mp4$/i, "").trim();
+  const windowsClipPathKey = (path) => {
+    const text = String(path || "").trim();
+    if (!text) return null;
+    let normalized = text.replace(/\//g, "\\");
+    const lower = normalized.toLowerCase();
+    if (lower.startsWith("\\\\?\\unc\\")) {
+      normalized = "\\\\" + normalized.slice(8);
+    } else if (lower.startsWith("\\\\?\\")) {
+      normalized = normalized.slice(4);
+    }
+    if (!/^[a-z]:\\/i.test(normalized) && !normalized.startsWith("\\\\")) return null;
+    return normalized.toLowerCase();
+  };
 
-  const cloudLibraryEntries = (uploads, localClips = [], cloudClips = []) => {
-    const localPaths = new Set((localClips || []).map((clip) => String(clip && clip.path || "")));
+  const sameClipPath = (left, right) => {
+    const leftText = String(left || "").trim();
+    const rightText = String(right || "").trim();
+    if (!leftText || !rightText) return false;
+    if (leftText === rightText) return true;
+    const leftKey = windowsClipPathKey(leftText);
+    const rightKey = windowsClipPathKey(rightText);
+    return leftKey !== null && rightKey !== null && leftKey === rightKey;
+  };
+
+  const clipNameStem = PresentationCore.clipNameStem;
+
+  const cloudLibraryEntries = (
+    uploads,
+    localClips = [],
+    cloudClips = [],
+    cloudListAuthoritative = false,
+  ) => {
+    const localPaths = (localClips || []).map((clip) => String(clip && clip.path || ""));
+    const localPathAvailable = (path) => localPaths.some((localPath) => sameClipPath(localPath, path));
     const uploadRecords = Object.values(uploads || {});
     const uploadsByLocalId = new Map(
       uploadRecords
@@ -76,7 +107,7 @@ const PlayerCore = (() => {
           : "private",
         upload_status: String(clip.upload_status || "uploaded_processing"),
         updated_at_unix: Number(clip.updated_at_unix) || 0,
-        local_available: Boolean(path && localPaths.has(path)),
+        local_available: Boolean(path && localPathAvailable(path)),
         remote_clip_id: remoteId,
       };
       const durationMs = Number(clip.duration_ms);
@@ -92,6 +123,9 @@ const PlayerCore = (() => {
         if (record.local_clip_id && seenLocalIds.has(String(record.local_clip_id))) return false;
         if (record.remote_clip_id && seenRemoteIds.has(String(record.remote_clip_id))) return false;
         const status = String(record.upload_status || "");
+        const active = ["queued", "uploading", "processing", "retrying", "uploaded_processing"]
+          .includes(status);
+        if (cloudListAuthoritative && !active) return false;
         return status !== "failed" && status !== "not_uploaded";
       })
       .map((record) => {
@@ -108,7 +142,7 @@ const PlayerCore = (() => {
           visibility,
           upload_status: status,
           updated_at_unix: Number(record.updated_at_unix) || 0,
-          local_available: localPaths.has(path),
+          local_available: localPathAvailable(path),
         };
         const remoteId = String(record.remote_clip_id || "");
         if (remoteId) entry.remote_clip_id = remoteId;
@@ -926,28 +960,35 @@ const PlayerCore = (() => {
     info: { singular: "event", plural: "events", glyph: "•" },
   };
 
+  const PRESENTATION_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+  const ownObjectValue = (object, key) => typeof key === "string"
+    && PRESENTATION_KEY.test(key)
+    && key !== "constructor"
+    && key !== "prototype"
+    && typeof object === "object"
+    && object !== null
+    && Object.prototype.hasOwnProperty.call(object, key)
+      ? object[key]
+      : undefined;
+
   const markerKindConfig = (kind, presentation) => {
-    const configured = presentation && presentation.marker_kinds
-      ? presentation.marker_kinds[kind]
-      : null;
+    const configured = ownObjectValue(presentation && presentation.marker_kinds, kind);
     return configured && typeof configured === "object" ? configured : {};
   };
 
   const markerCategoryConfig = (category, presentation) => {
-    const configured = presentation && presentation.marker_categories
-      ? presentation.marker_categories[category]
-      : null;
+    const configured = ownObjectValue(presentation && presentation.marker_categories, category);
     return configured && typeof configured === "object" ? configured : {};
   };
 
   const markerCategory = (kind, presentation) => {
     const configured = markerKindConfig(kind, presentation);
-    return String(configured.category || DEFAULT_MARKER_KINDS[kind] || "info");
+    return String(configured.category || ownObjectValue(DEFAULT_MARKER_KINDS, kind) || "info");
   };
 
   const markerCategoryMeta = (category, presentation) => {
     const configured = markerCategoryConfig(category, presentation);
-    const fallback = DEFAULT_MARKER_CATEGORIES[category] || DEFAULT_MARKER_CATEGORIES.info;
+    const fallback = ownObjectValue(DEFAULT_MARKER_CATEGORIES, category) || DEFAULT_MARKER_CATEGORIES.info;
     return {
       singular: String(configured.singular || fallback.singular),
       plural: String(configured.plural || fallback.plural),
@@ -1279,10 +1320,21 @@ const PlayerCore = (() => {
       && typeof presentation.event_rail.icons === "object"
       ? presentation.event_rail.icons
       : null;
-    const configured = icons && typeof icons[kind] === "string" ? icons[kind] : "";
+    const iconValue = ownObjectValue(icons, kind);
+    const configured = typeof iconValue === "string" ? iconValue : "";
     if (configured.trim()) return configured.trim();
     const markerIcon = markerKindConfig(kind, presentation).icon;
     return typeof markerIcon === "string" ? markerIcon.trim() : "";
+  };
+
+  const safeMarkerImage = (value) => {
+    const image = typeof value === "string" ? value.trim() : "";
+    if (/^assets\/markers\/[a-z0-9][a-z0-9-]*\.png$/i.test(image)) return image;
+    if (
+      image !== "data:image/png;base64,"
+      && /^data:image\/png;base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(image)
+    ) return image;
+    return "";
   };
 
   const markerEventText = (marker, presentation) => {
@@ -1618,13 +1670,7 @@ const PlayerCore = (() => {
     return groups;
   };
 
-  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-  const formatClipTitle = (month0, day, hours, minutes) => {
-    const h12 = hours % 12 === 0 ? 12 : hours % 12;
-    const ampm = hours < 12 ? "AM" : "PM";
-    return `${MONTHS[month0]} ${day} · ${h12}:${String(minutes).padStart(2, "0")} ${ampm}`;
-  };
+  const formatClipTitle = PresentationCore.formatClipTitle;
 
   // Prefer the backend's stable clip kind. Older clips can still be classified
   // from their on-disk names.
@@ -1662,8 +1708,6 @@ const PlayerCore = (() => {
         return { kind: "set-out" };
       case "KeyM":
         return { kind: shiftKey ? "prev-marker" : "next-marker" };
-      case "KeyF":
-        return { kind: "toggle-focus" };
       // Zoom: +/- step at the playhead, \ fits the clip, Shift+\ fits the trim.
       case "Equal":
       case "NumpadAdd":
@@ -1940,16 +1984,28 @@ const PlayerCore = (() => {
   const audioSidecarSyncDecision = (videoState, sidecarState, options = {}) => {
     const videoTime = Number(videoState && videoState.currentTime);
     const sidecarTime = Number(sidecarState && sidecarState.currentTime);
+    const sidecarDuration = Number(sidecarState && sidecarState.duration);
     const validVideoTime = Number.isFinite(videoTime) && videoTime >= 0;
-    const driftRequiresSeek = !Number.isFinite(sidecarTime)
-      || Math.abs(videoTime - sidecarTime) > AUDIO_SIDECAR_DRIFT_TOLERANCE_S;
+    const validSidecarDuration = Number.isFinite(sidecarDuration) && sidecarDuration >= 0;
     const rate = Number(videoState && videoState.playbackRate);
+    const playbackRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    const sidecarExhausted = Boolean(sidecarState && sidecarState.ended)
+      && validVideoTime
+      && validSidecarDuration
+      && videoTime >= sidecarDuration - Number.EPSILON;
+    const videoShouldPlay = !(videoState && videoState.paused) && !(videoState && videoState.ended);
+    const shouldPlay = videoShouldPlay && !sidecarExhausted;
+    const validSidecarTime = Number.isFinite(sidecarTime) && sidecarTime >= 0;
+    const drift = validVideoTime && validSidecarTime ? videoTime - sidecarTime : 0;
+    const driftMagnitude = Math.abs(drift);
+    const forceSeek = options.forceSeek === true
+      || !validSidecarTime
+      || (validVideoTime && driftMagnitude > AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S)
+      || (validVideoTime && !videoShouldPlay && driftMagnitude > AUDIO_SIDECAR_DRIFT_DEADBAND_S);
     return {
-      seekTime: validVideoTime && (options.forceSeek === true || driftRequiresSeek)
-        ? videoTime
-        : null,
-      playbackRate: Number.isFinite(rate) && rate > 0 ? rate : 1,
-      shouldPlay: !(videoState && videoState.paused) && !(videoState && videoState.ended),
+      seekTime: validVideoTime && forceSeek ? videoTime : null,
+      playbackRate,
+      shouldPlay,
     };
   };
 
@@ -1999,6 +2055,7 @@ const PlayerCore = (() => {
     encoderCodecCaveat,
     fmtBytes,
     fmtLibraryStorageUsage,
+    sameClipPath,
     cloudLibraryEntries,
     fmtDur,
     fmtTenths,
@@ -2063,6 +2120,9 @@ const PlayerCore = (() => {
     audioTrackSelectedRowCount,
     markerStyle,
     markerDigest,
+    ownObjectValue,
+    markerKindConfig,
+    safeMarkerImage,
     normalizeGameReviewSettings,
     reviewMatchEventMarkers,
     reviewTimelineMarkers,

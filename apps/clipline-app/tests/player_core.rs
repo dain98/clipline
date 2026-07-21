@@ -9,13 +9,48 @@ use std::fs;
 use std::path::Path;
 
 fn player_core_context() -> Context {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/player-core.js");
-    let source = fs::read_to_string(path).expect("read ui/player-core.js");
     let mut context = Context::default();
+    for name in ["presentation-core.js", "player-core.js"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui").join(name);
+        let source =
+            fs::read_to_string(path).unwrap_or_else(|error| panic!("read {name}: {error}"));
+        context
+            .eval(Source::from_bytes(&source))
+            .unwrap_or_else(|error| {
+                panic!("{name} evaluates without DOM or Tauri globals: {error}")
+            });
+    }
     context
-        .eval(Source::from_bytes(&source))
-        .expect("player-core.js evaluates standalone (no DOM, no Tauri globals)");
-    context
+}
+
+#[test]
+fn shared_presentation_normalizes_names_labels_and_dates() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "['clip.MP4','clip.mov','clip.MKV','clip.webm','clip.avi'].map(PresentationCore.clipNameStem)"
+        ),
+        "[\"clip\",\"clip\",\"clip\",\"clip\",\"clip.avi\"]"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PresentationCore.markerKindLabel('multiKill', '')"
+        ),
+        "multi Kill"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PresentationCore.markerKindLabel('multiKill', 'Spree')"
+        ),
+        "Spree"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PresentationCore.formatClipTitle(6, 18, 0, 5)"),
+        "Jul 18 · 12:05 AM"
+    );
 }
 
 /// Evaluate an expression and return its string conversion ("null" for null).
@@ -78,6 +113,32 @@ fn video_decode_probes_cover_hevc_and_av1_mp4_profiles() {
 }
 
 #[test]
+fn clip_paths_match_legacy_windows_canonical_forms() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            r#"PlayerCore.sameClipPath('D:\\Videos\\Clipline\\clip.mp4', '\\\\?\\D:\\Videos\\Clipline\\clip.mp4')"#,
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            r#"PlayerCore.sameClipPath('d:/videos/clipline/CLIP.mp4', 'D:\\Videos\\Clipline\\clip.mp4')"#,
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.sameClipPath('/Clips/clip.mp4', '/clips/clip.mp4')",
+        ),
+        "false"
+    );
+}
+
+#[test]
 fn cloud_library_entries_filter_sort_and_mark_local_availability() {
     let mut ctx = player_core_context();
     let entries = eval_json(
@@ -129,6 +190,58 @@ fn cloud_library_entries_filter_sort_and_mark_local_availability() {
     assert_eq!(
         entries,
         r#"[{"local_clip_id":"pending","path":"C:/Clips/pending clip.mp4","title":"pending clip","remote_url":"https://clips.example.com/pending","visibility":"private","upload_status":"processing","updated_at_unix":30,"local_available":true},{"local_clip_id":"gone","path":"C:/Clips/gone clip.mp4","title":"gone clip","remote_url":"https://clips.example.com/gone","visibility":"unlisted","upload_status":"uploaded_processing","updated_at_unix":20,"local_available":false},{"local_clip_id":"old","path":"C:/Clips/old clip.mp4","title":"old clip","remote_url":"https://clips.example.com/old","visibility":"public","upload_status":"uploaded_public","updated_at_unix":10,"local_available":true}]"#
+    );
+}
+
+#[test]
+fn cloud_library_entries_match_legacy_windows_canonical_paths() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            r#"PlayerCore.cloudLibraryEntries({
+              legacy: {
+                local_clip_id: 'legacy',
+                path: '\\\\?\\D:\\Videos\\Clipline\\clip.mp4',
+                remote_url: 'https://clips.example.com/legacy',
+                visibility: 'public',
+                upload_status: 'uploaded_public',
+                updated_at_unix: 10
+              }
+            }, [{ path: 'D:\\Videos\\Clipline\\clip.mp4' }])[0].local_available"#,
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn authoritative_cloud_library_hides_deleted_upload_history_but_keeps_active_uploads() {
+    let mut ctx = player_core_context();
+    let entries = eval_json(
+        &mut ctx,
+        r#"PlayerCore.cloudLibraryEntries({
+          deleted: {
+            local_clip_id: 'deleted',
+            path: 'C:/Clips/deleted.mp4',
+            remote_clip_id: 'missing-remote',
+            remote_url: 'https://clips.example.com/missing-remote',
+            upload_status: 'uploaded_public',
+            updated_at_unix: 10
+          },
+          active: {
+            local_clip_id: 'active',
+            path: 'C:/Clips/active.mp4',
+            remote_clip_id: 'processing-remote',
+            remote_url: 'https://clips.example.com/processing-remote',
+            upload_status: 'uploaded_processing',
+            updated_at_unix: 20
+          }
+        }, [], [], true)"#,
+    );
+
+    assert_eq!(
+        entries,
+        r#"[{"local_clip_id":"active","path":"C:/Clips/active.mp4","title":"active","remote_url":"https://clips.example.com/processing-remote","visibility":"public","upload_status":"uploaded_processing","updated_at_unix":20,"local_available":false,"remote_clip_id":"processing-remote"}]"#
     );
 }
 
@@ -1507,6 +1620,88 @@ fn marker_styles_accept_injected_plugin_presentation() {
 }
 
 #[test]
+fn marker_presentation_ignores_inherited_keys_and_rejects_unsafe_images() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const inheritedKinds = Object.create({
+          constructor: { category: 'kill', icon: 'assets/markers/kill.png' },
+          SneakyKind: { category: 'kill' }
+        });
+        inheritedKinds.RealKind = { category: 'objective' };
+        const inheritedCategories = Object.create({
+          constructor: { singular: 'forged', plural: 'forged', glyph: '!' }
+        });
+        inheritedCategories.objective = { singular: 'objective', plural: 'objectives', glyph: 'O' };
+        const INHERITED_PRESENTATION = {
+          marker_kinds: inheritedKinds,
+          marker_categories: inheritedCategories
+        };
+        const OWN_DANGEROUS_PRESENTATION = JSON.parse(
+          '{"marker_kinds":{"__proto__":{"category":"kill"},"constructor":{"category":"kill"}}}'
+        );
+        "#,
+    ))
+    .expect("define inherited presentation maps");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.markerStyle('SneakyKind', INHERITED_PRESENTATION)"
+        ),
+        r#"{"glyph":"•","cls":"info"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.markerStyle('RealKind', INHERITED_PRESENTATION)"
+        ),
+        r#"{"glyph":"O","cls":"objective"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.markerKindConfig('constructor', INHERITED_PRESENTATION)"
+        ),
+        "{}"
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "[PlayerCore.markerKindConfig('__proto__', OWN_DANGEROUS_PRESENTATION), PlayerCore.markerKindConfig('constructor', OWN_DANGEROUS_PRESENTATION)]"
+        ),
+        "[{},{}]"
+    );
+
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.safeMarkerImage('assets/markers/kill.png')"
+        ),
+        "assets/markers/kill.png"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.safeMarkerImage('data:image/png;base64,a2lsbA==')"
+        ),
+        "data:image/png;base64,a2lsbA=="
+    );
+    for unsafe_image in [
+        "assets/markers/../kill.png",
+        "https://tracker.example/marker.png",
+        "assets/markers/kill.png\");color:red/*",
+        "data:image/svg+xml,<svg onload=alert(1)>",
+    ] {
+        let encoded = serde_json::to_string(unsafe_image).expect("JSON image fixture");
+        assert_eq!(
+            eval(&mut ctx, &format!("PlayerCore.safeMarkerImage({encoded})")),
+            ""
+        );
+    }
+}
+
+#[test]
 fn ruler_marks_pick_nice_steps() {
     let mut ctx = player_core_context();
     assert_eq!(
@@ -2495,11 +2690,11 @@ fn session_groups_bucket_and_sort_by_newest() {
 }
 
 #[test]
-fn focus_mode_has_a_key() {
+fn removed_focus_mode_key_is_not_consumed() {
     let mut ctx = player_core_context();
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.keyIntent('KeyF', false)"),
-        r#"{"kind":"toggle-focus"}"#
+        "null"
     );
 }
 
@@ -2667,7 +2862,7 @@ fn audio_preview_queue_applies_only_current_success_and_cancel_keeps_worker_slot
 }
 
 #[test]
-fn audio_sidecar_sync_uses_video_as_the_authoritative_transport() {
+fn audio_sidecar_sync_keeps_requested_rate_and_hard_seeks_discontinuities() {
     let mut ctx = player_core_context();
     assert_eq!(
         eval_json(
@@ -2679,17 +2874,25 @@ fn audio_sidecar_sync_uses_video_as_the_authoritative_transport() {
                 { currentTime: 12.49 },
                 { forceSeek: true },
               ),
-              exactTolerance: PlayerCore.audioSidecarSyncDecision(
+              inSync: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 10, playbackRate: 1, paused: false, ended: false },
+                { currentTime: 9.99 },
+              ),
+              behind: PlayerCore.audioSidecarSyncDecision(
                 { currentTime: 10, playbackRate: 1, paused: false, ended: false },
                 { currentTime: 9.9 },
               ),
-              belowTolerance: PlayerCore.audioSidecarSyncDecision(
+              ahead: PlayerCore.audioSidecarSyncDecision(
                 { currentTime: 10, playbackRate: 1, paused: false, ended: false },
-                { currentTime: 9.901 },
+                { currentTime: 10.1 },
               ),
-              aboveTolerance: PlayerCore.audioSidecarSyncDecision(
+              discontinuity: PlayerCore.audioSidecarSyncDecision(
                 { currentTime: 10, playbackRate: 1, paused: false, ended: false },
-                { currentTime: 9.899 },
+                { currentTime: 9.49 },
+              ),
+              pausedDrift: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 10, playbackRate: 1, paused: true, ended: false },
+                { currentTime: 9.9 },
               ),
               invalidSidecar: PlayerCore.audioSidecarSyncDecision(
                 { currentTime: 4, playbackRate: 0, paused: true, ended: false },
@@ -2707,7 +2910,31 @@ fn audio_sidecar_sync_uses_video_as_the_authoritative_transport() {
             }))()
             "#,
         ),
-        r#"{"forced":{"seekTime":12.5,"playbackRate":1.5,"shouldPlay":true},"exactTolerance":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"belowTolerance":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"aboveTolerance":{"seekTime":10,"playbackRate":1,"shouldPlay":true},"invalidSidecar":{"seekTime":4,"playbackRate":1,"shouldPlay":false},"invalidVideo":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"ended":{"seekTime":null,"playbackRate":2,"shouldPlay":false}}"#
+        r#"{"forced":{"seekTime":12.5,"playbackRate":1.5,"shouldPlay":true},"inSync":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"behind":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"ahead":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"discontinuity":{"seekTime":10,"playbackRate":1,"shouldPlay":true},"pausedDrift":{"seekTime":10,"playbackRate":1,"shouldPlay":false},"invalidSidecar":{"seekTime":4,"playbackRate":1,"shouldPlay":false},"invalidVideo":{"seekTime":null,"playbackRate":1,"shouldPlay":true},"ended":{"seekTime":null,"playbackRate":2,"shouldPlay":false}}"#
+    );
+}
+
+#[test]
+fn audio_sidecar_sync_does_not_restart_a_track_that_ends_before_video() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            r#"
+            (() => ({
+              exhausted: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 29.8, playbackRate: 1, paused: false, ended: false },
+                { currentTime: 29.64, duration: 29.64, ended: true },
+              ),
+              seekBack: PlayerCore.audioSidecarSyncDecision(
+                { currentTime: 10, playbackRate: 1, paused: false, ended: false },
+                { currentTime: 29.64, duration: 29.64, ended: true },
+                { forceSeek: true },
+              ),
+            }))()
+            "#,
+        ),
+        r#"{"exhausted":{"seekTime":null,"playbackRate":1,"shouldPlay":false},"seekBack":{"seekTime":10,"playbackRate":1,"shouldPlay":true}}"#
     );
 }
 

@@ -30,6 +30,9 @@ pub(crate) fn parse_sps(sps: &[u8]) -> Option<HevcSpsInfo> {
     let mut r = BitReader::new(&rbsp);
     r.bits(4)?; // sps_video_parameter_set_id
     let max_sub_layers_minus1 = r.bits(3)?;
+    if max_sub_layers_minus1 > 6 {
+        return None;
+    }
     let temporal_id_nested = r.bit()? as u8;
 
     // profile_tier_level(1, max_sub_layers_minus1) — general fields.
@@ -96,8 +99,22 @@ pub(crate) fn parse_sps(sps: &[u8]) -> Option<HevcSpsInfo> {
 /// Build the `hvcC` box from raw VPS/SPS/PPS NALs. A corrupt SPS yields a
 /// zeroed summary (the raw NAL arrays still let decoders configure) —
 /// mirroring avcC's tolerance of short parameter sets.
-pub(crate) fn hvcc(vps: &[u8], sps: &[u8], pps: &[u8]) -> Vec<u8> {
-    let info = parse_sps(sps).unwrap_or(HevcSpsInfo {
+pub(crate) fn hvcc(vps: &[Vec<u8>], sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Vec<u8> {
+    debug_assert!(!vps.is_empty() && !sps.is_empty() && !pps.is_empty());
+    debug_assert!(
+        vps.iter()
+            .chain(sps)
+            .chain(pps)
+            .all(|nal| nal.len() <= u16::MAX as usize),
+        "HEVC parameter set exceeds hvcC u16 length"
+    );
+    debug_assert!(
+        vps.len() <= u16::MAX as usize
+            && sps.len() <= u16::MAX as usize
+            && pps.len() <= u16::MAX as usize,
+        "HEVC parameter-set array exceeds hvcC u16 count"
+    );
+    let info = parse_sps(&sps[0]).unwrap_or(HevcSpsInfo {
         general_profile_space: 0,
         general_tier_flag: 0,
         general_profile_idc: 0,
@@ -130,16 +147,12 @@ pub(crate) fn hvcc(vps: &[u8], sps: &[u8], pps: &[u8]) -> Vec<u8> {
         // the actual layer count (1-7) per ISO/IEC 14496-15, not a minus-1.
         .u8((info.num_temporal_layers << 3) | (info.temporal_id_nested << 2) | 3)
         .u8(3); // numOfArrays: VPS, SPS, PPS
-    for (nal_type, nal) in [(32u8, vps), (33, sps), (34, pps)] {
-        // hvcC nalUnitLength is u16 by spec; real parameter sets are far smaller.
-        debug_assert!(
-            nal.len() <= u16::MAX as usize,
-            "HEVC NAL exceeds hvcC u16 length"
-        );
+    for (nal_type, nals) in [(32u8, vps), (33, sps), (34, pps)] {
         p.u8(0x80 | nal_type) // array_completeness=1
-            .u16(1) // numNalus
-            .u16(nal.len() as u16)
-            .bytes(nal);
+            .u16(nals.len() as u16); // numNalus
+        for nal in nals {
+            p.u16(nal.len() as u16).bytes(nal);
+        }
     }
     mp4_box(*b"hvcC", p.into_vec())
 }
@@ -184,8 +197,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_reserved_eight_layer_count() {
+        assert_eq!(parse_sps(&[0x42, 0x01, 0x0E]), None);
+    }
+
+    #[test]
     fn hvcc_embeds_summary_and_all_three_nals() {
-        let buf = hvcc(VPS, SPS, PPS);
+        let buf = hvcc(&[VPS.to_vec()], &[SPS.to_vec()], &[PPS.to_vec()]);
         assert_eq!(&buf[4..8], b"hvcC");
         let p = &buf[8..];
         assert_eq!(p[0], 1, "configurationVersion");

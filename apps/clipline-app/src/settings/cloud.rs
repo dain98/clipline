@@ -71,6 +71,8 @@ pub struct CloudSettings {
     pub connected_display_name: Option<String>,
     #[serde(default)]
     pub credential_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_cleanup_targets: Vec<String>,
     #[serde(default = "default_cloud_visibility")]
     pub default_visibility: String,
     #[serde(default)]
@@ -90,6 +92,7 @@ impl Default for CloudSettings {
             connected_username: None,
             connected_display_name: None,
             credential_target: None,
+            credential_cleanup_targets: Vec::new(),
             default_visibility: default_cloud_visibility(),
             delete_local_after_upload: false,
             auto_upload_rules: false,
@@ -132,6 +135,13 @@ impl CloudSettings {
             .take()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        self.credential_cleanup_targets = std::mem::take(&mut self.credential_cleanup_targets)
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+        self.credential_cleanup_targets.sort();
+        self.credential_cleanup_targets.dedup();
         self.default_visibility = normalize_cloud_visibility(&self.default_visibility);
         self.uploads = std::mem::take(&mut self.uploads)
             .into_iter()

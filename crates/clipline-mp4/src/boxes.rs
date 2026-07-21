@@ -1,11 +1,18 @@
 /// Build a plain ISO-BMFF box: u32 size + fourcc + payload.
 pub fn mp4_box(fourcc: [u8; 4], payload: Vec<u8>) -> Vec<u8> {
-    let size = 8 + payload.len() as u32;
+    let size = checked_box_size(payload.len()).expect("MP4 box payload exceeds 32-bit box size");
     let mut out = Vec::with_capacity(size as usize);
     out.extend_from_slice(&size.to_be_bytes());
     out.extend_from_slice(&fourcc);
     out.extend_from_slice(&payload);
     out
+}
+
+fn checked_box_size(payload_len: usize) -> Result<u32, &'static str> {
+    payload_len
+        .checked_add(8)
+        .and_then(|size| u32::try_from(size).ok())
+        .ok_or("MP4 box payload exceeds 32-bit box size")
 }
 
 /// Build a "full box": version byte + 24-bit flags precede the payload.
@@ -74,6 +81,13 @@ mod tests {
         assert_eq!(b[8], 1); // version
         assert_eq!(&b[9..12], &[0x00, 0x00, 0x02]); // 24-bit flags
         assert_eq!(b[12], 9);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn plain_box_size_rejects_payloads_that_need_a_large_size_header() {
+        let err = checked_box_size(u32::MAX as usize).unwrap_err();
+        assert_eq!(err, "MP4 box payload exceeds 32-bit box size");
     }
 
     #[test]

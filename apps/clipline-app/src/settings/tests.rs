@@ -222,6 +222,140 @@ fn legacy_global_game_recording_mode_migrates_to_custom_games() {
 }
 
 #[test]
+fn legacy_custom_game_ids_migrate_out_of_the_built_in_namespace() {
+    let settings = AppSettings::load_from_object(
+        serde_json::json!({
+            "games": {
+                "custom_games": [
+                    {
+                        "id": "osu",
+                        "name": "My Rhythm Tool",
+                        "exe_name": "rhythm.exe",
+                        "icon": "data:image/png;base64,aWNvbg=="
+                    },
+                    {
+                        "id": "league_of_legends",
+                        "name": "Spreadsheet League",
+                        "exe_name": "sheets.exe"
+                    },
+                    {
+                        "id": "My Old Game!",
+                        "name": "Old Game",
+                        "exe_name": "old.exe"
+                    }
+                ]
+            }
+        })
+        .as_object()
+        .unwrap(),
+    );
+
+    let games = &settings.games.custom_games;
+    assert_eq!(games[0].id, "custom-migrated-osu");
+    assert_eq!(games[1].id, "custom-migrated-league-of-legends");
+    assert_eq!(games[2].id, "custom-migrated-my-old-game");
+    assert_eq!(games[0].legacy_ids, ["osu"]);
+    assert_eq!(games[1].legacy_ids, ["league_of_legends"]);
+    assert_eq!(games[2].legacy_ids, ["My Old Game!"]);
+    assert_eq!(games[0].name, "My Rhythm Tool");
+    assert_eq!(
+        games[0].icon.as_deref(),
+        Some("data:image/png;base64,aWNvbg==")
+    );
+    assert!(settings.validate().is_ok());
+}
+
+#[test]
+fn legacy_custom_game_id_migration_is_unique_and_idempotent() {
+    let mut games = GameSettings {
+        custom_games: vec![
+            CustomGameSettings {
+                id: "osu".into(),
+                legacy_ids: Vec::new(),
+                name: "First".into(),
+                enabled: true,
+                exe_name: "first.exe".into(),
+                process_path: None,
+                window_title: String::new(),
+                recording_mode: GameRecordingMode::ReplaysOnly,
+                icon: None,
+            },
+            CustomGameSettings {
+                id: "OSU".into(),
+                legacy_ids: Vec::new(),
+                name: "Second".into(),
+                enabled: true,
+                exe_name: "second.exe".into(),
+                process_path: None,
+                window_title: String::new(),
+                recording_mode: GameRecordingMode::ReplaysOnly,
+                icon: None,
+            },
+            CustomGameSettings {
+                id: "custom-migrated-osu".into(),
+                legacy_ids: Vec::new(),
+                name: "Existing".into(),
+                enabled: true,
+                exe_name: "existing.exe".into(),
+                process_path: None,
+                window_title: String::new(),
+                recording_mode: GameRecordingMode::ReplaysOnly,
+                icon: None,
+            },
+        ],
+        ..GameSettings::default()
+    };
+
+    games.normalize();
+    let first = games
+        .custom_games
+        .iter()
+        .map(|game| game.id.clone())
+        .collect::<Vec<_>>();
+    games.normalize();
+    let second = games
+        .custom_games
+        .iter()
+        .map(|game| game.id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        first,
+        vec![
+            "custom-migrated-osu-2",
+            "custom-migrated-osu-3",
+            "custom-migrated-osu"
+        ]
+    );
+    assert_eq!(second, first);
+}
+
+#[test]
+fn validation_rejects_custom_ids_outside_the_custom_namespace() {
+    for id in ["osu", "league_of_legends", "plain-legacy-id", "custom-Bad"] {
+        let settings = AppSettings {
+            games: GameSettings {
+                custom_games: vec![CustomGameSettings {
+                    id: id.into(),
+                    legacy_ids: Vec::new(),
+                    name: "Impostor".into(),
+                    enabled: true,
+                    exe_name: "impostor.exe".into(),
+                    process_path: None,
+                    window_title: String::new(),
+                    recording_mode: GameRecordingMode::ReplaysOnly,
+                    icon: None,
+                }],
+                ..GameSettings::default()
+            },
+            ..AppSettings::default()
+        };
+
+        assert!(settings.validate().is_err(), "{id:?} must be rejected");
+    }
+}
+
+#[test]
 fn supported_game_review_settings_round_trip_json() {
     let json = r#"{
             "games": {
@@ -323,6 +457,47 @@ fn validation_rejects_relative_media_folder() {
     };
 
     assert!(settings.validate().is_err());
+}
+
+#[test]
+fn validation_rejects_filesystem_and_sensitive_media_roots() {
+    let current = std::env::current_dir().unwrap();
+    let filesystem_root = current.ancestors().last().unwrap();
+    let root_settings = AppSettings {
+        media_dir: filesystem_root.display().to_string(),
+        ..AppSettings::default()
+    };
+    assert!(root_settings.validate().is_err());
+
+    for variable in [
+        "USERPROFILE",
+        "SystemRoot",
+        "ProgramData",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+    ] {
+        let Some(root) = std::env::var_os(variable).map(PathBuf::from) else {
+            continue;
+        };
+        if !root.is_absolute() {
+            continue;
+        }
+        let settings = AppSettings {
+            media_dir: root.display().to_string(),
+            ..AppSettings::default()
+        };
+        assert!(
+            settings.validate().is_err(),
+            "{variable} root must be rejected"
+        );
+    }
+
+    let nested = std::env::temp_dir().join("clipline-media-scope-test");
+    let settings = AppSettings {
+        media_dir: nested.display().to_string(),
+        ..AppSettings::default()
+    };
+    assert!(settings.validate().is_ok());
 }
 
 #[test]
@@ -921,6 +1096,7 @@ fn settings_round_trip_json() {
             )]),
             custom_games: vec![CustomGameSettings {
                 id: "custom-notepad".into(),
+                legacy_ids: Vec::new(),
                 name: "Notepad".into(),
                 enabled: true,
                 exe_name: "notepad.exe".into(),
@@ -947,6 +1123,7 @@ fn validation_rejects_custom_game_without_match_identity() {
             plugins: BTreeMap::new(),
             custom_games: vec![CustomGameSettings {
                 id: "custom-empty".into(),
+                legacy_ids: Vec::new(),
                 name: "Mystery".into(),
                 enabled: true,
                 exe_name: " ".into(),
@@ -1117,6 +1294,127 @@ fn temporary_settings_paths_are_unique_per_save_attempt() {
 }
 
 #[test]
+fn startup_defaults_quietly_only_when_primary_and_backup_are_missing() {
+    let dir = TestDir::new("clipline-settings", "startup-first-run");
+    let path = dir.path().join("settings.json");
+
+    let loaded = AppSettings::load_for_startup_from(&path);
+
+    assert_eq!(loaded.settings, AppSettings::default());
+    assert!(loaded.warnings.is_empty());
+}
+
+#[test]
+fn save_preserves_previous_valid_settings_as_last_known_good_backup() {
+    let dir = TestDir::new("clipline-settings", "last-known-good");
+    let path = dir.path().join("settings.json");
+    let backup = dir.path().join("settings.json.bak");
+    let previous = AppSettings {
+        close_to_tray: false,
+        ..AppSettings::default()
+    };
+    let current = AppSettings {
+        minimize_to_tray: true,
+        ..previous.clone()
+    };
+    previous.save_to(&path).unwrap();
+
+    current.save_to(&path).unwrap();
+
+    assert_eq!(AppSettings::load_from(&path).unwrap(), current);
+    assert_eq!(AppSettings::load_from(&backup).unwrap(), previous);
+}
+
+#[test]
+fn startup_quarantines_invalid_primary_and_recovers_last_known_good_backup() {
+    let dir = TestDir::new("clipline-settings", "recover-backup");
+    let path = dir.path().join("settings.json");
+    let recovered = AppSettings {
+        close_to_tray: false,
+        ..AppSettings::default()
+    };
+    recovered.save_to(&path).unwrap();
+    AppSettings {
+        minimize_to_tray: true,
+        ..recovered.clone()
+    }
+    .save_to(&path)
+    .unwrap();
+    std::fs::write(&path, "{ definitely not JSON").unwrap();
+
+    let loaded = AppSettings::load_for_startup_from(&path);
+
+    assert_eq!(loaded.settings, recovered);
+    assert_eq!(loaded.warnings.len(), 1);
+    assert!(loaded.warnings[0].contains("recovered"));
+    assert!(!path.exists());
+    assert!(std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("settings.json.corrupt.")
+    }));
+}
+
+#[test]
+fn startup_quarantines_invalid_primary_before_using_visible_safe_defaults() {
+    let dir = TestDir::new("clipline-settings", "recover-defaults");
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, "[]").unwrap();
+
+    let loaded = AppSettings::load_for_startup_from(&path);
+
+    assert_eq!(loaded.settings, AppSettings::default());
+    assert_eq!(loaded.warnings.len(), 1);
+    assert!(loaded.warnings[0].contains("safe defaults"));
+    assert!(loaded.warnings[0].contains("preserved"));
+    assert!(!path.exists());
+}
+
+#[test]
+fn startup_leaves_unreadable_primary_untouched_while_recovering_backup() {
+    let dir = TestDir::new("clipline-settings", "unreadable-primary");
+    let path = dir.path().join("settings.json");
+    let backup = dir.path().join("settings.json.bak");
+    std::fs::create_dir(&path).unwrap();
+    let recovered = AppSettings {
+        minimize_to_tray: true,
+        ..AppSettings::default()
+    };
+    recovered.save_to(&backup).unwrap();
+
+    let loaded = AppSettings::load_for_startup_from(&path);
+
+    assert_eq!(loaded.settings, recovered);
+    assert_eq!(loaded.warnings.len(), 1);
+    assert!(loaded.warnings[0].contains("left untouched"));
+    assert!(path.is_dir());
+}
+
+#[test]
+fn save_refuses_to_overwrite_invalid_existing_primary_or_backup() {
+    let dir = TestDir::new("clipline-settings", "block-invalid-overwrite");
+    let path = dir.path().join("settings.json");
+    let backup = dir.path().join("settings.json.bak");
+    let last_known_good = AppSettings {
+        close_to_tray: false,
+        ..AppSettings::default()
+    };
+    last_known_good.save_to(&backup).unwrap();
+    std::fs::write(&path, "broken but recoverable").unwrap();
+
+    let error = AppSettings::default().save_to(&path).unwrap_err();
+
+    assert!(error.contains("refusing to overwrite"));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "broken but recoverable"
+    );
+    assert_eq!(AppSettings::load_from(&backup).unwrap(), last_known_good);
+}
+
+#[test]
 fn uploaded_processing_status_survives_cloud_settings_normalization() {
     let mut cloud = CloudSettings::default();
     cloud.uploads.insert(
@@ -1166,6 +1464,7 @@ fn osu_api_settings_round_trip_without_secret() {
             client_id: Some("61835".into()),
             user: Some("3426414".into()),
             credential_target: Some("Clipline osu!:61835:3426414".into()),
+            credential_cleanup_targets: vec!["Clipline osu!:old".into()],
             last_connected_username: Some("Dain".into()),
         },
         ..AppSettings::default()
@@ -1183,6 +1482,10 @@ fn osu_api_settings_round_trip_without_secret() {
     assert_eq!(
         round_trip.osu.credential_target.as_deref(),
         Some("Clipline osu!:61835:3426414")
+    );
+    assert_eq!(
+        round_trip.osu.credential_cleanup_targets,
+        ["Clipline osu!:old"]
     );
     assert_eq!(
         round_trip.osu.last_connected_username.as_deref(),

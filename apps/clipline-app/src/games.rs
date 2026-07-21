@@ -3,6 +3,7 @@
 
 use clipline_capture::windows::{enumerate_capturable_windows, CapturableWindow};
 
+use crate::game_identity::GameIdentity;
 use crate::game_plugins::{self, GamePluginInfo};
 use crate::settings::{CustomGameSettings, GameRecordingMode, GameSettings};
 
@@ -14,9 +15,9 @@ pub struct GameWindowInfo {
     pub exe_path: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedGame {
-    pub id: String,
+    pub identity: GameIdentity,
     pub name: String,
     pub hwnd: isize,
     pub window_title: String,
@@ -26,7 +27,7 @@ pub struct DetectedGame {
 }
 
 pub fn game_plugin_catalog() -> Vec<GamePluginInfo> {
-    game_plugins::catalog().to_vec()
+    game_plugins::catalog()
 }
 
 pub fn list_game_windows() -> Vec<GameWindowInfo> {
@@ -74,7 +75,7 @@ pub fn detect_active_game_from_windows(
     for game in settings.custom_games.iter().filter(|game| game.enabled) {
         if let Some(window) = best_window_for_game(game, &windows) {
             return Some(DetectedGame {
-                id: game.id.clone(),
+                identity: GameIdentity::custom(game.id.clone()),
                 name: game.name.clone(),
                 hwnd: window.handle,
                 window_title: window.title.clone(),
@@ -87,7 +88,10 @@ pub fn detect_active_game_from_windows(
     None
 }
 
-pub fn built_in_game_still_configured(settings: &GameSettings, id: &str) -> bool {
+pub fn built_in_game_still_configured(settings: &GameSettings, identity: &GameIdentity) -> bool {
+    let Some(id) = identity.plugin_id() else {
+        return false;
+    };
     settings.auto_detect
         && game_plugins::all()
             .iter()
@@ -111,7 +115,8 @@ fn detect_built_in_game_from_windows(
                 game_plugins::ensure_plugin_icon_cached(plugin.id(), path);
             }
             return Some(DetectedGame {
-                id: plugin.id().into(),
+                identity: GameIdentity::built_in_plugin(plugin.id())
+                    .expect("registered game plugin id is reserved"),
                 name: plugin.manifest.name.clone(),
                 hwnd: window.handle,
                 window_title: window.title.clone(),
@@ -212,6 +217,7 @@ mod tests {
     fn game() -> CustomGameSettings {
         CustomGameSettings {
             id: "custom-test".into(),
+            legacy_ids: Vec::new(),
             name: "Test Game".into(),
             enabled: true,
             exe_name: "game.exe".into(),
@@ -437,7 +443,10 @@ mod tests {
         )
         .expect("League game window should match");
 
-        assert_eq!(detected.id, crate::game_plugins::LEAGUE_OF_LEGENDS_ID);
+        assert_eq!(
+            detected.identity.id(),
+            crate::game_plugins::LEAGUE_OF_LEGENDS_ID
+        );
         assert_eq!(detected.name, "League of Legends");
         assert_eq!(detected.hwnd, 2);
         assert_eq!(detected.recording_mode, GameRecordingMode::FullSession);
@@ -460,7 +469,7 @@ mod tests {
         .expect("osu! game window should match");
 
         assert_eq!(
-            detected.id,
+            detected.identity.id(),
             crate::game_plugins::plugin_id_for_game_id(clipline_events::GameId::Osu)
         );
         assert_eq!(detected.name, "osu!");
@@ -482,7 +491,7 @@ mod tests {
         .expect("osu! cutting-edge gameplay window should match");
 
         assert_eq!(
-            detected.id,
+            detected.identity.id(),
             crate::game_plugins::plugin_id_for_game_id(clipline_events::GameId::Osu)
         );
         assert_eq!(detected.name, "osu!");
@@ -504,7 +513,7 @@ mod tests {
         .expect("osu! stable gameplay window should match");
 
         assert_eq!(
-            detected.id,
+            detected.identity.id(),
             crate::game_plugins::plugin_id_for_game_id(clipline_events::GameId::Osu)
         );
         assert_eq!(detected.name, "osu!");
@@ -526,7 +535,7 @@ mod tests {
         .expect("osu! stable idle window should match");
 
         assert_eq!(
-            detected.id,
+            detected.identity.id(),
             crate::game_plugins::plugin_id_for_game_id(clipline_events::GameId::Osu)
         );
         assert_eq!(detected.name, "osu!");
@@ -581,7 +590,7 @@ mod tests {
         )
         .expect("custom game should still match");
 
-        assert_eq!(detected.id, "custom-test");
+        assert_eq!(detected.identity.id(), "custom-test");
     }
 
     #[test]

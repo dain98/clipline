@@ -4,7 +4,7 @@ Clipline's first-party code is permissively licensed (see the repository
 license). It additionally relies on the components below; their licenses and
 attribution requirements are reproduced here.
 
-## FFmpeg (LGPL v2.1+)
+## FFmpeg (LGPL v3+, selected build)
 
 Clipline invokes a bundled **FFmpeg** executable as a separate process for
 gallery poster extraction and for its optional encoder tier (HEVC / AV1 /
@@ -12,24 +12,27 @@ additional H.264 backends). For encoding, it pipes raw NV12 frames to
 `ffmpeg.exe` and reads back the encoded elementary stream; Clipline does not
 link the FFmpeg libraries into its own binary.
 
-- Clipline ships an **LGPL** build of FFmpeg (configured **without**
-  `--enable-gpl` / `--enable-nonfree`). It contains SVT-AV1 (BSD) and the
-  GPU vendor encoders; it does **not** contain GPL components such as
-  `libx264` or `libx265`.
-- FFmpeg is licensed under the GNU Lesser General Public License (LGPL)
-  version 2.1 or later. A copy of the LGPL and the GPL is distributed
-  alongside the FFmpeg binaries in the same folder.
-- **Source code:** the exact, unmodified FFmpeg source corresponding to the
-  shipped build is available from the build provider
-  (<https://github.com/BtbN/FFmpeg-Builds>) and from the FFmpeg project
-  (<https://ffmpeg.org/download.html>). Clipline applies no patches to
-  FFmpeg.
+- Clipline pins BtbN's retained `autobuild-2026-06-30-13-34` x64 shared
+  archive (`ffmpeg n8.1.2-21-gce3c09c101-20260630`). It enables
+  `--enable-version3` and is configured **without** `--enable-gpl` or
+  `--enable-nonfree`. It contains SVT-AV1 (BSD) and GPU vendor encoders, but
+  not GPL components such as `libx264` or `libx265`.
+- FFmpeg is generally available under the GNU Lesser General Public License
+  version 2.1 or later; the selected version3 build is distributed under
+  LGPL v3 or later. Its `LICENSE.txt` is bundled beside the executable.
+- **Exact source and build provenance:** the corresponding FFmpeg revision is
+  <https://github.com/FFmpeg/FFmpeg/commit/ce3c09c101>, and the retained build
+  release is
+  <https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-06-30-13-34>.
+  Clipline applies no FFmpeg patches. `PROVENANCE.json` beside the binaries
+  records the archive URL/hash, version/configuration, source links, and the
+  size and SHA-256 of every shipped runtime file.
 - The FFmpeg libraries are dynamically loaded (separate `.dll`s) and the
   executable is independently replaceable, satisfying LGPL §6's requirement
   that users can substitute a modified version of the library.
 
 > This software uses code of <a href="https://ffmpeg.org">FFmpeg</a> licensed
-> under the <a href="https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html">LGPLv2.1</a>.
+> under the <a href="https://www.gnu.org/licenses/lgpl-3.0.html">LGPLv3</a>.
 
 ### SVT-AV1 (BSD-3-Clause + AOM patent terms)
 

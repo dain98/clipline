@@ -4,8 +4,10 @@
 //! loads these through the asset protocol, the same path clips play back
 //! through, so no new scope is needed.
 
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::library::suppress_console;
 
@@ -13,6 +15,7 @@ use crate::library::suppress_console;
 /// while keeping each JPEG to a few tens of KB. Height follows the aspect
 /// ratio (`-2` keeps it even for the encoder).
 const POSTER_WIDTH: u32 = 480;
+static NEXT_POSTER_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 /// The cached poster path for a clip: `clip.mp4` -> `clip.poster.jpg`. Mirrors
 /// the `<clip>.markers.json` sidecar convention so the two travel together.
@@ -52,10 +55,7 @@ fn poster_is_fresh(clip: &Path, poster: &Path) -> bool {
 fn generate_poster(ffmpeg: &Path, clip: &Path, poster: &Path, seek_s: f64) -> Result<(), String> {
     // Write to a sibling temp then rename, so a crash mid-encode never leaves a
     // half-written poster the gallery would cache.
-    let mut tmp = poster.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    let _ = std::fs::remove_file(&tmp);
+    let tmp = PosterTemp::reserve(poster)?;
 
     let mut cmd = Command::new(ffmpeg);
     suppress_console(&mut cmd);
@@ -80,28 +80,71 @@ fn generate_poster(ffmpeg: &Path, clip: &Path, poster: &Path, seek_s: f64) -> Re
             "-f",
             "image2",
         ])
-        .arg(&tmp)
+        .arg(tmp.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .map_err(|e| format!("spawn ffmpeg poster: {e}"))?;
     if !output.status.success() {
-        let _ = std::fs::remove_file(&tmp);
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ffmpeg poster failed: {stderr}"));
     }
-    match std::fs::rename(&tmp, poster) {
-        Ok(()) => Ok(()),
-        Err(_) if poster.exists() => {
-            let _ = std::fs::remove_file(&tmp);
-            Ok(())
+    tmp.publish(poster)
+}
+
+struct PosterTemp {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl PosterTemp {
+    fn reserve(poster: &Path) -> Result<Self, String> {
+        let file_name = poster
+            .file_name()
+            .ok_or_else(|| "poster path has no file name".to_string())?;
+        for _ in 0..64 {
+            let id = NEXT_POSTER_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+            let mut temp_name = file_name.to_os_string();
+            temp_name.push(format!(".tmp.{}.{id}", std::process::id()));
+            let path = poster.with_file_name(temp_name);
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Ok(Self { path, armed: true }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("reserve poster temp: {error}")),
+            }
         }
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(format!("finalize poster: {e}"))
+        Err("reserve poster temp: unique-name attempts exhausted".to_string())
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn publish(mut self, poster: &Path) -> Result<(), String> {
+        atomic_replace_file(&self.path, poster)
+            .map_err(|error| format!("finalize poster: {error}"))?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for PosterTemp {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
         }
     }
+}
+
+#[cfg(windows)]
+fn atomic_replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    crate::windows::replace_file(from, to)
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
 }
 
 /// `-ss` value: seconds with millisecond precision, never negative.
@@ -140,5 +183,57 @@ mod tests {
         std::fs::write(&clip, b"\0\0\0\0").unwrap();
         assert!(!poster_is_fresh(&clip, &poster_path(&clip)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_poster_temps_have_independent_owned_paths() {
+        let dir = test_dir("owned-temp");
+        let poster = dir.join("clip.poster.jpg");
+        let first = PosterTemp::reserve(&poster).unwrap();
+        let second = PosterTemp::reserve(&poster).unwrap();
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+
+        assert_ne!(first_path, second_path);
+        assert_eq!(first_path.parent(), poster.parent());
+        assert_eq!(second_path.parent(), poster.parent());
+        assert!(first_path.exists());
+        assert!(second_path.exists());
+
+        drop(first);
+        assert!(!first_path.exists());
+        assert!(second_path.exists());
+        drop(second);
+        assert!(!second_path.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn poster_temp_atomically_replaces_stale_destination() {
+        let dir = test_dir("atomic-publish");
+        let poster = dir.join("clip.poster.jpg");
+        std::fs::write(&poster, b"stale").unwrap();
+        let temp = PosterTemp::reserve(&poster).unwrap();
+        let temp_path = temp.path().to_path_buf();
+        std::fs::write(&temp_path, b"complete jpeg").unwrap();
+
+        temp.publish(&poster).unwrap();
+
+        assert_eq!(std::fs::read(&poster).unwrap(), b"complete jpeg");
+        assert!(!temp_path.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn test_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-poster-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

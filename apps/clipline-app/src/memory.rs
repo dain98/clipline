@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::mem::{size_of, zeroed};
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -17,9 +18,60 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_VM_READ,
 };
 
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct MemoryStatus {
     pub private_working_set_bytes: u64,
+}
+
+const MEMORY_SAMPLE_CACHE_TTL: Duration = Duration::from_secs(1);
+
+struct CachedMemorySample {
+    completed_at: Instant,
+    result: Result<MemoryStatus, String>,
+}
+
+pub struct MemorySampler {
+    cache_ttl: Duration,
+    state: tokio::sync::Mutex<Option<CachedMemorySample>>,
+}
+
+impl Default for MemorySampler {
+    fn default() -> Self {
+        Self::with_cache_ttl(MEMORY_SAMPLE_CACHE_TTL)
+    }
+}
+
+impl MemorySampler {
+    fn with_cache_ttl(cache_ttl: Duration) -> Self {
+        Self {
+            cache_ttl,
+            state: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    pub async fn sample(&self) -> Result<MemoryStatus, String> {
+        self.sample_with(current_process_tree_memory).await
+    }
+
+    async fn sample_with(
+        &self,
+        measure: impl FnOnce() -> Result<MemoryStatus, String> + Send + 'static,
+    ) -> Result<MemoryStatus, String> {
+        let mut state = self.state.lock().await;
+        if let Some(cached) = state.as_ref() {
+            if cached.completed_at.elapsed() < self.cache_ttl {
+                return cached.result.clone();
+            }
+        }
+        let result = tauri::async_runtime::spawn_blocking(measure)
+            .await
+            .map_err(|error| format!("memory sampler task failed: {error}"))?;
+        *state = Some(CachedMemorySample {
+            completed_at: Instant::now(),
+            result: result.clone(),
+        });
+        result
+    }
 }
 
 pub fn current_process_tree_memory() -> Result<MemoryStatus, String> {
@@ -239,6 +291,9 @@ impl Drop for Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     fn proc(pid: u32, parent_pid: u32, name: &str) -> ProcessEntry {
         ProcessEntry {
@@ -251,6 +306,78 @@ mod tests {
     fn sorted(mut ids: Vec<u32>) -> Vec<u32> {
         ids.sort_unstable();
         ids
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_sampler_coalesces_concurrent_measurements() {
+        let sampler = Arc::new(MemorySampler::with_cache_ttl(Duration::from_secs(1)));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let sampler = Arc::clone(&sampler);
+            let calls = Arc::clone(&calls);
+            tasks.push(tokio::spawn(async move {
+                sampler
+                    .sample_with(move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(25));
+                        Ok(MemoryStatus {
+                            private_working_set_bytes: 42,
+                        })
+                    })
+                    .await
+            }));
+        }
+
+        for task in tasks {
+            assert_eq!(task.await.unwrap().unwrap().private_working_set_bytes, 42);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn memory_sampler_caches_failures_but_retries_after_expiry() {
+        let sampler = MemorySampler::with_cache_ttl(Duration::from_millis(1));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let first_calls = Arc::clone(&calls);
+        assert_eq!(
+            sampler
+                .sample_with(move || {
+                    first_calls.fetch_add(1, Ordering::SeqCst);
+                    Err("sample failed".to_string())
+                })
+                .await,
+            Err("sample failed".to_string())
+        );
+        let cached_calls = Arc::clone(&calls);
+        assert_eq!(
+            sampler
+                .sample_with(move || {
+                    cached_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(MemoryStatus {
+                        private_working_set_bytes: 7,
+                    })
+                })
+                .await,
+            Err("sample failed".to_string())
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let retry_calls = Arc::clone(&calls);
+        assert_eq!(
+            sampler
+                .sample_with(move || {
+                    retry_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(MemoryStatus {
+                        private_working_set_bytes: 7,
+                    })
+                })
+                .await
+                .unwrap()
+                .private_working_set_bytes,
+            7
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

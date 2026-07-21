@@ -8,9 +8,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use windows_sys::Win32::Storage::FileSystem::{
-    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-};
 
 use crate::service::VideoEncoder;
 use crate::updates::normalize_channel;
@@ -26,16 +23,111 @@ use super::validation::{
 use super::AppSettings;
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+static QUARANTINE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+enum SettingsLoadError {
+    Missing,
+    Io(String),
+    Invalid(String),
+}
+
+impl SettingsLoadError {
+    fn describe(&self) -> &str {
+        match self {
+            Self::Missing => "file not found",
+            Self::Io(error) | Self::Invalid(error) => error,
+        }
+    }
+
+    fn is_invalid(&self) -> bool {
+        matches!(self, Self::Invalid(_))
+    }
+}
+
+pub(crate) struct SettingsStartupLoad {
+    pub(crate) settings: AppSettings,
+    pub(crate) warnings: Vec<String>,
+}
 
 impl AppSettings {
+    // Kept as the strict, caller-supplied-path loader for unit tests and
+    // future import tooling; normal startup uses the recovery-aware wrapper.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn load_from(path: &Path) -> Result<Self, String> {
-        let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let value: Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| "settings file must be a JSON object".to_string())?;
+        load_classified(path)
+            .map(|(settings, _)| settings)
+            .map_err(|error| match error {
+                SettingsLoadError::Missing => "file not found".to_string(),
+                SettingsLoadError::Io(error) | SettingsLoadError::Invalid(error) => error,
+            })
+    }
+
+    pub(crate) fn load_for_startup() -> SettingsStartupLoad {
+        Self::load_for_startup_from(&super::settings_path())
+    }
+
+    pub(crate) fn load_for_startup_from(path: &Path) -> SettingsStartupLoad {
+        let backup = backup_path(path);
+        match load_classified(path) {
+            Ok((settings, _)) => SettingsStartupLoad {
+                settings,
+                warnings: Vec::new(),
+            },
+            Err(SettingsLoadError::Missing) => match load_classified(&backup) {
+                Ok((settings, _)) => SettingsStartupLoad {
+                    settings,
+                    warnings: vec![format!(
+                        "Settings were recovered from {} because {} was missing.",
+                        backup.display(),
+                        path.display()
+                    )],
+                },
+                Err(SettingsLoadError::Missing) => SettingsStartupLoad {
+                    settings: Self::default(),
+                    warnings: Vec::new(),
+                },
+                Err(backup_error) => startup_defaults_after_failure(
+                    path,
+                    &SettingsLoadError::Missing,
+                    &backup,
+                    backup_error,
+                ),
+            },
+            Err(primary_error) => match load_classified(&backup) {
+                Ok((settings, _)) => {
+                    let quarantine = quarantine_if_invalid(path, &primary_error);
+                    let mut warning = format!(
+                        "Settings were recovered from {} after {} could not be loaded: {}.",
+                        backup.display(),
+                        path.display(),
+                        primary_error.describe()
+                    );
+                    append_quarantine_result(&mut warning, path, quarantine);
+                    SettingsStartupLoad {
+                        settings,
+                        warnings: vec![warning],
+                    }
+                }
+                Err(backup_error) => {
+                    startup_defaults_after_failure(path, &primary_error, &backup, backup_error)
+                }
+            },
+        }
+    }
+
+    fn load_from_json_bytes(bytes: &[u8]) -> Result<Self, SettingsLoadError> {
+        let json = std::str::from_utf8(bytes)
+            .map_err(|e| SettingsLoadError::Invalid(format!("settings are not UTF-8: {e}")))?;
+        let value: Value = serde_json::from_str(json)
+            .map_err(|e| SettingsLoadError::Invalid(format!("invalid settings JSON: {e}")))?;
+        let object = value.as_object().ok_or_else(|| {
+            SettingsLoadError::Invalid("settings file must be a JSON object".to_string())
+        })?;
         let settings = Self::load_from_object(object);
-        settings.validate()?;
+        settings.validate().map_err(|error| {
+            SettingsLoadError::Invalid(format!("invalid settings values: {error}"))
+        })?;
         Ok(settings)
     }
 
@@ -145,15 +237,110 @@ impl AppSettings {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
+        let previous = match load_classified(path) {
+            Ok((_, bytes)) => Some(bytes),
+            Err(SettingsLoadError::Missing) => None,
+            Err(error) => {
+                return Err(format!(
+                    "refusing to overwrite unreadable or invalid settings file {}: {}",
+                    path.display(),
+                    error.describe()
+                ));
+            }
+        };
+        if let Some(previous) = previous {
+            write_file_atomically(&backup_path(path), &previous)
+                .map_err(|error| format!("preserve last-known-good settings: {error}"))?;
+        }
         write_file_atomically(path, json.as_bytes())
-    }
-
-    pub fn load_or_default() -> Self {
-        Self::load_from(&super::settings_path()).unwrap_or_default()
     }
 
     pub fn save(&self) -> Result<(), String> {
         self.save_to(&super::settings_path())
+    }
+}
+
+fn load_classified(path: &Path) -> Result<(AppSettings, Vec<u8>), SettingsLoadError> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            SettingsLoadError::Missing
+        } else {
+            SettingsLoadError::Io(error.to_string())
+        }
+    })?;
+    let settings = AppSettings::load_from_json_bytes(&bytes)?;
+    Ok((settings, bytes))
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    let mut file_name = path.file_name().unwrap_or_default().to_os_string();
+    file_name.push(".bak");
+    path.with_file_name(file_name)
+}
+
+fn quarantine_if_invalid(
+    path: &Path,
+    error: &SettingsLoadError,
+) -> Option<Result<PathBuf, String>> {
+    if !error.is_invalid() {
+        return None;
+    }
+    let suffix = QUARANTINE_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut file_name = path.file_name()?.to_os_string();
+    file_name.push(format!(".corrupt.{}.{}", std::process::id(), suffix));
+    let quarantine = path.with_file_name(file_name);
+    Some(
+        std::fs::rename(path, &quarantine)
+            .map(|()| quarantine)
+            .map_err(|error| error.to_string()),
+    )
+}
+
+fn append_quarantine_result(
+    warning: &mut String,
+    original: &Path,
+    result: Option<Result<PathBuf, String>>,
+) {
+    match result {
+        Some(Ok(path)) => warning.push_str(&format!(
+            " The invalid file was preserved as {}.",
+            path.display()
+        )),
+        Some(Err(error)) => warning.push_str(&format!(
+            " The invalid file at {} could not be quarantined ({error}); saves will remain blocked.",
+            original.display()
+        )),
+        None => warning.push_str(&format!(
+            " The unreadable path at {} was left untouched; saves will remain blocked until it is accessible.",
+            original.display()
+        )),
+    }
+}
+
+fn startup_defaults_after_failure(
+    primary: &Path,
+    primary_error: &SettingsLoadError,
+    backup: &Path,
+    backup_error: SettingsLoadError,
+) -> SettingsStartupLoad {
+    let primary_quarantine = quarantine_if_invalid(primary, primary_error);
+    let backup_quarantine = quarantine_if_invalid(backup, &backup_error);
+    let mut warning = format!(
+        "Clipline started with safe defaults because neither {} ({}) nor {} ({}) could be loaded.",
+        primary.display(),
+        primary_error.describe(),
+        backup.display(),
+        backup_error.describe()
+    );
+    if !matches!(primary_error, SettingsLoadError::Missing) {
+        append_quarantine_result(&mut warning, primary, primary_quarantine);
+    }
+    if !matches!(backup_error, SettingsLoadError::Missing) {
+        append_quarantine_result(&mut warning, backup, backup_quarantine);
+    }
+    SettingsStartupLoad {
+        settings: AppSettings::default(),
+        warnings: vec![warning],
     }
 }
 
@@ -164,6 +351,18 @@ pub fn config_base() -> PathBuf {
             std::env::var_os("USERPROFILE")
                 .map(PathBuf::from)
                 .map(|home| home.join("AppData").join("Roaming"))
+        })
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Clipline")
+}
+
+pub fn local_cache_base() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .map(|home| home.join("AppData").join("Local"))
         })
         .unwrap_or_else(std::env::temp_dir)
         .join("Clipline")
@@ -194,7 +393,40 @@ pub fn normalize_media_dir(raw: &str) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err("media folder must be an absolute path".into());
     }
+    validate_media_scope_root(&path)?;
     Ok(path)
+}
+
+fn validate_media_scope_root(path: &Path) -> Result<(), String> {
+    let comparable = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if comparable.parent().is_none() {
+        return Err("media folder cannot be a filesystem or drive root".into());
+    }
+
+    for (label, variable) in [
+        ("Windows profile", "USERPROFILE"),
+        ("Windows", "SystemRoot"),
+        ("ProgramData", "ProgramData"),
+        ("Program Files", "ProgramFiles"),
+        ("Program Files (x86)", "ProgramFiles(x86)"),
+    ] {
+        let Some(root) = std::env::var_os(variable).map(PathBuf::from) else {
+            continue;
+        };
+        if !root.is_absolute() {
+            continue;
+        }
+        let root = root.canonicalize().unwrap_or(root);
+        if same_path(&comparable, &root) {
+            return Err(format!("media folder cannot be the {label} root"));
+        }
+    }
+    Ok(())
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    super::validation::same_or_nested_path(left, right)
+        && super::validation::same_or_nested_path(right, left)
 }
 
 pub fn default_media_dir() -> String {
@@ -284,16 +516,8 @@ pub(crate) fn sibling_tmp_path(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
-    let from_w = crate::util::wide_null(from.as_os_str());
-    let to_w = crate::util::wide_null(to.as_os_str());
-    let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
-    if unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), flags) } == 0 {
-        return Err(format!(
-            "replace settings file {to:?}: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(())
+    crate::windows::replace_file(from, to)
+        .map_err(|error| format!("replace settings file {to:?}: {error}"))
 }
 
 pub(crate) fn deserialize_field<T>(object: &Map<String, Value>, key: &str) -> Option<T>

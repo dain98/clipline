@@ -2,6 +2,13 @@
 //! a path-validated delete. The webview never touches the filesystem
 //! directly — playback goes through the asset protocol.
 
+#[path = "library/naming.rs"]
+mod naming;
+use naming::{
+    inferred_clip_kind_for_path, is_reserved_windows_file_name, normalized_clip_file_name,
+    normalized_clip_title,
+};
+
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::mem::size_of;
@@ -10,14 +17,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use clipline_events::{is_review_event, ClipMarker, ClipMarkers, ClipPlay};
 use clipline_mp4::{
-    remux_with_mixed_audio_track, remux_with_selected_audio_tracks, trim_keyframe_aligned_file,
-    MediaTrackCounts,
+    remux_with_mixed_audio_track_file, remux_with_selected_audio_tracks_file,
+    trim_keyframe_aligned_file, MediaTrackCounts,
 };
 use clipline_storage::storage_status as read_storage_status;
-use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows_sys::Win32::System::DataExchange::{CloseClipboard, OpenClipboard, SetClipboardData};
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows_sys::Win32::System::Ole::CF_HDROP;
@@ -27,7 +35,7 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::service::{clips_dir, default_clips_dir};
 use crate::util;
-use crate::util::last_os_error;
+use crate::windows::last_os_error;
 
 pub struct StorageSettings {
     quota_bytes: Mutex<Option<u64>>,
@@ -103,6 +111,12 @@ pub struct ClipInfo {
     pub markers: Option<ClipMarkers>,
     /// Game this clip's session belongs to, if recorded under a detected game.
     pub game: Option<ClipGame>,
+}
+
+#[derive(serde::Serialize)]
+pub struct LocalClipScan {
+    pub clips: Vec<ClipInfo>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -225,31 +239,73 @@ pub struct CopyClipToClipboardRequest {
 pub async fn list_clips<R: Runtime>(
     app: AppHandle<R>,
     settings: tauri::State<'_, StorageSettings>,
-) -> Result<Vec<ClipInfo>, String> {
+) -> Result<LocalClipScan, String> {
     let dir = settings.clips_dir()?;
     let retry_root = dir.clone();
+    let enrichment_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = crate::osu_api::retry_pending_enrichment(&app, retry_root).await {
+        if let Err(e) = crate::osu_api::retry_pending_enrichment(&enrichment_app, retry_root).await
+        {
             eprintln!("retry osu! enrichment on library refresh: {e}");
         }
     });
-    tauri::async_runtime::spawn_blocking(move || list_clips_from_dir(dir))
+    let scope_root = dir.clone();
+    let scan = tauri::async_runtime::spawn_blocking(move || list_clips_from_dir(dir))
         .await
-        .map_err(|e| format!("list clips task: {e}"))?
+        .map_err(|e| format!("list clips task: {e}"))??;
+    let canonical_scope_root = canonical_media_root(&scope_root)?;
+    for clip in &scan.clips {
+        allow_local_clip_asset_from_canonical_root(
+            &app,
+            &canonical_scope_root,
+            Path::new(&clip.path),
+        )?;
+    }
+    Ok(scan)
 }
 
-fn list_clips_from_dir(dir: PathBuf) -> Result<Vec<ClipInfo>, String> {
+fn list_clips_from_dir(dir: PathBuf) -> Result<LocalClipScan, String> {
+    list_clips_from_dir_with_child_reader(dir, push_clips_from)
+}
+
+fn list_clips_from_dir_with_child_reader(
+    dir: PathBuf,
+    mut read_child: impl FnMut(&Path, Option<String>, &mut Vec<ClipInfo>) -> Result<(), String>,
+) -> Result<LocalClipScan, String> {
     let mut clips = Vec::new();
+    let mut warnings = Vec::new();
     push_clips_from(&dir, None, &mut clips)?;
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
-        let Ok(entry) = entry else { continue };
-        if entry.metadata().map(|m| m.is_dir()).unwrap_or(false) {
-            let session = entry.file_name().to_string_lossy().into_owned();
-            push_clips_from(&entry.path(), Some(session), &mut clips)?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warnings.push(format!("Skipped an unreadable Library entry: {error}"));
+                continue;
+            }
+        };
+        let session = entry.file_name().to_string_lossy().into_owned();
+        let is_dir = match entry.metadata() {
+            Ok(metadata) => metadata.is_dir(),
+            Err(error) => {
+                warnings.push(format!(
+                    "Skipped Library entry \"{session}\" because its metadata is unavailable: {error}"
+                ));
+                continue;
+            }
+        };
+        if is_dir {
+            if let Err(error) = read_child(&entry.path(), Some(session.clone()), &mut clips) {
+                warnings.push(format!(
+                    "Skipped Library session \"{session}\" because it could not be read: {error}"
+                ));
+            }
         }
     }
+    for warning in &warnings {
+        eprintln!("partial Library scan: {warning}");
+    }
     clips.sort_by_key(|c| std::cmp::Reverse(c.modified_unix));
-    Ok(clips)
+    Ok(LocalClipScan { clips, warnings })
 }
 
 fn push_clips_from(
@@ -333,17 +389,91 @@ fn game_from_markers(markers: Option<&ClipMarkers>) -> Option<ClipGame> {
 /// the webview loads through the asset protocol. Lazy and per-clip so the
 /// library listing never blocks on ffmpeg.
 #[tauri::command]
-pub async fn clip_poster(
+pub async fn clip_poster<R: Runtime>(
+    app: AppHandle<R>,
     path: String,
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<String, String> {
+    let scope_root = settings.clips_dir()?;
     let target = validate_clip_path(&settings, &path)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let poster = tauri::async_runtime::spawn_blocking(move || {
         let seek_s = poster_seek_seconds(&target);
-        crate::poster::ensure_poster(&target, seek_s).map(|poster| poster.display().to_string())
+        crate::poster::ensure_poster(&target, seek_s)
     })
     .await
-    .map_err(|e| format!("clip poster task: {e}"))?
+    .map_err(|e| format!("clip poster task: {e}"))??;
+    allow_local_poster_asset(&app, &scope_root, &poster)?;
+    Ok(poster.display().to_string())
+}
+
+fn allow_local_clip_asset<R: Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    clip: &Path,
+) -> Result<(), String> {
+    allow_local_media_asset(app, root, clip, &["mp4"])
+}
+
+fn allow_local_clip_asset_from_canonical_root<R: Runtime>(
+    app: &AppHandle<R>,
+    canonical_root: &Path,
+    clip: &Path,
+) -> Result<(), String> {
+    allow_local_media_asset_from_canonical_root(app, canonical_root, clip, &["mp4"])
+}
+
+fn allow_local_poster_asset<R: Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    poster: &Path,
+) -> Result<(), String> {
+    allow_local_media_asset(app, root, poster, &["jpg", "jpeg"])
+}
+
+fn allow_local_media_asset<R: Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    asset: &Path,
+    extensions: &[&str],
+) -> Result<(), String> {
+    let canonical_root = canonical_media_root(root)?;
+    allow_local_media_asset_from_canonical_root(app, &canonical_root, asset, extensions)
+}
+
+fn canonical_media_root(root: &Path) -> Result<PathBuf, String> {
+    root.canonicalize()
+        .map_err(|e| format!("canonicalize media root {root:?}: {e}"))
+}
+
+fn allow_local_media_asset_from_canonical_root<R: Runtime>(
+    app: &AppHandle<R>,
+    canonical_root: &Path,
+    asset: &Path,
+    extensions: &[&str],
+) -> Result<(), String> {
+    let canonical_asset = asset
+        .canonicalize()
+        .map_err(|e| format!("canonicalize media asset {asset:?}: {e}"))?;
+    if !canonical_asset.starts_with(canonical_root) {
+        return Err(format!(
+            "media asset {canonical_asset:?} escaped root {canonical_root:?}"
+        ));
+    }
+    let extension = canonical_asset
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .ok_or_else(|| format!("media asset {canonical_asset:?} has no extension"))?;
+    if !extensions
+        .iter()
+        .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+    {
+        return Err(format!(
+            "media asset {canonical_asset:?} has an unsupported extension"
+        ));
+    }
+    app.asset_protocol_scope()
+        .allow_file(&canonical_asset)
+        .map_err(|e| format!("scope media asset {canonical_asset:?} for playback: {e}"))
 }
 
 /// The frame to grab a poster from: prefer a local-player review event, then
@@ -716,7 +846,8 @@ fn rollback_renamed_clip_files(
 }
 
 #[tauri::command]
-pub async fn export_clip(
+pub async fn export_clip<R: Runtime>(
+    app: AppHandle<R>,
     path: String,
     start_s: f64,
     end_s: f64,
@@ -724,13 +855,16 @@ pub async fn export_clip(
     include_markers: Option<bool>,
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<ExportedClipInfo, String> {
+    let scope_root = settings.clips_dir()?;
     let source = validate_clip_path(&settings, &path)?;
     let include_markers = include_markers.unwrap_or(true);
-    tauri::async_runtime::spawn_blocking(move || {
+    let exported = tauri::async_runtime::spawn_blocking(move || {
         export_clip_file(source, start_s, end_s, title, include_markers)
     })
     .await
-    .map_err(|e| format!("export clip task: {e}"))?
+    .map_err(|e| format!("export clip task: {e}"))??;
+    allow_local_clip_asset(&app, &scope_root, Path::new(&exported.path))?;
+    Ok(exported)
 }
 
 #[tauri::command]
@@ -1088,17 +1222,18 @@ fn clipboard_share_path(
         source,
         selected_audio_track_ids,
         &crate::settings::share_export_cache_dir(),
-        |source, mode| {
-            let source_bytes = std::fs::read(source).map_err(|e| format!("read clip: {e}"))?;
+        |source, target, mode| {
             match mode {
                 ShareAudioExportMode::Remux(indices) => {
-                    remux_with_selected_audio_tracks(&source_bytes, &indices)
-                        .map_err(|e| e.to_string())
+                    remux_with_selected_audio_tracks_file(source, target, &indices)
+                        .map_err(|e| e.to_string())?;
                 }
                 ShareAudioExportMode::Mix(indices) => {
-                    remux_with_mixed_audio_track(&source_bytes, &indices).map_err(|e| e.to_string())
+                    remux_with_mixed_audio_track_file(source, target, &indices)
+                        .map_err(|e| e.to_string())?;
                 }
             }
+            Ok(())
         },
     )
 }
@@ -1107,7 +1242,7 @@ fn clipboard_share_path_with_exporter(
     source: &Path,
     selected_audio_track_ids: Option<&[String]>,
     export_dir: &Path,
-    mut export_audio: impl FnMut(&Path, ShareAudioExportMode) -> Result<Vec<u8>, String>,
+    mut export_audio: impl FnMut(&Path, &Path, ShareAudioExportMode) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     let Some(mode) = clipboard_share_export_mode(source, selected_audio_track_ids)? else {
         return Ok(source.to_path_buf());
@@ -1121,9 +1256,11 @@ fn clipboard_share_path_with_exporter(
         return Ok(export);
     }
 
-    let bytes = export_audio(source, mode)?;
     let tmp = share_export_tmp_path(&export)?;
-    std::fs::write(&tmp, bytes).map_err(|e| format!("write share export: {e}"))?;
+    if let Err(error) = export_audio(source, &tmp, mode) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
     match std::fs::rename(&tmp, &export) {
         Ok(()) => {}
         Err(_) if export.exists() => {
@@ -1488,12 +1625,17 @@ pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Res
 pub async fn copy_clip_to_clipboard(
     request: CopyClipToClipboardRequest,
     settings: tauri::State<'_, StorageSettings>,
+    window: tauri::WebviewWindow,
 ) -> Result<(), String> {
     let target = validate_clip_path(&settings, &request.path)?;
     let audio_track_ids = request.audio_track_ids;
+    let owner = window
+        .hwnd()
+        .map_err(|error| format!("get Clipline window handle: {error}"))?
+        .0 as isize;
     tauri::async_runtime::spawn_blocking(move || {
         let share_path = clipboard_share_path(&target, audio_track_ids.as_deref())?;
-        copy_file_to_clipboard(&share_path)
+        copy_file_to_clipboard(&share_path, owner as HWND)
     })
     .await
     .map_err(|e| format!("copy clip task: {e}"))?
@@ -1609,81 +1751,6 @@ pub(crate) fn clip_kind_for_path(path: &Path) -> String {
     clip_kind_from_metadata(path, &metadata).to_string()
 }
 
-fn inferred_clip_kind_for_path(path: &Path) -> &'static str {
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if name.contains("_trim_") {
-        "trim"
-    } else if name.starts_with("session_") {
-        "session"
-    } else {
-        "replay"
-    }
-}
-
-fn normalized_clip_title(input: &str) -> Result<String, String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err("clip name cannot be empty".into());
-    }
-    if trimmed.chars().any(|ch| ch.is_ascii_control()) {
-        return Err("clip name contains a control character".into());
-    }
-    Ok(trimmed.to_string())
-}
-
-fn normalized_clip_file_name(input: &str) -> Result<String, String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err("clip name cannot be empty".into());
-    }
-    if trimmed.contains(['/', '\\']) {
-        return Err("clip name cannot contain folders".into());
-    }
-    if trimmed
-        .chars()
-        .any(|ch| ch.is_ascii_control() || matches!(ch, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
-    {
-        return Err("clip name contains a character Windows cannot use in filenames".into());
-    }
-
-    let suffix = trimmed
-        .get(trimmed.len().saturating_sub(4)..)
-        .filter(|suffix| suffix.eq_ignore_ascii_case(".mp4"));
-    let stem = if suffix.is_some() {
-        &trimmed[..trimmed.len() - 4]
-    } else {
-        trimmed
-    }
-    .trim();
-    if stem.is_empty() || stem == "." || stem == ".." {
-        return Err("clip name cannot be empty".into());
-    }
-    if stem.ends_with(['.', ' ']) {
-        return Err("clip name cannot end with a dot or space".into());
-    }
-    if is_reserved_windows_file_name(stem) {
-        return Err("clip name is reserved by Windows".into());
-    }
-    Ok(format!("{stem}.mp4"))
-}
-
-fn is_reserved_windows_file_name(stem: &str) -> bool {
-    let base = stem
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_uppercase();
-    matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (base.len() == 4
-            && (base.starts_with("COM") || base.starts_with("LPT"))
-            && base.as_bytes()[3].is_ascii_digit()
-            && base.as_bytes()[3] != b'0')
-}
-
 fn display_renamed_clip_path(old_path: &str, name: &str, fallback_parent: &Path) -> String {
     Path::new(old_path)
         .parent()
@@ -1708,7 +1775,7 @@ fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, n
     }
 }
 
-fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
+fn copy_file_to_clipboard(path: &Path, owner: HWND) -> Result<(), String> {
     let payload = dropfiles_payload(path);
     let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, payload.len()) };
     if handle.is_null() {
@@ -1729,17 +1796,54 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
     }
 
     let mut transfer = ClipboardTransfer::new(handle);
-    if unsafe { OpenClipboard(ptr::null_mut()) } == 0 {
-        return Err(last_os_error("open clipboard"));
+    clipboard_transaction(
+        8,
+        || {
+            if unsafe { OpenClipboard(owner) } == 0 {
+                Err(last_os_error("open clipboard"))
+            } else {
+                Ok(())
+            }
+        },
+        || unsafe {
+            CloseClipboard();
+        },
+        || {
+            if unsafe { SetClipboardData(CF_HDROP as u32, transfer.handle()) }.is_null() {
+                Err(last_os_error("set clipboard data"))
+            } else {
+                transfer.release();
+                Ok(())
+            }
+        },
+        || std::thread::sleep(Duration::from_millis(15)),
+    )
+}
+
+fn clipboard_transaction<E>(
+    attempts: usize,
+    mut open: impl FnMut() -> Result<(), E>,
+    mut close: impl FnMut(),
+    mut set: impl FnMut() -> Result<(), E>,
+    mut wait: impl FnMut(),
+) -> Result<(), E> {
+    let mut last_error = None;
+    for attempt in 0..attempts.max(1) {
+        match open() {
+            Ok(()) => {
+                let result = set();
+                close();
+                return result;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < attempts.max(1) {
+                    wait();
+                }
+            }
+        }
     }
-    let _close = ClipboardClose;
-    // CF_HDROP can be replaced format-by-format. Avoid EmptyClipboard so a
-    // rare SetClipboardData failure does not discard the user's clipboard.
-    if unsafe { SetClipboardData(CF_HDROP as u32, transfer.handle()) }.is_null() {
-        return Err(last_os_error("set clipboard data"));
-    }
-    transfer.release();
-    Ok(())
+    Err(last_error.expect("at least one clipboard-open attempt runs"))
 }
 
 fn dropfiles_payload(path: &Path) -> Vec<u8> {
@@ -1813,16 +1917,6 @@ impl Drop for ClipboardTransfer {
             unsafe {
                 GlobalFree(self.handle);
             }
-        }
-    }
-}
-
-struct ClipboardClose;
-
-impl Drop for ClipboardClose {
-    fn drop(&mut self) {
-        unsafe {
-            CloseClipboard();
         }
     }
 }
@@ -1979,13 +2073,12 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    use audiopus::coder::Encoder;
-    use audiopus::{Application, Channels, SampleRate};
     use clipline_events::{ClipAudioTrack, ClipPlay, EventKind, GameEvent, GameId, PlayerSummary};
     use clipline_mp4::{
         AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
     };
     use clipline_test_utils::TestDir;
+    use shiguredo_opus::{Encoder, EncoderConfig};
 
     fn marker(t_s: f64) -> ClipMarker {
         marker_with(t_s, EventKind::ChampionKill, true)
@@ -2350,10 +2443,11 @@ mod tests {
             &source,
             Some(&selected),
             &export_dir,
-            |input, mode| {
+            |input, target, mode| {
                 assert_eq!(input, source.as_path());
                 assert_eq!(mode, ShareAudioExportMode::Mix(vec![0, 1]));
-                Ok(b"mixed share mp4".to_vec())
+                std::fs::write(target, b"mixed share mp4").unwrap();
+                Ok(())
             },
         )
         .unwrap();
@@ -2373,7 +2467,7 @@ mod tests {
             &source,
             selected,
             &dir.path().join("share"),
-            |_, _| panic!("clipboard copy without explicit audio selection must not export"),
+            |_, _, _| panic!("clipboard copy without explicit audio selection must not export"),
         )
         .unwrap();
 
@@ -3126,11 +3220,44 @@ mod tests {
         )
         .unwrap();
 
-        let clips = list_clips_from_dir(media).unwrap();
+        let clips = list_clips_from_dir(media).unwrap().clips;
 
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].duration_s, Some(42.5));
         assert_eq!(clips[0].markers.as_ref().unwrap().markers.len(), 1);
+    }
+
+    #[test]
+    fn local_library_scan_keeps_readable_sessions_and_warns_about_denied_children() {
+        let dir = TestDir::new("clipline-library", "partial-session-scan");
+        let media = dir.path().join("media");
+        let readable = media.join("readable-session");
+        let denied = media.join("denied-session");
+        touch_mp4(&readable.join("kept.mp4"));
+        std::fs::create_dir_all(&denied).unwrap();
+
+        let result = list_clips_from_dir_with_child_reader(media, |path, session, clips| {
+            if path.ends_with("denied-session") {
+                Err("access denied by test".into())
+            } else {
+                push_clips_from(path, session, clips)
+            }
+        })
+        .unwrap();
+
+        assert_eq!(result.clips.len(), 1);
+        assert_eq!(result.clips[0].name, "kept.mp4");
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("denied-session"));
+        assert!(result.warnings[0].contains("access denied by test"));
+    }
+
+    #[test]
+    fn local_library_scan_keeps_root_failures_fatal() {
+        let dir = TestDir::new("clipline-library", "missing-root-scan");
+        let missing = dir.path().join("missing");
+
+        assert!(list_clips_from_dir(missing).is_err());
     }
 
     #[test]
@@ -3301,7 +3428,7 @@ mod tests {
         assert_eq!(result.kind, "session");
         assert!(clip.exists(), "display title rename must not move the MP4");
 
-        let clips = list_clips_from_dir(root).unwrap();
+        let clips = list_clips_from_dir(root).unwrap().clips;
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].name, "session_123.mp4");
         assert_eq!(clips[0].title.as_deref(), Some("Ranked win vs Lux"));
@@ -3337,7 +3464,7 @@ mod tests {
         assert!(!crate::poster::poster_path(&source).exists());
         assert!(crate::poster::poster_path(&target).exists());
 
-        let clips = list_clips_from_dir(root).unwrap();
+        let clips = list_clips_from_dir(root).unwrap().clips;
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].name, "Ranked win.mp4");
         assert_eq!(clips[0].title, None);
@@ -3833,8 +3960,7 @@ mod tests {
     }
 
     fn opus_audio_packets(amplitude: f32) -> Vec<FragSample> {
-        let encoder =
-            Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Audio).unwrap();
+        let mut encoder = Encoder::new(EncoderConfig::new(48_000, 2)).unwrap();
         (0..50)
             .map(|frame_idx| {
                 let mut pcm = Vec::with_capacity(960 * 2);
@@ -3843,9 +3969,7 @@ mod tests {
                     let sample = (t * 440.0 * std::f32::consts::TAU).sin() * amplitude;
                     pcm.extend([sample, sample]);
                 }
-                let mut encoded = vec![0u8; 4000];
-                let len = encoder.encode_float(&pcm, &mut encoded).unwrap();
-                encoded.truncate(len);
+                let encoded = encoder.encode_f32(&pcm).unwrap();
                 FragSample {
                     data: encoded,
                     duration: 960,
@@ -3998,5 +4122,68 @@ mod tests {
         let decoded = String::from_utf16(&shell_clipboard_path_wide(path)).unwrap();
 
         assert_eq!(decoded, r"\\nas\clips\clïp 雪.mp4");
+    }
+
+    #[test]
+    fn clipboard_transaction_retries_open_and_closes_every_opened_path() {
+        use std::cell::{Cell, RefCell};
+
+        let events = RefCell::new(Vec::new());
+        let opens = Cell::new(0_u32);
+        let result = clipboard_transaction(
+            3,
+            || {
+                events.borrow_mut().push("open");
+                opens.set(opens.get() + 1);
+                if opens.get() < 3 {
+                    Err("busy")
+                } else {
+                    Ok(())
+                }
+            },
+            || events.borrow_mut().push("close"),
+            || {
+                events.borrow_mut().push("set");
+                Ok(())
+            },
+            || events.borrow_mut().push("wait"),
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            events.into_inner(),
+            vec!["open", "wait", "open", "wait", "open", "set", "close"]
+        );
+
+        let events = RefCell::new(Vec::new());
+        let result = clipboard_transaction(
+            1,
+            || {
+                events.borrow_mut().push("open");
+                Ok::<(), &str>(())
+            },
+            || events.borrow_mut().push("close"),
+            || {
+                events.borrow_mut().push("set");
+                Err("set")
+            },
+            || unreachable!(),
+        );
+        assert_eq!(result, Err("set"));
+        assert_eq!(events.into_inner(), vec!["open", "set", "close"]);
+
+        let closes = Cell::new(0);
+        let result = clipboard_transaction(
+            2,
+            || Err::<(), _>("busy"),
+            || closes.set(closes.get() + 1),
+            || Ok(()),
+            || {},
+        );
+        assert_eq!(result, Err("busy"));
+        assert_eq!(
+            closes.get(),
+            0,
+            "never close a clipboard that was not opened"
+        );
     }
 }

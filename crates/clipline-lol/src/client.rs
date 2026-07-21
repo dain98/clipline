@@ -5,11 +5,12 @@ use serde::Deserialize;
 
 use clipline_events::{PlayerItem, PlayerParticipant, PlayerSummary, PlayerSummonerSpell};
 
-use crate::normalize::player_name_key;
+use crate::normalize::PlayerNameIdentity;
 use crate::raw::{EventData, PlayerItemEntry, PlayerListEntry, PlayerSummonerSpellEntry};
 
 /// Riot's local Live Client Data endpoint (ddoc §5a).
 const DEFAULT_BASE: &str = "https://127.0.0.1:2999";
+const MAX_LIVE_CLIENT_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -17,13 +18,17 @@ pub enum Error {
     Http(#[from] reqwest::Error),
     #[error("refusing to disable certificate validation for non-loopback URL: {0}")]
     NotLoopback(String),
+    #[error("live client response is invalid: {0}")]
+    InvalidResponse(String),
+    #[error("live client JSON is invalid: {0}")]
+    InvalidJson(#[from] serde_json::Error),
 }
 
 /// Client for the League Live Client Data API. The real endpoint serves a
 /// self-signed Riot cert over loopback, so certificate validation is
-/// disabled — the client is only ever pointed at 127.0.0.1 (or a test mock).
+/// disabled only after the base is pinned to a numeric loopback address.
 pub struct LiveClient {
-    base: String,
+    base: reqwest::Url,
     http: reqwest::Client,
 }
 
@@ -44,11 +49,13 @@ struct GameStats {
 impl LiveClient {
     pub fn new(base: impl Into<String>) -> Result<Self, Error> {
         let base = base.into();
-        if !is_loopback_url(&base).unwrap_or(false) {
-            return Err(Error::NotLoopback(base));
-        }
+        let base = normalize_loopback_base(&base)?;
         let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .danger_accept_invalid_certs(true)
+            .connect_timeout(Duration::from_secs(1))
+            .read_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(2))
             .build()?;
         Ok(Self { base, http })
@@ -60,16 +67,16 @@ impl LiveClient {
     }
 
     pub async fn event_data(&self) -> Result<EventData, Error> {
-        Ok(self.get_json("/liveclientdata/eventdata").await?)
+        self.get_json("/liveclientdata/eventdata").await
     }
 
     pub async fn player_list(&self) -> Result<Vec<PlayerListEntry>, Error> {
-        Ok(self.get_json("/liveclientdata/playerlist").await?)
+        self.get_json("/liveclientdata/playerlist").await
     }
 
     /// Riot returns the active player's name as a bare JSON string.
     pub async fn active_player_name(&self) -> Result<String, Error> {
-        Ok(self.get_json("/liveclientdata/activeplayername").await?)
+        self.get_json("/liveclientdata/activeplayername").await
     }
 
     pub async fn player_summary(&self, local_player: &str) -> Result<Option<PlayerSummary>, Error> {
@@ -88,40 +95,82 @@ impl LiveClient {
         Ok(stats.game_time)
     }
 
-    async fn get_json<T: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-    ) -> Result<T, reqwest::Error> {
-        self.http
-            .get(format!("{}{}", self.base, path))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<T>()
-            .await
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
+        let url = self
+            .base
+            .join(path.trim_start_matches('/'))
+            .map_err(|error| Error::InvalidResponse(format!("build endpoint URL: {error}")))?;
+        let mut response = self.http.get(url).send().await?.error_for_status()?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_LIVE_CLIENT_JSON_BYTES as u64)
+        {
+            return Err(Error::InvalidResponse(format!(
+                "body exceeds {} bytes",
+                MAX_LIVE_CLIENT_JSON_BYTES
+            )));
+        }
+        let mut body = Vec::with_capacity(
+            response
+                .content_length()
+                .unwrap_or(0)
+                .min(MAX_LIVE_CLIENT_JSON_BYTES as u64) as usize,
+        );
+        while let Some(chunk) = response.chunk().await? {
+            let total = body
+                .len()
+                .checked_add(chunk.len())
+                .ok_or_else(|| Error::InvalidResponse("body size overflow".to_string()))?;
+            if total > MAX_LIVE_CLIENT_JSON_BYTES {
+                return Err(Error::InvalidResponse(format!(
+                    "body exceeds {} bytes",
+                    MAX_LIVE_CLIENT_JSON_BYTES
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(serde_json::from_slice(&body)?)
     }
 }
 
-/// Returns `Some(true)` for loopback URLs (cert validation can safely be
-/// skipped for Riot's self-signed local cert), `Some(false)` for other
-/// well-formed URLs, and `None` for unparseable inputs.
+fn normalize_loopback_base(base: &str) -> Result<reqwest::Url, Error> {
+    let reject = || Error::NotLoopback(base.to_string());
+    let mut url = reqwest::Url::parse(base).map_err(|_| reject())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(reject());
+    }
+
+    let host = url.host_str().ok_or_else(&reject)?;
+    if host.eq_ignore_ascii_case("localhost") {
+        url.set_host(Some("127.0.0.1")).map_err(|_| reject())?;
+        return Ok(url);
+    }
+
+    let numeric_host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    let numeric = numeric_host.parse::<IpAddr>().map_err(|_| reject())?;
+    if !numeric.is_loopback() {
+        return Err(reject());
+    }
+    Ok(url)
+}
+
+/// Returns `Some(true)` only when a base can be normalized to a numeric
+/// loopback endpoint, `Some(false)` for other URLs, and `None` for garbage.
+#[cfg(test)]
 fn is_loopback_url(base: &str) -> Option<bool> {
-    let url = reqwest::Url::parse(base).ok()?;
-    let host = url.host_str()?;
-    if host == "localhost" {
-        return Some(true);
+    match reqwest::Url::parse(base) {
+        Ok(_) => Some(normalize_loopback_base(base).is_ok()),
+        Err(_) => None,
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Some(ip.is_loopback());
-    }
-    // Strip brackets from IPv6 literals like `[::1]`.
-    let trimmed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
-    if let Some(inner) = trimmed {
-        if let Ok(ip) = inner.parse::<IpAddr>() {
-            return Some(ip.is_loopback());
-        }
-    }
-    Some(false)
 }
 
 fn normalized_game_time_s(game_time_s: Option<f64>) -> Option<u32> {
@@ -200,17 +249,29 @@ pub fn player_summary_from_list_with_game_time(
     local_player: &str,
     game_time_s: Option<f64>,
 ) -> Option<PlayerSummary> {
-    let local_key = player_name_key(local_player);
-    if local_key.is_empty() {
+    let local_identity = PlayerNameIdentity::new(local_player);
+    if local_identity.is_empty() {
         return None;
     }
-    let player = players.iter().find(|player| {
-        player_name_key(&player.summoner_name) == local_key
-            || player
-                .riot_id
-                .as_deref()
-                .is_some_and(|riot_id| player_name_key(riot_id) == local_key)
-    })?;
+    let player = players
+        .iter()
+        .find(|player| {
+            local_identity.exact_match(&player.summoner_name)
+                || player
+                    .riot_id
+                    .as_deref()
+                    .is_some_and(|riot_id| local_identity.exact_match(riot_id))
+        })
+        .or_else(|| {
+            players.iter().find(|player| {
+                let preferred_name = player
+                    .riot_id
+                    .as_deref()
+                    .filter(|riot_id| PlayerNameIdentity::new(riot_id).has_tagline())
+                    .unwrap_or(&player.summoner_name);
+                local_identity.matches(preferred_name)
+            })
+        })?;
     let champion_name = player.champion_name.trim();
     if champion_name.is_empty() {
         return None;
@@ -260,6 +321,7 @@ pub fn player_summary_from_list_with_game_time(
 mod tests {
     use super::*;
     use crate::raw::{PlayerListEntry, PlayerScores, PlayerSummonerSpells};
+    use httpmock::prelude::*;
 
     #[test]
     fn is_loopback_url_accepts_loopback_variants() {
@@ -285,6 +347,92 @@ mod tests {
     fn new_rejects_non_loopback_url() {
         let err = LiveClient::new("https://example.com:2999").unwrap_err();
         assert!(matches!(err, Error::NotLoopback(_)));
+    }
+
+    #[test]
+    fn loopback_base_normalization_eliminates_name_resolution_and_url_tricks() {
+        assert_eq!(
+            normalize_loopback_base("https://127.0.0.1:2999")
+                .unwrap()
+                .as_str(),
+            "https://127.0.0.1:2999/"
+        );
+        assert_eq!(
+            normalize_loopback_base("https://[::1]:2999")
+                .unwrap()
+                .as_str(),
+            "https://[::1]:2999/"
+        );
+        assert_eq!(
+            normalize_loopback_base("http://localhost:1234")
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:1234/"
+        );
+
+        for rejected in [
+            "https://example.com:2999",
+            "https://192.168.1.1:2999",
+            "ftp://127.0.0.1:2999",
+            "https://user:pass@127.0.0.1:2999",
+            "https://127.0.0.1:2999/prefix",
+            "https://127.0.0.1:2999?query=1",
+            "https://127.0.0.1:2999/#fragment",
+            "not a url",
+        ] {
+            assert!(
+                normalize_loopback_base(rejected).is_err(),
+                "must reject {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_client_builder_explicitly_disables_redirects_and_proxies() {
+        let source = include_str!("client.rs");
+        assert!(source.contains(".redirect(reqwest::redirect::Policy::none())"));
+        assert!(source.contains(".no_proxy()"));
+    }
+
+    #[tokio::test]
+    async fn live_client_does_not_follow_loopback_redirects() {
+        let target = MockServer::start();
+        let redirected = target.mock(|when, then| {
+            when.method(GET).path("/redirected");
+            then.status(200).json_body_obj(&serde_json::json!({
+                "Events": []
+            }));
+        });
+        let source = MockServer::start();
+        source.mock(|when, then| {
+            when.method(GET).path("/liveclientdata/eventdata");
+            then.status(302)
+                .header("Location", format!("{}/redirected", target.base_url()));
+        });
+
+        let client = LiveClient::new(source.base_url()).unwrap();
+        client
+            .event_data()
+            .await
+            .expect_err("redirect response must not reach its target");
+        redirected.assert_hits(0);
+    }
+
+    #[tokio::test]
+    async fn live_client_rejects_oversized_json_before_deserialization() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/liveclientdata/eventdata");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body("x".repeat(MAX_LIVE_CLIENT_JSON_BYTES + 1));
+        });
+        let client = LiveClient::new(server.base_url()).unwrap();
+
+        let error = client.event_data().await.unwrap_err();
+
+        assert!(matches!(error, Error::InvalidResponse(_)));
+        assert!(error.to_string().contains("exceeds"));
     }
 
     fn player(
@@ -329,6 +477,19 @@ mod tests {
         let by_summoner =
             player_summary_from_list_with_game_time(&players, " DAIN ", None).unwrap();
         assert_eq!(by_summoner.champion_name, "Nautilus");
+    }
+
+    #[test]
+    fn player_summary_prefers_exact_riot_id_over_same_name_fallback() {
+        let players = [
+            player("dain", Some("Dain#EUW"), "Ahri", 1, 2, 3),
+            player("dain", Some(" dAiN # nA1 "), "Nautilus", 3, 4, 23),
+        ];
+
+        let summary = player_summary_from_list_with_game_time(&players, "Dain#NA1", None).unwrap();
+
+        assert_eq!(summary.champion_name, "Nautilus");
+        assert_eq!((summary.kills, summary.deaths, summary.assists), (3, 4, 23));
     }
 
     #[test]

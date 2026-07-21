@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
 
 use clipline_capture::ffmpeg;
 use clipline_capture::ffmpeg_encoder::FfmpegVideoEncoder;
@@ -29,17 +28,25 @@ use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
 };
 use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
-use clipline_storage::{enforce_quota, recover_recording_files, storage_status, StorageStatus};
+use clipline_storage::{
+    clip_ownership_marker_path, enforce_quota, ensure_clip_owned, recover_recording_files,
+    remove_clip_ownership_marker, storage_status, StorageStatus,
+};
 use clipline_storage::{session_label, SessionTracker};
-use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 use crate::markers::PollerMsg;
+use crate::util::{unix_now as unix_now_u64, unix_now_i64};
 
 /// Re-exported so the app layer can name codecs without its own
 /// clipline-capture import.
 pub use clipline_capture::probe::Codec;
 
 const LOW_REPLAY_CACHE_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const REPLAY_CACHE_RUN_PREFIX: &str = "clipline-replay-cache-";
+const REPLAY_CACHE_OWNER_FILE: &str = ".clipline-run.json";
+const AMBIGUOUS_REPLAY_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+#[path = "service/media_root.rs"]
+mod media_root;
 pub enum Cmd {
     Save,
     Stop { announce: bool },
@@ -131,9 +138,8 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
         let wall_remaining = self
             .frame_interval
             .saturating_sub(now.saturating_duration_since(self.last_emit_wall));
-        let timeout = self
-            .retry_deadline
-            .take()
+        let retry_deadline = self.retry_deadline.take();
+        let timeout = retry_deadline
             .map(|deadline| deadline.saturating_duration_since(now).min(wall_remaining))
             .unwrap_or(wall_remaining);
         match self.inner.next_frame_timeout(timeout) {
@@ -171,6 +177,19 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
                 };
                 let now = Instant::now();
                 let elapsed = now.saturating_duration_since(self.last_emit_wall);
+                if elapsed < self.frame_interval {
+                    // A capture backend may report a timeout before the duration it was
+                    // asked to wait. Do not pay out a full video cadence slot until that
+                    // slot's wall-clock deadline has actually arrived.
+                    let wall_remaining = self.frame_interval - elapsed;
+                    if retry_deadline.is_some_and(|deadline| deadline > now) {
+                        self.retry_deadline = retry_deadline;
+                    }
+                    let retry_after = retry_deadline
+                        .map(|deadline| deadline.saturating_duration_since(now))
+                        .map_or(wall_remaining, |remaining| remaining.min(wall_remaining));
+                    return Err(CaptureError::Timeout(retry_after));
+                }
                 let elapsed_intervals =
                     (elapsed.as_secs_f64() / self.frame_interval_s).floor() as u64;
                 let intervals = elapsed_intervals.max(1);
@@ -181,14 +200,8 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
                     .max(min_pts);
                 self.last_emit_pts_s = Some(pts_s);
                 self.next_pts_s = Some(pts_s + self.frame_interval_s);
-                if elapsed >= self.frame_interval {
-                    self.last_emit_wall +=
-                        Duration::from_secs_f64(intervals as f64 * self.frame_interval_s);
-                } else {
-                    // A test double (or early platform timeout) may return before its
-                    // requested wait. Treat that return as the emission time.
-                    self.last_emit_wall = now;
-                }
+                self.last_emit_wall +=
+                    Duration::from_secs_f64(intervals as f64 * self.frame_interval_s);
                 Ok(Some(Frame { pts_s, data }))
             }
             Err(e) => Err(e),
@@ -465,6 +478,10 @@ impl OutputResolution {
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
+    MediaRootResolved {
+        path: String,
+        fell_back: bool,
+    },
     Status {
         recording: bool,
         segments: usize,
@@ -502,7 +519,7 @@ pub enum Event {
 /// alongside saved clips so the library can show its icon.
 #[derive(Clone, Debug)]
 pub struct ActiveGame {
-    pub id: String,
+    pub identity: crate::game_identity::GameIdentity,
     pub name: String,
 }
 
@@ -510,10 +527,7 @@ pub struct ServiceOptions {
     pub capture_source: CaptureSource,
     /// Screen-capture backend preference for display/region capture.
     pub capture_backend: CaptureBackend,
-    /// Built-in game plugin id for the active capture target, if any.
-    pub active_game_plugin_id: Option<String>,
-    /// Active game (plugin or custom) for clip attribution. Unlike
-    /// `active_game_plugin_id`, this is set for custom games too.
+    /// Active built-in or custom game identity for policy and clip attribution.
     pub active_game: Option<ActiveGame>,
     /// Root folder for saved media.
     pub media_dir: PathBuf,
@@ -551,7 +565,6 @@ impl Default for ServiceOptions {
         Self {
             capture_source: CaptureSource::PrimaryMonitor,
             capture_backend: CaptureBackend::Auto,
-            active_game_plugin_id: None,
             active_game: None,
             media_dir: default_clips_dir(),
             recover_abandoned_recordings: true,
@@ -632,7 +645,11 @@ impl PlayerSummaryState {
 }
 
 fn marker_source_kind(opts: &ServiceOptions) -> MarkerSourceKind {
-    if crate::game_plugins::has_event_source(opts.active_game_plugin_id.as_deref()) {
+    let plugin_id = opts
+        .active_game
+        .as_ref()
+        .and_then(|game| game.identity.plugin_id());
+    if crate::game_plugins::has_event_source(plugin_id) {
         MarkerSourceKind::Plugin
     } else {
         MarkerSourceKind::LegacyLeaguePoller
@@ -646,7 +663,11 @@ fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver
     };
     match marker_source_kind(opts) {
         MarkerSourceKind::Plugin => {
-            crate::game_plugins::spawn_event_source(opts.active_game_plugin_id.as_deref(), context)
+            let plugin_id = opts
+                .active_game
+                .as_ref()
+                .and_then(|game| game.identity.plugin_id());
+            crate::game_plugins::spawn_event_source(plugin_id, context)
                 .expect("marker source kind checked plugin event source")
         }
         MarkerSourceKind::LegacyLeaguePoller => {
@@ -809,30 +830,11 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let (encoder, active) = build_encoder(&device, &opts, in_w, in_h, enc_w, enc_h, events)?;
     let encoder_status = encoder_label(active);
 
-    let replay_cache_dir = prepare_replay_storage(&opts)?;
-    let replay_storage = match &opts.replay_storage {
-        ReplayStorageOptions::Memory => ReplayStorageConfig::Memory {
-            max_bytes: opts.buffer_bytes,
-        },
-        ReplayStorageOptions::Disk { quota_bytes, .. } => ReplayStorageConfig::Disk {
-            max_bytes: usize::try_from(*quota_bytes).unwrap_or(usize::MAX),
-            dir: replay_cache_dir
-                .clone()
-                .ok_or_else(|| "disk replay cache was not prepared".to_string())?,
-        },
-    };
-    let cap = CadencedCapture::new(cap, opts.fps, &first);
-    let mut rec = Recorder::new_with_replay_storage(cap, encoder, replay_storage)
-        .map_err(|e| format!("replay cache: {e}"))?;
-    let audio_tracks = audio_sources_from_options(clock, &opts.audio, events);
-    let audio_track_metadata: Vec<ClipAudioTrack> = audio_tracks
-        .iter()
-        .map(|(_, track)| track.clone())
-        .collect();
-    for (audio, _) in audio_tracks {
-        rec = rec.with_audio(audio);
-    }
     let (clips_dir, fell_back) = clips_dir_resolved(&opts.media_dir, default_clips_dir)?;
+    let _ = events.send(Event::MediaRootResolved {
+        path: clips_dir.display().to_string(),
+        fell_back,
+    });
     if fell_back {
         warn_user(
             events,
@@ -851,6 +853,32 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                 "saving recordings to a temporary folder {clips_dir:?} that the system may delete; choose a Media folder in Settings"
             ),
         );
+    }
+
+    let mut prepared_replay = prepare_replay_storage(&opts)?;
+    let replay_cache_dir = prepared_replay.run_dir.clone();
+    let replay_storage = match &opts.replay_storage {
+        ReplayStorageOptions::Memory => ReplayStorageConfig::Memory {
+            max_bytes: opts.buffer_bytes,
+        },
+        ReplayStorageOptions::Disk { .. } => ReplayStorageConfig::Disk {
+            max_bytes: prepared_replay.max_bytes,
+            dir: replay_cache_dir
+                .clone()
+                .ok_or_else(|| "disk replay cache was not prepared".to_string())?,
+        },
+    };
+    let cap = CadencedCapture::new(cap, opts.fps, &first);
+    let mut rec = Recorder::new_with_replay_storage(cap, encoder, replay_storage)
+        .map_err(|e| format!("replay cache: {e}"))?;
+    prepared_replay.disarm();
+    let audio_tracks = audio_sources_from_options(clock, &opts.audio, events);
+    let audio_track_metadata: Vec<ClipAudioTrack> = audio_tracks
+        .iter()
+        .map(|(_, track)| track.clone())
+        .collect();
+    for (audio, _) in audio_tracks {
+        rec = rec.with_audio(audio);
     }
     if opts.recover_abandoned_recordings {
         recover_abandoned_recordings(&clips_dir, events);
@@ -876,19 +904,21 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             // Idle screen: WGC delivers nothing — keep serving commands.
             Err(PipelineError::Capture(CaptureError::Timeout(_))) => {}
             Err(e) => {
-                let _ = shutdown_recorder(
-                    &mut rec,
-                    &mut full_session,
-                    RecorderFinishContext {
-                        marker_log: &marker_log,
-                        player_summary: player_summary.full_session_summary(),
-                        audio_tracks: &audio_track_metadata,
-                        clips_dir: &clips_dir,
-                        opts: &opts,
-                        events,
-                    },
-                );
-                return Err(format!("recording: {e}"));
+                let primary = format!("recording: {e}");
+                return Err(finalize_runtime_failure(primary, || {
+                    shutdown_recorder(
+                        &mut rec,
+                        &mut full_session,
+                        RecorderFinishContext {
+                            marker_log: &marker_log,
+                            player_summary: player_summary.full_session_summary(),
+                            audio_tracks: &audio_track_metadata,
+                            clips_dir: &clips_dir,
+                            opts: &opts,
+                            events,
+                        },
+                    )
+                }));
             }
         }
 
@@ -914,6 +944,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     player_summary.match_ended();
                     session.match_ended();
                 }
+                PollerMsg::Heartbeat => {}
             }
         }
 
@@ -921,7 +952,22 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             last_status = Instant::now();
             send_recording_status(events, &rec, &full_session, &encoder_status);
             if replay_cache_dir.is_some() {
-                ensure_replay_cache_free_space(&opts)?;
+                if let Err(primary) = ensure_replay_cache_free_space(&opts) {
+                    return Err(finalize_runtime_failure(primary, || {
+                        shutdown_recorder(
+                            &mut rec,
+                            &mut full_session,
+                            RecorderFinishContext {
+                                marker_log: &marker_log,
+                                player_summary: player_summary.full_session_summary(),
+                                audio_tracks: &audio_track_metadata,
+                                clips_dir: &clips_dir,
+                                opts: &opts,
+                                events,
+                            },
+                        )
+                    }));
+                }
             }
         }
 
@@ -1081,7 +1127,7 @@ fn add_output_audio_sources(
                         options.output_volume,
                     ) {
                         Ok(audio) => process_tracks.push((process, audio)),
-                        Err(e) if e.to_string().contains("timed out") => {
+                        Err(e) if e.is_timeout() => {
                             process_loopback_failed = true;
                             process_loopback_error.get_or_insert_with(|| e.to_string());
                             break;
@@ -1364,9 +1410,53 @@ fn open_candidate(
     }
 }
 
-fn prepare_replay_storage(opts: &ServiceOptions) -> Result<Option<PathBuf>, String> {
+struct PreparedReplayStorage {
+    run_dir: Option<PathBuf>,
+    max_bytes: usize,
+    armed: bool,
+}
+
+impl PreparedReplayStorage {
+    fn memory(max_bytes: usize) -> Self {
+        Self {
+            run_dir: None,
+            max_bytes,
+            armed: false,
+        }
+    }
+
+    fn disk(run_dir: PathBuf, max_bytes: usize) -> Self {
+        Self {
+            run_dir: Some(run_dir),
+            max_bytes,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PreparedReplayStorage {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Some(run_dir) = &self.run_dir {
+                let _ = std::fs::remove_dir_all(run_dir);
+            }
+        }
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ReplayCacheOwner {
+    process_instance_id: String,
+    created_at_unix: u64,
+}
+
+fn prepare_replay_storage(opts: &ServiceOptions) -> Result<PreparedReplayStorage, String> {
     match &opts.replay_storage {
-        ReplayStorageOptions::Memory => Ok(None),
+        ReplayStorageOptions::Memory => Ok(PreparedReplayStorage::memory(opts.buffer_bytes)),
         ReplayStorageOptions::Disk { dir, quota_bytes } => {
             if *quota_bytes < 256 * 1024 * 1024 {
                 return Err("replay cache quota is too small".into());
@@ -1374,6 +1464,17 @@ fn prepare_replay_storage(opts: &ServiceOptions) -> Result<Option<PathBuf>, Stri
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("create replay cache folder {dir:?}: {e}"))?;
             ensure_replay_cache_free_space(opts)?;
+            let now = SystemTime::now();
+            let preserved_bytes =
+                sweep_replay_cache_runs(dir, now, crate::windows::process_instance_id)?;
+            let available_quota = quota_bytes.saturating_sub(preserved_bytes);
+            if available_quota == 0 {
+                return Err(format!(
+                    "replay cache quota is already consumed by active or protected runs ({preserved_bytes} bytes)"
+                ));
+            }
+            let current_process_instance_id =
+                crate::windows::process_instance_id(std::process::id())?;
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1381,7 +1482,7 @@ fn prepare_replay_storage(opts: &ServiceOptions) -> Result<Option<PathBuf>, Stri
             let run_dir = (0u32..1024)
                 .find_map(|attempt| {
                     let candidate = dir.join(format!(
-                        "clipline-replay-cache-{stamp}-{}-{attempt}",
+                        "{REPLAY_CACHE_RUN_PREFIX}{stamp}-{}-{attempt}",
                         std::process::id()
                     ));
                     match std::fs::create_dir(&candidate) {
@@ -1395,9 +1496,135 @@ fn prepare_replay_storage(opts: &ServiceOptions) -> Result<Option<PathBuf>, Stri
                 .unwrap_or_else(|| {
                     Err("create replay cache run folder: too many collisions".into())
                 })?;
-            Ok(Some(run_dir))
+            let owner = ReplayCacheOwner {
+                process_instance_id: current_process_instance_id,
+                created_at_unix: now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            };
+            if let Err(error) = write_replay_cache_owner(&run_dir, &owner) {
+                let _ = std::fs::remove_dir_all(&run_dir);
+                return Err(error);
+            }
+            Ok(PreparedReplayStorage::disk(
+                run_dir,
+                usize::try_from(available_quota).unwrap_or(usize::MAX),
+            ))
         }
     }
+}
+
+fn write_replay_cache_owner(run_dir: &Path, owner: &ReplayCacheOwner) -> Result<(), String> {
+    let path = run_dir.join(REPLAY_CACHE_OWNER_FILE);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| format!("create replay cache ownership record {path:?}: {e}"))?;
+    serde_json::to_writer(&mut file, owner)
+        .map_err(|e| format!("write replay cache ownership record {path:?}: {e}"))?;
+    file.sync_all()
+        .map_err(|e| format!("flush replay cache ownership record {path:?}: {e}"))
+}
+
+fn sweep_replay_cache_runs(
+    root: &Path,
+    now: SystemTime,
+    mut process_instance_id: impl FnMut(u32) -> Result<String, String>,
+) -> Result<u64, String> {
+    let entries =
+        std::fs::read_dir(root).map_err(|e| format!("scan replay cache folder {root:?}: {e}"))?;
+    let mut preserved_bytes = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !is_replay_cache_run_name(name) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
+            continue;
+        }
+
+        let owner = std::fs::read(path.join(REPLAY_CACHE_OWNER_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ReplayCacheOwner>(&bytes).ok());
+        let definitively_stale = owner
+            .as_ref()
+            .and_then(|owner| {
+                replay_cache_owner_pid(&owner.process_instance_id).map(|pid| (owner, pid))
+            })
+            .and_then(|(owner, pid)| {
+                process_instance_id(pid)
+                    .ok()
+                    .map(|current| current != owner.process_instance_id)
+            });
+        let old_enough = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= AMBIGUOUS_REPLAY_CACHE_MAX_AGE);
+        let should_remove = definitively_stale.unwrap_or(old_enough);
+
+        if should_remove && std::fs::remove_dir_all(&path).is_ok() {
+            continue;
+        }
+        preserved_bytes = preserved_bytes.saturating_add(replay_cache_run_size(&path));
+    }
+    Ok(preserved_bytes)
+}
+
+fn is_replay_cache_run_name(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(REPLAY_CACHE_RUN_PREFIX) else {
+        return false;
+    };
+    let mut parts = suffix.split('-');
+    let valid = (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    });
+    valid && parts.next().is_none()
+}
+
+fn replay_cache_owner_pid(process_instance_id: &str) -> Option<u32> {
+    let (pid, creation_time) = process_instance_id.split_once(':')?;
+    if creation_time.is_empty() || !creation_time.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+fn replay_cache_run_size(path: &Path) -> u64 {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if is_link_or_reparse_point(&metadata) {
+        return 0;
+    }
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    std::fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| replay_cache_run_size(&entry.path()))
+                .fold(0u64, u64::saturating_add)
+        })
+        .unwrap_or(0)
+}
+
+fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 fn ensure_replay_cache_free_space(opts: &ServiceOptions) -> Result<(), String> {
@@ -1415,30 +1642,7 @@ fn ensure_replay_cache_free_space(opts: &ServiceOptions) -> Result<(), String> {
 }
 
 fn available_space_bytes(path: &Path) -> Result<u64, String> {
-    let mut wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    if wide.len() == 1 {
-        wide = OsStr::new(".")
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-    }
-    let mut free = 0u64;
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(
-            wide.as_ptr(),
-            &mut free,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        return Err(format!("could not read free space for {path:?}"));
-    }
-    Ok(free)
+    crate::windows::available_space_bytes(path, &format!("could not read free space for {path:?}"))
 }
 
 fn send_stopped(events: &Sender<Event>) {
@@ -1531,6 +1735,13 @@ fn shutdown_recorder(
     }
 }
 
+fn finalize_runtime_failure(primary: String, finalize: impl FnOnce() -> Option<String>) -> String {
+    match finalize() {
+        Some(finish) => format!("{primary}; additionally, {finish}"),
+        None => primary,
+    }
+}
+
 /// Sidecar that records which game a session folder belongs to, so the
 /// library can show its icon. Written once per folder; custom-game clips have
 /// no markers, so this is their only game link.
@@ -1542,7 +1753,7 @@ fn write_session_game_meta(session_dir: &Path, active_game: Option<&ActiveGame>)
     if meta_path.exists() {
         return;
     }
-    let doc = serde_json::json!({ "id": game.id, "name": game.name });
+    let doc = serde_json::json!({ "id": game.identity.id(), "name": game.name });
     match serde_json::to_string(&doc) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&meta_path, json) {
@@ -1574,7 +1785,7 @@ fn begin_full_session_recording(
         return None;
     }
     write_session_game_meta(&session_dir, active_game);
-    let stamp = media_timestamp_seconds();
+    let stamp = unix_now_u64();
     let (final_path, temp_path, file) =
         match reserve_full_session_path_at(&session_dir, "session", stamp) {
             Ok(reservation) => reservation,
@@ -1590,6 +1801,7 @@ fn begin_full_session_recording(
         };
     if let Err(e) = rec.start_full_session(file) {
         let _ = std::fs::remove_file(&temp_path);
+        let _ = remove_clip_ownership_marker(&temp_path);
         warn_user(
             events,
             format!("full-session recording unavailable; start writer: {e}"),
@@ -1599,7 +1811,7 @@ fn begin_full_session_recording(
     Some(FullSessionRecording {
         final_path,
         temp_path,
-        wall_start_unix: unix_now(),
+        wall_start_unix: unix_now_i64(),
         min_duration_s: minimum_full_session_duration_s(active_game),
     })
 }
@@ -1618,7 +1830,7 @@ fn finish_full_session_recording(
                 ctx.events,
                 "full session ended before any footage was written".into(),
             );
-            let _ = std::fs::remove_file(&recording.temp_path);
+            remove_discarded_clip(&recording.temp_path);
         }
         Ok(Some(summary))
             if should_discard_full_session_for_min_duration(
@@ -1633,7 +1845,7 @@ fn finish_full_session_recording(
                     summary.duration_s
                 ),
             );
-            let _ = std::fs::remove_file(&recording.temp_path);
+            remove_discarded_clip(&recording.temp_path);
         }
         Ok(Some(summary)) => {
             let seconds = if summary.duration_s.is_finite() {
@@ -1667,7 +1879,7 @@ fn finish_full_session_recording(
                     markers,
                     full_session: true,
                     recording_start_unix: Some(recording.wall_start_unix),
-                    recording_end_unix: Some(unix_now()),
+                    recording_end_unix: Some(unix_now_i64()),
                 },
                 ctx.opts,
             );
@@ -1677,7 +1889,7 @@ fn finish_full_session_recording(
                 ctx.events,
                 "full session ended before any footage was written".into(),
             );
-            let _ = std::fs::remove_file(&recording.temp_path);
+            remove_discarded_clip(&recording.temp_path);
         }
         Err(error) => {
             handle_full_session_finish_error(&recording.temp_path, ctx.events, &error.to_string());
@@ -1688,7 +1900,7 @@ fn finish_full_session_recording(
 fn handle_full_session_finish_error(temp_path: &Path, events: &Sender<Event>, error: &str) {
     match std::fs::metadata(temp_path) {
         Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {
-            let _ = std::fs::remove_file(temp_path);
+            remove_discarded_clip(temp_path);
             warn_user(events, format!("finish full session: {error}"));
         }
         Ok(_) => warn_user(
@@ -1696,6 +1908,7 @@ fn handle_full_session_finish_error(temp_path: &Path, events: &Sender<Event>, er
             format!("finish full session: {error}; recoverable recording kept at {temp_path:?}"),
         ),
         Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
+            let _ = remove_clip_ownership_marker(temp_path);
             warn_user(events, format!("finish full session: {error}"));
         }
         Err(metadata_error) => warn_user(
@@ -1743,8 +1956,13 @@ fn discard_full_session_recording(
     if let Err(e) = rec.finish_full_session() {
         warn_user(events, format!("stop full-session writer: {e}"));
     }
-    let _ = std::fs::remove_file(&recording.temp_path);
+    remove_discarded_clip(&recording.temp_path);
     warn_user(events, reason.to_string());
+}
+
+fn remove_discarded_clip(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = remove_clip_ownership_marker(path);
 }
 
 struct FullSessionRecording {
@@ -1756,7 +1974,13 @@ struct FullSessionRecording {
 
 fn minimum_full_session_duration_s(active_game: Option<&ActiveGame>) -> f64 {
     match active_game {
-        Some(game) if game.id == crate::game_plugins::OSU_ID => 10.0,
+        Some(game)
+            if game
+                .identity
+                .is_built_in_plugin(crate::game_plugins::OSU_ID) =>
+        {
+            10.0
+        }
         _ => 0.0,
     }
 }
@@ -1774,14 +1998,7 @@ fn should_discard_full_session_for_min_duration(min_duration_s: f64, duration_s:
 }
 
 fn unique_media_path(session_dir: &Path, prefix: &str) -> PathBuf {
-    unique_media_path_at(session_dir, prefix, media_timestamp_seconds())
-}
-
-fn media_timestamp_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    unique_media_path_at(session_dir, prefix, unix_now_u64())
 }
 
 fn unique_media_path_at(session_dir: &Path, prefix: &str, stamp: u64) -> PathBuf {
@@ -1792,7 +2009,9 @@ fn unique_media_path_at(session_dir: &Path, prefix: &str, stamp: u64) -> PathBuf
             format!("{prefix}_{stamp}_{attempt}.mp4")
         };
         let candidate = session_dir.join(name);
-        if !candidate.exists() {
+        let marker_exists =
+            clip_ownership_marker_path(&candidate).is_ok_and(|marker| marker.exists());
+        if !candidate.exists() && !marker_exists {
             return candidate;
         }
     }
@@ -1832,13 +2051,37 @@ where
             format!("{prefix}_{stamp}_{attempt}.mp4")
         };
         let final_path = session_dir.join(name);
-        if final_path.try_exists()? {
+        if final_path.try_exists()? || clip_ownership_marker_path(&final_path)?.try_exists()? {
             continue;
         }
         let temp_path = final_path.with_extension("mp4.recording");
         match reserve_temp(&final_path, &temp_path) {
             Ok(file) => match final_path.try_exists() {
-                Ok(false) => return Ok((final_path, temp_path, file)),
+                Ok(false) => match ensure_clip_owned(&temp_path) {
+                    Ok(true) => match final_path.try_exists() {
+                        Ok(false) => return Ok((final_path, temp_path, file)),
+                        Ok(true) => {
+                            drop(file);
+                            remove_discarded_clip(&temp_path);
+                            continue;
+                        }
+                        Err(check_error) => {
+                            drop(file);
+                            remove_discarded_clip(&temp_path);
+                            return Err(check_error);
+                        }
+                    },
+                    Ok(false) => {
+                        drop(file);
+                        std::fs::remove_file(&temp_path)?;
+                        continue;
+                    }
+                    Err(marker_error) => {
+                        drop(file);
+                        let _ = std::fs::remove_file(&temp_path);
+                        return Err(marker_error);
+                    }
+                },
                 Ok(true) => {
                     drop(file);
                     std::fs::remove_file(&temp_path)?;
@@ -1958,14 +2201,22 @@ fn save(
     path: &Path,
     window_s: f64,
 ) -> Result<(f64, f64), String> {
+    let marker_created =
+        ensure_clip_owned(path).map_err(|e| format!("mark Clipline-owned clip {path:?}: {e}"))?;
     let saved_from = rec
         .save_window_bounds(window_s, None)
         .map(|(start, _)| start);
-    let file = std::fs::File::create(path).map_err(|e| format!("create {path:?}: {e}"))?;
-    let (_, end) = rec
-        .save_replay(file, window_s, None)
-        .map_err(|e| format!("save: {e}"))?;
-    Ok((end, end - saved_from.unwrap_or(end)))
+    let result = (|| {
+        let file = std::fs::File::create(path).map_err(|e| format!("create {path:?}: {e}"))?;
+        let (_, end) = rec
+            .save_replay(file, window_s, None)
+            .map_err(|e| format!("save: {e}"))?;
+        Ok((end, end - saved_from.unwrap_or(end)))
+    })();
+    if result.is_err() && marker_created {
+        let _ = remove_clip_ownership_marker(path);
+    }
+    result
 }
 
 fn crop_for_region(
@@ -2127,47 +2378,55 @@ fn local_session_label(league_match: bool) -> String {
     )
 }
 
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
-
 pub(crate) fn default_clips_dir() -> PathBuf {
-    std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Videos")
-        .join("Clipline")
+    media_root::default_clips_dir()
 }
 
 pub(crate) fn clips_dir(media_dir: &Path) -> Result<PathBuf, String> {
-    clips_dir_resolved(media_dir, default_clips_dir).map(|(dir, _)| dir)
+    media_root::clips_dir(media_dir)
 }
 
 /// Resolve the directory clips are actually written to. The configured folder
-/// is used when it can be created; otherwise `fallback` is, so an unplugged
-/// external drive degrades to the default folder instead of killing recording
-/// and emptying the library. The bool is true when the fallback was taken, so
-/// callers with a UI channel can warn the user.
+/// is used when it can reserve and durably write a new file; otherwise
+/// `fallback` is, so an unplugged external drive degrades to the default folder
+/// instead of killing recording and emptying the library. The bool is true when
+/// the fallback was taken, so callers with a UI channel can warn the user.
 pub(crate) fn clips_dir_resolved(
     media_dir: &Path,
     fallback: impl FnOnce() -> PathBuf,
 ) -> Result<(PathBuf, bool), String> {
-    if std::fs::create_dir_all(media_dir).is_ok() {
-        return Ok((media_dir.to_path_buf(), false));
-    }
-    let dir = fallback();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
-    Ok((dir, true))
+    media_root::clips_dir_resolved_with_probe(media_dir, fallback, probe_writable_directory)
+}
+
+#[cfg(test)]
+fn clips_dir_resolved_with_probe(
+    media_dir: &Path,
+    fallback: impl FnOnce() -> PathBuf,
+    mut probe: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(PathBuf, bool), String> {
+    media_root::clips_dir_resolved_with_probe(media_dir, fallback, &mut probe)
+}
+
+pub(crate) fn prepare_writable_media_directory(dir: &Path) -> Result<(), String> {
+    prepare_writable_directory_with(dir, probe_writable_directory)
+        .map_err(|error| format!("media folder {} is not writable: {error}", dir.display()))
+}
+
+fn prepare_writable_directory_with(
+    dir: &Path,
+    probe: impl FnMut(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    media_root::prepare_writable_directory_with(dir, probe)
+}
+
+fn probe_writable_directory(dir: &Path) -> std::io::Result<()> {
+    media_root::probe_writable_directory(dir)
 }
 
 /// Whether `dir` lives under the system temp root. Both paths are canonicalized
 /// when they exist so a symlinked or short-name temp root still matches.
 fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
-    let normalize = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    normalize(dir).starts_with(normalize(temp_dir))
+    media_root::is_within_temp(dir, temp_dir)
 }
 
 #[cfg(test)]
@@ -2181,6 +2440,7 @@ mod tests {
 
     impl TimedFrameSource for TimeoutSource {
         fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+            std::thread::sleep(timeout);
             Err(CaptureError::Timeout(timeout))
         }
     }
@@ -2193,9 +2453,14 @@ mod tests {
     impl TimedFrameSource for ScriptedTimedSource {
         fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
             self.requested_timeouts.push(timeout);
-            self.outcomes
+            let outcome = self
+                .outcomes
                 .pop_front()
-                .expect("scripted timed source exhausted")
+                .expect("scripted timed source exhausted");
+            if matches!(outcome, Err(CaptureError::Timeout(_))) {
+                std::thread::sleep(timeout);
+            }
+            outcome
         }
     }
 
@@ -2212,6 +2477,7 @@ mod tests {
                 std::thread::sleep(self.delay);
                 Ok(Some(frame))
             } else {
+                std::thread::sleep(timeout);
                 Err(CaptureError::Timeout(timeout))
             }
         }
@@ -2226,6 +2492,20 @@ mod tests {
             self.requested_timeouts.push(timeout);
             std::thread::sleep(timeout);
             Err(CaptureError::Timeout(timeout))
+        }
+    }
+
+    struct PrematureTimeoutSource {
+        delay: Duration,
+    }
+
+    impl TimedFrameSource for PrematureTimeoutSource {
+        fn next_frame_timeout(
+            &mut self,
+            _timeout: Duration,
+        ) -> Result<Option<Frame>, CaptureError> {
+            std::thread::sleep(self.delay);
+            Err(CaptureError::Timeout(self.delay))
         }
     }
 
@@ -2460,7 +2740,13 @@ mod tests {
     #[test]
     fn marker_source_uses_active_plugin_event_source_when_available() {
         let opts = ServiceOptions {
-            active_game_plugin_id: Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into()),
+            active_game: Some(ActiveGame {
+                identity: crate::game_identity::GameIdentity::built_in_plugin(
+                    crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+                )
+                .unwrap(),
+                name: "League of Legends".into(),
+            }),
             ..ServiceOptions::default()
         };
 
@@ -2468,9 +2754,14 @@ mod tests {
     }
 
     #[test]
-    fn marker_source_falls_back_for_unknown_plugin_id() {
+    fn custom_identity_cannot_enable_a_built_in_marker_source() {
         let opts = ServiceOptions {
-            active_game_plugin_id: Some("community_game_without_source".into()),
+            active_game: Some(ActiveGame {
+                identity: crate::game_identity::GameIdentity::custom(
+                    crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+                ),
+                name: "Community game".into(),
+            }),
             ..ServiceOptions::default()
         };
 
@@ -2699,6 +2990,58 @@ mod tests {
     }
 
     #[test]
+    fn cadenced_capture_premature_timeouts_cannot_inflate_pts_past_wall_time() {
+        let fps = 60;
+        let frame_interval_s = 1.0 / fps as f64;
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![7, 8, 9]),
+        };
+        let mut cap = CadencedCapture::new(
+            PrematureTimeoutSource {
+                delay: Duration::from_millis(1),
+            },
+            fps,
+            &seed,
+        );
+        let started = Instant::now();
+        let mut last_pts_s = seed.pts_s;
+
+        for _ in 0..120 {
+            match cap.next_frame() {
+                Ok(Some(frame)) => last_pts_s = frame.pts_s,
+                Err(CaptureError::Timeout(_)) => {}
+                other => panic!("unexpected capture result: {other:?}"),
+            }
+        }
+
+        let wall_elapsed_s = started.elapsed().as_secs_f64();
+        let pts_elapsed_s = last_pts_s - seed.pts_s;
+        assert!(
+            pts_elapsed_s <= wall_elapsed_s + frame_interval_s,
+            "premature timeouts inflated PTS: pts={pts_elapsed_s:.6}s wall={wall_elapsed_s:.6}s"
+        );
+    }
+
+    #[test]
+    fn cadenced_capture_propagates_target_closure_instead_of_duplicating() {
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![7, 8, 9]),
+        };
+        let source = ScriptedTimedSource {
+            outcomes: VecDeque::from([Ok(None)]),
+            requested_timeouts: Vec::new(),
+        };
+        let mut capture = CadencedCapture::new(source, 60, &seed);
+
+        assert!(capture
+            .next_frame()
+            .expect("closed source is not an error")
+            .is_none());
+    }
+
+    #[test]
     fn cadenced_capture_suppresses_stale_real_frame_after_timeout_duplicate() {
         let fps = 60;
         let interval_s = 1.0 / fps as f64;
@@ -2743,7 +3086,12 @@ mod tests {
         assert!(cap.inner.requested_timeouts[1] <= cap.frame_interval);
         assert!(cap.inner.requested_timeouts[2] <= skipped_for);
         let remaining_s = skipped_for.as_secs_f64();
-        assert!((remaining_s - (scheduled_pts_s - stale_pts_s)).abs() < 1e-9);
+        let pts_remaining_s = scheduled_pts_s - stale_pts_s;
+        assert!(remaining_s <= pts_remaining_s + 1e-9);
+        assert!(
+            remaining_s >= pts_remaining_s - 0.005,
+            "stale retry lost its deadline: remaining={remaining_s:.6}s expected={pts_remaining_s:.6}s"
+        );
     }
 
     #[test]
@@ -2885,6 +3233,39 @@ mod tests {
         assert!((second_end - 4.0).abs() < 1e-6);
         assert!((first_seconds - 2.0).abs() < 1e-6);
         assert!((second_seconds - 2.0).abs() < 1e-6);
+        assert_eq!(
+            std::fs::read(first_path.with_extension("clipline.json")).unwrap(),
+            b"{}"
+        );
+        assert_eq!(
+            std::fs::read(second_path.with_extension("clipline.json")).unwrap(),
+            b"{}"
+        );
+    }
+
+    #[test]
+    fn failed_replay_save_removes_only_a_new_ownership_marker() {
+        let dir = TestDir::new("clipline-service", "failed-save-marker-cleanup");
+        let mut rec = Recorder::new(
+            MockCapture::new(1, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        );
+        rec.run_to_end().unwrap();
+
+        let newly_marked = dir.path().join("new.mp4");
+        std::fs::create_dir(&newly_marked).unwrap();
+        assert!(save(&rec, &newly_marked, 1.0).is_err());
+        assert!(!newly_marked.with_extension("clipline.json").exists());
+
+        let already_marked = dir.path().join("existing.mp4");
+        std::fs::create_dir(&already_marked).unwrap();
+        ensure_clip_owned(&already_marked).unwrap();
+        assert!(save(&rec, &already_marked, 1.0).is_err());
+        assert_eq!(
+            std::fs::read(already_marked.with_extension("clipline.json")).unwrap(),
+            b"{}"
+        );
     }
 
     #[test]
@@ -2915,6 +3296,75 @@ mod tests {
         assert!(fell_back);
         assert_eq!(resolved, fallback);
         assert!(fallback.is_dir());
+    }
+
+    #[test]
+    fn clips_dir_falls_back_when_existing_configured_root_is_not_writable() {
+        let dir = TestDir::new("clipline-service", "unwritable-existing-root");
+        let configured = dir.path().join("configured");
+        let fallback = dir.path().join("fallback");
+        std::fs::create_dir_all(&configured).unwrap();
+        let mut probed = Vec::new();
+
+        let (resolved, fell_back) = clips_dir_resolved_with_probe(
+            &configured,
+            || fallback.clone(),
+            |candidate| {
+                probed.push(candidate.to_path_buf());
+                if candidate == configured {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected ACL denial",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap();
+
+        assert!(fell_back);
+        assert_eq!(resolved, fallback);
+        assert_eq!(probed, [configured, fallback]);
+    }
+
+    #[test]
+    fn writable_directory_probe_leaves_no_probe_file() {
+        let dir = TestDir::new("clipline-service", "writable-root-probe");
+        let media = dir.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("existing.txt"), b"keep").unwrap();
+
+        probe_writable_directory(&media).unwrap();
+
+        let mut names = std::fs::read_dir(&media)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, [std::ffi::OsString::from("existing.txt")]);
+    }
+
+    #[test]
+    fn clips_dir_reports_configured_and_fallback_probe_failures() {
+        let dir = TestDir::new("clipline-service", "double-probe-failure");
+        let configured = dir.path().join("configured");
+        let fallback = dir.path().join("fallback");
+
+        let error = clips_dir_resolved_with_probe(
+            &configured,
+            || fallback.clone(),
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected denial",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains(&configured.display().to_string()), "{error}");
+        assert!(error.contains(&fallback.display().to_string()), "{error}");
     }
 
     #[test]
@@ -2962,6 +3412,27 @@ mod tests {
             temp_path,
             dir.path().join(format!("session_{stamp}_2.mp4.recording"))
         );
+        assert_eq!(
+            std::fs::read(final_path.with_extension("clipline.json")).unwrap(),
+            b"{}"
+        );
+    }
+
+    #[test]
+    fn media_path_reservation_skips_orphaned_ownership_markers() {
+        let dir = TestDir::new("clipline-service", "ownership-marker-reservation");
+        let stamp = 1_725_000_002;
+        let occupied = dir.path().join(format!("clip_{stamp}.mp4"));
+        ensure_clip_owned(&occupied).unwrap();
+
+        let replay = unique_media_path_at(dir.path(), "clip", stamp);
+        let (session, temp, _file) =
+            reserve_full_session_path_at(dir.path(), "session", stamp).unwrap();
+
+        assert_eq!(replay, dir.path().join(format!("clip_{stamp}_1.mp4")));
+        assert_eq!(session, dir.path().join(format!("session_{stamp}.mp4")));
+        assert!(temp.exists());
+        assert!(session.with_extension("clipline.json").is_file());
     }
 
     #[test]
@@ -3053,13 +3524,17 @@ mod tests {
         let empty = dir.path().join("empty.mp4.recording");
         std::fs::write(&recoverable, b"hybrid mp4").unwrap();
         std::fs::write(&empty, b"").unwrap();
+        ensure_clip_owned(&recoverable).unwrap();
+        ensure_clip_owned(&empty).unwrap();
         let (tx, rx) = mpsc::channel();
 
         handle_full_session_finish_error(&recoverable, &tx, "writer failed");
         handle_full_session_finish_error(&empty, &tx, "writer failed");
 
         assert!(recoverable.exists());
+        assert!(clip_ownership_marker_path(&recoverable).unwrap().exists());
         assert!(!empty.exists());
+        assert!(!clip_ownership_marker_path(&empty).unwrap().exists());
         let Event::Error { message } = rx.try_recv().unwrap() else {
             panic!("expected recovery warning");
         };
@@ -3085,20 +3560,144 @@ mod tests {
     }
 
     #[test]
+    fn replay_cache_sweep_removes_stale_instance_and_preserves_live_quota() {
+        let dir = TestDir::new("clipline-service", "replay-cache-sweep");
+        let stale = dir.path().join("clipline-replay-cache-100-41-0");
+        let live = dir.path().join("clipline-replay-cache-101-42-0");
+        let unrelated = dir.path().join("somebody-elses-folder");
+        for run in [&stale, &live, &unrelated] {
+            std::fs::create_dir(run).unwrap();
+        }
+        write_replay_cache_owner(
+            &stale,
+            &ReplayCacheOwner {
+                process_instance_id: "41:1000".into(),
+                created_at_unix: 100,
+            },
+        )
+        .unwrap();
+        write_replay_cache_owner(
+            &live,
+            &ReplayCacheOwner {
+                process_instance_id: "42:2000".into(),
+                created_at_unix: 101,
+            },
+        )
+        .unwrap();
+        std::fs::write(stale.join("seg.bin"), vec![1; 17]).unwrap();
+        std::fs::write(live.join("seg.bin"), vec![2; 23]).unwrap();
+        std::fs::write(unrelated.join("keep.txt"), b"keep").unwrap();
+
+        let preserved = sweep_replay_cache_runs(
+            dir.path(),
+            SystemTime::now() + Duration::from_secs(48 * 60 * 60),
+            |pid| match pid {
+                41 => Ok("41:9999".into()),
+                42 => Ok("42:2000".into()),
+                _ => Err("unexpected pid".into()),
+            },
+        )
+        .unwrap();
+
+        assert!(!stale.exists());
+        assert!(live.exists());
+        assert!(unrelated.exists());
+        assert!(preserved >= 23);
+    }
+
+    #[test]
+    fn replay_cache_sweep_preserves_ambiguous_fresh_run() {
+        let dir = TestDir::new("clipline-service", "replay-cache-ambiguous");
+        let run = dir.path().join("clipline-replay-cache-100-42-0");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::write(run.join("seg.bin"), vec![3; 29]).unwrap();
+
+        let preserved = sweep_replay_cache_runs(dir.path(), SystemTime::now(), |_| {
+            Err("process cannot be queried".into())
+        })
+        .unwrap();
+
+        assert!(run.exists());
+        assert_eq!(preserved, 29);
+    }
+
+    #[test]
+    fn replay_cache_sweep_removes_ambiguous_run_only_after_grace_period() {
+        let dir = TestDir::new("clipline-service", "replay-cache-aged");
+        let run = dir.path().join("clipline-replay-cache-100-42-0");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::write(run.join("seg.bin"), vec![4; 31]).unwrap();
+
+        let preserved = sweep_replay_cache_runs(
+            dir.path(),
+            SystemTime::now() + Duration::from_secs(25 * 60 * 60),
+            |_| Err("process cannot be queried".into()),
+        )
+        .unwrap();
+
+        assert!(!run.exists());
+        assert_eq!(preserved, 0);
+    }
+
+    #[test]
+    fn prepared_replay_storage_cleans_untransferred_run() {
+        let dir = TestDir::new("clipline-service", "replay-cache-construction");
+        let run = dir.path().join("clipline-replay-cache-100-42-0");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::write(run.join(REPLAY_CACHE_OWNER_FILE), b"owned").unwrap();
+
+        drop(PreparedReplayStorage::disk(run.clone(), 1024));
+
+        assert!(!run.exists());
+    }
+
+    #[test]
+    fn low_space_runtime_failure_always_finalizes_and_keeps_primary_error() {
+        let finalized = std::cell::Cell::new(false);
+
+        let message = finalize_runtime_failure("replay cache disk is low".into(), || {
+            finalized.set(true);
+            Some("finish: writer failed".into())
+        });
+
+        assert!(finalized.get());
+        assert!(message.starts_with("replay cache disk is low"), "{message}");
+        assert!(message.contains("finish: writer failed"), "{message}");
+    }
+
+    #[test]
     fn osu_full_session_duration_policy_discards_boot_transients_only() {
         let osu = ActiveGame {
-            id: crate::game_plugins::OSU_ID.into(),
+            identity: crate::game_identity::GameIdentity::built_in_plugin(
+                crate::game_plugins::OSU_ID,
+            )
+            .unwrap(),
             name: "osu!".into(),
         };
         let league = ActiveGame {
-            id: crate::game_plugins::LEAGUE_OF_LEGENDS_ID.into(),
+            identity: crate::game_identity::GameIdentity::built_in_plugin(
+                crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+            )
+            .unwrap(),
             name: "League of Legends".into(),
+        };
+        let custom_osu_impostor = ActiveGame {
+            identity: crate::game_identity::GameIdentity::custom(crate::game_plugins::OSU_ID),
+            name: "Unrelated custom game".into(),
         };
 
         assert_eq!(minimum_full_session_duration_s(Some(&osu)), 10.0);
         assert!(should_discard_full_session_duration(Some(&osu), 9.9));
         assert!(!should_discard_full_session_duration(Some(&osu), 10.0));
         assert_eq!(minimum_full_session_duration_s(Some(&league)), 0.0);
+        assert_eq!(
+            minimum_full_session_duration_s(Some(&custom_osu_impostor)),
+            0.0
+        );
+        assert!(!should_discard_full_session_duration(
+            Some(&custom_osu_impostor),
+            3.0
+        ));
         assert!(!should_discard_full_session_duration(Some(&league), 3.0));
         assert!(!should_discard_full_session_duration(None, 3.0));
     }

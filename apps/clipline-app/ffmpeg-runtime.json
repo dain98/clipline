@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "provider": "BtbN/FFmpeg-Builds",
+  "release_tag": "autobuild-2026-06-30-13-34",
+  "published_at": "2026-06-30T13:35:42Z",
+  "archive_name": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-shared-8.1.zip",
+  "archive_url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-shared-8.1.zip",
+  "archive_sha256": "27bcaf58b5140171dfe838a0b365d12c60607d71fc168424456410bad6a834da",
+  "archive_root": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-shared-8.1",
+  "version_line": "ffmpeg version n8.1.2-21-gce3c09c101-20260630 Copyright (c) 2000-2026 the FFmpeg developers",
+  "required_configuration": [
+    "--arch=x86_64",
+    "--target-os=mingw32",
+    "--enable-version3",
+    "--enable-shared",
+    "--disable-static",
+    "--disable-libfdk-aac",
+    "--disable-libx264",
+    "--disable-libx265"
+  ],
+  "forbidden_configuration": [
+    "--enable-gpl",
+    "--enable-nonfree",
+    "--enable-libfdk-aac",
+    "--enable-libx264",
+    "--enable-libx265"
+  ],
+  "source_offer_url": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-06-30-13-34",
+  "ffmpeg_source_url": "https://github.com/FFmpeg/FFmpeg/commit/ce3c09c101",
+  "allowed_files": [
+    {
+      "archive_path": "LICENSE.txt",
+      "staged_name": "LICENSE.txt",
+      "size": 7651,
+      "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+    },
+    {
+      "archive_path": "bin/ffmpeg.exe",
+      "staged_name": "ffmpeg.exe",
+      "size": 542208,
+      "sha256": "abe4f6dc7ca6d807c9492e56f96db9030d7c5faba942254aa00d4474042048d4"
+    },
+    {
+      "archive_path": "bin/avcodec-62.dll",
+      "staged_name": "avcodec-62.dll",
+      "size": 70369280,
+      "sha256": "cb6a577e64c1c52877bd831c266eb276578de1d88413174b5c888846608de5d0"
+    },
+    {
+      "archive_path": "bin/avdevice-62.dll",
+      "staged_name": "avdevice-62.dll",
+      "size": 3698176,
+      "sha256": "353c3b75419d4da8e44fe463a0fe73fc1d19663c604619b9886183baaad2731a"
+    },
+    {
+      "archive_path": "bin/avfilter-11.dll",
+      "staged_name": "avfilter-11.dll",
+      "size": 29532160,
+      "sha256": "e62a6cc728ed461f09cb1f4878e3fef0e497dbd524079a4dd44828479b90ab20"
+    },
+    {
+      "archive_path": "bin/avformat-62.dll",
+      "staged_name": "avformat-62.dll",
+      "size": 21734912,
+      "sha256": "4a85e712c6ecfa1dba40b1eed97cf7d7aa231270de09ad0a5ff6ad6a504e21a6"
+    },
+    {
+      "archive_path": "bin/avutil-60.dll",
+      "staged_name": "avutil-60.dll",
+      "size": 2935808,
+      "sha256": "14799bb047d9db1338cadc53e7ffec56f3fbd506ae02c1286ca972fe94ce6566"
+    },
+    {
+      "archive_path": "bin/swresample-6.dll",
+      "staged_name": "swresample-6.dll",
+      "size": 722944,
+      "sha256": "b920b9173f3d25917c8fe15b4127b068b037456d24a1560df22080df434720d3"
+    },
+    {
+      "archive_path": "bin/swscale-9.dll",
+      "staged_name": "swscale-9.dll",
+      "size": 12541952,
+      "sha256": "e128459c6aa1b0165d7c6eca51b45612051c20619cd8eb6e1cfa1e497206b53b"
+    }
+  ]
+}

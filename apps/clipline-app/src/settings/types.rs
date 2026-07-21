@@ -364,6 +364,9 @@ impl ReplayStorageSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CustomGameSettings {
     pub id: String,
+    /// Previous persisted ids retained only to resolve historical session icons.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub legacy_ids: Vec<String>,
     pub name: String,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -382,6 +385,16 @@ pub struct CustomGameSettings {
 impl CustomGameSettings {
     pub fn normalize(&mut self) {
         self.id = self.id.trim().to_string();
+        self.legacy_ids = std::mem::take(&mut self.legacy_ids)
+            .into_iter()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty() && id.len() <= 256)
+            .fold(Vec::new(), |mut ids, id| {
+                if !ids.contains(&id) && ids.len() < 8 {
+                    ids.push(id);
+                }
+                ids
+            });
         self.name = self.name.trim().to_string();
         self.exe_name = self.exe_name.trim().to_string();
         self.window_title = self.window_title.trim().to_string();

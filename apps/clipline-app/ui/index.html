@@ -723,9 +723,13 @@
                   <input id="cloud-host-url" placeholder="https://clips.example.com" spellcheck="false" />
                   <input id="cloud-username" placeholder="Username" autocomplete="username" spellcheck="false" />
                   <input id="cloud-password" type="password" placeholder="Password" autocomplete="current-password" />
-                  <span id="cloud-http-warning" class="cloud-http-warning" hidden>
-                    This host uses HTTP. Your password will be sent without TLS.
-                  </span>
+                  <label id="cloud-http-warning" class="cloud-http-warning" hidden>
+                    <input id="cloud-http-confirm" type="checkbox" />
+                    <span>
+                      I understand my password will be sent without TLS to
+                      <code id="cloud-http-origin"></code>.
+                    </span>
+                  </label>
                 </div>
                 <div class="cloud-actions">
                   <button id="cloud-connect" type="button" class="primary">Connect</button>
@@ -835,11 +839,10 @@
     <div class="confirm-body">
       <strong>Administrator game blocks replay hotkeys</strong>
       <span><span id="elevation-game-name">This game</span> is running as administrator. Windows prevents Clipline from receiving Save Replay hotkeys while the game is focused.</span>
-      <span class="hint">Restarting Clipline as administrator fixes the hotkey, but resets the current rolling replay buffer. Clipline will continue to start normally in the future.</span>
+      <span class="hint">For safe focused-game hotkeys, run the game without administrator privileges. Clipline does not elevate the full application.</span>
     </div>
     <div class="confirm-actions">
-      <button id="elevation-restart" class="primary">Restart as Administrator</button>
-      <button id="elevation-cancel">Not Now</button>
+      <button id="elevation-cancel" class="primary">Got It</button>
     </div>
   </dialog>
 
@@ -988,6 +991,7 @@
     <button id="clip-menu-delete" type="button" class="danger-text">Delete</button>
   </div>
 
+  <script src="presentation-core.js"></script>
   <script src="player-core.js"></script>
   <script src="cloud-core.js"></script>
   <script src="app-core.js"></script>
@@ -995,6 +999,6 @@
   <script src="library.js"></script>
   <script src="cloud.js"></script>
   <script src="review-player.js"></script>
-  <script src="main.js"></script>
+  <script type="module" src="bootstrap.mjs"></script>
 </body>
 </html>

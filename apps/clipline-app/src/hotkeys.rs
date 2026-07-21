@@ -2,7 +2,7 @@
 //! reliably deliver registered global shortcuts while focused.
 
 use std::collections::BTreeSet;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
@@ -42,7 +42,13 @@ struct HookState {
     hotkeys: Mutex<Vec<HookHotkey>>,
     down_keys: Mutex<BTreeSet<u32>>,
     trigger_tx: Sender<()>,
+    keyboard_hook: Option<KeyboardHookThread>,
     mouse_hook: Mutex<Option<MouseHookThread>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeyboardHookThread {
+    thread_id: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +137,15 @@ impl HookState {
     }
 }
 
+impl Drop for HookState {
+    fn drop(&mut self) {
+        if let Some(keyboard_hook) = self.keyboard_hook.take() {
+            keyboard_hook.stop();
+        }
+        self.stop_mouse_hook();
+    }
+}
+
 impl HookHotkey {
     fn matches(&self, vk_code: u32, ctrl: bool, alt: bool, shift: bool) -> bool {
         self.key_vk == vk_code && self.ctrl == ctrl && self.alt == alt && self.shift == shift
@@ -148,6 +163,14 @@ impl MouseHookThread {
     fn stop(self) {
         if unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) } == 0 {
             eprintln!("low-level save mouse hotkey hook could not be stopped");
+        }
+    }
+}
+
+impl KeyboardHookThread {
+    fn stop(self) {
+        if unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) } == 0 {
+            eprintln!("low-level save keyboard hotkey hook could not be stopped");
         }
     }
 }
@@ -172,10 +195,12 @@ where
         .map_err(|e| format!("spawn save hotkey dispatcher: {e}"))?;
 
     let requires_mouse_hook = parsed_hotkeys.iter().any(HookHotkey::requires_mouse_hook);
+    let keyboard_hook = start_keyboard_hook()?;
     let state = Arc::new(HookState {
         hotkeys: Mutex::new(parsed_hotkeys),
         down_keys: Mutex::new(BTreeSet::new()),
         trigger_tx,
+        keyboard_hook: Some(keyboard_hook),
         mouse_hook: Mutex::new(None),
     });
     if requires_mouse_hook {
@@ -184,19 +209,47 @@ where
     SAVE_HOOK
         .set(state)
         .map_err(|_| "save hotkey hook was already installed".to_string())?;
-
-    thread::Builder::new()
-        .name("clipline-save-keyboard-hook".into())
-        .spawn(run_keyboard_hook)
-        .map_err(|e| format!("spawn save hotkey hook: {e}"))?;
     Ok(())
 }
 
 pub fn set_save_hotkeys(hotkeys: &[&str]) -> Result<(), String> {
     if let Some(state) = SAVE_HOOK.get() {
-        state.set_hotkeys(hotkeys)?;
+        state.set_hotkeys(hotkeys)
+    } else {
+        parse_hook_hotkeys(hotkeys).map(|_| ())
     }
-    Ok(())
+}
+
+fn start_keyboard_hook() -> Result<KeyboardHookThread, String> {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (start_tx, start_rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("clipline-save-keyboard-hook".into())
+        .spawn(move || run_keyboard_hook(ready_tx, start_rx))
+        .map_err(|e| format!("spawn save keyboard hotkey hook: {e}"))?;
+
+    let keyboard_hook = wait_for_keyboard_hook_ready(ready_rx, std::time::Duration::from_secs(2))?;
+    start_tx
+        .send(())
+        .map_err(|_| "start save keyboard hotkey hook: hook thread exited".to_string())?;
+    Ok(keyboard_hook)
+}
+
+fn wait_for_keyboard_hook_ready(
+    ready_rx: Receiver<Result<u32, String>>,
+    timeout: std::time::Duration,
+) -> Result<KeyboardHookThread, String> {
+    ready_rx
+        .recv_timeout(timeout)
+        .map_err(|error| match error {
+            mpsc::RecvTimeoutError::Timeout => {
+                "install save keyboard hotkey hook: timed out".to_string()
+            }
+            mpsc::RecvTimeoutError::Disconnected => {
+                "install save keyboard hotkey hook: disconnected".to_string()
+            }
+        })?
+        .map(|thread_id| KeyboardHookThread { thread_id })
 }
 
 fn parse_hook_hotkeys(raws: &[&str]) -> Result<Vec<HookHotkey>, String> {
@@ -204,58 +257,64 @@ fn parse_hook_hotkeys(raws: &[&str]) -> Result<Vec<HookHotkey>, String> {
 }
 
 fn parse_hook_hotkey(raw: &str) -> Result<HookHotkey, String> {
-    let normalized = crate::settings::normalize_hotkey(raw)?;
-    let mut ctrl = false;
-    let mut alt = false;
-    let mut shift = false;
-    let mut key_vk = None;
+    use crate::settings::hotkey::{parse_hotkey_spec, HotkeyKey};
 
-    for part in normalized.split('+') {
-        match part {
-            "Ctrl" => ctrl = true,
-            "Alt" => alt = true,
-            "Shift" => shift = true,
-            key if key.starts_with('F') => {
-                let number = key[1..]
-                    .parse::<u32>()
-                    .map_err(|_| "hotkey key must be an F-key".to_string())?;
-                key_vk = Some(VK_F1_CODE + number - 1);
-            }
-            "Middle" => key_vk = Some(VK_MBUTTON_CODE),
-            "Mouse4" => key_vk = Some(VK_XBUTTON1_CODE),
-            "Mouse5" => key_vk = Some(VK_XBUTTON2_CODE),
-            key => {
-                key_vk = Some(
-                    keyboard_key_vk_code(key)
-                        .ok_or_else(|| format!("unsupported hotkey key: {key}"))?,
-                );
-            }
+    let spec = parse_hotkey_spec(raw)?;
+    let key_vk = match &spec.key {
+        HotkeyKey::Function(number) => VK_F1_CODE + u32::from(*number) - 1,
+        HotkeyKey::Keyboard(key) => {
+            keyboard_key_vk_code(key).ok_or_else(|| format!("unsupported hotkey key: {key}"))?
         }
-    }
-
-    let key_vk = key_vk.ok_or_else(|| "hotkey needs a key".to_string())?;
+        HotkeyKey::Middle => VK_MBUTTON_CODE,
+        HotkeyKey::Mouse4 => VK_XBUTTON1_CODE,
+        HotkeyKey::Mouse5 => VK_XBUTTON2_CODE,
+    };
     Ok(HookHotkey {
-        ctrl,
-        alt,
-        shift,
+        ctrl: spec.ctrl,
+        alt: spec.alt,
+        shift: spec.shift,
         key_vk,
     })
 }
 
-fn run_keyboard_hook() {
-    let keyboard_hook =
+fn run_keyboard_hook(ready_tx: Sender<Result<u32, String>>, start_rx: Receiver<()>) {
+    let mut msg = unsafe { std::mem::zeroed::<MSG>() };
+    unsafe {
+        PeekMessageW(
+            &mut msg,
+            std::ptr::null_mut(),
+            WM_USER,
+            WM_USER,
+            PM_NOREMOVE,
+        );
+    }
+    let hook =
         unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), std::ptr::null_mut(), 0) };
-    if keyboard_hook.is_null() {
-        eprintln!("low-level save hotkey hook could not be installed");
+    if hook.is_null() {
+        let _ = ready_tx.send(Err(
+            "low-level save keyboard hotkey hook could not be installed".into(),
+        ));
         return;
     }
 
-    let mut msg = unsafe { std::mem::zeroed::<MSG>() };
+    if ready_tx.send(Ok(unsafe { GetCurrentThreadId() })).is_err()
+        || start_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .is_err()
+    {
+        unsafe {
+            UnhookWindowsHookEx(hook);
+        }
+        return;
+    }
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
         unsafe {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+    unsafe {
+        UnhookWindowsHookEx(hook);
     }
 }
 
@@ -456,12 +515,26 @@ mod tests {
         assert!(letter.matches(0x47, true, false, false));
         assert!(!letter.matches(0x47, false, false, false));
 
+        let literal_f = parse_hook_hotkey("Ctrl+Shift+F").unwrap();
+        assert!(literal_f.matches(0x46, true, false, true));
+        assert!(!literal_f.matches(VK_F1_CODE, true, false, true));
+
         let arrow = parse_hook_hotkey("Alt+Shift+ArrowLeft").unwrap();
         assert!(arrow.matches(0x25, false, true, true));
         assert!(!arrow.matches(0x25, false, true, false));
 
         let slash = parse_hook_hotkey("Ctrl+Slash").unwrap();
         assert!(slash.matches(0xBF, true, false, false));
+    }
+
+    #[test]
+    fn function_key_range_keeps_distinct_virtual_keys() {
+        assert!(parse_hook_hotkey("F1")
+            .unwrap()
+            .matches(VK_F1_CODE, false, false, false));
+        assert!(parse_hook_hotkey("F24")
+            .unwrap()
+            .matches(VK_F24_CODE, false, false, false));
     }
 
     #[test]
@@ -492,6 +565,7 @@ mod tests {
             hotkeys: Mutex::new(parse_hook_hotkeys(&["Alt+F10", "Ctrl+Mouse5"]).unwrap()),
             down_keys: Mutex::new(BTreeSet::new()),
             trigger_tx,
+            keyboard_hook: None,
             mouse_hook: Mutex::new(None),
         };
 
@@ -536,6 +610,7 @@ mod tests {
             hotkeys: Mutex::new(parse_hook_hotkeys(&["Ctrl+Mouse5"]).unwrap()),
             down_keys: Mutex::new(BTreeSet::new()),
             trigger_tx,
+            keyboard_hook: None,
             mouse_hook: Mutex::new(None),
         });
         let guard = state.hotkeys.lock().unwrap();
@@ -551,5 +626,44 @@ mod tests {
         assert!(trigger_rx
             .recv_timeout(std::time::Duration::from_millis(250))
             .is_ok());
+    }
+
+    #[test]
+    fn updating_hotkeys_without_an_installed_hook_still_validates_and_succeeds() {
+        if SAVE_HOOK.get().is_none() {
+            assert_eq!(set_save_hotkeys(&["Alt+F10"]), Ok(()));
+            assert!(set_save_hotkeys(&["not a hotkey"]).is_err());
+        }
+    }
+
+    #[test]
+    fn keyboard_hook_readiness_reports_success_and_installation_failure() {
+        let (success_tx, success_rx) = mpsc::channel();
+        success_tx.send(Ok(42)).unwrap();
+        assert_eq!(
+            wait_for_keyboard_hook_ready(success_rx, std::time::Duration::from_millis(10)).unwrap(),
+            KeyboardHookThread { thread_id: 42 }
+        );
+
+        let (failure_tx, failure_rx) = mpsc::channel();
+        failure_tx.send(Err("hook unavailable".into())).unwrap();
+        let error = wait_for_keyboard_hook_ready(failure_rx, std::time::Duration::from_millis(10))
+            .unwrap_err();
+        assert_eq!(error, "hook unavailable");
+    }
+
+    #[test]
+    fn keyboard_hook_readiness_reports_disconnect_and_timeout() {
+        let (disconnected_tx, disconnected_rx) = mpsc::channel::<Result<u32, String>>();
+        drop(disconnected_tx);
+        let disconnected =
+            wait_for_keyboard_hook_ready(disconnected_rx, std::time::Duration::from_millis(10))
+                .unwrap_err();
+        assert!(disconnected.contains("disconnected"), "{disconnected}");
+
+        let (_timeout_tx, timeout_rx) = mpsc::channel::<Result<u32, String>>();
+        let timeout = wait_for_keyboard_hook_ready(timeout_rx, std::time::Duration::from_millis(1))
+            .unwrap_err();
+        assert!(timeout.contains("timed out"), "{timeout}");
     }
 }

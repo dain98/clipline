@@ -161,7 +161,11 @@ async function syncReviewAudioSidecarSet(sidecars, options = {}) {
   for (const { element: audio } of sidecars || []) {
     const decision = PlayerCore.audioSidecarSyncDecision(
       videoState,
-      { currentTime: audio.currentTime },
+      {
+        currentTime: audio.currentTime,
+        duration: audio.duration,
+        ended: audio.ended,
+      },
       { forceSeek: options.forceSeek === true },
     );
     if (decision.seekTime != null) audio.currentTime = decision.seekTime;
@@ -1043,11 +1047,9 @@ const MARKER_IMAGES = {
 };
 
 function markerImageForKind(kind, presentation) {
-  const kinds = presentation && presentation.marker_kinds ? presentation.marker_kinds : null;
-  const configured = kinds && kinds[kind] && typeof kinds[kind] === "object"
-    ? kinds[kind].icon
-    : null;
-  return configured || MARKER_IMAGES[kind] || "";
+  const configured = PlayerCore.markerKindConfig(kind, presentation).icon;
+  const fallback = PlayerCore.ownObjectValue(MARKER_IMAGES, kind);
+  return PlayerCore.safeMarkerImage(configured) || PlayerCore.safeMarkerImage(fallback);
 }
 
 function renderPlayBlocks() {
@@ -1107,7 +1109,9 @@ function renderMarkers() {
       glyph.classList.add("img");
       glyph.style.setProperty("--marker-img", `url("${img}")`);
     } else {
-      glyph.innerHTML = MARKER_ICONS[m.kind] || MARKER_ICON_FALLBACK[style.cls] || MARKER_ICONS.Other;
+      glyph.innerHTML = PlayerCore.ownObjectValue(MARKER_ICONS, m.kind)
+        || PlayerCore.ownObjectValue(MARKER_ICON_FALLBACK, style.cls)
+        || MARKER_ICONS.Other;
     }
     const hair = document.createElement("span");
     hair.className = "hair";
@@ -1543,6 +1547,7 @@ async function exportRangeAsClip(startS, endS, {
       markers: exported.markers || null,
       game: sourceClip.game || null,
     };
+    invalidateLocalClipsRefresh();
     clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
     renderClips();
     await refreshStorage();
@@ -1612,6 +1617,7 @@ async function applyDeletion(removedPaths) {
   const removed = new Set(removedPaths || []);
   if (!removed.size) return;
   const wasCurrent = currentClip && removed.has(currentClip.path);
+  invalidateLocalClipsRefresh();
   clipsCache = clipsCache.filter((clip) => !removed.has(clip.path));
   if (wasCurrent) closeReview();
   else renderClips();
@@ -1754,9 +1760,7 @@ async function copyClipToClipboard() {
 
 async function chooseMediaFolder() {
   try {
-    const selected = await invoke("choose_media_folder", {
-      current: $("set-media-dir").value,
-    });
+    const selected = await invoke("choose_media_folder");
     if (selected) {
       $("set-media-dir").value = selected;
       syncSettingsDraftFromForm();
@@ -1769,9 +1773,7 @@ async function chooseMediaFolder() {
 
 async function chooseReplayCacheFolder() {
   try {
-    const selected = await invoke("choose_replay_cache_folder", {
-      current: $("set-replay-disk-dir").value,
-    });
+    const selected = await invoke("choose_replay_cache_folder");
     if (selected) {
       $("set-replay-disk-dir").value = selected;
       syncSettingsDraftFromForm();

@@ -186,7 +186,6 @@ impl AppSettings {
                 }
             },
             capture_backend: self.capture_backend,
-            active_game_plugin_id: None,
             active_game: None,
             media_dir: self.media_dir_path()?,
             recover_abandoned_recordings: true,

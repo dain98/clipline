@@ -8,8 +8,9 @@
 //! *compiled* encoder regardless of hardware, so each hardware encoder is
 //! confirmed with a one-frame test encode before being reported.
 
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -169,32 +170,96 @@ pub fn locate() -> Option<PathBuf> {
 /// All probe subprocesses must finish well within this; a wedged ffmpeg is
 /// killed rather than allowed to block startup probing indefinitely.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_PROBE_STDOUT_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug)]
+pub(crate) enum ChildWait {
+    Exited(ExitStatus),
+    TimedOut,
+}
+
+/// Wait for a child without ever leaving it running past `timeout`. Timeout
+/// and `try_wait` failure paths both attempt to kill and reap before returning.
+pub(crate) fn wait_for_child(child: &mut Child, timeout: Duration) -> io::Result<ChildWait> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(ChildWait::Exited(status)),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(ChildWait::TimedOut);
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+    }
+}
+
+fn read_bounded(mut reader: impl Read, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut retained = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(retained);
+        }
+        let keep = read.min(max_bytes.saturating_sub(retained.len()));
+        retained.extend_from_slice(&chunk[..keep]);
+    }
+}
 
 /// Run a probe command to completion, killing it if it exceeds
 /// `PROBE_TIMEOUT`. stdout is captured (these commands emit little); stderr is
 /// discarded. `None` on spawn failure or timeout — treated as "unavailable".
 fn run_bounded(mut cmd: Command) -> Option<Output> {
+    run_bounded_with_timeout(&mut cmd, PROBE_TIMEOUT, MAX_PROBE_STDOUT_BYTES)
+}
+
+fn run_bounded_with_timeout(
+    cmd: &mut Command,
+    timeout: Duration,
+    max_stdout_bytes: usize,
+) -> Option<Output> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    suppress_console(&mut cmd);
+    suppress_console(cmd);
     let mut child = cmd.spawn().ok()?;
-    let deadline = Instant::now() + PROBE_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(_) => return None,
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let reader = match std::thread::Builder::new()
+        .name("clipline-ffmpeg-probe-reader".into())
+        .spawn(move || read_bounded(stdout, max_stdout_bytes))
+    {
+        Ok(reader) => reader,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
         }
-    }
-    child.wait_with_output().ok()
+    };
+    let wait = wait_for_child(&mut child, timeout);
+    let stdout = reader.join().ok()?.ok()?;
+    let ChildWait::Exited(status) = wait.ok()? else {
+        return None;
+    };
+    Some(Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
 }
 
 fn runs(path: &Path) -> bool {
@@ -270,6 +335,35 @@ pub fn probe() -> Vec<EncoderCapability> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    const PROBE_CHILD_MODE: &str = "CLIPLINE_FFMPEG_PROBE_CHILD_MODE";
+
+    #[test]
+    fn probe_subprocess_helper() {
+        match std::env::var(PROBE_CHILD_MODE).as_deref() {
+            Ok("burst") => {
+                std::io::stdout()
+                    .write_all(&vec![b'X'; 8 * 1024 * 1024])
+                    .expect("write burst");
+                std::io::stdout().flush().expect("flush burst");
+            }
+            Ok("hang") => std::thread::sleep(Duration::from_secs(60)),
+            _ => {}
+        }
+    }
+
+    fn probe_helper_command(mode: &str) -> Command {
+        let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+        command
+            .args([
+                "--exact",
+                "ffmpeg::tests::probe_subprocess_helper",
+                "--nocapture",
+            ])
+            .env(PROBE_CHILD_MODE, mode);
+        command
+    }
 
     // A trimmed real `ffmpeg -encoders` excerpt (FFmpeg 8.x): the AMD box
     // lists nvenc/qsv/amf and libsvtav1/libx265 even without that hardware.
@@ -291,6 +385,38 @@ mod tests {
  V..... hevc_qsv             HEVC (Intel Quick Sync Video) (codec hevc)
  V..... h264_qsv             H.264 (Intel Quick Sync Video) (codec h264)
  A....D aac                  AAC (Advanced Audio Coding)";
+
+    #[test]
+    fn verbose_probe_is_drained_concurrently_and_retained_output_is_bounded() {
+        let mut command = probe_helper_command("burst");
+        let output = run_bounded_with_timeout(&mut command, Duration::from_secs(5), 1024 * 1024)
+            .expect("verbose child must not block on a full pipe");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 1024 * 1024);
+        assert!(
+            output.stdout.iter().filter(|byte| **byte == b'X').count() > 900_000,
+            "the retained prefix should contain the child's burst"
+        );
+    }
+
+    #[test]
+    fn wedged_probe_is_killed_and_reaped_at_deadline() {
+        let mut command = probe_helper_command("hang");
+        let started = Instant::now();
+
+        assert!(
+            run_bounded_with_timeout(&mut command, Duration::from_millis(100), 1024,).is_none()
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn bounded_reader_keeps_draining_after_reaching_its_limit() {
+        let input = vec![0xAB; 4096];
+        let retained = read_bounded(std::io::Cursor::new(input), 1000).unwrap();
+        assert_eq!(retained, vec![0xAB; 1000]);
+    }
 
     #[test]
     fn parses_known_encoders_and_ignores_others() {

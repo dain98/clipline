@@ -7,23 +7,25 @@ fn main() {
 
 #[cfg(windows)]
 fn main() {
-    if let Err(error) = windows::wait_for_elevation_parent_from_args() {
-        eprintln!("administrator restart handoff: {error}");
-        return;
-    }
     app::run();
 }
 
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod bounded_http;
+#[cfg(windows)]
 mod cloud;
 #[cfg(windows)]
 mod cloud_upload;
 #[cfg(windows)]
+mod credential_transaction;
+#[cfg(windows)]
 mod game_discovery;
 #[cfg(windows)]
 mod game_icon;
+#[cfg(windows)]
+mod game_identity;
 #[cfg(windows)]
 mod game_plugins;
 #[cfg(windows)]

@@ -37,6 +37,13 @@ pub fn nal_type(nal: &[u8]) -> u8 {
     nal.first().map(|b| b & 0x1F).unwrap_or(0)
 }
 
+/// Classify an H.264 access unit from the encoded bitstream itself. Hardware
+/// MFTs do not consistently attach `MFSampleExtension_CleanPoint` to every
+/// IDR, so callers must be able to recognize the authoritative NAL type.
+pub fn is_keyframe(annexb: &[u8]) -> bool {
+    split_annexb(annexb).iter().any(|unit| nal_type(unit) == 5)
+}
+
 /// Pull (SPS, PPS) out of an Annex B blob — works on
 /// `MF_MT_MPEG_SEQUENCE_HEADER` and on full access units with in-band
 /// parameter sets.
@@ -113,6 +120,12 @@ mod tests {
         assert_eq!(nal_type(IDR), 5);
         assert_eq!(nal_type(NON_IDR), 1);
         assert_eq!(nal_type(AUD), 9);
+    }
+
+    #[test]
+    fn keyframe_classification_uses_encoded_idr_nals() {
+        assert!(is_keyframe(&annexb(&[AUD, SPS, PPS, IDR])));
+        assert!(!is_keyframe(&annexb(&[AUD, NON_IDR])));
     }
 
     #[test]

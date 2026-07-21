@@ -1,8 +1,6 @@
 //! Shared helpers used by multiple app modules.
 
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -61,22 +59,23 @@ fn infer_audio_tracks_from_file(path: &Path) -> Result<Vec<ClipAudioTrack>, Stri
         .collect())
 }
 
-/// Encode an OS string as a null-terminated UTF-16 vector for Win32 wide APIs.
-pub(crate) fn wide_null(value: &OsStr) -> Vec<u16> {
-    value.encode_wide().chain(std::iter::once(0)).collect()
-}
-
-/// Format a Win32 last-OS-error into a human-readable message.
-pub(crate) fn last_os_error(action: &str) -> String {
-    format!("{action}: {}", std::io::Error::last_os_error())
-}
-
 /// Current wall-clock time as seconds since the Unix epoch.
 pub(crate) fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    unix_seconds_at(SystemTime::now())
+}
+
+pub(crate) fn unix_now_i64() -> i64 {
+    unix_seconds_i64_at(SystemTime::now())
+}
+
+fn unix_seconds_at(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
+}
+
+fn unix_seconds_i64_at(time: SystemTime) -> i64 {
+    i64::try_from(unix_seconds_at(time)).unwrap_or(i64::MAX)
 }
 
 /// Resolve user-facing audio track IDs to their MP4 track indices, validating
@@ -118,6 +117,18 @@ mod tests {
         AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
     };
     use std::io::Cursor;
+
+    #[test]
+    fn signed_unix_seconds_clamps_pre_epoch_and_maps_normal_time() {
+        assert_eq!(
+            unix_seconds_i64_at(UNIX_EPOCH - std::time::Duration::from_secs(1)),
+            0
+        );
+        assert_eq!(
+            unix_seconds_i64_at(UNIX_EPOCH + std::time::Duration::from_secs(42)),
+            42
+        );
+    }
 
     fn two_audio_fixture() -> Vec<u8> {
         let tracks = vec![
@@ -172,7 +183,7 @@ mod tests {
             .find("fn infer_audio_tracks_from_file")
             .expect("inference helper exists");
         let end = source[start..]
-            .find("\n/// Encode an OS string")
+            .find("\n/// Current wall-clock")
             .map(|offset| start + offset)
             .expect("inference helper end marker exists");
         let body = &source[start..end];

@@ -132,18 +132,25 @@ async function openRailProfile() {
   }
 }
 
-function cloudHostUsesInsecureHttp() {
-  const raw = $("cloud-host-url").value.trim();
-  if (!raw) return false;
+function cloudInsecureHttpOrigin(raw = $("cloud-host-url").value.trim()) {
+  if (!raw) return "";
   try {
-    return new URL(raw).protocol === "http:";
+    const url = new URL(raw);
+    return url.protocol === "http:" ? url.origin : "";
   } catch (_) {
-    return /^http:\/\//i.test(raw);
+    return "";
   }
 }
 
 function syncCloudHttpWarning() {
-  $("cloud-http-warning").hidden = !cloudHostUsesInsecureHttp();
+  const origin = cloudInsecureHttpOrigin();
+  const confirm = $("cloud-http-confirm");
+  if (confirm.dataset.origin !== origin) {
+    confirm.checked = false;
+    confirm.dataset.origin = origin;
+  }
+  $("cloud-http-origin").textContent = origin;
+  $("cloud-http-warning").hidden = !origin;
 }
 
 function readCloudSettings() {
@@ -171,7 +178,9 @@ function cloudConnected() {
 
 function cloudUploadRecordForPath(path) {
   const uploads = cloudSettings().uploads || {};
-  return Object.values(uploads).find((record) => record && record.path === path) || null;
+  return Object.values(uploads).find(
+    (record) => record && PlayerCore.sameClipPath(record.path, path)
+  ) || null;
 }
 
 function clipCloudRecord(clip) {
@@ -186,19 +195,31 @@ function clipCloudVisibility(record) {
 }
 
 function cloudLibraryRecords() {
-  return PlayerCore.cloudLibraryEntries(cloudSettings().uploads || {}, clipsCache, cloudClipsCache);
+  const cloudListAuthoritative = cloudClipsLoaded
+    || cloudClipsLoading
+    || !cloudConnected();
+  return PlayerCore.cloudLibraryEntries(
+    cloudSettings().uploads || {},
+    clipsCache,
+    cloudClipsCache,
+    cloudListAuthoritative,
+  );
 }
 
 function cloudLocalClipForEntry(entry) {
   if (!entry || !entry.local_available || !entry.path) return null;
-  return clipsCache.find((clip) => clip && clip.path === entry.path) || null;
+  return clipsCache.find(
+    (clip) => clip && PlayerCore.sameClipPath(clip.path, entry.path)
+  ) || null;
 }
 
 function isCloudOnlyReviewClip(clip = currentClip) {
   return !!(
     clip
     && clip.cloud_remote_clip_id
-    && !clipsCache.some((localClip) => localClip && localClip.path === clip.path)
+    && !clipsCache.some(
+      (localClip) => localClip && PlayerCore.sameClipPath(localClip.path, clip.path)
+    )
   );
 }
 
@@ -244,6 +265,9 @@ async function loadCloudClips({ force = false } = {}) {
     const result = await invoke("list_cloud_clips");
     if (!isCurrent()) return;
     cloudClipsCache = result && Array.isArray(result.clips) ? result.clips : [];
+    cloudClipsError = result && result.truncated
+      ? "Showing the first 10,000 unique cloud clips; refine the library on the server to see older items."
+      : "";
     cloudClipsLoaded = true;
   } catch (error) {
     if (!isCurrent()) return;
@@ -282,9 +306,9 @@ function cloudStatusLabel(status) {
 }
 
 async function openCloudClipUrl(entry) {
-  if (!entry || !entry.remote_url) return;
+  if (!entry || !entry.remote_clip_id) return;
   try {
-    await invoke("open_cloud_clip_url", { url: entry.remote_url });
+    await invoke("open_cloud_clip", { remoteClipId: entry.remote_clip_id });
   } catch (e) {
     $("error").textContent = String(e);
     setDeckStatus("could not open cloud clip", { transient: true });
@@ -372,12 +396,8 @@ function observeCloudThumbnail(entry, thumb) {
   posterObserver.observe(thumb);
 }
 
-function clipNameStem(name) {
-  return String(name || "").replace(/\.mp4$/i, "").trim();
-}
-
 function clipUploadDefaultTitle(clip) {
-  return clipDisplayTitle(clip) || clipNameStem(clip && clip.name) || "Untitled clip";
+  return clipDisplayTitle(clip) || PresentationCore.clipNameStem(clip && clip.name) || "Untitled clip";
 }
 
 function upsertCloudUploadRecord(record) {
@@ -393,7 +413,7 @@ function replaceCloudRecordPath(oldPath, newPath) {
   let changed = false;
   const nextUploads = {};
   for (const [key, record] of Object.entries(uploads)) {
-    if (record && record.path === oldPath) {
+    if (record && PlayerCore.sameClipPath(record.path, oldPath)) {
       nextUploads[key] = { ...record, path: newPath };
       changed = true;
     } else {
@@ -411,7 +431,7 @@ function removeCloudUploadRecordForPath(path) {
   const nextUploads = {};
   let changed = false;
   for (const [key, record] of Object.entries(uploads)) {
-    if (record && record.path === path) {
+    if (record && PlayerCore.sameClipPath(record.path, path)) {
       changed = true;
       continue;
     }
@@ -466,32 +486,54 @@ async function syncCloudClipStatus(clip) {
 }
 
 function upsertCloudProgress(progress) {
-  if (!progress || !progress.local_clip_id) return;
+  if (!progress || !progress.local_clip_id) return { record: null, renderRequired: false };
   const current = (cloudSettings().uploads || {})[progress.local_clip_id] || {};
-  upsertCloudUploadRecord({
-    ...current,
-    local_clip_id: progress.local_clip_id,
-    path: progress.path || current.path || "",
-    remote_clip_id: progress.remote_clip_id ?? current.remote_clip_id ?? null,
-    remote_url: progress.remote_url ?? current.remote_url ?? null,
-    visibility: current.visibility || cloudSettings().default_visibility || "private",
-    upload_status: progress.upload_status || current.upload_status || "not_uploaded",
-    error: progress.error ?? current.error ?? null,
-    updated_at_unix: Math.floor(Date.now() / 1000),
-  });
+  const update = CloudCore.reconcileUploadProgress(
+    current,
+    progress,
+    cloudSettings().default_visibility,
+    Date.now() / 1000,
+  );
+  upsertCloudUploadRecord(update.record);
+  return update;
 }
 async function reloadSettings() {
   const previousAccountKey = cloudAccountKey();
-  const settings = await invoke("get_settings");
-  fillSettings(settings);
+  const backendSettings = await invoke("get_settings");
+  currentSettings = CloudCore.mergeBackendCloudSettings(currentSettings || {}, backendSettings);
+  settingsDraft = CloudCore.mergeBackendCloudSettings(
+    settingsDraft || currentSettings,
+    backendSettings,
+  );
+  if (settingsIndicatorBaseline) {
+    settingsIndicatorBaseline = CloudCore.mergeBackendCloudSettings(
+      settingsIndicatorBaseline,
+      backendSettings,
+    );
+  }
+  fillCloudSettings(settingsDraft.cloud || defaultCloudSettings());
+  syncSettingsDirtyState({ resetDiscard: false });
   if (cloudAccountKey() !== previousAccountKey) resetCloudClipsCache();
   if (clipsCache.length) renderClips();
 }
 
 async function connectCloud() {
-  $("cloud-connect-status").textContent = "connecting...";
+  syncSettingsDraftFromForm({ resetDiscard: false });
   $("error").textContent = "";
   const hostUrl = $("cloud-host-url").value.trim();
+  syncCloudHttpWarning();
+  const plainHttpOrigin = cloudInsecureHttpOrigin(hostUrl);
+  const plainHttpConfirmed = CloudCore.plainHttpConfirmed(
+    plainHttpOrigin,
+    $("cloud-http-confirm").dataset.origin,
+    $("cloud-http-confirm").checked,
+  );
+  if (plainHttpOrigin && !plainHttpConfirmed) {
+    $("cloud-connect-status").textContent = "Confirm plain HTTP password transmission first.";
+    $("cloud-http-confirm").focus();
+    return;
+  }
+  $("cloud-connect-status").textContent = "connecting...";
   try {
     await invoke("cloud_connect", {
       request: {
@@ -499,7 +541,7 @@ async function connectCloud() {
         username: $("cloud-username").value.trim(),
         password: $("cloud-password").value,
         device_name: "Clipline Desktop",
-        plain_http_confirmed: cloudHostUsesInsecureHttp(),
+        plain_http_confirmed: plainHttpConfirmed,
         default_visibility: $("cloud-default-visibility").value,
       },
     });
@@ -513,6 +555,7 @@ async function connectCloud() {
 }
 
 async function disconnectCloud() {
+  syncSettingsDraftFromForm({ resetDiscard: false });
   $("cloud-connect-status").textContent = "";
   $("error").textContent = "";
   try {

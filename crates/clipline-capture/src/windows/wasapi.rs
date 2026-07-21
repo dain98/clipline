@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use windows::core::{implement, Interface, Ref, Result as WindowsResult, HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, RPC_E_CHANGED_MODE};
+use windows::Win32::Foundation::{CloseHandle, RPC_E_CHANGED_MODE};
 use windows::Win32::Media::Audio::{
     eCapture, eConsole, eRender, ActivateAudioInterfaceAsync, AudioSessionStateExpired, EDataFlow,
     IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
@@ -17,8 +17,8 @@ use windows::Win32::Media::Audio::{
     IAudioSessionControl2, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
     MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
     AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-    AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
     AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
     DEVICE_STATE_ACTIVE, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
     VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVE_FORMAT_PCM,
@@ -37,21 +37,26 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
-    CreateEventW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::System::Variant::VT_BLOB;
 
 use clipline_mp4::AudioTrackConfig;
 
 use crate::clock::RelativeClock;
+use crate::diagnostics::{emit_diagnostic, CaptureDiagnostic, DiagnosticRateLimiter};
 use crate::opus::{OpusFrameEncoder, FRAME_DURATION_S};
 use crate::pcm::{
-    apply_gain, extract_mono_centered, extract_stereo, LoopbackAssembler, PcmFrame, StereoResampler,
+    apply_gain, extract_mono_centered, extract_stereo, DevicePacketPlacement, DevicePacketTimeline,
+    DiscontinuityFade, LoopbackAssembler, PcmFrame, StereoResampler,
 };
 use crate::traits::{AudioPacket, AudioSource, CaptureError};
 
 const OPUS_SAMPLE_RATE: u32 = 48_000;
+const POLLING_BUFFER_DURATION_100NS: i64 = 10_000_000; // One second.
+const PROCESS_LOOPBACK_ACTIVATION_TIMEOUT: Duration = Duration::from_millis(1500);
+const AUDIO_DELIVERY_HEADROOM_S: f64 = FRAME_DURATION_S + 0.010;
+const TERMINAL_AUDIO_DRAIN_S: f64 = FRAME_DURATION_S * 3.0;
 
 #[derive(Debug, Clone)]
 pub struct AudioDeviceInfo {
@@ -77,7 +82,7 @@ pub struct AudioProcessInfo {
 #[derive(Debug, Clone)]
 struct ProcessSnapshotEntry {
     parent_pid: u32,
-    process_path: Option<String>,
+    image_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -103,6 +108,52 @@ pub enum WasapiChannelMode {
 enum EndpointMode {
     OutputLoopback,
     InputCapture(WasapiChannelMode),
+}
+
+impl EndpointMode {
+    fn diagnostic_label(self) -> &'static str {
+        match self {
+            Self::OutputLoopback => "output",
+            Self::InputCapture(_) => "microphone",
+        }
+    }
+}
+
+enum WaveFormatStorage<'a> {
+    Borrowed(&'a mut WAVEFORMATEX),
+    CoTaskMem(*mut WAVEFORMATEX),
+}
+
+impl<'a> WaveFormatStorage<'a> {
+    fn borrowed(format: &'a mut WAVEFORMATEX) -> Self {
+        Self::Borrowed(format)
+    }
+
+    fn co_task_mem(format: *mut WAVEFORMATEX) -> Option<Self> {
+        (!format.is_null()).then_some(Self::CoTaskMem(format))
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut WAVEFORMATEX {
+        match self {
+            Self::Borrowed(format) => *format as *mut WAVEFORMATEX,
+            Self::CoTaskMem(format) => *format,
+        }
+    }
+
+    #[cfg(test)]
+    fn owns_allocation(&self) -> bool {
+        matches!(self, Self::CoTaskMem(_))
+    }
+}
+
+impl Drop for WaveFormatStorage<'_> {
+    fn drop(&mut self) {
+        if let Self::CoTaskMem(format) = self {
+            // SAFETY: this variant is created only from `GetMixFormat`, which
+            // transfers one COM-task allocation to the caller.
+            unsafe { CoTaskMemFree(Some((*format).cast())) };
+        }
+    }
 }
 
 fn wasapi_timestamp_valid(flags: u32) -> bool {
@@ -163,13 +214,50 @@ impl AudioLevelAccumulator {
 
 fn audio_poll_silence_horizon(until_pts_s: f64) -> Option<f64> {
     (until_pts_s.is_finite() && until_pts_s != f64::MAX)
-        .then(|| (until_pts_s - FRAME_DURATION_S).max(0.0))
+        .then(|| (until_pts_s - AUDIO_DELIVERY_HEADROOM_S).max(0.0))
+}
+
+/// Owns one successful `IAudioCaptureClient::GetBuffer` packet until it is
+/// released back to WASAPI.
+struct WasapiPacket {
+    capture: IAudioCaptureClient,
+    frames: u32,
+    released: bool,
+}
+
+impl WasapiPacket {
+    fn new(capture: &IAudioCaptureClient, frames: u32) -> Self {
+        Self {
+            capture: capture.clone(),
+            frames,
+            released: false,
+        }
+    }
+
+    fn release(mut self) -> windows::core::Result<()> {
+        self.released = true;
+        // SAFETY: this guard is created only after a successful GetBuffer and
+        // owns the matching frame count. Marking it released before the call
+        // prevents Drop from attempting a second release if the API fails.
+        unsafe { self.capture.ReleaseBuffer(self.frames) }
+    }
+}
+
+impl Drop for WasapiPacket {
+    fn drop(&mut self) {
+        if !self.released {
+            self.released = true;
+            // SAFETY: this is the matching release for the successful
+            // GetBuffer that created the guard. Drop makes validation errors
+            // and unwinding release the packet exactly once.
+            let _ = unsafe { self.capture.ReleaseBuffer(self.frames) };
+        }
+    }
 }
 
 struct WasapiPcmCapture {
     client: IAudioClient,
     capture: IAudioCaptureClient,
-    event_handle: Option<HANDLE>,
     clock: RelativeClock,
     channels: u16,
     sample_format: SampleFormat,
@@ -177,8 +265,13 @@ struct WasapiPcmCapture {
     volume: f32,
     level: AudioLevelAccumulator,
     resampler: Option<StereoResampler>,
+    discontinuity_fade: DiscontinuityFade,
+    packet_timeline: DevicePacketTimeline,
+    last_device_packet_at: Instant,
     assembler: LoopbackAssembler,
     queue: std::collections::VecDeque<PcmFrame>,
+    discontinuity_diagnostics: DiagnosticRateLimiter,
+    late_audio_diagnostics: DiagnosticRateLimiter,
 }
 
 pub struct WasapiLoopback {
@@ -214,15 +307,14 @@ impl WasapiPcmCapture {
     ) -> Result<Self, CaptureError> {
         init_com()?;
         let client = activate_process_loopback_client(pid)?;
+        let (streamflags, buffer_duration_100ns) = process_loopback_stream_config();
         Self::start_client(
             clock,
             client,
-            AUDCLNT_STREAMFLAGS_LOOPBACK
-                | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-                | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+            streamflags,
             volume,
             EndpointMode::OutputLoopback,
-            0,
+            buffer_duration_100ns,
             Some(process_loopback_format()),
         )
     }
@@ -259,7 +351,15 @@ impl WasapiPcmCapture {
             let device = endpoint_device(&enumerator, dataflow, device_id).map_err(init)?;
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(init)?;
 
-            Self::start_client(clock, client, streamflags, volume, mode, 10_000_000, None)
+            Self::start_client(
+                clock,
+                client,
+                streamflags,
+                volume,
+                mode,
+                POLLING_BUFFER_DURATION_100NS,
+                None,
+            )
         }
     }
 
@@ -276,11 +376,15 @@ impl WasapiPcmCapture {
         // releases the mix-format allocation after Initialize consumes it.
         unsafe {
             let mut fixed_mix_format = fixed_mix_format;
-            let (format_ptr, should_free_format) = if let Some(format) = fixed_mix_format.as_mut() {
-                (format as *mut WAVEFORMATEX, false)
+            let mut format_storage = if let Some(format) = fixed_mix_format.as_mut() {
+                WaveFormatStorage::borrowed(format)
             } else {
-                (client.GetMixFormat().map_err(init)?, true)
+                let format = client.GetMixFormat().map_err(init)?;
+                WaveFormatStorage::co_task_mem(format).ok_or_else(|| {
+                    CaptureError::Init("WASAPI GetMixFormat returned a null format".into())
+                })?
             };
+            let format_ptr = format_storage.as_mut_ptr();
             let format = &*format_ptr;
             // Copy packed fields to locals (references into packed structs are UB).
             let tag = format.wFormatTag;
@@ -288,7 +392,6 @@ impl WasapiPcmCapture {
             let rate = format.nSamplesPerSec;
             let bits = format.wBitsPerSample;
             let Some(mix) = parse_mix_format(format) else {
-                CoTaskMemFree(Some(format_ptr as *const _));
                 return Err(CaptureError::Init(format!(
                     "unsupported mix format: tag {tag} ch {ch} rate {rate} bits {bits} \
                      (need float32 or signed PCM)"
@@ -304,24 +407,7 @@ impl WasapiPcmCapture {
                 format_ptr,
                 None,
             );
-            if should_free_format {
-                CoTaskMemFree(Some(format_ptr as *const _));
-            }
             r.map_err(|e| CaptureError::Init(format!("WASAPI Initialize: {e}")))?;
-
-            let event_handle = if streamflags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK != 0 {
-                let handle = CreateEventW(None, false, false, PCWSTR::null())
-                    .map_err(|e| CaptureError::Init(format!("WASAPI CreateEventW: {e}")))?;
-                if let Err(error) = client.SetEventHandle(handle) {
-                    let _ = CloseHandle(handle);
-                    return Err(CaptureError::Init(format!(
-                        "WASAPI SetEventHandle: {error}"
-                    )));
-                }
-                Some(handle)
-            } else {
-                None
-            };
 
             let capture: IAudioCaptureClient = client
                 .GetService()
@@ -340,7 +426,6 @@ impl WasapiPcmCapture {
             Ok(Self {
                 client,
                 capture,
-                event_handle,
                 clock,
                 channels: mix.channels,
                 sample_format: mix.sample_format,
@@ -349,8 +434,13 @@ impl WasapiPcmCapture {
                 level: AudioLevelAccumulator::default(),
                 resampler: (mix.sample_rate != OPUS_SAMPLE_RATE)
                     .then(|| StereoResampler::new(mix.sample_rate, OPUS_SAMPLE_RATE)),
+                discontinuity_fade: DiscontinuityFade::new(),
+                packet_timeline: DevicePacketTimeline::new(),
+                last_device_packet_at: Instant::now(),
                 assembler,
                 queue: std::collections::VecDeque::new(),
+                discontinuity_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
+                late_audio_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
             })
         }
     }
@@ -359,33 +449,27 @@ impl WasapiPcmCapture {
         self.level.take()
     }
 
-    fn decode_samples(&self, data: *const u8, frames: u32) -> Vec<f32> {
-        let sample_count = frames as usize * self.channels as usize;
-        // SAFETY: WASAPI's buffer is valid until ReleaseBuffer. Callers copy
-        // before releasing, and each branch reads exactly the active frames.
-        unsafe {
-            match self.sample_format {
-                SampleFormat::Float32 => {
-                    std::slice::from_raw_parts(data as *const f32, sample_count).to_vec()
-                }
-                SampleFormat::Pcm16 => std::slice::from_raw_parts(data as *const i16, sample_count)
-                    .iter()
-                    .map(|&s| s as f32 / 32_768.0)
-                    .collect(),
-                SampleFormat::Pcm24 => std::slice::from_raw_parts(data, sample_count * 3)
-                    .chunks_exact(3)
-                    .map(|b| {
-                        let raw = b[0] as i32 | ((b[1] as i32) << 8) | ((b[2] as i32) << 16);
-                        let signed = (raw << 8) >> 8;
-                        signed as f32 / 8_388_608.0
-                    })
-                    .collect(),
-                SampleFormat::Pcm32 => std::slice::from_raw_parts(data as *const i32, sample_count)
-                    .iter()
-                    .map(|&s| s as f32 / 2_147_483_648.0)
-                    .collect(),
-            }
+    fn decode_samples(&self, data: *const u8, frames: u32) -> Result<Vec<f32>, CaptureError> {
+        let sample_count = (frames as usize)
+            .checked_mul(self.channels as usize)
+            .ok_or_else(|| CaptureError::DeviceLost("WASAPI sample count overflow".into()))?;
+        let byte_len = sample_count
+            .checked_mul(self.sample_format.bytes_per_sample())
+            .ok_or_else(|| CaptureError::DeviceLost("WASAPI buffer size overflow".into()))?;
+        if byte_len == 0 {
+            return Ok(Vec::new());
         }
+        if data.is_null() {
+            return Err(CaptureError::DeviceLost(
+                "WASAPI returned a null non-silent buffer".into(),
+            ));
+        }
+        // SAFETY: GetBuffer guarantees `byte_len` readable bytes until
+        // ReleaseBuffer. A u8 slice has alignment one; typed decoding below
+        // copies fixed-size little-endian arrays and never assumes alignment.
+        let bytes = unsafe { std::slice::from_raw_parts(data, byte_len) };
+        decode_sample_bytes(bytes, self.sample_format, sample_count)
+            .map_err(|message| CaptureError::DeviceLost(message.into()))
     }
 
     fn stereo_samples(&mut self, samples: &[f32]) -> Vec<f32> {
@@ -402,8 +486,23 @@ impl WasapiPcmCapture {
             stereo = resampler.resample(&stereo);
         }
         apply_gain(&mut stereo, self.volume);
-        self.level.add(&stereo);
         stereo
+    }
+
+    fn push_timed_stereo(&mut self, pts_s: f64, stereo: &[f32]) {
+        let outcome = self.assembler.push_chunk(pts_s, stereo);
+        if let Some(correction_s) = outcome.late_reanchor_s {
+            if let Some(suppressed_since_last) = self.late_audio_diagnostics.observe(Instant::now())
+            {
+                emit_diagnostic(CaptureDiagnostic::WasapiLateAudioReanchored {
+                    source: self.mode.diagnostic_label(),
+                    correction_ms: (correction_s * 1_000.0).round() as u64,
+                    total_correction_ms: (outcome.total_correction_s * 1_000.0).round() as u64,
+                    chunk_ms: (outcome.chunk_duration_s * 1_000.0).round() as u64,
+                    suppressed_since_last,
+                });
+            }
+        }
     }
 
     /// Drain everything the device has buffered into the assembler.
@@ -414,6 +513,7 @@ impl WasapiPcmCapture {
         // ReleaseBuffer.
         unsafe {
             while self.capture.GetNextPacketSize().map_err(lost)? > 0 {
+                self.last_device_packet_at = Instant::now();
                 let mut data = std::ptr::null_mut();
                 let mut frames = 0u32;
                 let mut flags = 0u32;
@@ -427,34 +527,62 @@ impl WasapiPcmCapture {
                         Some(&mut qpc_100ns),
                     )
                     .map_err(lost)?;
+                let packet = WasapiPacket::new(&self.capture, frames);
                 let timestamp_valid = wasapi_timestamp_valid(flags);
                 let data_discontinuous = wasapi_data_discontinuous(flags);
                 let pts_s = timestamp_valid.then(|| self.clock.pts_s(qpc_100ns as i64));
-                let n = frames as usize * self.channels as usize;
-                let samples: Vec<f32> = if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
-                    vec![0.0; n]
+                let sample_count = (frames as usize)
+                    .checked_mul(self.channels as usize)
+                    .ok_or_else(|| CaptureError::DeviceLost("WASAPI sample count overflow".into()));
+                let samples = if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
+                    sample_count.map(|count| vec![0.0; count])
                 } else {
                     self.decode_samples(data as *const u8, frames)
                 };
-                self.capture.ReleaseBuffer(frames).map_err(lost)?;
-                let stereo = self.stereo_samples(&samples);
-                if let Some(pts_s) = pts_s {
-                    self.assembler.push_chunk(pts_s, &stereo);
-                } else {
-                    self.assembler.push_contiguous_chunk(&stereo);
+                packet.release().map_err(lost)?;
+                let samples = samples?;
+                let mut stereo = self.stereo_samples(&samples);
+                if data_discontinuous {
+                    self.discontinuity_fade.restart();
+                    self.packet_timeline.require_timestamp_anchor();
+                }
+                self.discontinuity_fade.apply(&mut stereo);
+                self.level.add(&stereo);
+                match self.packet_timeline.placement(pts_s) {
+                    DevicePacketPlacement::Timestamped(anchor_pts_s) => {
+                        self.push_timed_stereo(anchor_pts_s, &stereo);
+                    }
+                    DevicePacketPlacement::Contiguous => {
+                        self.assembler.push_contiguous_chunk(&stereo);
+                    }
                 }
                 if data_discontinuous {
-                    eprintln!("WASAPI data discontinuity; audio gap fill capped");
+                    if let Some(suppressed_since_last) =
+                        self.discontinuity_diagnostics.observe(Instant::now())
+                    {
+                        emit_diagnostic(CaptureDiagnostic::WasapiDataDiscontinuity {
+                            suppressed_since_last,
+                        });
+                    }
                 }
             }
         }
         Ok(())
     }
 
-    fn poll_frames(&mut self, until_pts_s: f64) -> Result<Vec<PcmFrame>, CaptureError> {
+    fn collect_frames(
+        &mut self,
+        until_pts_s: f64,
+        synthesize_silence: bool,
+    ) -> Result<Vec<PcmFrame>, CaptureError> {
         self.drain_device()?;
-        if let Some(horizon_pts_s) = audio_poll_silence_horizon(until_pts_s) {
-            self.assembler.advance_with_silence(horizon_pts_s);
+        if synthesize_silence {
+            if let Some(horizon_pts_s) = audio_poll_silence_horizon(until_pts_s) {
+                let idle_s = self.last_device_packet_at.elapsed().as_secs_f64();
+                if self.packet_timeline.note_synthesized_silence(idle_s) {
+                    self.assembler.advance_with_silence(horizon_pts_s);
+                }
+            }
         }
         while let Some(frame) = self.assembler.pop_frame() {
             self.queue.push_back(frame);
@@ -466,16 +594,28 @@ impl WasapiPcmCapture {
             .unwrap_or(self.queue.len());
         Ok(self.queue.drain(..split).collect())
     }
+
+    fn poll_frames(&mut self, until_pts_s: f64) -> Result<Vec<PcmFrame>, CaptureError> {
+        self.collect_frames(until_pts_s, true)
+    }
+
+    fn finish_frames(&mut self, until_pts_s: f64) -> Result<Vec<PcmFrame>, CaptureError> {
+        self.collect_frames(until_pts_s, false)
+    }
 }
 
 impl Drop for WasapiPcmCapture {
     fn drop(&mut self) {
         // SAFETY: Stop on a started client is always valid.
         let _ = unsafe { self.client.Stop() };
-        if let Some(handle) = self.event_handle.take() {
-            let _ = unsafe { CloseHandle(handle) };
-        }
     }
+}
+
+fn process_loopback_stream_config() -> (u32, i64) {
+    (
+        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+        POLLING_BUFFER_DURATION_100NS,
+    )
 }
 
 impl WasapiLoopback {
@@ -537,6 +677,30 @@ impl WasapiLoopback {
             samples,
         })
     }
+
+    fn encode_frames(&mut self, frames: Vec<PcmFrame>) -> Result<(), CaptureError> {
+        for (pts_s, frame) in frames {
+            let data = self
+                .opus
+                .encode_frame(&frame)
+                .map_err(|e| CaptureError::DeviceLost(format!("opus encode: {e}")))?;
+            self.queue.push(AudioPacket {
+                data,
+                pts_s,
+                duration_s: FRAME_DURATION_S,
+            });
+        }
+        Ok(())
+    }
+
+    fn take_packets_until(&mut self, until_pts_s: f64) -> Vec<AudioPacket> {
+        let split = self
+            .queue
+            .iter()
+            .position(|packet| packet.pts_s + packet.duration_s > until_pts_s + 1e-9)
+            .unwrap_or(self.queue.len());
+        self.queue.drain(..split).collect()
+    }
 }
 
 pub fn enumerate_audio_devices() -> Result<AudioDeviceList, CaptureError> {
@@ -588,7 +752,7 @@ pub fn enumerate_output_processes(
             let session_process_path = process_image_path(pid).or_else(|| {
                 process_snapshot
                     .get(&pid)
-                    .and_then(|entry| entry.process_path.clone())
+                    .and_then(|entry| entry.image_name.clone())
             });
             let capture_pid =
                 process_group_root(pid, session_process_path.as_deref(), &process_snapshot);
@@ -604,7 +768,7 @@ pub fn enumerate_output_processes(
                 .or_else(|| {
                     process_snapshot
                         .get(&capture_pid)
-                        .and_then(|entry| entry.process_path.clone())
+                        .and_then(|entry| entry.image_name.clone())
                 });
             let process_name = process_path
                 .as_deref()
@@ -821,13 +985,13 @@ fn activate_process_loopback_client(pid: u32) -> Result<IAudioClient, CaptureErr
     let operation = match operation {
         Ok(operation) => operation,
         Err(error) => {
-            // SAFETY: clears the owned blob allocated by InitPropVariantFromBuffer.
+            // SAFETY: clears the VT_BLOB payload allocated with CoTaskMemAlloc.
             let _ = unsafe { PropVariantClear(&mut variant) };
             return Err(init(error));
         }
     };
 
-    let deadline = Instant::now() + Duration::from_millis(1500);
+    let deadline = Instant::now() + PROCESS_LOOPBACK_ACTIVATION_TIMEOUT;
     let mut guard = state.completed.lock().expect("activation mutex");
     loop {
         if *guard {
@@ -871,11 +1035,9 @@ fn activate_process_loopback_client(pid: u32) -> Result<IAudioClient, CaptureErr
             return Ok(client);
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            // SAFETY: clears the owned blob allocated by InitPropVariantFromBuffer.
+            // SAFETY: clears the VT_BLOB payload allocated with CoTaskMemAlloc.
             let _ = unsafe { PropVariantClear(&mut variant) };
-            return Err(CaptureError::Init(format!(
-                "WASAPI process loopback activation timed out for pid {pid}"
-            )));
+            return Err(process_loopback_activation_timeout(pid));
         };
         let (next_guard, timeout) = state
             .ready
@@ -883,12 +1045,17 @@ fn activate_process_loopback_client(pid: u32) -> Result<IAudioClient, CaptureErr
             .expect("activation result condvar");
         guard = next_guard;
         if timeout.timed_out() && !*guard {
-            // SAFETY: clears the owned blob allocated by InitPropVariantFromBuffer.
+            // SAFETY: clears the VT_BLOB payload allocated with CoTaskMemAlloc.
             let _ = unsafe { PropVariantClear(&mut variant) };
-            return Err(CaptureError::Init(format!(
-                "WASAPI process loopback activation timed out for pid {pid}"
-            )));
+            return Err(process_loopback_activation_timeout(pid));
         }
+    }
+}
+
+fn process_loopback_activation_timeout(pid: u32) -> CaptureError {
+    CaptureError::OperationTimeout {
+        operation: format!("WASAPI process loopback activation for pid {pid}"),
+        after: PROCESS_LOOPBACK_ACTIVATION_TIMEOUT,
     }
 }
 
@@ -933,8 +1100,7 @@ fn process_snapshot() -> std::collections::HashMap<u32, ProcessSnapshotEntry> {
                         pid,
                         ProcessSnapshotEntry {
                             parent_pid: entry.th32ParentProcessID,
-                            process_path: (!fallback_name.trim().is_empty())
-                                .then_some(fallback_name),
+                            image_name: (!fallback_name.trim().is_empty()).then_some(fallback_name),
                         },
                     );
                 }
@@ -961,7 +1127,7 @@ fn process_group_root(
         .or_else(|| {
             snapshot
                 .get(&pid)
-                .and_then(|entry| entry.process_path.clone())
+                .and_then(|entry| entry.image_name.clone())
         });
 
     for parent_pid in process_parent_pids(pid, snapshot) {
@@ -971,7 +1137,7 @@ fn process_group_root(
         let Some(parent) = snapshot.get(&parent_pid) else {
             break;
         };
-        let Some(parent_path) = parent.process_path.as_deref() else {
+        let Some(parent_path) = parent.image_name.as_deref() else {
             break;
         };
         if !same_process_image(path, parent_path) {
@@ -1037,8 +1203,8 @@ fn process_images_differ(
     snapshot: &std::collections::HashMap<u32, ProcessSnapshotEntry>,
 ) -> bool {
     match (
-        process_path_for(a.pid, a.process_path.as_deref(), snapshot),
-        process_path_for(b.pid, b.process_path.as_deref(), snapshot),
+        process_image_for(a.pid, a.process_path.as_deref(), snapshot),
+        process_image_for(b.pid, b.process_path.as_deref(), snapshot),
     ) {
         (Some(a_path), Some(b_path)) => !same_process_image(a_path, b_path),
         _ => {
@@ -1053,7 +1219,7 @@ fn process_images_differ(
     }
 }
 
-fn process_path_for<'a>(
+fn process_image_for<'a>(
     pid: u32,
     path: Option<&'a str>,
     snapshot: &'a std::collections::HashMap<u32, ProcessSnapshotEntry>,
@@ -1061,7 +1227,7 @@ fn process_path_for<'a>(
     path.or_else(|| {
         snapshot
             .get(&pid)
-            .and_then(|entry| entry.process_path.as_deref())
+            .and_then(|entry| entry.image_name.as_deref())
     })
 }
 
@@ -1069,7 +1235,7 @@ fn process_identity_name(
     process: &AudioProcessInfo,
     snapshot: &std::collections::HashMap<u32, ProcessSnapshotEntry>,
 ) -> Option<String> {
-    process_path_for(process.pid, process.process_path.as_deref(), snapshot)
+    process_image_for(process.pid, process.process_path.as_deref(), snapshot)
         .and_then(process_name_from_path)
         .or_else(|| {
             process
@@ -1131,24 +1297,16 @@ fn utf16z_from_buf(buf: &[u16]) -> String {
 
 impl AudioSource for WasapiLoopback {
     fn poll_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
-        for (pts_s, frame) in self.pcm.poll_frames(until_pts_s)? {
-            let data = self
-                .opus
-                .encode_frame(&frame)
-                .map_err(|e| CaptureError::DeviceLost(format!("opus encode: {e}")))?;
-            self.queue.push(AudioPacket {
-                data,
-                pts_s,
-                duration_s: FRAME_DURATION_S,
-            });
-        }
-        // Mock semantics: every packet that ends at or before `until`.
-        let split = self
-            .queue
-            .iter()
-            .position(|p| p.pts_s + p.duration_s > until_pts_s + 1e-9)
-            .unwrap_or(self.queue.len());
-        Ok(self.queue.drain(..split).collect())
+        let frames = self.pcm.poll_frames(until_pts_s)?;
+        self.encode_frames(frames)?;
+        Ok(self.take_packets_until(until_pts_s))
+    }
+
+    fn finish_packets(&mut self, until_pts_s: f64) -> Result<Vec<AudioPacket>, CaptureError> {
+        std::thread::sleep(Duration::from_secs_f64(TERMINAL_AUDIO_DRAIN_S));
+        let frames = self.pcm.finish_frames(until_pts_s)?;
+        self.encode_frames(frames)?;
+        Ok(self.take_packets_until(until_pts_s))
     }
 
     fn track_config(&self) -> AudioTrackConfig {
@@ -1198,6 +1356,56 @@ fn pcm_sample_format(bits: u16) -> Option<SampleFormat> {
     }
 }
 
+impl SampleFormat {
+    const fn bytes_per_sample(self) -> usize {
+        match self {
+            Self::Float32 | Self::Pcm32 => 4,
+            Self::Pcm16 => 2,
+            Self::Pcm24 => 3,
+        }
+    }
+}
+
+fn decode_sample_bytes(
+    bytes: &[u8],
+    sample_format: SampleFormat,
+    sample_count: usize,
+) -> Result<Vec<f32>, &'static str> {
+    let expected_len = sample_count
+        .checked_mul(sample_format.bytes_per_sample())
+        .ok_or("WASAPI buffer size overflow")?;
+    if bytes.len() != expected_len {
+        return Err("WASAPI buffer length does not match its frame count");
+    }
+    Ok(match sample_format {
+        SampleFormat::Float32 => bytes
+            .chunks_exact(4)
+            .map(|sample| f32::from_le_bytes(sample.try_into().expect("four-byte chunk")))
+            .collect(),
+        SampleFormat::Pcm16 => bytes
+            .chunks_exact(2)
+            .map(|sample| {
+                i16::from_le_bytes(sample.try_into().expect("two-byte chunk")) as f32 / 32_768.0
+            })
+            .collect(),
+        SampleFormat::Pcm24 => bytes
+            .chunks_exact(3)
+            .map(|sample| {
+                let raw = sample[0] as i32 | ((sample[1] as i32) << 8) | ((sample[2] as i32) << 16);
+                let signed = (raw << 8) >> 8;
+                signed as f32 / 8_388_608.0
+            })
+            .collect(),
+        SampleFormat::Pcm32 => bytes
+            .chunks_exact(4)
+            .map(|sample| {
+                i32::from_le_bytes(sample.try_into().expect("four-byte chunk")) as f32
+                    / 2_147_483_648.0
+            })
+            .collect(),
+    })
+}
+
 fn process_loopback_format() -> WAVEFORMATEX {
     const CHANNELS: u16 = 2;
     const BITS_PER_SAMPLE: u16 = 16;
@@ -1232,8 +1440,81 @@ mod tests {
     use crate::traits::AudioSource;
 
     #[test]
-    fn audio_poll_horizon_leaves_one_opus_frame_for_delivery() {
-        assert_eq!(audio_poll_silence_horizon(0.5), Some(0.48));
+    fn sample_decoder_accepts_misaligned_little_endian_buffers() {
+        fn misaligned(samples: impl IntoIterator<Item = u8>) -> Vec<u8> {
+            std::iter::once(0xAA).chain(samples).collect()
+        }
+
+        let float = misaligned(
+            (-1.0f32)
+                .to_le_bytes()
+                .into_iter()
+                .chain(0.5f32.to_le_bytes()),
+        );
+        assert_eq!(
+            decode_sample_bytes(&float[1..], SampleFormat::Float32, 2).unwrap(),
+            [-1.0, 0.5]
+        );
+
+        let pcm16 = misaligned(
+            i16::MIN
+                .to_le_bytes()
+                .into_iter()
+                .chain(16_384i16.to_le_bytes()),
+        );
+        assert_eq!(
+            decode_sample_bytes(&pcm16[1..], SampleFormat::Pcm16, 2).unwrap(),
+            [-1.0, 0.5]
+        );
+
+        let pcm32 = misaligned(
+            i32::MIN
+                .to_le_bytes()
+                .into_iter()
+                .chain(1_073_741_824i32.to_le_bytes()),
+        );
+        assert_eq!(
+            decode_sample_bytes(&pcm32[1..], SampleFormat::Pcm32, 2).unwrap(),
+            [-1.0, 0.5]
+        );
+
+        let pcm24 = misaligned([0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        let decoded = decode_sample_bytes(&pcm24[1..], SampleFormat::Pcm24, 3).unwrap();
+        assert_eq!(decoded[0], -1.0);
+        assert_eq!(decoded[1], -1.0 / 8_388_608.0);
+        assert!((decoded[2] - 8_388_607.0 / 8_388_608.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn sample_decoder_rejects_truncated_or_extra_bytes() {
+        assert!(decode_sample_bytes(&[0; 3], SampleFormat::Float32, 1).is_err());
+        assert!(decode_sample_bytes(&[0; 3], SampleFormat::Pcm16, 1).is_err());
+        assert!(decode_sample_bytes(&[0; 2], SampleFormat::Pcm24, 1).is_err());
+        assert!(decode_sample_bytes(&[0; 5], SampleFormat::Pcm32, 1).is_err());
+    }
+
+    #[test]
+    fn fixed_wave_format_storage_is_borrowed() {
+        let mut format = process_loopback_format();
+        let storage = WaveFormatStorage::borrowed(&mut format);
+
+        assert!(!storage.owns_allocation());
+    }
+
+    #[test]
+    fn com_wave_format_storage_owns_its_allocation() {
+        let allocation = unsafe { CoTaskMemAlloc(size_of::<WAVEFORMATEX>()) } as *mut WAVEFORMATEX;
+        assert!(!allocation.is_null());
+        unsafe { allocation.write(process_loopback_format()) };
+        let storage = WaveFormatStorage::co_task_mem(allocation).expect("COM allocation");
+
+        assert!(storage.owns_allocation());
+        drop(storage);
+    }
+
+    #[test]
+    fn audio_poll_horizon_leaves_thirty_milliseconds_for_delivery() {
+        assert_eq!(audio_poll_silence_horizon(0.5), Some(0.47));
         assert_eq!(audio_poll_silence_horizon(0.01), Some(0.0));
     }
 
@@ -1274,21 +1555,21 @@ mod tests {
                 10724,
                 ProcessSnapshotEntry {
                     parent_pid: 1000,
-                    process_path: Some(r"C:\Users\dain\AppData\Local\Discord\Discord.exe".into()),
+                    image_name: Some("Discord.exe".into()),
                 },
             ),
             (
                 18736,
                 ProcessSnapshotEntry {
                     parent_pid: 10724,
-                    process_path: Some(r"C:\Users\dain\AppData\Local\Discord\Discord.exe".into()),
+                    image_name: Some("Discord.exe".into()),
                 },
             ),
             (
                 20732,
                 ProcessSnapshotEntry {
                     parent_pid: 10724,
-                    process_path: Some(r"C:\Users\dain\AppData\Local\Discord\Discord.exe".into()),
+                    image_name: Some("Discord.exe".into()),
                 },
             ),
         ]);
@@ -1318,14 +1599,14 @@ mod tests {
                 10,
                 ProcessSnapshotEntry {
                     parent_pid: 1,
-                    process_path: Some(r"C:\Launchers\Launcher.exe".into()),
+                    image_name: Some("Launcher.exe".into()),
                 },
             ),
             (
                 20,
                 ProcessSnapshotEntry {
                     parent_pid: 10,
-                    process_path: Some(r"C:\Games\Game.exe".into()),
+                    image_name: Some("Game.exe".into()),
                 },
             ),
         ]);
@@ -1343,14 +1624,14 @@ mod tests {
                 10,
                 ProcessSnapshotEntry {
                     parent_pid: 1,
-                    process_path: Some(r"C:\Program Files\Steam\steam.exe".into()),
+                    image_name: Some("steam.exe".into()),
                 },
             ),
             (
                 20,
                 ProcessSnapshotEntry {
                     parent_pid: 10,
-                    process_path: Some(r"C:\Games\SlayTheSpire2.exe".into()),
+                    image_name: Some("SlayTheSpire2.exe".into()),
                 },
             ),
         ]);
@@ -1382,14 +1663,14 @@ mod tests {
                 10,
                 ProcessSnapshotEntry {
                     parent_pid: 1,
-                    process_path: None,
+                    image_name: None,
                 },
             ),
             (
                 20,
                 ProcessSnapshotEntry {
                     parent_pid: 10,
-                    process_path: Some(r"C:\Games\SlayTheSpire2.exe".into()),
+                    image_name: Some("SlayTheSpire2.exe".into()),
                 },
             ),
         ]);
@@ -1429,6 +1710,43 @@ mod tests {
         assert_eq!(block_align, 4);
     }
 
+    #[test]
+    fn process_loopback_uses_pull_mode_with_one_second_of_headroom() {
+        let (flags, buffer_duration_100ns) = process_loopback_stream_config();
+
+        assert_ne!(flags & AUDCLNT_STREAMFLAGS_LOOPBACK, 0);
+        assert_ne!(flags & AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, 0);
+        assert_eq!(
+            flags & windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            0,
+            "pull mode must not register an event that no capture thread waits on"
+        );
+        assert_eq!(buffer_duration_100ns, 10_000_000);
+    }
+
+    #[test]
+    fn process_loopback_pull_mode_starts_polls_and_stops() {
+        if std::env::var_os("CI").is_some() || !process_loopback_available() {
+            eprintln!("SKIP: process loopback needs a supported interactive Windows session");
+            return;
+        }
+        let clock = RelativeClock::new(crate::windows::qpc_now_ticks_100ns().unwrap());
+        let mut source = match WasapiLoopback::start_process_output(clock, std::process::id(), 1.0)
+        {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!("SKIP: process loopback unavailable: {error}");
+                return;
+            }
+        };
+
+        std::thread::sleep(Duration::from_millis(100));
+        source
+            .poll_packets(f64::MAX)
+            .expect("pull-mode process loopback poll");
+        drop(source);
+    }
+
     /// Real loopback against the default render endpoint. CI-skipped (no
     /// audio endpoint on runners); lenient about an idle/silent desktop —
     /// the assembler's gap fill makes silence a valid outcome.
@@ -1457,10 +1775,22 @@ mod tests {
                 "20 ms cadence"
             );
         }
+
         for p in &packets {
             assert!(!p.data.is_empty());
         }
         eprintln!("captured {} opus packets in 300 ms", packets.len());
+    }
+
+    #[test]
+    fn process_loopback_activation_timeout_is_typed() {
+        let error = process_loopback_activation_timeout(42);
+        assert!(error.is_timeout());
+        assert!(matches!(
+            error,
+            CaptureError::OperationTimeout { after, .. }
+                if after == PROCESS_LOOPBACK_ACTIVATION_TIMEOUT
+        ));
     }
 
     #[test]

@@ -39,6 +39,48 @@ const H264_PROFILE_HIGH: u32 = 100;
 const MFT_EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 const MFT_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
+fn take_and_clear_manually_drop_option<T>(slot: &mut ManuallyDrop<Option<T>>) -> Option<T> {
+    // SAFETY: the value is immediately replaced with `None`, so the owner can
+    // still drop its field without releasing the moved value a second time.
+    let value = unsafe { ManuallyDrop::take(slot) };
+    *slot = ManuallyDrop::new(None);
+    value
+}
+
+struct OwnedMftOutputBuffer {
+    raw: MFT_OUTPUT_DATA_BUFFER,
+}
+
+impl OwnedMftOutputBuffer {
+    fn new(output_id: u32) -> Self {
+        Self {
+            raw: MFT_OUTPUT_DATA_BUFFER {
+                dwStreamID: output_id,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn raw_mut(&mut self) -> &mut MFT_OUTPUT_DATA_BUFFER {
+        &mut self.raw
+    }
+
+    fn take_sample(&mut self) -> Option<IMFSample> {
+        take_and_clear_manually_drop_option(&mut self.raw.pSample)
+    }
+}
+
+impl Drop for OwnedMftOutputBuffer {
+    fn drop(&mut self) {
+        // SAFETY: ProcessOutput transfers these fields to its caller on every
+        // result. A taken sample is replaced with None before this guard drops.
+        unsafe {
+            ManuallyDrop::drop(&mut self.raw.pSample);
+            ManuallyDrop::drop(&mut self.raw.pEvents);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MftConfig {
     /// Encode size; must already be even (`annexb::even_dimensions`).
@@ -148,6 +190,7 @@ impl MftH264Encoder {
         cfg: MftConfig,
         crop: Option<CropRect>,
     ) -> Result<Self, EncodeError> {
+        crate::windows::d3d11::ensure_multithread_protected(device).map_err(backend)?;
         mft_probe::ensure_mf_started().map_err(backend)?;
 
         let activates = mft_probe::enum_activates(
@@ -319,23 +362,19 @@ impl MftH264Encoder {
     /// Pull one encoded sample after METransformHaveOutput.
     fn drain_one(&mut self) -> Result<EncodedPacket, EncodeError> {
         loop {
-            let mut out = MFT_OUTPUT_DATA_BUFFER {
-                dwStreamID: self.output_id,
-                ..Default::default()
-            };
+            let mut out = OwnedMftOutputBuffer::new(self.output_id);
             let mut status = 0u32;
             // SAFETY: hardware MFTs provide their own samples (pSample None
-            // in); on Ok we take ownership of pSample and release pEvents.
+            // in); `out` releases all returned fields on every result path.
             let res = unsafe {
                 self.transform
-                    .ProcessOutput(0, std::slice::from_mut(&mut out), &mut status)
+                    .ProcessOutput(0, std::slice::from_mut(out.raw_mut()), &mut status)
             };
             match res {
                 Ok(()) => {
-                    // SAFETY: ManuallyDrop fields owned by us after the call.
-                    let sample = unsafe { ManuallyDrop::take(&mut out.pSample) }
+                    let sample = out
+                        .take_sample()
                         .ok_or_else(|| EncodeError::Backend("no sample on Ok".into()))?;
-                    unsafe { ManuallyDrop::drop(&mut out.pEvents) };
                     return self.packet_from_sample(&sample);
                 }
                 Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
@@ -378,7 +417,7 @@ impl MftH264Encoder {
         }
         let nominal = 1.0 / self.cfg.fps as f64;
         // SAFETY: attribute getters on a valid sample.
-        let (pts_s, duration_s, is_keyframe) = unsafe {
+        let (pts_s, duration_s, clean_point) = unsafe {
             (
                 sample.GetSampleTime().map_err(backend)? as f64 / 1e7,
                 sample
@@ -388,6 +427,7 @@ impl MftH264Encoder {
                 sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) == 1,
             )
         };
+        let is_keyframe = clean_point || crate::annexb::is_keyframe(&annexb);
         Ok(EncodedPacket {
             data: annexb_to_avcc(&annexb),
             pts_s,
@@ -599,6 +639,39 @@ fn sequence_header_sps_pps(
 mod tests {
     use super::*;
     use crate::traits::{Encoder, Frame, FrameData};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct DropSpy(Rc<Cell<usize>>);
+
+    impl Drop for DropSpy {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    #[test]
+    fn taking_a_manually_dropped_option_clears_its_owner_slot() {
+        let drops = Rc::new(Cell::new(0));
+        let mut slot = ManuallyDrop::new(Some(DropSpy(drops.clone())));
+
+        let value = take_and_clear_manually_drop_option(&mut slot).expect("owned value");
+        assert!((*slot).is_none());
+        assert_eq!(drops.get(), 0);
+
+        drop(value);
+        assert_eq!(drops.get(), 1);
+        unsafe { ManuallyDrop::drop(&mut slot) };
+        assert_eq!(
+            drops.get(),
+            1,
+            "cleared owner must not double-drop the value"
+        );
+
+        let mut untouched = ManuallyDrop::new(Some(DropSpy(drops.clone())));
+        unsafe { ManuallyDrop::drop(&mut untouched) };
+        assert_eq!(drops.get(), 2, "untaken owner must release its value once");
+    }
 
     #[test]
     fn classifies_mft_error_event_as_error() {

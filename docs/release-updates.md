@@ -28,22 +28,32 @@ so standalone installs never update into the Evergreen installer.
 For now, publish Nightly manually from a Windows checkout:
 
 ```powershell
-# One-time per machine (and when bumping the pinned runtime): download the
-# WebView2 Fixed Version runtime and extract it where
-# tauri.standalone.conf.json expects it. Get the current x64 .cab URL from
-# https://developer.microsoft.com/en-us/microsoft-edge/webview2/ (Fixed
-# Version section), then:
+# For every standalone release, review Microsoft's current WebView2 Fixed
+# Version release even when the pinned version does not change. Update
+# webview2-fixed-runtime.json (reviewed_on/review_due_on and version when
+# needed), then download the reviewed x64 .cab from the official Fixed Version
+# section:
+# https://developer.microsoft.com/en-us/microsoft-edge/webview2/
 #   expand.exe -F:* <runtime>.cab apps\clipline-app\webview2-fixed
 # Keep the folder name (with version) in sync with tauri.standalone.conf.json
-# — both the resources glob and the webviewInstallMode path.
+# — both the resources glob and the webviewInstallMode path. The preflight
+# rejects a review older than 30 days, config drift, and a missing runtime
+# executable in the staged payload.
+.\scripts\verify-webview2-runtime.ps1 -RequirePayload
 
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content .local-secrets\clipline-updater.key -Raw
 
-# Stage the LGPL FFmpeg resource bundle used for gallery poster generation
-# and the optional FFmpeg encoder tier. Defaults to
-# %APPDATA%\Clipline\ffmpeg, which should contain ffmpeg.exe, its DLLs, and
-# the license texts from the LGPL shared distribution.
-.\scripts\stage-ffmpeg-resource.ps1
+# Download and stage the exact reviewed LGPL FFmpeg archive used for gallery
+# posters and the optional FFmpeg encoder tier. The script hashes the archive
+# before opening it, extracts only the manifest allowlist, validates the
+# executable/version/configuration and per-file hashes, and emits
+# PROVENANCE.json beside the staged runtime.
+$ffmpegManifest = Get-Content apps\clipline-app\ffmpeg-runtime.json -Raw | ConvertFrom-Json
+$ffmpegInputs = Join-Path $env:LOCALAPPDATA "Clipline\release-inputs"
+New-Item -ItemType Directory -Path $ffmpegInputs -Force | Out-Null
+$ffmpegArchive = Join-Path $ffmpegInputs $ffmpegManifest.archive_name
+Invoke-WebRequest -Uri $ffmpegManifest.archive_url -OutFile $ffmpegArchive
+.\scripts\stage-ffmpeg-resource.ps1 -ArchivePath $ffmpegArchive
 
 # 1. Regular build (from apps/clipline-app so config discovery works)
 Set-Location apps/clipline-app
@@ -63,11 +73,20 @@ gh release create nightly <bundle assets> --prerelease --title "Clipline Nightly
 ```
 
 The release must include both updater metadata assets (`latest.json`,
-`latest-standalone.json`). When bumping the pinned WebView2 runtime, update
-the version in `tauri.standalone.conf.json` and re-download the runtime.
-When bumping or replacing FFmpeg, update the source bundle staged by
-`scripts\stage-ffmpeg-resource.ps1`; `apps/clipline-app/ffmpeg/` is a build
-staging directory and its binaries are intentionally git-ignored.
+`latest-standalone.json`). A WebView2 Fixed Version review is required for
+every standalone release and at least every 30 days. Compare the official
+release notes with the pinned version, update `webview2-fixed-runtime.json`,
+update both paths in `tauri.standalone.conf.json` when the version changes,
+stage the matching runtime, and run the preflight above. Before publication,
+play an H.264/Opus clip through its end in the standalone build and confirm the
+HEVC/AV1 capability probes still enable only codecs that the runtime can play.
+When bumping FFmpeg, select a retained immutable LGPL-shared release, review
+its license and configuration, then rotate every version, URL, archive/file
+size, and hash in `apps/clipline-app/ffmpeg-runtime.json` together. Run the
+staging script against the exact archive and review the logged provenance.
+Never use BtbN's floating `latest` asset. `apps/clipline-app/ffmpeg/` is a
+build staging directory and its binaries are intentionally git-ignored; its
+allowlisted `PROVENANCE.json` and license are bundled into both installers.
 A GitHub Actions workflow can automate this later, but pushing workflow files
 requires a token with GitHub's `workflow` scope.
 

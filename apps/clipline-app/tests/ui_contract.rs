@@ -11,6 +11,7 @@ fn index_html() -> String {
 }
 
 const APP_UI_JS: &[&str] = &[
+    "presentation-core.js",
     "cloud-core.js",
     "app-core.js",
     "settings.js",
@@ -210,6 +211,51 @@ fn default_capability_only_targets_main_window() {
 }
 
 #[test]
+fn renderer_capabilities_match_observed_window_operations() {
+    let capability: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json"),
+        )
+        .expect("read default capability"),
+    )
+    .expect("valid default capability JSON");
+    let permissions: Vec<_> = capability["permissions"]
+        .as_array()
+        .expect("capability permissions")
+        .iter()
+        .map(|permission| permission.as_str().expect("string permission"))
+        .collect();
+
+    assert_eq!(
+        permissions,
+        [
+            "core:default",
+            "core:window:allow-toggle-maximize",
+            "core:window:allow-close",
+            "core:window:allow-start-dragging",
+            "autostart:allow-enable",
+            "autostart:allow-disable",
+            "autostart:allow-is-enabled",
+        ]
+    );
+}
+
+#[test]
+fn cloud_pages_and_marker_art_cross_narrow_renderer_boundaries() {
+    let cloud = read_ui_js("cloud.js");
+    let review = read_ui_js("review-player.js");
+    let library = read_ui_js("library.js");
+
+    assert!(
+        cloud.contains("await invoke(\"open_cloud_clip\", { remoteClipId: entry.remote_clip_id })")
+    );
+    assert!(!cloud.contains("invoke(\"open_cloud_clip_url\""));
+    assert!(review.contains("PlayerCore.safeMarkerImage"));
+    assert!(review.contains("PlayerCore.markerKindConfig"));
+    assert!(library.matches("PlayerCore.markerKindConfig").count() >= 2);
+}
+
+#[test]
 fn native_shell_prevents_duplicate_clipline_instances() {
     let manifest = cargo_toml();
     let app = app_rs();
@@ -338,12 +384,14 @@ fn frontend_reports_webview_readiness_to_native_shell() {
     let js = main_js();
 
     assert!(
-        app.contains("fn frontend_ready()") && app.contains("frontend_ready,"),
-        "Rust shell must expose a lightweight frontend_ready command"
+        app.contains("fn frontend_ready(startup_warnings:") && app.contains("frontend_ready,"),
+        "Rust shell must expose frontend_ready with durable startup diagnostics"
     );
     assert!(
-        js.contains("invoke(\"frontend_ready\")"),
-        "main.js must report readiness once the frontend JavaScript boots"
+        js.contains("invoke(\"frontend_ready\")")
+            && js.contains("Array.isArray(warnings)")
+            && js.contains("warnings.join(\" \")"),
+        "main.js must report readiness and render queued startup diagnostics"
     );
 }
 
@@ -398,17 +446,13 @@ fn update_dialog_body_can_drag_frameless_window() {
 }
 
 #[test]
-fn elevated_game_hotkey_warning_offers_opt_in_restart_once_per_process() {
+fn elevated_game_hotkey_warning_offers_safe_guidance_once_per_process() {
     let html = index_html();
     let js = main_js();
     let css = styles_css();
     let warning = js_function_body(&js, "maybeWarnElevatedGame");
 
-    for required in [
-        "id=\"elevation-dialog\"",
-        "id=\"elevation-restart\"",
-        "id=\"elevation-cancel\"",
-    ] {
+    for required in ["id=\"elevation-dialog\"", "id=\"elevation-cancel\""] {
         assert!(
             html.contains(required),
             "missing elevated-game UI: {required}"
@@ -418,10 +462,12 @@ fn elevated_game_hotkey_warning_offers_opt_in_restart_once_per_process() {
         js.contains("elevated_hotkeys_blocked")
             && warning.contains("game.process_instance_id")
             && js.contains("warnedElevatedGameProcesses")
-            && js.contains("invoke(\"restart_as_administrator\")")
-            && warning.contains("if (dialog.open && !elevationRestartInFlight) dialog.close();")
-            && js.contains("addEventListener(\"close\", () => maybeWarnElevatedGame(activeDetectedGame))"),
-        "game detection must warn once per process instance, close stale warnings, and invoke only the explicit restart command"
+            && warning.contains("if (dialog.open) dialog.close();")
+            && !js.contains("restart_as_administrator")
+            && !js.contains("restartAsAdministrator")
+            && !html.contains("Restart as Administrator")
+            && html.contains("without administrator privileges"),
+        "game detection must warn once per process instance and offer only non-elevation guidance"
     );
     assert!(
         css.contains("#elevation-dialog"),
@@ -430,92 +476,43 @@ fn elevated_game_hotkey_warning_offers_opt_in_restart_once_per_process() {
 }
 
 #[test]
-fn cancelled_uac_restart_keeps_elevation_dialog_open_for_retry() {
-    let js = main_js();
-    let restart = js_function_body(&js, "restartAsAdministrator");
-    let warning = js_function_body(&js, "maybeWarnElevatedGame");
-    let catch_start = restart
-        .find("catch (error)")
-        .expect("administrator restart failure path");
-    let catch_body = &restart[catch_start..];
+fn app_has_no_full_application_elevation_entrypoint() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let app = app_rs();
+    let main = fs::read_to_string(root.join("src/main.rs")).expect("read src/main.rs");
+    let windows =
+        fs::read_to_string(root.join("src/windows/mod.rs")).expect("read src/windows/mod.rs");
+    let ui = main_js();
 
-    assert!(
-        warning.contains("warnedElevatedGameProcesses.has(processInstanceId)"),
-        "elevation warnings must remain once per process instance after an intentional dismiss"
-    );
-    assert!(
-        catch_body.contains("button.disabled = false")
-            && catch_body.contains("Restart as Administrator")
-            && catch_body.contains("$(\"error\").textContent = String(error)")
-            && !catch_body.contains(".close()"),
-        "UAC cancellation must leave the elevation dialog open; closing it while the PID stays in warnedElevatedGameProcesses removes the only retry path"
-    );
-}
-
-#[test]
-fn elevation_restart_restores_retry_if_dialog_closed_during_uac() {
-    let js = main_js();
-    let restart = js_function_body(&js, "restartAsAdministrator");
-    let catch_start = restart
-        .find("catch (error)")
-        .expect("administrator restart failure path");
-    let catch_body = &restart[catch_start..];
-
-    assert!(
-        restart.contains("elevationRestartInFlight = true")
-            && restart.contains("cancel.disabled = true")
-            && js.contains("addEventListener(\"cancel\"")
-            && js.contains("elevationRestartInFlight"),
-        "an in-flight administrator restart must disable dismiss controls and block Escape"
-    );
-    assert!(
-        catch_body.contains("if (!dialog.open)")
-            && catch_body.contains("warnedElevatedGameProcesses.delete(processInstanceId)")
-            && catch_body.contains("maybeWarnElevatedGame(activeDetectedGame)"),
-        "if the elevation dialog was closed while UAC was showing, failure must clear the warned process instance and re-offer the warning"
-    );
-}
-
-#[test]
-fn elevation_restart_reconciles_after_inflight_and_handles_false_result() {
-    let js = main_js();
-    let restart = js_function_body(&js, "restartAsAdministrator");
-    let cleared = restart
-        .rfind("elevationRestartInFlight = false")
-        .expect("in-flight flag must clear after the restart attempt");
-
-    assert!(
-        restart.contains("const restarted = await invoke(\"restart_as_administrator\")")
-            && restart.contains("if (!restarted)")
-            && restart.contains("cancel.disabled = false"),
-        "Ok(false) must re-enable elevation dialog controls instead of leaving them disabled"
-    );
-    assert!(
-        restart[cleared..].contains("maybeWarnElevatedGame(activeDetectedGame)"),
-        "after in-flight clears, the dialog must reconcile: close if the game already went inactive during UAC (no further detection emit), or restore a closed retry path"
-    );
-}
-
-#[test]
-fn failed_elevation_handoff_does_not_start_tauri() {
-    let main = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
-        .expect("read src/main.rs");
-    let handoff_error = main
-        .find("if let Err(error) = windows::wait_for_elevation_parent_from_args()")
-        .expect("elevation handoff error branch");
-    let app_run = main[handoff_error..]
-        .find("app::run();")
-        .map(|offset| handoff_error + offset)
-        .expect("Tauri startup");
-    assert!(
-        main[handoff_error..app_run].contains("return;"),
-        "a failed parent handoff must abort before Tauri and the recorder start"
-    );
+    for (name, source) in [
+        ("app", app.as_str()),
+        ("main", main.as_str()),
+        ("windows", windows.as_str()),
+        ("ui", ui.as_str()),
+    ] {
+        for forbidden in [
+            "restart_as_administrator",
+            "launch_elevated_after",
+            "wait_for_elevation_parent_from_args",
+            "--clipline-elevated-after",
+            "\"runas\"",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{name} must not retain full-app elevation entrypoint {forbidden}"
+            );
+        }
+    }
 }
 
 fn library_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library.rs");
     fs::read_to_string(path).expect("read src/library.rs")
+}
+
+fn cloud_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cloud.rs");
+    fs::read_to_string(path).expect("read src/cloud.rs")
 }
 
 fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
@@ -535,6 +532,27 @@ fn audio_preview_command_scopes_generated_preview_files() {
             && library.contains("asset_protocol_scope")
             && library.contains("allow_file(preview"),
         "selected-audio preview MP4s are generated under AppData and must be exact-scoped before the player loads them"
+    );
+}
+
+#[test]
+fn exported_clips_are_scoped_for_immediate_playback() {
+    let library = library_rs();
+    let export_start = library
+        .find("pub async fn export_clip")
+        .expect("export_clip command");
+    let export_end = library[export_start..]
+        .find("\n#[tauri::command]")
+        .map(|offset| export_start + offset)
+        .unwrap_or(library.len());
+    let export_command = &library[export_start..export_end];
+
+    assert!(
+        export_command.contains("app: AppHandle<R>")
+            && export_command.contains("let scope_root = settings.clips_dir()?")
+            && export_command.contains("allow_local_clip_asset(")
+            && export_command.contains("Path::new(&exported.path)"),
+        "a newly exported MP4 must be exact-scoped before its card can open it without a Library rescan"
     );
 }
 
@@ -938,12 +956,17 @@ fn review_player_owns_all_controls() {
     );
     assert!(
         html.contains(">Cloud<")
-            && html.contains("This host uses HTTP. Your password will be sent without TLS.")
-            && !html.contains("id=\"cloud-http-confirm\"")
+            && html.contains("I understand my password will be sent without TLS to")
+            && html.contains("id=\"cloud-http-confirm\"")
+            && html.contains("id=\"cloud-http-origin\"")
             && main_js().contains("cloud_connect")
             && main_js().contains("cloud_disconnect")
-            && main_js().contains("function cloudHostUsesInsecureHttp()")
-            && main_js().contains("plain_http_confirmed: cloudHostUsesInsecureHttp()")
+            && main_js().contains("function cloudInsecureHttpOrigin(")
+            && main_js().contains("CloudCore.plainHttpConfirmed(")
+            && main_js().contains("plain_http_confirmed: plainHttpConfirmed")
+            && main_js().contains("if (plainHttpOrigin && !plainHttpConfirmed)")
+            && main_js().contains("confirm.checked = false")
+            && !main_js().contains("plain_http_confirmed: cloudHostUsesInsecureHttp()")
             && main_js().contains(
                 "$(\"cloud-host-url\").addEventListener(\"input\", syncCloudHttpWarning)"
             )
@@ -996,10 +1019,15 @@ fn review_player_owns_all_controls() {
             && app_rs().contains("crate::cloud::sync_cloud_clip_status")
             && app_rs().contains("crate::library::prepare_clip_audio_sidecars")
             && main_js().contains("sync_cloud_clip_status")
+            && main_js().contains("result.truncated")
+            && main_js().contains("first 10,000 unique cloud clips")
             && styles_css().contains(".cloud-connect-grid")
             && styles_css().contains(".cloud-connect-fields")
             && styles_css().contains(".cloud-connect-fields[hidden] { display: none; }")
             && styles_css().contains(".cloud-http-warning")
+            && styles_css().contains(".cloud-http-warning input")
+            && styles_css().contains(".cloud-http-warning span")
+            && styles_css().contains("word-break: break-all")
             && styles_css().contains(".cloud-http-warning[hidden] { display: none; }")
             && styles_css().contains(".clip-cloud-visibility.public")
             && styles_css().contains(".clip-cloud-visibility.unlisted")
@@ -1357,6 +1385,137 @@ fn review_player_owns_all_controls() {
 }
 
 #[test]
+fn custom_game_ids_use_a_reserved_namespace_and_migrated_icons_do_not_become_plugins() {
+    let js = main_js();
+
+    assert!(
+        js.contains("return `custom-${slug}-${Date.now()}`")
+            && js.contains("for (const plugin of gamePlugins) usedIds.add(plugin.id)"),
+        "new custom games must stay in the custom namespace and reserve catalog ids"
+    );
+    assert!(
+        js.contains("function customGameForRecordedGame(recordedGame)")
+            && js.contains("custom.name === recordedGame.name")
+            && js.contains("custom.legacy_ids.includes(recordedGame.id)")
+            && js.contains("if (clip && customGameForRecordedGame(clip.game)) return null"),
+        "historical collision aliases must retain custom icons without enabling plugin presentation"
+    );
+}
+
+#[test]
+fn resolved_recorder_media_root_updates_library_and_playback_scope() {
+    let app = app_rs();
+    let library = library_rs();
+
+    assert!(
+        app.contains("Event::MediaRootResolved")
+            && app.contains("StorageSettings>()")
+            && app.contains("set_media_dir")
+            && library.contains("allow_local_clip_asset")
+            && library.contains("allow_file")
+            && app.contains("service::prepare_writable_media_directory(&media_dir)?"),
+        "recorder fallback must publish the actual media root and Library results must exact-scope playback files"
+    );
+}
+
+#[test]
+fn renderer_filesystem_authority_is_exact_and_backend_owned() {
+    let app = app_rs();
+    let cloud = cloud_rs();
+    let library = library_rs();
+    let settings_js = read_ui_js("settings.js");
+    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+    let static_scope = config["app"]["security"]["assetProtocol"]["scope"]
+        .as_array()
+        .expect("asset protocol scope array");
+
+    assert!(
+        static_scope.is_empty(),
+        "asset scope must be granted per validated file"
+    );
+    assert!(!app.contains(".allow_directory("));
+    assert!(!cloud.contains(".allow_directory("));
+    assert!(library.contains(".allow_file("));
+    assert!(cloud.contains(".allow_file("));
+    assert!(app.contains("NativeMediaFolderAuthorization"));
+    assert!(app.contains("validate_change(&old_media_dir, &media_dir)"));
+    assert!(app.contains("fn extract_window_icon(process_id: u32)"));
+    assert!(app.contains("crate::games::list_game_windows()"));
+    assert!(settings_js.contains("processId: win.process_id"));
+    assert!(!settings_js.contains("exePath: win.exe_path"));
+}
+
+#[test]
+fn local_library_refresh_rejects_stale_snapshots_and_reports_event_errors() {
+    let app_core = read_ui_js("app-core.js");
+    let library = read_ui_js("library.js");
+    let review = read_ui_js("review-player.js");
+    let main = read_ui_js("main.js");
+    let refresh_clips = js_function_body(&library, "refreshClips");
+
+    assert!(
+        app_core.contains("var localClipsRequestGate = CloudCore.createRequestGate();"),
+        "local Library reads need a latest-request generation gate"
+    );
+    assert!(
+        app_core.contains("var localLibraryWarning = \"\";"),
+        "the UI must remember which visible error belongs to a partial Library scan"
+    );
+    for required in [
+        "const request = localClipsRequestGate.begin(\"local-library\");",
+        "const isCurrent = () => localClipsRequestGate.isCurrent(request, \"local-library\");",
+        "if (!isCurrent()) return false;",
+        "result = await invoke(\"list_clips\");",
+        "freshClips = Array.isArray(result.clips) ? result.clips : [];",
+        "applyLocalLibraryWarnings(result.warnings);",
+        "clipsCache = freshClips;",
+    ] {
+        assert!(
+            refresh_clips.contains(required),
+            "refreshClips must arbitrate snapshots with `{required}`"
+        );
+    }
+    assert!(
+        refresh_clips.find("if (!isCurrent()) return false;")
+            < refresh_clips.find("applyLocalLibraryWarnings(result.warnings);")
+            && refresh_clips.find("applyLocalLibraryWarnings(result.warnings);")
+                < refresh_clips.find("clipsCache = freshClips;"),
+        "a stale response must be rejected before it mutates warnings or the local cache"
+    );
+    let apply_warnings = js_function_body(&library, "applyLocalLibraryWarnings");
+    for required in [
+        "error.textContent === localLibraryWarning",
+        "error.textContent = \"\";",
+        "localLibraryWarning = normalized.join(\" \");",
+        "error.textContent = localLibraryWarning;",
+    ] {
+        assert!(
+            apply_warnings.contains(required),
+            "Library warnings must use safe, scoped notice handling: `{required}`"
+        );
+    }
+    assert!(
+        library.contains("function invalidateLocalClipsRefresh()")
+            && js_function_body(&library, "replaceClipInCache")
+                .contains("invalidateLocalClipsRefresh();")
+            && js_function_body(&review, "applyDeletion")
+                .contains("invalidateLocalClipsRefresh();")
+            && review.matches("invalidateLocalClipsRefresh();").count() >= 2,
+        "rename, delete, and export cache mutations must invalidate older snapshots"
+    );
+    assert!(
+        main.contains("function requestRefresh()")
+            && main.contains("refresh().catch((error) => {")
+            && main.contains("listen(\"saved\"")
+            && main.contains("listen(\"osu-enrichment-updated\"")
+            && main.matches("requestRefresh();").count() >= 2,
+        "fire-and-forget event refreshes must catch and surface current failures"
+    );
+}
+
+#[test]
 fn keyboard_shortcuts_document_j_l_frame_step_and_arrows_seek() {
     let html = index_html();
 
@@ -1677,8 +1836,31 @@ fn library_refresh_starts_osu_enrichment_retry() {
     assert!(
         library.contains("pub async fn list_clips<R: Runtime>")
             && library.contains("app: AppHandle<R>")
-            && library.contains("crate::osu_api::retry_pending_enrichment(&app, retry_root).await"),
+            && library.contains(
+                "crate::osu_api::retry_pending_enrichment(&enrichment_app, retry_root).await",
+            ),
         "list_clips should kick off the async osu! retry path during library refresh"
+    );
+}
+
+#[test]
+fn library_refresh_canonicalizes_the_media_root_once_before_scoping_clips() {
+    let library = library_rs();
+    let list_start = library
+        .find("pub async fn list_clips<R: Runtime>")
+        .expect("list_clips command");
+    let list_end = library[list_start..]
+        .find("\nfn list_clips_from_dir")
+        .map(|offset| list_start + offset)
+        .expect("list_clips helper follows command");
+    let list = &library[list_start..list_end];
+
+    assert!(list.contains("let canonical_scope_root = canonical_media_root(&scope_root)?;"));
+    assert!(list.contains("allow_local_clip_asset_from_canonical_root("));
+    assert_eq!(
+        list.matches("canonical_media_root(&scope_root)").count(),
+        1,
+        "the unchanging media root should be resolved once per Library refresh"
     );
 }
 
@@ -1962,6 +2144,8 @@ fn audio_sidecar_transport_follows_only_the_video_clock() {
     let main = read_ui_js("main.js");
     let sync = js_function_body(&review, "syncReviewAudioSidecarSet");
     assert!(sync.contains("PlayerCore.audioSidecarSyncDecision("));
+    assert!(sync.contains("duration: audio.duration"));
+    assert!(sync.contains("ended: audio.ended"));
     assert!(sync.contains("audio.currentTime = decision.seekTime;"));
     assert!(sync.contains("audio.playbackRate = decision.playbackRate;"));
     assert!(!sync.contains("video.currentTime ="));
@@ -2727,8 +2911,25 @@ fn shell_shows_live_memory_usage() {
         "sidebar chrome must include the RAM indicator placeholder"
     );
     assert!(
-        js.contains("memory_status") && js.contains("setInterval(refreshMemoryUsage, 2000)"),
-        "memory indicator must poll the backend command on a short interval"
+        js.contains("memory_status"),
+        "memory indicator must use the backend sampler"
+    );
+    assert!(
+        js.contains("if (!document.hidden) refreshMemoryUsage()")
+            && js.contains("visibilitychange"),
+        "memory polling must pause while hidden and refresh when visible again"
+    );
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let app = fs::read_to_string(source_root.join("app.rs")).expect("read app.rs");
+    assert!(
+        app.contains("async fn memory_status(")
+            && app.contains("State<'_, crate::memory::MemorySampler>"),
+        "memory_status must use the managed asynchronous sampler"
+    );
+    let memory = fs::read_to_string(source_root.join("memory.rs")).expect("read memory.rs");
+    assert!(
+        memory.contains("spawn_blocking") && memory.contains("tokio::sync::Mutex"),
+        "the process-tree walk must run on the blocking pool and coalesce callers"
     );
     assert!(
         css.contains(".memory-usage") && css.contains("font-variant-numeric: tabular-nums"),
@@ -2795,7 +2996,7 @@ fn library_has_cloud_source_tab() {
         "invoke(\"list_cloud_clips\")",
         "invoke(\"cache_cloud_clip_media\"",
         "invoke(\"cloud_clip_thumbnail\"",
-        "invoke(\"open_cloud_clip_url\"",
+        "invoke(\"open_cloud_clip\"",
         "PlayerCore.cloudLibraryEntries",
         "localClip ? clipCard(localClip) : cloudClipCard(entry)",
         "showCloudClipContextMenu(ev, entry)",
@@ -2861,9 +3062,25 @@ fn library_has_cloud_source_tab() {
         "native command registry must expose list_cloud_clips for the Cloud library tab"
     );
     assert!(
-        app_rs().contains("crate::cloud::open_cloud_clip_url"),
-        "native command registry must expose open_cloud_clip_url for Cloud card links"
+        app_rs().contains("crate::cloud::open_cloud_clip"),
+        "native command registry must expose open_cloud_clip for Cloud card links"
     );
+}
+
+#[test]
+fn cloud_upload_state_matches_legacy_windows_canonical_paths() {
+    let js = main_js();
+    for required in [
+        "function cloudUploadRecordForPath(path)",
+        "PlayerCore.sameClipPath(record.path, path)",
+        "PlayerCore.sameClipPath(clip.path, entry.path)",
+        "PlayerCore.sameClipPath(record.path, oldPath)",
+    ] {
+        assert!(
+            js.contains(required),
+            "cloud UI path pairing must use equivalent Windows paths through `{required}`"
+        );
+    }
 }
 
 #[test]
@@ -2918,6 +3135,38 @@ fn cloud_library_loader_guards_every_async_result_and_force_supersedes() {
 }
 
 #[test]
+fn cloud_tab_click_forces_authoritative_refresh() {
+    let main = read_ui_js("main.js");
+    let click_start = main
+        .find("$(\"gallery-source-tabs\").addEventListener(\"click\"")
+        .expect("gallery source tabs must have a click handler");
+    let click_end = main[click_start..]
+        .find("$(\"gallery-select-toggle\")")
+        .map(|offset| click_start + offset)
+        .expect("gallery source handler must precede the selection handler");
+    let click = &main[click_start..click_end];
+    assert!(click.contains("loadCloudClips({ force: true })"));
+    assert!(
+        click.find("loadCloudClips({ force: true })") < click.find("renderClips()"),
+        "Cloud selection must start its forced request before generic rendering can request cached data"
+    );
+
+    let cloud = read_ui_js("cloud.js");
+    let records = js_function_body(&cloud, "cloudLibraryRecords");
+    assert!(
+        records.contains("cloudListAuthoritative")
+            && records.contains("cloudClipsLoaded")
+            && records.contains("cloudClipsLoading")
+            && records.contains("cloudClipsCache,"),
+        "the renderer must distinguish an authoritative server response from an uninitialized cache"
+    );
+    assert!(
+        !records.contains("Boolean(cloudClipsError)"),
+        "a failed refresh must preserve cached completed uploads"
+    );
+}
+
+#[test]
 fn rail_profile_identity_change_resets_and_refetches_cloud_library() {
     let cloud = read_ui_js("cloud.js");
     let refresh = js_function_body(&cloud, "refreshRailProfileIdentity");
@@ -2947,6 +3196,7 @@ fn games_ui_wires_detection_commands() {
         "await invoke(\"list_game_plugins\")",
         "await invoke(\"list_game_windows\")",
         "listen(\"game-detection\"",
+        "if (activeDetectedGame?.active) loadGamePlugins();",
         "var detectedGameCandidates = []",
         "var selectedDetectedGameIds = new Set()",
         "var detectedGamesScanId = 0",
@@ -3050,8 +3300,12 @@ fn clipboard_copy_sends_selected_audio_tracks() {
 
     assert!(
         library.contains("pub struct CopyClipToClipboardRequest")
-            && library.contains("request: CopyClipToClipboardRequest"),
-        "clipboard command should accept a request object so selected audio can be passed"
+            && library.contains("request: CopyClipToClipboardRequest")
+            && library.contains("window: tauri::WebviewWindow")
+            && library.contains(".hwnd()")
+            && library.contains("SetClipboardData(CF_HDROP as u32")
+            && !library.contains("EmptyClipboard()"),
+        "clipboard command should accept selected audio while native clipboard ownership comes from the invoking Clipline window",
     );
     assert!(
         app.contains("crate::library::copy_clip_to_clipboard"),
@@ -3113,16 +3367,36 @@ fn ui_is_split_into_markup_styles_and_logic() {
 
     for asset in [
         "href=\"styles.css\"",
+        "src=\"presentation-core.js\"",
         "src=\"player-core.js\"",
         "src=\"app-core.js\"",
         "src=\"settings.js\"",
         "src=\"library.js\"",
         "src=\"cloud.js\"",
         "src=\"review-player.js\"",
-        "src=\"main.js\"",
+        "type=\"module\" src=\"bootstrap.mjs\"",
     ] {
         assert!(html.contains(asset), "index.html must reference {asset}");
     }
+
+    let bootstrap = read_ui_js("bootstrap.mjs");
+    assert!(
+        bootstrap.contains("import { PresentationCore } from \"./presentation.mjs\"")
+            && bootstrap.contains("import { PlayerCore } from \"./player-core.mjs\"")
+            && bootstrap.contains("import { CloudCore } from \"./cloud-core.mjs\"")
+            && bootstrap.contains("globalThis.CliplineModules = Object.freeze(")
+            && bootstrap.contains("await import(\"./main.js\")"),
+        "renderer startup must enter through an explicit ES-module core/controller boundary"
+    );
+
+    let presentation = read_ui_js("presentation-core.js");
+    let library = read_ui_js("library.js");
+    let cloud = read_ui_js("cloud.js");
+    let player = player_core_js();
+    assert!(presentation.contains("const clipNameStem ="));
+    assert!(!library.contains("function clipFileStem("));
+    assert!(!cloud.contains("function clipNameStem("));
+    assert!(!player.contains("const MONTHS ="));
 
     assert!(
         !html.contains("<style"),
@@ -3409,5 +3683,99 @@ fn gallery_card_hover_keeps_hit_target_stable() {
         css_decl_value(delete_hover_rule, "pointer-events"),
         Some("auto"),
         "the delete button should become clickable only while visible on card hover"
+    );
+}
+
+#[test]
+fn player_shortcuts_defer_to_any_open_dialog() {
+    let main = read_ui_js("main.js");
+    let handler = main
+        .split("document.addEventListener(\"keydown\", (ev) => {")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split("if (ev.code === \"Escape\" && settingsOpen)")
+                .next()
+        })
+        .expect("global keydown handler has a dialog guard");
+
+    assert!(
+        handler.contains("document.querySelector(\"dialog[open]\")"),
+        "the global keydown guard must automatically cover every open dialog"
+    );
+    for dialog_id in [
+        "confirm-dialog",
+        "quit-dialog",
+        "update-dialog",
+        "elevation-dialog",
+        "upload-dialog",
+        "detected-games-dialog",
+        "game-window-picker-dialog",
+        "rename-file-dialog",
+        "game-plugin-settings-dialog",
+        "keys-dialog",
+    ] {
+        assert!(
+            !handler.contains(dialog_id),
+            "the dialog guard must not maintain a drifting special case for {dialog_id}"
+        );
+    }
+}
+
+#[test]
+fn cloud_auth_refresh_preserves_the_unsaved_settings_draft() {
+    let cloud = read_ui_js("cloud.js");
+    let reload = js_function_body(&cloud, "reloadSettings");
+    let connect = js_function_body(&cloud, "connectCloud");
+    let disconnect = js_function_body(&cloud, "disconnectCloud");
+
+    assert!(
+        reload.contains("CloudCore.mergeBackendCloudSettings")
+            && reload.contains("settingsDraft")
+            && reload.contains("settingsIndicatorBaseline")
+            && !reload.contains("fillSettings("),
+        "cloud auth reload must patch backend-owned cloud state instead of repainting all settings"
+    );
+    for (name, body) in [("connect", connect), ("disconnect", disconnect)] {
+        let snapshot = body
+            .find("syncSettingsDraftFromForm({ resetDiscard: false })")
+            .unwrap_or_else(|| panic!("{name} must snapshot the settings form before auth"));
+        let invoke = body
+            .find("await invoke(")
+            .unwrap_or_else(|| panic!("{name} must invoke its backend command"));
+        assert!(
+            snapshot < invoke,
+            "{name} must preserve edits before awaiting auth"
+        );
+    }
+}
+
+#[test]
+fn cloud_byte_progress_does_not_unconditionally_rebuild_the_gallery() {
+    let main = read_ui_js("main.js");
+    let handler = main
+        .split("listen(\"cloud-upload-progress\", (e) => {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n});").next())
+        .expect("cloud upload progress handler");
+
+    assert!(
+        handler.contains("const update = upsertCloudProgress(progress)")
+            && handler.contains("if (update.renderRequired) renderClips()"),
+        "gallery rebuilding must be conditional on meaningful upload-record transitions"
+    );
+    let condition = handler
+        .find("if (update.renderRequired) renderClips()")
+        .expect("conditional gallery render");
+    let percentage = handler
+        .find("received_size_bytes")
+        .expect("live byte progress");
+    assert!(
+        percentage < condition,
+        "the constant-size percentage update must remain live for byte-only progress"
+    );
+    assert_eq!(
+        handler.matches("renderClips()").count(),
+        1,
+        "the progress handler must not keep an unconditional gallery rebuild"
     );
 }

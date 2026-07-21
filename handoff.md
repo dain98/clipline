@@ -4,6 +4,1592 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-21): second PR 89 review pass
+
+The presigned object-upload client now refuses every redirect, matching the authenticated/control
+clients. A 307 regression proves a reusable PUT body is not forwarded to the redirect target; the
+direct-upload path falls back normally on the returned non-success response.
+
+WASAPI's discontinuity fade no longer spends its 40 ms ramp on digital-silence pairs before the
+first live sample in a mixed packet. Fully silent buffers and cross-buffer fades retain their
+existing behavior. The native media-folder picker keeps the canonical path for authorization but
+returns a user-facing path without Windows `\\?\` / `\\?\UNC\` prefixes. Local Library refreshes
+canonicalize their unchanging media root once, while every individual asset remains independently
+canonicalized and checked beneath that root before exact WebView scoping.
+
+The review's proposed audio-sidecar rate nudge remains intentionally rejected: commit `e7ca91e`
+implemented it and `a85ceae` removed it after audible rate oscillation. Mid-session settings saves
+also continue refusing to overwrite an externally corrupted file; startup quarantine/recovery is
+the deliberate data-preserving boundary. The three retry backoffs remain separate because their
+jitter, caps, and status semantics differ.
+
+Focused regressions, the full workspace test suite, and fresh-cache warning-denied workspace Clippy
+pass.
+
+## Checkpoint (2026-07-21): PR 89 review regressions
+
+Seven actionable PR review findings are fixed. Settings saves continue when the optional low-level
+save hook failed to install, while hotkey syntax is still validated. WASAPI keeps a requested QPC
+anchor across packets with missing or invalid timestamps and consumes it only when a finite
+timestamp arrives.
+
+The storage ownership boundary now includes a narrow pre-marker migration signal: only MP4s using
+Clipline's generated `clip_<timestamp>[_attempt]` or `session_<timestamp>[_attempt]` names are
+adopted without a sidecar. This restores quota accounting/GC for legacy replays and recovery for
+legacy `session_*.mp4.recording` files while arbitrary unmarked MP4s remain untouched. Recovered
+legacy recordings receive an ownership marker before finalization.
+
+Clipboard sharing replaces only `CF_HDROP` and no longer empties the entire clipboard before the
+new handle is accepted. A failed Cloud tab refresh remains non-authoritative so cached completed
+uploads stay visible. Cloud duplicate detection now hashes the requested payload first and skips
+only an exact local clip ID; changing audio selection or replacing media at the same path starts a
+new upload, while exact re-uploads still return the completed record.
+
+Focused regressions and the full workspace test suite pass. Fresh-cache warning-denied workspace
+Clippy is clean.
+
+## Checkpoint (2026-07-20): one-tick full-session GOP boundary overlap
+
+A full-session writer failed after roughly 86 seconds with video track 0 attempting to move from
+decode tick 7,731,609 back to 7,731,608. Segment sample durations are quantized relative to each
+GOP while the next GOP start is quantized from the absolute recording origin. At an exact rounding
+boundary those equivalent timestamps can differ by one 90 kHz tick (about 11 microseconds).
+
+The MP4 writer remains strict about backward decode time and now exposes its current per-track
+frontier. The capture pipeline alone treats a one-tick overlap as a rounding tie and keeps the
+already-written frontier; regressions of two ticks or more still fail. Regression coverage writes
+the observed adjacent-segment shape through the full-session path and separately proves that the
+larger-regression guard remains intact.
+
+## Checkpoint (2026-07-20): legacy cloud upload path identity
+
+Completed cloud records created by older builds can contain canonical Windows paths such as
+`\\?\D:\Videos\...`, while the local library reports the same clip as `D:\Videos\...`. Exact
+frontend path comparison hid the uploaded visibility badge, made cloud entries appear local-only,
+and exposed the upload action again. Local/cloud pairing now uses a shared Windows-aware path
+comparison that strips the verbatim prefix, normalizes separators, and compares Windows paths
+case-insensitively without changing POSIX semantics.
+
+The backend applies the same identity rule when finding, replacing, and removing upload records.
+An upload request for a completed record now returns that existing record before any media transfer,
+with a second local-clip-ID check after hashing as defense in depth. Regression coverage includes
+legacy verbatim paths, cloud-library availability, frontend wiring, and duplicate-upload prevention.
+
+The Cloud library tab starts a forced server request as soon as it is selected. While that request
+is active and after it succeeds, the server response is authoritative: finalized local upload
+history absent from the response is no longer rendered as generic, broken cloud cards. Active and
+still-processing upload records remain visible until the server begins returning them.
+
+## Checkpoint (2026-07-20): semi-static capture inflated video PTS
+
+Direct frontier measurement overturned the audio-clock diagnosis below. Two replay saves taken
+737.28 wall-clock seconds apart advanced the video frontier by 741.02 seconds (`1.00507x`) but the
+audio frontier by 737.44 seconds (`1.00021x`). Independent five-minute probes measured both raw
+MOTU endpoints at only +32 ppm versus QPC and the production `WasapiLoopback` sources within one
+Opus packet of wall time. League/game sessions with sustained real frames were audio-perfect;
+idle-desktop and test captures accumulated roughly 0.3--0.5% apparent audio lead. The audio path,
+MOTU clock, MP4 muxer, replay ring, and players are not the source of this drift.
+
+The defect was `CadencedCapture` in `apps/clipline-app/src/service.rs`. Timeout duplicates advance
+on a synthetic `1/fps` grid. When a backend returned before its requested timeout, the handler
+still emitted a full video cadence step and reset its wall anchor to `now`. Stale real-frame retries
+made that path repeat on semi-static content, so video PTS advanced faster than wall/QPC time. A
+moving game regularly supplied accepted QPC-stamped frames and hid the ratchet by re-anchoring it.
+
+Premature timeouts now remain timeouts until the existing cadence deadline. They neither emit a
+duplicate nor reset the wall anchor. Once a real wall interval has elapsed, duplicate PTS still
+advance on the configured grid, catch up across missed intervals, reuse the latest captured
+texture, and remain monotonic. A regression reproduces the failure: 120 one-millisecond early
+returns previously advanced PTS by 2.000 seconds in only 0.181 seconds; video PTS is now bounded by
+elapsed wall time.
+
+Plan commit `fc767ef`; implementation `aeeb7b0`. The 422-test app suite and the full workspace pass,
+including serial real-device WGC, DXGI, WASAPI, MFT, shared-clock, and FFmpeg tests. Warning-denied
+workspace Clippy and clean-cache app Clippy are clean. Manual acceptance is a ten-minute
+idle-desktop run followed by multiple 30-second replays, then a moving game test. Both audio tracks
+should reach the video tail within normal one-frame/Opus headroom with no crackle, startup
+transient, or keyframe regression.
+
+> The next two checkpoints record superseded audio-clock hypotheses and failed experiments. Keep
+> them only as history; the direct video/audio frontier measurements above are authoritative.
+
+## Checkpoint (2026-07-20): QPC servo rejected and rolled back
+
+Manual testing rejected the continuous QPC audio clock servo. After the recorder had been running
+for roughly 53 minutes, `clip_1784585886.mp4` contained 30.000 seconds of video but only 25.540
+seconds of Output Audio and 25.520 seconds of Microphone audio. The same run logged repeated WASAPI
+data discontinuities. The one-packet servo therefore amplified real device interruptions into
+multi-second audio loss and made synchronization dramatically worse.
+
+The servo implementation has been removed and WASAPI packet placement restored exactly to the
+previous nominal-cadence path: QPC anchors the first packet and post-idle/discontinuity recovery,
+while continuously delivered PCM retains every sample. Do not revive the resampling approach
+without first adding raw packet-QPC/sample-count telemetry and testing a controlled synchronized
+A/V fixture over a long-running buffer. The restored 204-test capture suite, including hardware
+device tests, passes.
+
+## Checkpoint (2026-07-20): continuous QPC audio clock servo
+
+The nominal-cadence follow-up did not fix A/V sync. In `clip_1784581736.mp4`, video lasts exactly
+30.000 seconds while Output Audio ends at 29.618 seconds and Microphone at 29.598 seconds. The
+captured source was a synchronized YouTube osu! video, which made independent measurement possible:
+cross-correlation of audio spectral onsets against gameplay-region frame changes placed audio
+roughly 350--400 ms before video. Whole-section and two separate active-play windows all peaked
+near -367 ms, matching the missing tail and the user's VLC/Clipline observation.
+
+WGC `SystemRelativeTime` and WASAPI packet QPC are timestamps on the same synchronization clock.
+Keeping only the first audio anchor and then advancing at nominal 48 kHz let device-clock error
+accumulate across the full recorder uptime; a later 30-second replay selected earlier audio content
+and omitted its matching tail. Audio now holds one real packet for QPC lookahead and resamples it to
+a **cumulative** shared-clock sample frontier. Fractional device intervals therefore do not round
+into long-running drift. Half-open interpolation uses the following packet's first stereo pair at
+the boundary, avoiding forced packet endpoints and the periodic holes from discontinuous gap fill.
+
+The pending packet remains a hard silence-synthesis frontier. Actual delivery idle flushes after
+100 ms, terminal drain flushes immediately, timestamp-error input falls back to contiguous PCM,
+and explicit device discontinuities flush/reset before the existing 40 ms onset fade. Regressions
+cover cumulative 514.4-pair clock intervals, cross-packet waveform continuity, and finite idle
+flush. The 205-test capture suite (including WGC, DXGI, WASAPI, MFT, shared-clock, and FFmpeg device
+tests), workspace tests, warning-denied workspace Clippy, and clean-cache capture Clippy pass.
+
+Plan commit `ca62bda`; implementation `c332e2d`. Restart Clipline, let the buffer run for at least
+two minutes, then save another synchronized-source replay and compare its beginning/end in both VLC
+and Clipline. Also listen for any return of periodic crackle.
+
+## Checkpoint (2026-07-20): nominal WASAPI cadence and encoded MFT keyframes
+
+The next successful 30-second replays proved that the crackle fixes had introduced progressive A/V
+lead: `clip_1784530928.mp4` has 30.100 seconds of video but only 29.700 seconds of Output Audio and
+29.680 seconds of Microphone audio, and the user confirmed sound arrived before picture. The
+one-packet-lookahead path was converting each 512-pair MOTU packet to its roughly 510-pair QPC
+interval. That removed real PCM continuously and compressed about 0.4 seconds out of each 30-second
+track.
+
+Continuous WASAPI packets now retain every device sample and append at the nominal 48 kHz cadence.
+QPC is used only for the first anchor, after 100 ms of actual device-delivery idleness, or for an
+explicit `DATA_DISCONTINUITY`. Quiet loopback still receives finite synthetic silence, idle resume
+still gets the bounded late-recovery fade, terminal drain remains immediate, and no timestamped
+packet is held back. Neutral regressions reproduce the observed 512-pair packets on 510-pair QPC
+steps and require all 153,600 pairs to span 3.2 seconds exactly.
+
+The same long-running recorder later hit the ten-second pending-GOP safety bound. The AMD H.264 MFT
+path classified keyframes only from `MFSampleExtension_CleanPoint`, although the encoded H.264 IDR
+NAL is the authoritative signal and some hardware MFT output omits the optional flag. MFT packets
+now accept either CleanPoint or an encoded IDR, matching the FFmpeg path. The ten-second/byte limits
+remain unchanged, so a genuinely stalled encoder is still bounded instead of consuming memory.
+
+Plan commit `bb30ed1`; audio implementation `1fe0ce9`; keyframe implementation `93c3d5f`. The
+204-test capture suite, including real WGC, DXGI, WASAPI, MFT, shared-clock, and FFmpeg device tests,
+passes, as do workspace tests, warning-denied workspace Clippy, and clean-cache capture Clippy.
+Retest a fresh 30-second replay with a simultaneous visual/sound cue near both ends, then leave the
+buffer running and save multiple replays to exercise repeated keyframe boundaries.
+
+## Checkpoint (2026-07-20): repeat replay save and review-audio EOF
+
+The first crackle-free replay, `clip_1784529665.mp4`, exposed two follow-on boundary bugs. Its video
+is exactly 30.000 seconds, while Output Audio ends at 29.655 seconds and Microphone at 29.635 seconds.
+The audio-only review sidecars preserve those endpoints. During the remaining video tail, the review
+timer saw each ended audio element paused and called `play()` again; WebView restarted it from zero,
+so roughly the first 350 ms of audio played at the end. VLC correctly remained silent.
+
+The sidecar synchronization policy now receives each element's duration and ended state. An ended
+sidecar stays exhausted while video is beyond its duration, but a seek back inside the sidecar range
+seeks and resumes it normally. A pure regression covers both decisions and the UI contract requires
+the live transport state to be wired into the policy.
+
+The next Save Replay failed with `media sample timestamp precedes recording origin`. Continuously
+delivered WASAPI audio can trail video and be sealed into a later GOP, but replay materialization
+filtered pre-origin audio only from the first selected segment. Origin filtering now visits every
+selected segment and every audio track before fragment timestamps are built. A two-segment fixture
+places stale audio in the later segment and verifies exact sample/data removal plus timestamp advance.
+
+Plan commit `cf0083d`; player implementation `b0f306a`; replay implementation `5147791`. All 89
+player-core tests, 78 UI contracts, 206 capture tests, workspace tests, warning-denied workspace
+Clippy, and clean-cache app/capture Clippy pass.
+
+Retest the existing first replay through its final second in Clipline, seek back from EOF, then save
+at least two new replays from one continuously running buffer. Both new saves must finalize.
+
+## Checkpoint (2026-07-20): continuous WASAPI delivery no longer becomes synthetic silence
+
+VLC reproduced the crackle in `clip_1784527236.mp4`, proving the artifact was encoded rather than a
+review-player problem. Typed telemetry on the configured MOTU M Series `Out 1-2` and `In 1-2`
+tracks showed recurring complete-packet late recovery: each event corrected 10--11 ms and both
+sources accumulated roughly 150 ms per 30 seconds. The five-millisecond recovery fade consequently
+became a periodic encoded level hole during otherwise continuous audio.
+
+WASAPI capture now holds one timestamped chunk, interpolates it to the following QPC interval, and
+treats pending real PCM as a hard frontier for poll-time silence. Crucially, the fallback flush is
+based on 100 ms with no device packet arriving, not on packet timestamp age: this MOTU driver reports
+a source timeline that drifts behind video even while samples arrive continuously. A genuinely quiet
+loopback still flushes finitely, stream finish still flushes immediately, and the discontinuity/late
+fade remains available only for actual startup, idle resume, and device discontinuities.
+
+Neutral fixtures cover the observed 512-sample/510-sample interval, endpoint preservation, genuine
+timestamp gaps, the pending-real-audio synthesis frontier, finite idle flush, and 300 consecutive
+chunks without a packet reanchor. The real output-plus-microphone build ran for 45 seconds with zero
+`wasapi_late_audio_reanchored` events; only the two expected startup discontinuities appeared. The
+205-test capture suite, workspace tests, warning-denied workspace Clippy, and clean-cache capture
+Clippy pass. Plan/telemetry commits begin at `e06752d`; core implementation commits are `de9b804`,
+`ec70d82`, and `a2fb2e3`.
+
+Retest with a fresh recording of at least one minute while game output and microphone remain active,
+then save a 30-second replay and listen in VLC. The old MP4 remains unchanged and will still crackle.
+
+## Checkpoint (2026-07-20): review sidecar rate artifacts
+
+The fresh replay `clip_1784527236.mp4` still sounded crackly throughout in Clipline. Its two Opus
+packet timelines are continuous, decoded samples have no impulses at two-second GOP boundaries,
+and the two generated review sidecars are packet-for-packet stream copies of the source tracks.
+Their encoded-packet SHA-256 hashes match exactly, ruling out replay materialization, muxing, capture,
+and sidecar extraction as the source of this symptom.
+
+The review transport checked each hidden audio element every 500 ms and changed its playback rate
+to 0.95x or 1.05x whenever ordinary drift exceeded 25 ms. Returning inside the deadband restored
+1.00x, so WebView continuously time-stretched two independent Opus decoders. Ordinary playing drift
+now keeps the video's requested playback rate. Forced seeks, paused alignment, invalid-sidecar
+recovery, and gross drift over 500 ms still seek; selected-track routing, mute/volume, preparation,
+and lifecycle behavior are unchanged. Focused sidecar tests, workspace tests, warning-denied
+workspace Clippy, and clean-cache app Clippy pass. Plan commit `814e4ee`; implementation commit
+`a85ceae`.
+
+Retest the same `clip_1784527236.mp4` in Clipline with both tracks, Output only, and Microphone only;
+a new recording is not required. Also seek while playing/paused and change playback speed. If the
+same file still crackles, compare it in an external player before changing capture again.
+
+## Checkpoint (2026-07-20): smooth WASAPI late recovery
+
+The 30-second replay `clip_1784525638.mp4` began cleanly after the discontinuity fade, but crackled
+throughout. Its Opus packet timelines are continuous; decoded PCM instead contains isolated deep
+10 ms holes (about 40 dB on Output Audio near 28.27 seconds and 21 dB on Microphone near 23.64
+seconds). Recorder diagnostics repeatedly reported `wasapi_late_audio_reanchored` every two to
+three seconds. When a quiescent endpoint resumed behind already-committed synthetic silence, the
+late-buffer recovery correctly retained the complete live chunk but joined an arbitrary waveform
+sample directly to digital silence, creating a hard audible edge.
+
+Live experiments with both 30 ms and 60 ms normal-poll allowances produced the same recovery cadence,
+proving a fixed timeout cannot outwait endpoints that stop delivering while quiet. Normal capture
+therefore keeps 30 ms of active-delivery headroom, and every actual synthetic-silence-to-live
+recovery now receives a five-millisecond linear fade. The fade retains every live sample, reaches
+full amplitude inside the first Opus frame, and leaves following samples untouched. Stream finish
+separately waits three Opus frames, drains only real buffered audio within the video boundary, and
+does not synthesize tail silence. Regressions cover the fade shape and sample retention, poll
+horizon, and terminal-only audio. The real shared-clock hardware test passed with 20.0 ms maximum
+segment skew and total drift, inside the 45 ms contract. The 200-test capture suite, workspace
+tests, warning-denied workspace Clippy, and clean-cache capture Clippy pass. Initial plan/terminal
+drain commits `1b13651`/`58109ac`; final plan/implementation commits `565954e`/`b029b80`.
+
+Retest a fresh replay of at least 30 seconds with Output Audio and Microphone active throughout.
+Listen from start to finish with both selected, then each track alone. The old file is unchanged and
+will retain its encoded holes and hard boundaries; only recordings made by this build receive the
+smoothed late recovery.
+
+## Checkpoint (2026-07-20): WASAPI discontinuity onset fade
+
+The next 188-second full session `session_1784524668.mp4` contained a loud sound at its beginning.
+Both Opus streams are structurally continuous, but Output Audio begins at 11.687 ms with a non-zero
+broadband transient: the first 20 ms peaks around -24.5 dBFS and decays by roughly 30 dB over the
+following 60 ms. Recorder diagnostics show `wasapi_data_discontinuity` on both sources at the exact
+05:17:48 recording start, confirming that the abrupt source boundary was encoded into the file.
+
+WASAPI capture now applies a 40 ms linear stereo fade after conversion, resampling, and configured
+gain. The fade is armed at capture startup and re-armed before each packet marked
+`DATA_DISCONTINUITY`; explicit digital-silence buffers do not consume it. Timestamps, sample counts,
+gap filling, late-buffer recovery, Opus framing, and diagnostics are unchanged. The neutral
+regression covers a two-buffer ramp, digital-silence deferral, steady-state pass-through, and
+re-arming. The capture suite, real shared-clock device test, workspace tests, warning-denied
+workspace Clippy, and clean-cache capture Clippy pass. Plan commit `475a5eb`; implementation commit
+`7920ad0`.
+
+Retest a new full session with Output Audio and Microphone enabled, stop after at least ten seconds,
+and replay 0:00 several times. The old file remains unchanged and will still contain its encoded
+transient; only recordings made by this build receive the discontinuity fade.
+
+## Checkpoint (2026-07-20): smooth multi-track review audio synchronization
+
+The follow-up 74-second full session `session_1784523792.mp4` was mostly audible after the delayed
+WASAPI recovery, but multi-track playback stuttered at exactly two seconds. Both Opus tracks have
+continuous 20 ms packets and continuous decoded PCM through that boundary, so the saved media is
+intact. The default review selection enables Output Audio and Microphone, which makes the player
+extract and run two independent audio sidecars alongside the video element.
+
+The review player compared each sidecar clock with video every 500 ms and hard-seeked the audio
+element whenever ordinary drift exceeded 100 ms. That turned natural WebView media-clock drift into
+an audible skip or repeated fragment. Playing sidecars now use bounded +/-5% rate correction outside
+a 25 ms deadband and return to the requested video rate when aligned. Hard seeks remain for explicit
+seeks, paused alignment, invalid sidecar clocks, and gross drift over 500 ms. The pure player
+regression failed under the old behavior and covers correction in both directions plus every
+hard-seek boundary. Focused tests, workspace tests, warning-denied workspace Clippy, and clean-cache
+app Clippy pass. Plan commit `3abaf7c`; implementation commit `e7ca91e`.
+
+Retest the reported file from the beginning with both tracks selected, then let it play for at least
+one minute. Confirm the two-second stutter and periodic skips are gone. Seek while playing and
+paused, and toggle Output only, Microphone only, both, and mute; each selection should remain synced.
+
+## Checkpoint (2026-07-20): delayed WASAPI audio recovery
+
+A real 989-second League full-session recording exposed both enabled audio tracks stuttering into
+permanent silence. FFprobe confirmed a valid 59,332-frame H.264 video and two complete 49,458-packet
+Opus tracks, ruling out truncation or missing mux samples. Output contained real audio only around
+7.40--13.74 seconds and microphone only during the opening seconds; the rest decoded as exact
+digital silence. Clipline logged no device-loss error, and the original 995 MB session and its
+sidecars were inspected read-only and remain untouched.
+
+The finite WASAPI poller advances a quiet source with synthesized silence to keep it aligned with
+video. With only one Opus frame of delivery allowance, a delayed real buffer could arrive entirely
+behind that synthetic frontier. The assembler discarded it, the next video poll synthesized more
+silence, and a consistently delayed endpoint could never catch up; partial overlap caused the
+audible stutter before lockout.
+
+The assembler now distinguishes synthetic advancement from genuine duplicate/late buffers. When
+silence has overtaken live audio, it preserves the complete real chunk at the current monotonic
+position and retains that one timestamp correction for following chunks. Late chunks without a
+synthetic advance keep the prior trimming behavior. A typed, per-source, 30-second-rate-limited
+`wasapi_late_audio_reanchored` diagnostic records the correction in milliseconds. Deterministic
+partial- and full-overlap fixtures failed under the old behavior and now preserve every live sample.
+The real shared-clock hardware test passed with 16.6 ms maximum segment skew and 43.3 ms total
+drift, inside the existing 45 ms contract. Capture tests, workspace tests, warning-denied workspace
+Clippy, and clean-cache capture Clippy pass. Plan commit `71e9977`; implementation commit `65f45ff`.
+
+Retest a five-minute full session with output and microphone activity near the beginning, middle,
+and end, plus one replay save. Confirm neither track stutters into silence, both remain synced, and
+any `wasapi_late_audio_reanchored` log line is rate-limited and followed by audible recording.
+
+## Checkpoint (2026-07-20): replay audio-origin save
+
+Manual replay acceptance after the full-session startup fix exposed the same
+`media sample timestamp precedes recording origin` invariant at a different boundary. Replay save
+rebases the MP4 timeline to the first selected video GOP, but an indivisible 20 ms Opus packet can
+begin before that GOP's keyframe and end after it. That packet is correctly retained across GOPs
+for full-session continuity, yet it has a negative timestamp when its later GOP becomes the first
+segment of a replay.
+
+Replay materialization now removes complete audio samples from only the first selected segment
+while their start precedes the selected video origin, then advances that track's start by the exact
+removed durations. Ring contents, full-session muxing, later replay segments, delayed/gapped audio,
+and the MP4 writer's negative-timestamp validation remain unchanged. A deterministic fixture puts
+the replay keyframe at 1.51 s inside the 1.50--1.52 s Opus packet: it reproduced the production
+error before the fix and now drops exactly that packet, starts audio at 1.52 s, and finalizes the
+replay. Capture tests, workspace tests, warning-denied workspace Clippy, and clean-cache capture
+Clippy pass. Plan commit `47cd9cc`; implementation commit `c91d805`.
+
+Retest Save Replay with system or microphone audio after capture has run longer than one GOP.
+Confirm the warning does not recur, the clip appears in Library, and playback begins cleanly with
+synchronized audio.
+
+## Checkpoint (2026-07-19): full-session audio-origin finalization
+
+A real full-session stop exposed `media sample timestamp precedes recording origin`; the non-empty
+`.mp4.recording` was preserved as designed. The recorder defines its timeline at the first encoded
+video packet and already drops engine-init audio lead-in, but the predicate retained an indivisible
+20 ms Opus packet when it began before that video origin and ended after it. The asynchronous
+full-session writer then correctly rejected the packet's negative relative timestamp and reported
+the failure at finalization.
+
+Startup-audio filtering is now shared by both first-keyframe and GOP-seal paths and retains only
+packets whose start is at or after the video origin, with the existing sub-nanosecond tolerance.
+The packet that straddles the origin is dropped whole; later delayed and gapped audio timing is
+unchanged. A deterministic 510 ms video-offset fixture reproduced the exact finalization error
+before the fix and now produces a finalized MP4. Existing lead-in and delayed/gapped mux tests,
+all workspace tests, warning-denied workspace Clippy, and clean-cache capture Clippy pass. The
+reported preserved recording was not opened, renamed, or deleted. Plan commit `f563812`;
+implementation commit `daff93a`.
+
+## Checkpoint (2026-07-19): single-PUT uploads declare MP4 content type
+
+The consolidated manual Cloud acceptance run found that a real single-PUT upload failed with HTTP
+400: the server requires `Content-Type: video/mp4`. Clipline's chunked proxy path already declared
+that media type, but its streamed single-PUT request sent only `Content-Length`. The existing mock
+verified the body without constraining the header, so the divergence was not covered.
+
+The single-PUT request now sends the same explicit MP4 content type, and the focused mock requires
+it. Plan commit `92f05b6`; implementation commit `0d3475a`. The focused test failed before the
+implementation and passes afterward. CI-mode workspace tests and warning-denied workspace Clippy
+pass. The local real-device WGC shared-clock test separately failed twice because the hardware
+encoder did not emit a keyframe before the existing ten-second pending-GOP bound; that capture
+failure is unrelated to the HTTP-only change. Retest by uploading a small clip through a deployment
+that selects `single_put` and confirm progress reaches processing/ready without the HTTP 400.
+
+## Checkpoint (2026-07-19): immediate playback for newly exported clips
+
+The first consolidated manual-acceptance run found one clear failure: a 30-second trim exported
+from a 2.0 GB, 33:43 session completed with flat process memory (about 152--155 MB), but its newly
+inserted Library card consistently showed WebView media error 4. The original session remained
+intact and playable. This was an authorization race, not evidence of a failed large-file mux:
+`list_clips` exact-scoped every discovered MP4 for Tauri's asset protocol, while `export_clip`
+returned a new path and the renderer inserted it directly into the Library cache before another
+scan could grant that path.
+
+`export_clip` now receives the application handle, retains the validated configured media root,
+and exact-scopes the completed MP4 before returning it to the renderer. A focused UI contract first
+reproduced the missing command invariant and now requires that grant. The Library unit-test group
+passes. Plan commit `d8226f6`; implementation commit `23f7aef`. All workspace tests,
+warning-denied workspace Clippy, and clean-cache warning-denied app Clippy pass. Retest by exporting
+a trim and opening its card immediately without refreshing or restarting; confirm metadata,
+playback, seeking, and a second reopen all work and the source remains playable.
+
+## Checkpoint (2026-07-18): explicit application module boundaries
+
+The combined audit's L-14 is fixed with incremental, compatibility-safe module boundaries. The
+largest application shells now delegate diagnostic-log ownership, media-root probing, clip naming,
+and cloud cache identity to focused Rust modules with narrow parent-only APIs. Tauri command names
+and externally visible behavior remain unchanged, while repository contracts prevent those domains
+from being folded back into the command/service monoliths.
+
+The renderer now enters through `bootstrap.mjs`, which explicitly imports frozen presentation,
+player, and Cloud core surfaces before loading the remaining controller adapter. The classic
+`PlayerCore` and `CloudCore` globals remain only as the Boa/gradual-migration compatibility layer.
+Filename stems, marker-kind labels, month names, clip titles, and gallery day labels now share one
+DOM-free presentation core. Its unified suffix policy strips MP4, MOV, MKV, and WebM consistently,
+closing the observed local/cloud title disagreement.
+
+Plan commit `e859f5d`; implementation commit `6c86a72`. Boa tests cover the shared suffix, marker,
+and calendar policies; UI contracts require the module bootstrap and explicit imports; repository
+contracts enforce all four Rust owners and reject the duplicated helpers. All 421 app tests, 88
+player-core tests, seven repository contracts, 77 UI contracts, CI-mode workspace tests,
+fresh-cache app Clippy, and warning-denied workspace Clippy pass. Computer Use verified the module
+build in the nine-of-nine Library, General and disconnected Cloud Settings, and active review
+playback. No new manual-only item remains.
+
+## Checkpoint (2026-07-18): consolidated divergence-prone paths
+
+The combined audit's L-15 is fixed. Memory and disk replay rings now share keyframe-window and
+eviction planning, while `ReplayStorage` owns the remaining backend dispatch for metrics, window
+loading, and insertion. Folder commands share one off-main-thread native dialog constructor while
+retaining their distinct media-authorization rules. Game discovery no longer hides drift behind a
+module-wide dead-code allowance.
+
+Process-loopback activation reports a typed operation timeout, so recorder fallback no longer
+classifies errors by display text. The MP4 walker and both trim readers share one overflow-checked
+normal/large/terminal box-header decoder. All four fragment payload transports now share sample
+validation, `moof`/`mdat` planning, chunk bookkeeping, decode-time advancement, and sequence commit;
+only their payload I/O differs.
+
+Plan commit `c6bbc94`; implementation commit `621c6dc`. Tests prove memory/disk eviction safety,
+typed timeout classification, checked header boundaries, and byte-identical output across owned,
+borrowed, single-source, and per-track-source MP4 writes. A repository contract rejects the blanket
+allowance, duplicated dialog/header/state paths, timeout substring matching, and the FFmpeg codec
+no-op. All 421 app tests, 18 buffer tests, 194 capture tests, 112 MP4 tests plus integrations,
+CI-mode workspace tests, fresh-cache changed-crate Clippy, and warning-denied workspace Clippy pass.
+Computer Use verified the rebuilt nine-of-nine Library with recording active. Existing media-root
+and Windows capture lifecycle acceptance scenarios cover the native boundaries, so no duplicate
+manual-only item was added.
+
+## Checkpoint (2026-07-18): coalesced off-thread memory sampling
+
+The combined audit's L-16 is fixed without changing the displayed metric. `MemorySampler` now owns
+one async mutex and a one-second monotonic cache of either success or failure. The first stale caller
+runs the exact private-resident process-tree walk on Tauri's blocking pool while concurrent callers
+wait; they then reuse the completed result rather than duplicating the address-space scan.
+
+`memory_status` is asynchronous and reads the managed sampler. The renderer keeps its two-second
+visible cadence, skips invokes while the document is hidden, and refreshes immediately on
+`visibilitychange` when shown again. Child-process enumeration, conhost exclusion, and private
+working-set semantics are unchanged.
+
+Plan commit `938b3ea`; implementation commit `fb30ca0`. Async fixtures prove eight concurrent calls
+execute one measurement and that failures are cached then retried after expiry. The UI contract
+requires the async managed sampler, blocking-pool boundary, hidden guard, and visibility refresh.
+All 421 app unit tests, 77 UI contracts, CI-mode workspace tests, fresh app Clippy, and
+warning-denied workspace Clippy pass. Computer Use verified a live RAM value, minimized the rebuilt
+app for three seconds, restored it, and observed sampling resume with the nine-of-nine Library
+healthy. No manual-only item remains.
+
+## Checkpoint (2026-07-18): transition-only Cloud gallery rendering
+
+The combined audit's L-32 is fixed. Cloud upload progress reconciliation is now DOM-free in
+`CloudCore` and returns the normalized record plus a `renderRequired` decision. Byte-only multipart
+ticks still update the deck percentage immediately, but they preserve the upload record timestamp
+and do not rebuild either gallery or rearm poster observers.
+
+The first record plus path, local/remote identity, URL, visibility, status, or error transitions
+still render synchronously. That preserves Cloud membership, search/filter results, sort order,
+visibility badges, processing/failure states, and terminal uploaded state. Explicit null values in
+native events now authoritatively clear stale remote/error fields rather than being mistaken for an
+omitted field.
+
+Plan commit `1bd80ca`; implementation commit `255a8a6`. Boa tests cover byte-only reconciliation,
+all meaningful transitions, and a 500-event burst that produces zero gallery renders and no
+timestamp churn. A UI contract proves the constant-size percentage update precedes the single
+conditional render, and JavaScript syntax checks pass. All 419 app unit tests, eight CloudCore tests,
+77 UI contracts, CI-mode workspace tests, fresh app Clippy, and warning-denied workspace Clippy are
+green. Computer Use verified the rebuilt nine-of-nine Local gallery and disconnected Cloud view.
+The existing large real-account upload scenario now also checks gallery stability during progress.
+
+## Checkpoint (2026-07-18): typed rate-limited capture diagnostics
+
+The combined audit's L-31 is fixed. ToolHelp snapshot entries now call their fallback executable
+value `image_name`, while `AudioProcessInfo.process_path` remains reserved for a queried full image
+path. Internal image lookup names and fixtures preserve the existing case-insensitive basename/path
+matching and process-tree grouping behavior without implying that ToolHelp supplied a path.
+
+WASAPI discontinuities now emit a typed `CaptureDiagnostic` through a process-wide handler installed
+by the desktop before capture can start. Clipline routes those events into its existing bounded log;
+each capture source emits immediately, suppresses repeats for 30 seconds, then reports the number
+suppressed. Gap fill and packet handling are unchanged. Activation-blob safety comments now name the
+actual `CoTaskMemAlloc` plus `PROPVARIANT`/`PropVariantClear` ownership path. The audit's cited FFmpeg
+print was already absent, and a production-source contract keeps it absent.
+
+Plan commit `c40ac40`; implementation commit `e5c51c2`. Pure tests cover the limiter sequence,
+suppressed counts, typed formatting, and handler delivery; repository contracts enforce snapshot
+naming, comment accuracy, no production WASAPI/FFmpeg `eprintln!`, and early desktop handler
+installation. All 193 capture tests plus integrations, all 419 app tests in the CI-mode workspace,
+fresh capture/app Clippy, and warning-denied workspace Clippy pass. Computer Use verified the
+rebuilt nine-of-nine Library, and the live log received structured discontinuity events. The
+existing Windows capture lifecycle acceptance scenario remains sufficient; no duplicate manual
+item was added.
+
+## Checkpoint (2026-07-18): centralized Windows platform helpers
+
+The combined audit's L-30 is fixed. Generic Credential Manager ownership, decoding, and
+write/read/delete behavior now live behind one safe `CredentialStore`; Cloud and osu! keep only
+their domain labels and transactional adapters. Successful Win32 calls that return a null
+credential, malformed nonempty blobs, invalid UTF-8, and embedded-NUL target/user strings all fail
+safely, while the single owned credential wrapper guarantees `CredFree` on every branch.
+
+Shell opening, free-space queries, atomic file replacement, null-terminated UTF-16 conversion, and
+Windows error conversion are likewise centralized under `src/windows/`. Settings, poster, and osu!
+enrichment publication share the replacement helper; game-icon and shell paths share the UTF-16
+boundary. Neutral wall-clock helpers now live in `util`, removing the app/service/osu!/media clock
+copies without changing their signed or unsigned call-site types.
+
+Plan commit `5f69751`; implementation commit `b26b88e`. Seven Windows helper tests cover credential
+decoding/labels, UTF-16, shell result boundaries, and the existing elevation/instance wrappers; a
+signed-time boundary and a recursive repository contract prevent the duplicated APIs and clocks
+from returning. All 419 app tests, CI-mode workspace tests, fresh app Clippy, and warning-denied
+workspace Clippy pass. Computer Use verified the rebuilt nine-of-nine Library and opened the local
+osu! API setup guide in Chrome through the centralized shell helper. The existing real credential
+transaction acceptance scenario remains sufficient, so no duplicate manual item was added.
+
+## Checkpoint (2026-07-18): bounded runtime diagnostic logging
+
+The combined audit's L-29 is fixed. The process-lifetime diagnostic handle is now a locked writer
+that tracks its active byte count and rotates before the next line would cross 1 MiB. Rotation
+flushes and closes the live Windows handle, replaces one bounded old generation, and reopens the
+active file. An oversized pre-fix log is migrated by retaining only its newest bounded tail, and a
+single UTF-8 message is truncated on a character boundary so it cannot defeat the cap.
+
+Generic window diagnostics now discard high-frequency move and resize events while retaining
+focus, destroy, DPI, drag/drop, theme, and explicit close behavior. The redundant per-line flush is
+gone; `File` writes remain direct and rotation performs the required flush.
+
+Plan commit `7607b11`; implementation commit `d95568f`. Five log fixtures cover repeated
+multi-generation rotation, newest-line retention, UTF-8 truncation, and legacy-tail migration;
+window-event fixtures cover noisy and retained variants. All 413 app tests, CI-mode workspace tests,
+fresh app Clippy, and warning-denied workspace Clippy pass. Computer Use moved the rebuilt window:
+the log gained only the expected focus loss/gain pair, no move/resize lines, and the nine-of-nine
+Library remained healthy. No manual-only item remains.
+
+## Checkpoint (2026-07-18): collision-safe Riot ID matching
+
+The combined audit's L-26 is fixed. League player names now parse into a normalized game name and
+an optional normalized full Riot ID. Event attribution requires the full identity when both the
+event and local player include taglines, while retaining the name-only fallback when either Live
+Client payload omits a usable tagline.
+
+Player-summary lookup scans the entire participant list for an exact full Riot ID before considering
+fallbacks. When a participant supplies a valid `riotId`, that identity also takes precedence over
+its legacy untagged `summonerName`, so an earlier same-name player with a different tagline cannot
+shadow the local player.
+
+Plan commit `af0322a`; implementation commit `2c40f15`. New fixtures put the wrong same-name
+participant first, vary case and separator whitespace, reject a foreign taglined event, and retain
+untagged compatibility. All 30 League unit tests plus its HTTP, marker, and poll integration tests
+pass; fresh crate Clippy, 409 app tests within the CI-mode workspace suite, and warning-denied
+workspace Clippy are green. Computer Use verified the rebuilt nine-of-nine Library. No manual-only
+item remains for these deterministic payload variants.
+
+## Checkpoint (2026-07-18): explicit event clock-anchor validation
+
+The combined audit's L-25 is fixed. `recording_offset_s` now uses
+`Instant::checked_duration_since` and returns a typed `ClockSyncError` when an anchor was sampled
+before recording start. Legitimate negative offsets for game events that occurred before recording
+remain unchanged; only the invalid wall-clock relation is rejected.
+
+The League poller validates its newly sampled anchor immediately after the game-clock request,
+before fetching cumulative event data or advancing `EventTracker`. The neutral error maps to the
+existing Live Client invalid-response boundary with a diagnostic, so future/backfill misuse fails
+visibly without silently shifting or consuming markers.
+
+Plan commit `ae25fa1`; implementation commit `a4d2ad7`. All 13 event tests pass, including the typed
+earlier-anchor case. A League HTTP integration supplies a future recording start, observes the
+diagnostic error, and proves the event endpoint receives zero requests; normal negative-offset and
+continuity tests remain green. Both changed crates pass fresh warning-denied Clippy, followed by
+CI-mode workspace tests and workspace Clippy. Computer Use verified the relinked nine-clip Library.
+No manual-only item remains for this latent invariant.
+
+## Checkpoint (2026-07-18): bounded direct-upload retry backoff
+
+The combined audit's L-24 is fixed. Retryable direct object-storage PUT failures now wait between
+attempts using 250 ms / 500 ms exponential steps plus deterministic per-upload, part, and attempt
+jitter. `Retry-After` delta seconds and HTTP dates become a minimum delay, with all local/server
+delays capped at 30 seconds for foreground failure reporting. Tokio timers keep task abort/future
+drop cancellation immediate.
+
+Malformed request construction and redirect configuration errors now fall back from the direct
+provider immediately; timeout/connect/request/body failures remain retryable. Existing status
+policy still refreshes expired 403 presigns and retries 408, 429, and 5xx responses, while provider
+fallback and terminal missing-ETag behavior are unchanged.
+
+Plan commit `9083940`; implementation commit `dd896dc`. Pure tests cover deterministic exponential
+jitter, server minimums/capping, delta/date/expired/malformed `Retry-After`, and existing integration
+tests prove expired presigns still make three spaced PUTs and provider failure still restarts through
+proxy. After a fresh app-crate clean, all 409 app tests, CI-mode workspace tests, and warning-denied
+workspace Clippy pass. Computer Use verified the rebuilt nine-clip Library. The existing real Cloud
+upload acceptance scenario now includes throttled direct-upload timing; no duplicate item was added.
+
+## Checkpoint (2026-07-18): live extracted plugin icons
+
+The combined audit's L-22 is fixed. Parsed profiles and resolved immutable catalog presentation
+remain `OnceLock`-cached, while each `list_game_plugins` command gets an owned snapshot and overlays
+only extraction-backed icons from the current cache file. A missing file is therefore not memoized:
+if detection extracts it later, the next catalog request observes it in the same process. Manifests
+with either explicit `extracted` icon mode or no bundled icon share this behavior.
+
+Game detection finishes synchronous icon extraction before emitting its active-game event. The
+renderer now refreshes the catalog on that event, updating supported-game rows, rail/cards, and an
+open plugin settings dialog without an app restart. File reading/base64 work stays at startup and
+game-change command boundaries rather than render paths.
+
+Plan commit `91b1ada`; implementation commit `ea11121`. A temporary cache test proves missing-then-
+created icon visibility in one process; catalog tests preserve immutable-cache identity while
+requiring independent dynamic snapshots, and the detection refresh has a UI contract. After a
+fresh app-crate clean, all 407 app tests, CI-mode workspace tests, JavaScript syntax, and
+warning-denied workspace Clippy pass. Computer Use verified the rebuilt nine-clip Library and both
+bundled League of Legends/osu! icons in Supported games. No manual-only item remains.
+
+## Checkpoint (2026-07-18): partial local Library scans
+
+The combined audit's L-21 is fixed. Local Library enumeration now returns a typed result with
+readable clips plus warnings. Failure to open or enumerate the configured media root remains fatal,
+but an unreadable child entry/session is named, logged, skipped, and no longer hides clips from
+readable sibling sessions. Sorting and exact-file asset authorization still run over every returned
+clip.
+
+The frontend applies a partial-scan warning only after the local request-generation gate accepts
+that result, so an older slow refresh cannot overwrite newer Library state. A later complete scan
+clears the prior Library warning only when it still owns the visible error text, preserving any
+unrelated error that appeared afterward. Warning text is rendered through `textContent`.
+
+Plan commit `252602e`; implementation commit `5e69249`. Deterministic tests inject an access-denied
+child beside a readable session and verify the readable clip plus named warning, while a missing
+root remains fatal. The warning ordering/clearing UI contract and changed JavaScript syntax checks
+pass. After a fresh app-crate clean, all 406 app tests, CI-mode workspace tests, and warning-denied
+workspace Clippy pass. Computer Use verified the rebuilt complete Library at nine of nine clips
+without a warning. No manual-only item remains for this deterministic enumeration boundary.
+
+## Checkpoint (2026-07-18): serialized microphone test sessions
+
+The combined audit's L-20 is fixed. Microphone test state now owns a monotonic generation and stop
+sender. Allocating a generation, stopping the previous session, and installing its replacement are
+one locked transaction, so concurrent starts cannot overwrite the only control sender and strand a
+worker holding the microphone. Workers stop on either an explicit message or channel disconnect,
+and named thread creation is fallible with conditional state rollback.
+
+Live monitor publication and error/stopped completion are serialized against generation
+replacement. A superseded worker therefore cannot emit a late level/error event or clear the
+newer active session. Explicit stop and replacement also remain ordered after any in-progress
+event publication.
+
+Plan commit `0765beb`; implementation commit `065c9a7`. Focused tests cover disconnected control
+channels, 12 concurrent replacements with one surviving generation, and stale publish/finish
+rejection. After a fresh app-crate clean, all 404 app tests, CI-mode workspace tests, and
+warning-denied workspace Clippy pass. Computer Use verified the rebuilt nine-clip Library plus two
+real default-microphone start/stop cycles; controls returned to idle and the process settled at 32
+threads after stopping. No manual-only item remains for this lifecycle boundary.
+
+## Checkpoint (2026-07-18): validated capture readback boundaries
+
+The combined audit's L-19 is fixed. WASAPI buffers are now viewed only as alignment-one byte
+slices and decoded with fixed-size little-endian copies, avoiding typed-slice alignment
+assumptions for float32 and PCM16/24/32. Frame/sample/byte arithmetic is checked, truncated or
+extra buffers are rejected, and non-silent null buffers fail safely. A packet guard pairs every
+successful `GetBuffer` with exactly one `ReleaseBuffer`, including validation errors and unwinding.
+
+NV12 readback validates nonzero even dimensions, row pitch, allocation sizes, plane offsets, and
+the complete addressable mapped span before allocation or pointer arithmetic. Null mapped pointers
+are rejected. The shared D3D read-map guard now guarantees exactly one `Unmap` on every return and
+unwind path for both NV12 and BGRA staging reads.
+
+Plan commit `efac254`; implementation commit `bd2d617`. Misaligned and malformed audio fixtures plus
+NV12 dimension/pitch/overflow layout tests pass. Capture has 193 unit, four end-to-end, and one
+FFmpeg roundtrip test green; CI-mode workspace tests and warning-denied workspace Clippy also pass
+after a fresh capture-crate clean. The current adapter lacks a video processor, so the real NV12
+converter device test self-skipped; the existing Windows capture lifecycle acceptance scenario
+covers the hardware path and no additional manual-only item is needed.
+
+## Checkpoint (2026-07-18): narrow renderer authority
+
+The combined audit's L-17, L-18, and L-33 are fixed. The renderer no longer sends an external URL
+to the native shell. It sends only `remote_clip_id`; native code validates the same conservative ID
+alphabet used for Cloud assets, constructs one encoded path segment from the saved public/host URL,
+and launches that configured origin. Private deployments and a distinct public frontend remain
+supported without granting arbitrary renderer-selected navigation.
+
+Marker presentation now uses shared own-property lookup, so inherited keys such as `constructor`
+and `__proto__` cannot become kinds/categories/icons. CSS marker art accepts only a simple bundled
+`assets/markers/*.png` path or canonical PNG data URL; invalid art falls back to the existing SVG
+glyph. Gallery/review call the same DOM-free helper. The main-window capability now retains only
+core defaults, toggle-maximize, close, drag, and the three used autostart operations; direct
+minimize remains a native command, while direct maximize/unmaximize/resize grants are gone.
+
+Plan commit `b80fff3`; implementation commit `bdff7aa`. Focused native/player/UI contracts passed,
+including inherited-object and CSS-delimiter fixtures. After a fresh app-crate clean, all CI-mode
+workspace tests and warning-denied workspace Clippy passed (401 app, 87 player-core, 76 UI-contract
+tests). Computer Use verified the rebuilt nine-clip Library and exercised maximize/restore,
+minimize/reopen, titlebar dragging, close-to-tray, and single-instance restoration. The app remains
+open for testing. Only a real-account Cloud page-origin check remains on the final manual list.
+
+## Checkpoint (2026-07-18): verified FFmpeg release staging
+
+The combined audit's L-13 is fixed. Release staging no longer accepts an arbitrary directory or
+copies its contents wholesale. `ffmpeg-runtime.json` pins BtbN's retained
+`autobuild-2026-06-30-13-34` x64 LGPL-shared FFmpeg archive, archive digest, exact version and
+license-safe configuration, upstream source/build links, and the size/hash of each allowed runtime
+file. The selected version3 build excludes GPL/nonfree mode plus libx264/libx265.
+
+`stage-ffmpeg-resource.ps1` hashes the regular archive before opening it, selects only the nine
+manifest entries, verifies each extracted file, executes only the verified `ffmpeg.exe` for the
+version/configuration probe, and builds the complete resource in an owned temporary directory. It
+then atomically replaces staging and emits deterministic `PROVENANCE.json` beside the retained
+license and independently replaceable FFmpeg runtime. Release instructions and third-party notices
+now document immutable rotation, exact source/build provenance, and LGPL replacement rights.
+
+Plan commit `87c3e32`; implementation commit `2890d0a`. The focused repository contract passed.
+A tiny archive with the exact expected name was rejected on SHA-256 before ZIP access. Real staging
+removed an injected `evil.dll`, produced exactly 11 resource files, and matched every declared
+size/hash plus the receipt. After a fresh app-crate clean, all CI-mode workspace tests and
+warning-denied workspace Clippy passed. This batch changes release inputs only, so no native app
+rebuild was required. The final acceptance list now includes inspecting both installed variants and
+exercising their packaged FFmpeg runtime.
+
+## Checkpoint (2026-07-18): owned dependency and fixed-runtime maintenance
+
+The combined audit's L-12 is fixed. The abandoned `audiopus`/`audiopus_sys` pair is gone. Capture,
+MP4 mixing/remux, and app fixtures now share `shiguredo_opus` 2026.1.0 with libopus 1.6.1. Clipline
+carries a narrow Apache-2.0 controlled fork because that release publishes `opus.lib` for Windows
+while its build script expects `libopus.a`. The fork chooses the correct platform filename and
+embeds the reviewed Windows plus Ubuntu 22.04/24.04 artifact hashes; it refuses unknown targets or
+changed artifacts. Provenance, exact patches, owner, review deadline, and removal conditions are
+recorded beside the fork and in `docs/dependency-policy.json`.
+
+The two `reqwest` release lines cannot safely converge in this repository today: Clipline and the
+pinned cloud API use 0.12, while `tauri-plugin-updater` owns 0.13. The exact split is now a quarterly
+expiring exception with an upstream convergence trigger. Moving one first-party caller alone would
+retain both stacks; downgrading the updater would discard current fixes.
+
+The standalone WebView2 runtime now has a machine-readable version/review manifest and a release
+preflight. The script rejects manifest/Tauri path drift, review windows beyond 30 days, overdue
+reviews, and a missing staged `msedgewebview2.exe`. The repository contract also expires the review
+automatically in CI. Every standalone release must review the official Fixed Version release and
+regress H.264/Opus playback plus HEVC/AV1 capability detection.
+
+Plan commit `c6aae09`; implementation commit `706d329`. The fresh build passed 401 app tests, 190
+capture tests, 109 MP4 tests, all remaining workspace tests, and warning-denied workspace Clippy.
+RustSec reports zero vulnerabilities and 18 informational unmaintained warnings, down from 19.
+Computer Use verified the rebuilt nine-clip Library and active H.264/Opus playback advancing from
+0:00 to 0:09. The final acceptance list contains the standalone installer/runtime/update test that
+requires release staging; existing real capture/export tests cover the new Opus codec boundary.
+
+## Checkpoint (2026-07-18): reproducible dependency security gates
+
+The combined audit's L-11 is fixed. `anyhow` is locked to 1.0.103, clearing
+RUSTSEC-2026-0190. Running the newly added RustSec gate also surfaced newer actionable advisories,
+so `quinn-proto` is now 0.11.15 and the XML chain is on `quick-xml` 0.41 through `plist` 1.10.
+Because released `wayland-scanner` 0.31.10 still pins vulnerable quick-xml 0.39, Cargo temporarily
+patches only that build-time crate to the exact upstream commit that already adopted 0.41; there is
+no advisory ignore.
+
+All remote workflow actions are pinned to full reviewed commits with version/channel comments,
+checkout credentials are not persisted, and workflow tokens are least-privilege. A separate
+dependency-security workflow runs RustSec on dependency changes, weekly, and on demand. The checked
+in audit policy keeps ignores empty and documents the owner/rationale/expiry/removal requirements
+for any future exception. Dependabot proposes weekly Cargo and GitHub Actions updates.
+
+Plan commit `d2b1492`; implementation commit `a1b3e20`. A repository-security integration contract
+pins the fixed crate floors, SHA-only remote actions, readable pin comments, RustSec presence,
+empty-ignore policy, and both Dependabot ecosystems. The local cargo-audit 0.22.2 scan reports zero
+vulnerabilities; its 19 informational unmaintained warnings feed directly into L-12. Fresh-cache app
+Clippy, CI-mode workspace tests (401 app tests plus the repository contract), and workspace Clippy
+pass with warnings denied. No native or manual-only acceptance item is needed for this CI/lockfile
+batch.
+
+## Checkpoint (2026-07-18): pinned League loopback transport
+
+The combined audit's L-10 is fixed. League Live Client bases are now parsed once and accepted only
+as plain HTTP(S) root URLs with no credentials, query, or fragment. Numeric IPv4/IPv6 loopback
+addresses are retained, while `localhost` is rewritten to `127.0.0.1` before request construction,
+so DNS and hosts-file changes cannot move the connection off loopback.
+
+The dedicated reqwest client disables redirects and all configured proxies before enabling invalid
+certificates for Riot's self-signed local endpoint. Fixed Live Client paths are joined against the
+normalized URL instead of concatenated renderer/configuration text. The existing one-second connect,
+two-second request/read, and 4 MiB response bounds remain intact.
+
+Plan commit `783482b`; implementation commit `a49813e`. The League crate has 28 unit tests plus five
+integration tests. New coverage pins IPv4/IPv6/localhost normalization, rejects remote hosts and URL
+tricks, structurally requires proxy/redirect disabling, and proves a redirect target receives zero
+requests. Fresh-cache League Clippy, CI-mode workspace tests (401 app tests), and workspace Clippy
+pass with warnings denied. Computer Use verified rebuilt app startup and the nine-clip Library. The
+existing real-match/network-interruption acceptance scenario covers endpoint continuity.
+
+## Checkpoint (2026-07-18): backend-owned filesystem authority
+
+The combined audit's L-09 is fixed. Changing the media root now requires an exact, transient
+authorization issued by the native folder picker; renderer text alone cannot grant a new root.
+The picker starts from the persisted backend setting rather than a renderer-provided path, and
+validation rejects filesystem/drive roots plus the Windows profile, Windows, ProgramData, and
+Program Files roots. Authorization remains retryable after an unrelated save failure and is
+consumed only after the settings/runtime/storage transaction commits.
+
+The asset protocol no longer has static or runtime recursive directory grants. Library MP4s,
+generated poster JPEGs, Cloud cache files, and audio previews are canonicalized, containment- and
+extension-checked, then granted one exact file at a time. Custom-game icon extraction now accepts a
+process id, re-enumerates running windows in the backend, and only passes an existing canonical
+local `.exe` to Windows Shell APIs; renderer paths, UNC paths, and device paths are rejected.
+
+Plan commit `03a8776`; implementation commit `f80117b`. The app suite has 401 tests and 74 UI
+contracts, including native-folder authorization, sensitive-root rejection, local executable path
+validation, and exact-scope ownership. Fresh-cache app Clippy, CI-mode workspace tests, and
+workspace Clippy pass with warnings denied. Computer Use verified all nine local posters, live clip
+playback, the backend-rooted native folder picker with cancellation, and backend-enumerated custom
+game windows without modifying settings or media.
+
+## Checkpoint (2026-07-18): explicit origin-bound plain HTTP consent
+
+The combined audit's L-08 is fixed. Entering a plain-HTTP Clipline Cloud URL now reveals an
+explicit checkbox that names the normalized origin receiving the password. The renderer no longer
+derives `plain_http_confirmed` from the URL scheme. It blocks `cloud_connect` before invocation
+unless the checkbox is checked and its stored origin exactly matches the active normalized origin;
+HTTPS requests continue with the flag false.
+
+The acknowledgment is transient and resets when the scheme, host, or effective port changes.
+Path-only edits on the same origin retain it. Programmatic host replacement is also safe because
+the request-time comparison rejects stale consent even before input-event synchronization. Backend
+validation remains authoritative for the limited loopback/private HTTP hosts Clipline permits.
+
+Plan commit `036c882`; implementation commit `962ba5e`. Five pure CloudCore tests cover checked,
+unchecked, wrong-origin, wrong-port, and empty consent states, while 73 UI contracts pin the
+pre-request guard, explicit control, origin reset, backend flag, and bounded layout. Fresh-cache
+app Clippy, CI-mode workspace tests (398 app tests), and workspace Clippy pass with warnings denied.
+Computer Use verified the normalized warning and visible checkbox, a blocked unconfirmed connect,
+port-change invalidation after consent, and clean wrapping for a long URL. No manual-only item
+remains for this finding.
+
+## Checkpoint (2026-07-18): cloud auth preserves unsaved settings
+
+The combined audit's L-07 is fixed. Connect and disconnect now snapshot the complete settings form
+before their first await. After authentication changes, a pure CloudCore merge patches only the
+backend-owned host/public URL, connected identity, credential target, and upload-record fields into
+`currentSettings`, `settingsDraft`, and the dirty-comparison baseline. It no longer calls the full
+`fillSettings` repaint that replaced unrelated draft values and controls.
+
+Recording, audio, storage, game, and general edits survive unchanged. User-editable Cloud defaults
+and delete-local policy also remain the draft values until Save Settings, while authoritative
+account and upload state immediately drives the profile, gallery, and connection UI. Account-key
+changes still invalidate cloud request generations and cached listings.
+
+Plan commit `d3c90a9`; implementation commit `4ad75ac`. A pure merge fixture covers unrelated
+settings, Cloud preferences, identity, credentials, public URL, cloned upload records, and account
+replacement; the 73 UI contracts pin pre-await snapshots and prohibit full settings repaint during
+auth refresh. Fresh-cache app Clippy, CI-mode workspace tests, and workspace Clippy pass with
+warnings denied. Computer Use verified the rebuilt Cloud settings pane and clean return to the
+nine-clip Library. The existing real-account credential acceptance scenario now also checks draft
+preservation across reconnect/disconnect.
+
+## Checkpoint (2026-07-18): isolated concurrent poster generation
+
+The combined audit's L-06 is fixed. Every FFmpeg poster attempt now reserves a distinct sibling
+temp file with `create_new` and a process/counter identity. An RAII owner removes exactly that file
+on spawn failure, encode failure, publish failure, or early return, so overlapping attempts cannot
+delete or overwrite one another and no in-flight-key map can grow over time.
+
+Only a successful FFmpeg exit reaches publication. Windows uses `MoveFileExW` with replace-existing
+and write-through flags to atomically replace a stale cached poster; other platforms use the native
+rename boundary. The visible poster is therefore always either the previous complete JPEG or one
+new complete JPEG, even when two requests finish together. This also corrects stale-poster refresh
+on Windows, where plain `std::fs::rename` could not replace an existing destination.
+
+Plan commit `9440a95`; implementation commit `509e5cd`. The app suite now has 398 unit tests,
+including independent concurrent reservations, owner-scoped cleanup, and real Windows atomic stale
+replacement. Fresh-cache app Clippy, CI-mode workspace tests, and workspace Clippy pass with warnings
+denied. Computer Use verified normal startup and complete cached thumbnails across the nine-clip
+Library. No manual-only item remains for this filesystem concurrency boundary.
+
+## Checkpoint (2026-07-18): validated multipart upload work lists
+
+The combined audit's L-05 is fixed. Before either authenticated proxy upload or direct object-store
+upload reads a chunk, one shared validator now checks the server's complete missing-parts list. Part
+size must be positive and within the 64 MiB client bound, the file-derived part count must fit the
+protocol, and every part number must be nonzero, unique, and within the file-derived range. Valid
+resumable subsets retain their server-provided order. The file reader keeps its per-part checks as a
+second defensive boundary.
+
+The H-05 file-streaming batch had already replaced `saturating_sub(1)` and rejected part zero at the
+reader. This batch closes the remaining list-level gap, preventing duplicate chunks from being sent
+and acknowledged twice and preventing malformed work from reaching either network transport.
+
+Plan commit `6ba62d0`; implementation commit `b353966`. The app suite now has 396 unit tests; new
+fixtures cover zero, duplicate, out-of-range, empty, reordered valid, proxy, and direct work lists.
+Fresh-cache app Clippy, CI-mode workspace tests, and workspace Clippy pass with warnings denied.
+Computer Use verified normal startup and the nine-clip Library. No manual-only item remains for this
+malformed-protocol boundary.
+
+## Checkpoint (2026-07-18): unified keyboard contracts
+
+The combined audit's L-03 is fixed. Settings parsing now produces one crate-private typed hotkey
+specification containing modifier state and a distinct function-key, keyboard-key, or mouse-button
+value. The Windows low-level hook maps that specification directly to virtual keys instead of
+reparsing the normalized display string, so literal `Ctrl+Shift+F` can no longer be mistaken for a
+malformed function key while `F1` through `F24` and mouse buttons retain their existing mappings.
+
+The orphaned review-player `KeyF` intent was removed because focus mode and its UI had already been
+removed; the browser event is no longer prevented for an action the dispatcher cannot perform. The
+global player shortcut guard now derives modal ownership from `document.querySelector("dialog[open]")`
+instead of an incomplete dialog-id list, automatically covering detected-games, window-picker,
+rename-file, and future native dialogs while preserving the separate Settings and form guards.
+
+Plan commit `94ab793`; implementation commit `cc836fa`. The app suite now has 394 unit tests, 86
+player-core tests, and 72 UI contracts, including literal/function/mouse virtual-key identity,
+released `KeyF`, and data-driven modal ownership. Fresh-cache app Clippy, CI-mode workspace tests,
+and workspace Clippy pass with warnings denied. Computer Use verified normal startup, the Hotkeys
+settings pane with both binding fields, and clean close back to the nine-clip Library. No new
+manual-only item remains for this deterministic contract.
+
+## Checkpoint (2026-07-18): exact Windows native-resource ownership
+
+The combined audit's L-01 is fixed. WASAPI mix formats now carry an explicit borrowed-stack or
+owned-COM allocation variant. Only the `GetMixFormat` variant calls `CoTaskMemFree`, and RAII frees
+it on unsupported-format, initialization, service, start, and success paths. The fixed process
+loopback format can no longer reach a stack-pointer free. The finding's unused event-handle branch
+had already disappeared with M-14's pull-mode process loopback conversion and was verified absent.
+
+Media Foundation `ProcessOutput` now writes into an owned guard whose `pSample` and `pEvents` fields
+release on every success, stream-change, missing-sample, and arbitrary error branch. Taking a sample
+atomically replaces its owner slot with `None`, so packet conversion errors release the moved sample
+normally while the guard releases only remaining fields.
+
+Plan commit `b3ffca4`; implementation commit `3c5d059`. The capture suite now has 190 unit tests,
+including borrowed/COM wave-format ownership and drop-spy coverage for taken, cleared, and untouched
+`ManuallyDrop` values. Fresh-cache capture Clippy, CI-mode workspace tests (393 app tests), and
+workspace Clippy pass with warnings denied. Computer Use verified normal startup and the nine-clip
+Library. No new manual-only item remains beyond the existing Windows capture lifecycle scenario.
+
+## Checkpoint (2026-07-18): enforced shared D3D11 synchronization
+
+The combined audit's M-23 is fixed. The Windows D3D wrapper now has one idempotent guard that casts
+to `ID3D10Multithread`, enables protection when absent, and verifies the device reports protection
+before returning. Clipline-created hardware and WARP devices use that same guard instead of a
+separate unchecked setter.
+
+Every safe boundary that accepts and then shares a caller-provided D3D11 device now establishes the
+invariant before immediate-context work: WGC and DXGI capture construction, D3D video-processor
+conversion, NV12/BGRA readback, GPU and CPU FFmpeg encoder construction, and the D3D-aware Media
+Foundation encoder. Query/enable failures propagate through the existing capture, Windows, or
+encoder error type instead of proceeding with an undocumented concurrency precondition.
+
+Plan commit `fe22cca`; implementation commit `fe55590`. The capture suite now has 187 unit tests.
+A WARP test starts from deliberately disabled protection and covers enable/idempotence; the public
+BGRA readback test proves that boundary repairs the same device. On the real interactive desktop,
+the caller-provided WGC constructor also restored deliberately disabled protection and captured a
+frame. Fresh-cache capture Clippy, CI-mode workspace tests (393 app tests), and workspace Clippy pass
+with warnings denied. Computer Use verified normal startup with all nine clips visible. No new
+manual-only item remains beyond the existing Windows capture lifecycle acceptance scenario.
+
+## Checkpoint (2026-07-18): generation-safe local Library refreshes
+
+The combined audit's M-22 is fixed. Every local `list_clips` request now owns a monotonically newer
+generation and may mutate `clipsCache`, the active review, or the gallery only while it remains the
+latest request. Superseded successes and failures are ignored. Successful rename, delete, and export
+mutations explicitly invalidate snapshots that began before their optimistic cache update, so an
+older filesystem view cannot undo the mutation or close a newly updated review.
+
+Saved and osu! enrichment events now use one fire-and-forget refresh wrapper that catches current
+failures and reports them through the existing visible error surface. Awaited settings, upload, and
+startup refreshes retain their existing propagation, while local/cloud source switching and the
+separate cloud account-scoped request gate are unchanged.
+
+Plan commit `1f05190`; implementation commit `9cebaf5`. The 71 UI contracts pin generation checks,
+pre-mutation invalidation, and caught event refreshes; the existing request-gate unit tests cover
+supersession and invalidation behavior. JavaScript syntax checks, fresh-cache app Clippy, CI-mode
+workspace tests (393 app tests), and workspace Clippy pass with warnings denied. Computer Use
+verified the nine-clip Library and opening a clip into review. No manual-only acceptance item remains
+for this deterministic race.
+
+## Checkpoint (2026-07-18): verified writable media-root fallback
+
+The combined audit's M-21 is fixed. Recording now verifies a configured media directory by
+atomically reserving a unique probe file, writing and syncing one byte, and removing the probe.
+An existing but unwritable, disconnected, full, or otherwise unusable root therefore falls back to
+the default `Videos\Clipline` directory instead of passing `create_dir_all` and failing later. The
+fallback receives the same probe, and a double failure reports both paths and causes.
+
+The recorder publishes its actual resolved root before normal status events. Shared Library state
+and the WebView asset scope follow that root, so fallback clips appear and play immediately instead
+of leaving the UI pointed at the unavailable configured folder. Settings saves apply the same
+writable preflight before committing runtime or persisted changes. Routine Library reads do not
+repeat the durable probe, avoiding a disk/network sync on every refresh.
+
+Plan commit `4fe2d31`; implementation commit `410a7da`. The app suite now has 393 unit tests and 70
+UI contracts, including injected existing-directory ACL denial, fallback failure diagnostics,
+probe cleanup, and resolved-root state/scope propagation. Fresh-cache app Clippy, CI-mode workspace
+tests, and workspace Clippy pass with warnings denied. Computer Use verified normal startup with all
+nine clips visible and the Settings UI opening. A real unwritable/removable-volume scenario remains
+on the final manual acceptance list.
+
+## Checkpoint (2026-07-18): scoped built-in and custom game identities
+
+The combined audit's M-20 is fixed. Built-in IDs now live in one reserved catalog and runtime game
+identity is explicitly `BuiltInPlugin` or `Custom`; detection, event-source selection, osu! title
+tracking, active-rule continuity, session metadata, and the osu! minimum-duration policy no longer
+infer privileges from an unscoped string. A custom identity cannot become a plugin even if an
+adversarial test gives it the text `osu` or `league_of_legends`.
+
+Persisted custom IDs must use a bounded canonical `custom-` slug namespace. Settings normalization
+deterministically migrates built-in collisions, empty IDs, and legacy/malformed IDs to unique
+`custom-migrated-…` values before they reach runtime. Each migrated record retains a bounded legacy
+ID alias alongside its name and embedded icon. Historical session metadata resolves that exact
+alias plus name to the custom icon and is explicitly excluded from built-in plugin presentation.
+New frontend IDs reserve the live built-in catalog as an additional defense.
+
+Plan commit `0e07f88`; implementation commit `2d0a33f`. The app suite now has 390 unit tests and 69
+UI contracts, including deterministic collision migration/idempotence, namespace validation,
+custom-impostor event/title/duration isolation, and historical icon routing. Fresh-cache app
+Clippy, CI-mode workspace tests, and workspace Clippy pass with warnings denied. Computer Use
+verified the nine-clip library and Settings > Games with League of Legends and osu! isolated from
+the empty custom-game list. No manual-only acceptance item remains for this finding.
+
+## Checkpoint (2026-07-18): owned and retryable Windows file clipboard
+
+The combined audit's M-18 is fixed. Clipboard file-copy commands now derive a real native owner
+from the invoking Clipline webview window, retry a busy clipboard for a short bounded interval,
+and call `EmptyClipboard` before publishing `CF_HDROP`. The movable allocation transfers to
+Windows only after `SetClipboardData` succeeds; every failure path closes an opened clipboard and
+frees the allocation exactly once.
+
+Plan commit `b941c91`; implementation commit `68bbc82`. A deterministic transaction test covers
+busy retries, exact open/wait/empty/set/close order, empty/set failures, and never closing a
+clipboard that was not opened. The UI contract pins native-window injection and ownership setup.
+Fresh-cache app Clippy, CI-mode workspace tests (386 app tests), and workspace Clippy pass with
+warnings denied. Computer Use exercised Copy Clip from the real review UI and PowerShell verified
+one existing `.mp4` in Windows' file-drop clipboard. Brief and persistent contention remain on the
+final manual acceptance list because they require another desktop clipboard owner.
+
+## Checkpoint (2026-07-18): lossless MP4 track timing and codec arrays
+
+The combined audit's M-17 is fixed, along with the pending L-02/L-27/L-28 overlaps. The hybrid
+writer now accepts checked absolute per-track decode times, emits those times in fragmented
+`tfdt` boxes, and records presentation runs separately from contiguous media samples. Finalized
+files use versioned edit lists for leading and internal silence/blank spans; the 720 kHz movie
+clock exactly represents Clipline's 90 kHz video and 48 kHz Opus clocks. Track and movie durations
+cover the real presentation end while `mdhd` continues to describe encoded media duration.
+
+Finalized-file parsing maps supported version-0/1 edit lists back to integer presentation ticks and
+rejects rate-adjusted, negative, overlapping, backward, or mid-sample edits. Trim snaps and selects
+on integer/rational boundaries, rebases each retained track to the aligned video origin, and keeps
+later gaps. All in-memory, file-backed, selected-audio, and mixed-audio remux paths write contiguous
+runs at their original times. Replay segments now retain each audio track's first packet PTS in RAM
+and disk storage; replay and full-session output use those stamps, including audio-empty GOPs and
+later discontinuities. Cumulative endpoint quantization prevents per-frame rounding drift.
+
+H.264 and HEVC configs now retain every SPS/PPS/VPS entry through `avcC`/`hvcC` parse, trim, and
+remux while singleton encoder constructors stay ergonomic. Writer configuration is validated before
+output mutation, scalar reads cannot borrow bytes from sibling boxes, reserved eight-layer HEVC
+metadata is rejected, and malformed public sample metadata returns `InvalidData` instead of
+panicking.
+
+Plan commit `d694c69`; implementation commit `ec6f373`. Focused results: 109 MP4 tests, 17 buffer
+tests, and 186 capture tests. CI-mode workspace tests (385 app tests) and fresh/workspace Clippy pass
+with warnings denied. Deterministic fixtures cover delayed onset, an empty audio GOP, an internal
+gap, replay/full-session edit lists, integer trim rebasing, malformed edits, complete multi-parameter
+arrays, and Opus pre-skip continuity. One real playback acceptance item was added for delayed/gapped
+audio export.
+
+## Checkpoint (2026-07-18): bounded FFmpeg subprocess lifecycle
+
+The combined audit's M-15 is fixed. Probe commands now start a named stdout reader immediately,
+retain at most 4 MiB, and continue draining excess bytes through EOF while the parent polls the
+child. One shared deadline primitive returns a real exit status or kills and reaps on timeout;
+`try_wait` errors also trigger best-effort kill/reap cleanup. Probe spawn/reader setup failures no
+longer leave a live child behind.
+
+Encoder finish closes stdin, lets the existing stdout reader drain concurrently while FFmpeg gets
+a documented 30-second flush grace, and waits for the process before joining the reader. A timeout
+kills/reaps first, then joins/drains and reports that the encoded tail was discarded. `Drop` uses
+the same finite cleanup and recognizes an encoder already cleaned by `finish`. Normal exit still
+preserves tail packets and then applies reader, exit-status, and input/output-count validation.
+
+Plan commit `75acdf6`; implementation commit `8ff611e`. The 185 capture unit tests include an
+8 MiB probe burst retained at a 1 MiB test cap, bounded-reader exhaustion, wedged probe kill/reap,
+wedged encoder kill-before-join, and a normal two-picture encoded tail. Fresh-cache capture Clippy,
+CI-mode workspace tests (385 app tests), and workspace Clippy pass with warnings denied. The real
+FFmpeg/mux integration self-skipped because no FFmpeg binary was discoverable on this machine.
+Computer Use verified normal startup with all nine clips at 6.2 MB. No manual-only acceptance item
+remains for the deterministic process lifecycle.
+
+## Checkpoint (2026-07-18): Windows capture lifecycle contracts
+
+The combined audit's M-14 is fixed. Per-process WASAPI loopback no longer requests event-callback
+mode and then ignores the registered event. It now uses the supported shared pull model with
+loopback/autoconversion flags and a one-second device buffer, matching Clipline's endpoint polling
+headroom. The existing recorder cadence drains it every video step, including duplicate frames for
+an idle WGC source. Unused event creation, registration, handle storage, and teardown are removed.
+
+WGC now registers `GraphicsCaptureItem.Closed` and retains both the `Closed` and `FrameArrived`
+tokens. Target closure atomically marks the bounded queue closed, discards queued stale textures,
+wakes a blocked receiver, and rejects later frame callbacks even though their sender clones remain
+alive. The handlers are revoked during teardown. `next_frame_timeout` reports the closed channel as
+end-of-stream, which `CadencedCapture` propagates instead of manufacturing another frozen frame.
+
+Plan commit `4a8112e`; implementation commit `e3190a0`. The 178 capture tests include pull-mode
+configuration, a real process-loopback start/poll/drop smoke, explicit queue close with retained
+callback senders, and blocked-receiver wakeup; the app suite adds cadence closure propagation for
+385 tests. Fresh-cache capture/app Clippy, CI-mode workspace tests, and workspace Clippy pass with
+warnings denied. Computer Use verified normal startup with all nine clips at 6.4 MB. Continuous
+real process audio during a static image and closing a live captured window are on the final manual
+acceptance list because they require actual Windows audio and capture-item events.
+
+## Checkpoint (2026-07-18): bounded pending audio and clock discontinuities
+
+The combined audit's M-13 is fixed. The recorder now reserves encoded payload bytes for every
+pending audio track as well as the current video GOP and any pre-keyframe video. Lead-in removal
+and each segment seal recalculate the retained audio reservation, so old tracks do not accumulate
+against later GOPs. The shared pending ceiling remains the smaller of the replay budget and 64 MiB.
+A broken encoder that fails to close a GOP for ten seconds now stops with an explicit keyframe/GOP
+duration error even when its encoded payload remains small.
+
+Large positive WASAPI timestamp gaps still allocate at most five seconds of silence, but the PCM
+assembler now records a monotonic timeline anchor at the absolute stereo-pair boundary where the
+source resumes. The bounded silence is shortened by at most one 20 ms frame to end on an Opus
+packet boundary. The first resumed packet lands on the new source timestamp and subsequent packets
+continue at 20 ms cadence instead of remaining permanently behind by the discarded clock gap.
+
+Plan commit `d2e6517`; implementation commit `05152fd`. The 174 capture unit tests include
+combined audio/video pressure, per-GOP reservation release, duration failure, one-hour clock jumps,
+post-jump cadence, and a discontinuity after partial PCM. Fresh-cache capture Clippy, CI-mode
+workspace tests (384 app tests), and workspace Clippy pass with warnings denied. Computer Use
+verified normal startup with all nine clips at 6.4 MB. No manual-only acceptance item remains for
+these deterministic resource and timeline state machines.
+
+## Checkpoint (2026-07-18): bitstream-authored picture and sync boundaries
+
+The combined audit's M-12 is fixed. H.264 and HEVC Annex-B framing now uses access-unit
+delimiters plus the codecs' first-slice fields, so every standards-valid multi-slice picture stays
+one MP4 sample. Parameter-set and SEI prefix NALs after a completed picture are held for the next
+picture. The streaming classifier still works when any start code or slice header is divided
+across stdout reads.
+
+AV1 sync status now comes from the frame/frame-header OBU rather than configured GOP position;
+reduced still-picture streams and `show_existing_frame` are handled explicitly, while malformed
+or metadata-free temporal units fail the encoder. FFmpeg output consumes exactly one queued input
+timestamp per encoded picture. Extra output and missing output at finish are encoder errors rather
+than causes to synthesize timestamps and silently desynchronize a replay.
+
+Plan commit `a8b92a9`; implementation commit `68c6606`. The 170 capture unit tests include new
+multi-slice H.264/HEVC, AV1 frame-type, malformed-metadata, and timestamp-cardinality regressions.
+The FFmpeg/mux integration now asserts exactly one packet per input frame, though it self-skipped
+on this machine because FFmpeg was not on `PATH`. Fresh-cache capture Clippy, CI-mode workspace
+tests (384 app tests), and workspace Clippy pass with warnings denied. Computer Use verified normal
+startup with all nine clips at 6.5 MB. No manual-only acceptance item remains for the deterministic
+bitstream rules; supported real encoder fixtures remain covered whenever the integration binary is
+available.
+
+## Checkpoint (2026-07-18): bounded incremental Annex-B framing
+
+The combined audit's M-11 is fixed. `AnnexBFramer` no longer allocates a complete start-code list
+or rescans its accumulated buffer on every FFmpeg stdout chunk. It retains one incremental scan
+cursor, the current access-unit start, and the most recent incomplete NAL boundary. A NAL is
+classified exactly once when the following start code arrives, and all offsets are adjusted when
+emitted prefixes are drained.
+
+The 32 MiB ceiling is checked with overflow-safe `current + incoming` arithmetic before extending
+the buffer, including the no-start-code path that previously returned before its guard. Exceeding
+the limit clears the entire framing generation and every cursor/boundary field; no suffix is kept,
+so discarded zero bytes cannot combine with a future chunk into a synthetic delimiter. Valid
+three- and four-byte start codes remain recognized across every reader split point.
+
+Plan commit `1f8d1f4`; implementation commit `725a310`. All eight framing tests pass, including
+incremental delimiter-free scanning, cap/reset, every four-byte-code split, and post-reset
+non-merging. Fresh-cache capture Clippy, CI-mode workspace tests (384 app tests), and workspace
+Clippy pass with warnings denied. Computer Use verified normal startup with all nine clips at
+6.4 MB. No manual-only acceptance test remains for this pure byte-stream boundary.
+
+## Checkpoint (2026-07-18): durable single-flight osu! enrichment
+
+The combined audit's M-09 is fixed. Startup, library refresh, connection tests, and completed-save
+triggers now acquire a process-wide lease keyed by the canonical configured media root. An
+overlapping pass for that root coalesces instead of issuing duplicate API requests or racing queue
+files; other roots remain independent and RAII releases the lease on every return/error path. The
+save trigger now uses the configured root rather than treating its session folder as another key.
+
+Persisted queue state now schedules work. New jobs run immediately; pending attempts back off from
+one minute to a six-hour cap, and `Failed` legacy jobs re-enter after a six-hour delay capped at one
+day. A pass fetches only for due jobs, and a failed shared API fetch atomically increments those
+jobs so repeated refreshes cannot hammer the service. Malformed, unreadable, mismatched, or missing
+jobs are logged and moved to unique `.invalid.<pid>.<counter>` siblings individually; valid jobs in
+the same directory continue and quarantine files are never rediscovered.
+
+All pending/retry/failed/marker JSON now publishes through unique create-new sibling temporaries,
+file sync, and replace-existing/write-through rename. Owned temporaries clean themselves on every
+failure, eliminating partial JSON and breaking any swapped link at publication rather than writing
+through it.
+
+Plan commit `0b72632`; implementation commit `16b20f1`. Eighteen focused enrichment tests plus
+worker-lease and no-credential tests cover coalescing, independent roots, retry caps, failed-record
+re-entry, atomic replacement, mixed malformed/valid discovery, and quarantine. Fresh-cache app
+Clippy, CI-mode workspace tests (384 app tests), and workspace Clippy pass with warnings denied.
+Computer Use verified normal startup with all nine clips at 6.4 MB. No manual-only acceptance test
+remains for these deterministic worker and persistence guarantees.
+
+## Checkpoint (2026-07-18): osu! enrichment filesystem boundary
+
+The combined audit's M-08 is fixed. Discovery no longer returns bare deserialized enrichment
+records whose embedded `clip_path` controls later I/O. It returns a path-bound job: the pending
+sidecar is the actual regular file found under the canonical media root, and the MP4 is derived
+from that sidecar's filename and directory. The serialized path remains only a schema-v1
+consistency check and must canonicalize to that exact MP4.
+
+Discovery accepts only an existing regular `.mp4` at the media root or one session directory
+below it. It rejects mismatched/missing targets, sidecar or media reparse points, and linked session
+directories. Marker publication, retry/failure rewrites, and completion deletion use only the
+private bound paths, so crafted JSON cannot redirect a write or deletion. Clipline's existing
+rename transaction continues rewriting the compatibility field when it moves a pending clip.
+
+Plan commit `d1fdbf6`; implementation commit `d143dbc`. Fifteen focused enrichment tests cover
+outside-path injection, missing MP4s, linked directories, safe retry targeting, discovery, and
+score mapping. Fresh-cache app Clippy, CI-mode workspace tests (380 app tests), and workspace
+Clippy pass with warnings denied. Computer Use verified normal startup with all nine clips at
+6.5 MB. No manual-only acceptance test remains for this deterministic path boundary.
+
+## Checkpoint (2026-07-18): League poller match continuity
+
+The combined audit's M-07 is fixed. The League poller now owns one `EventTracker` for its whole
+lifetime, so a failed Live Client request cannot discard the cumulative-event watermark. Each
+successful batch compares both Riot's maximum event ID and game clock with the prior successful
+batch. A rollback resets the watermark and emits the old-match/new-match boundary before the new
+match's first event; small clock corrections do not reset it.
+
+Polling failures receive bounded exponential backoff and a six-consecutive-failure grace window.
+A brief outage emits no boundary, while sustained absence ends an active match once. `GameEnd`
+still closes immediately, and an endpoint that lingers on its completed cumulative payload cannot
+start a duplicate session. Tracker identity survives sustained absence, while the local player is
+re-acquired when the endpoint returns. Heartbeats during unavailable-game waits and retry sleeps
+make a dropped recorder receiver terminate the otherwise idle poller thread.
+
+Plan commit `4af92c3`; implementation commit `905d976`. Six deterministic app lifecycle tests,
+25 League unit tests, and five League HTTP/end-to-end tests pass, including a real mock-server
+failure/recovery sequence that emits only the later event. Fresh-cache Clippy for both changed
+crates, CI-mode workspace tests (376 app tests), and workspace Clippy pass with warnings denied.
+Computer Use verified the rebuilt app renders all nine clips at 6.6 MB. A short real-match League
+endpoint interruption and the following match remain on the final manual acceptance list.
+
+## Checkpoint (2026-07-18): bounded remote HTTP operations
+
+The combined audit's M-05 is fixed. Desktop control requests now share a client with a five-second
+connect timeout, 15-second read-idle timeout, 30-second total deadline, and redirects disabled.
+Authenticated media streams use the same connect boundary plus a 30-second read-idle deadline
+without a short total cap; upload requests receive a size-aware deadline based on a 256 KiB/s
+minimum rate (60-second floor, 24-hour ceiling). Token-free object uploads keep a separate client.
+
+All Cloud and osu! success JSON is streamed through a 4 MiB bound, diagnostic/error bodies through
+64 KiB, and avatars through their existing 2 MiB image bound. The reader rejects deceptive
+`Content-Length` values before buffering and enforces the same cap chunk by chunk. Cloud connect,
+identity, listing, clip status, visibility, upload controls, assets, and osu! token/user/score
+requests no longer use fresh default clients or unbounded `json`/`text` reads. Cloud listing stops
+at 100 pages / 10,000 unique clip ids and returns a visible truncation warning. The loopback League
+client adds connect/read deadlines and rejects JSON over 4 MiB.
+
+Plan commit `acb3326`; implementation commit `3a51d1b`. Three bounded-reader/deadline tests, 15
+upload tests, 40 Cloud tests, five osu! tests, 22 League unit tests plus its HTTP integrations, and
+the cloud-library UI contract pass. Fresh-cache Clippy for both changed crates, CI-mode workspace
+tests (370 app tests), and workspace Clippy pass with warnings denied. Computer Use verified the
+rebuilt app renders all nine clips at 6.5 MB. Real Cloud/osu!/League continuity remains on the
+manual acceptance list because it requires live accounts and a running game.
+
+## Checkpoint (2026-07-18): recoverable settings startup
+
+The combined audit's M-03 is fixed. Startup now distinguishes a first-run missing file from an
+unreadable path and structurally invalid JSON/settings. Every successful replacement first
+publishes the prior valid bytes atomically as `settings.json.bak`. A missing or invalid primary
+recovers that last-known-good copy; proven-invalid files are moved to unique `.corrupt.<pid>.<n>`
+siblings, while unreadable paths are left untouched. If neither generation is usable, Clipline
+uses safe defaults only with an explicit diagnostic naming the preserved/quarantined files.
+
+Normal saves refuse to replace an existing primary that cannot first be read and validated, so a
+transient sharing/permission problem cannot turn a later save into silent data loss. Field-level
+legacy repair remains on the normal path. Recovery diagnostics are held until `frontend_ready`
+and drained once into the persistent renderer error area, avoiding setup-time events emitted
+before WebView listeners exist.
+
+Plan commit `00cf25a`; implementation commit `63dca68`. All 63 focused settings tests, the startup
+warning unit test, and the UI readiness contract pass. Fresh-cache app Clippy, CI-mode workspace
+tests (including 367 app tests), and workspace Clippy pass with warnings denied. Computer Use
+verified normal startup with all nine clips at 6.5 MB, then launched a disposable corrupt profile
+and visibly confirmed both the safe-default warning and its quarantined file before restoring the
+normal profile. No manual-only acceptance test remains for this finding.
+
+## Checkpoint (2026-07-18): transactional settings and credentials
+
+The combined audit's M-02 is fixed. Backend-owned Cloud and osu! settings now stage a normalized
+copy, persist it, and publish it to live memory only after the write succeeds. The main settings
+save applies global hotkeys, the low-level keyboard hook, tray labels, and release autostart as a
+transaction: any later persistence or recorder-commit failure restores the old settings file and
+rolls back every already-applied runtime/OS side effect. Partial hotkey registration failures also
+restore earlier removals and surface any rollback failure instead of silently leaving a mixed
+configuration.
+
+Credential replacement now snapshots the previous Windows Credential Manager value, writes the
+replacement, and compensates if settings persistence fails. Obsolete Cloud and osu! credential
+targets are first recorded as durable pending cleanup, then deleted; failed cleanup is retried by
+the next status check rather than losing ownership. Renderer saves preserve these backend-owned
+cleanup fields, and no secret is written to `settings.json`.
+
+Plan commit `1cec26b`; implementation commits `99d5e7d` and `fc647fb`. The 57 settings tests,
+57 app command tests, 40 Cloud tests, five osu! tests, and four credential-transaction tests pass.
+Fresh-cache app Clippy, CI-mode workspace tests, and workspace Clippy pass with warnings denied.
+Computer Use verified an unchanged Settings save reports `saved` in the rebuilt native app while
+all nine clips remain visible. Installed-release autostart/hotkey rollback and real Credential
+Manager migration/cleanup remain on the final manual acceptance list.
+
+## Checkpoint (2026-07-18): authenticated upload origin boundary
+
+The combined audit's M-01 is fixed. Every server-provided URL that receives the Clipline Cloud
+bearer token—single-PUT content, direct-S3 presign control, and direct-S3 acknowledgement—must now
+match the configured cloud's normalized scheme, host, and port. Cross-origin URLs, port changes,
+HTTPS-to-HTTP downgrades, and embedded URL credentials are rejected before a request is sent.
+
+Authenticated upload requests use a dedicated HTTP client with redirects disabled, so the cloud
+cannot redirect a token-bearing create/control request elsewhere. Token-free presigned object
+storage PUTs retain a separate client and remain cross-origin capable; the existing two-server S3
+test proves that intended path still works.
+
+Plan commit `0d9561f`; implementation commit `716b3d3`. All 15 upload transport tests pass,
+including a real redirect target that receives zero requests and same-origin/cross-origin/port/
+scheme cases. Fresh-cache app Clippy, CI-mode workspace tests, and workspace Clippy pass with
+warnings denied. Computer Use verified the rebuilt native app renders all nine clips and
+Local/Cloud controls at 6.7 MB idle RAM. A normal upload against the real configured cloud remains
+covered by the existing manual cloud-upload acceptance test.
+
+## Checkpoint (2026-07-18): replay-cache lifecycle safety
+
+The combined audit's M-06 is fixed. Disk replay segments now publish through owned temporary and
+final-file guards, commit bookkeeping only after required eviction succeeds, and keep bookkeeping
+consistent when an eviction fails partway through. Dropping a disk ring removes its entire unique
+Clipline-owned run directory, including orphaned temporary files and its ownership record.
+
+Each disk-cache run records the Windows process-instance identity (PID plus creation time) and its
+creation timestamp. Startup scans only structurally valid Clipline run names, skips links/reparse
+points, immediately removes definitively dead/reused instances, and gives missing, corrupt, or
+unqueryable identities a 24-hour safety window. Bytes in every preserved run reduce the new ring's
+quota. A prepared run remains under an RAII cleanup guard until recorder construction succeeds.
+
+The periodic 2 GiB free-space check now passes through `finish_stream` and full-session
+finalization before the recorder reports its primary low-space error; any secondary finish error
+is retained in the report. Capture failures use the same path, and all fallible media-folder setup
+now happens before recorder ownership begins.
+
+Plan commit `c180bf2`; implementation commit `52eb9f4`. Sixteen buffer tests and 42 focused service
+tests pass, including publication/eviction failures, live/stale/ambiguous run recovery, quota
+accounting, constructor rollback, and low-space finalization. Fresh-cache Clippy for both changed
+crates, CI-mode workspace tests, and workspace Clippy pass with warnings denied. Computer Use
+verified the rebuilt native app renders all nine clips and Local/Cloud controls at 6.6 MB idle RAM.
+Crossing the 2 GiB reserve during a real disk/full-session recording remains on the manual list.
+
+## Checkpoint (2026-07-18): bounded cloud media cache
+
+The combined audit's M-04 is fixed. Bulk cloud media now lives under LocalAppData rather than the
+roaming settings tree. The first cache use migrates only valid 16-hex account namespace
+directories from the legacy roaming root, skips reparse-linked directories, and leaves unrelated
+legacy files untouched.
+
+Cloud media is capped at 4 GiB per file, the cache at 10 GiB aggregate, and downloads reserve a
+2 GiB free-space floor before allocating. Completed entries and their `.ok` markers are accounted
+and evicted together in least-recently-used order. Cache hits refresh recency. In-flight and
+returned playback targets receive 24-hour process leases; if only leased media could satisfy
+pressure, the download fails clearly instead of invalidating playback.
+
+Download temporaries use unique `create_new` paths and an ownership guard. Pruning deletes only
+Clipline-patterned temps older than one day, never an active or arbitrary `.tmp`, and recursive
+accounting refuses symlinks/reparse points. Publication and capacity accounting are serialized.
+
+Plan commit `dddb9cd`; implementation commit `d54426b`. Forty focused cloud tests, fresh-cache app
+Clippy, CI-mode workspace tests, and workspace Clippy pass with warnings denied. Computer Use
+verified the rebuilt app renders all nine clips and Local/Cloud controls at 6.4 MB idle RAM. A real
+multi-clip cloud eviction/playback run remains on the manual acceptance list.
+
+## Checkpoint (2026-07-18): bounded large-file transforms and upload
+
+The combined audit's H-05 and M-16 are fixed. File trim and audio-selection remux now load only a
+bounded finalized `moov` box, retain the source file's absolute sample offsets, and copy media with
+a 64 KiB buffer. Multi-track audio mixing decodes one Opus packet per selected track at a time,
+spools encoded mixed packets to a unique file, and muxes source video plus spooled audio without
+materializing the MP4. Clipboard sharing uses these file APIs instead of a source/output `Vec`.
+
+Cloud upload now owns a path/size/checksum payload rather than bytes. SHA-256 is computed in a
+streaming pass, single PUT uses a streaming request body, and resumable proxy/direct uploads seek
+and read only one part at a time. Server part sizes above 64 MiB are rejected before allocation.
+Original uploads use the source directly; selected-audio variants use reserved `.tmp` files that
+are removed on every ordinary exit, while abandoned Clipline-owned temps older than one day are
+reclaimed without touching unrelated or active files.
+
+Every file transform rejects source/target identity through Windows file ids (so distinct hard
+links are safe), writes to a unique `create_new` sibling, flushes/syncs, and publishes with an
+atomic replace only after finalization. Injected late failures preserve the prior target and clean
+the partial output.
+
+Plan commit `aa6e177`; implementation commit `db86efe`. The 100-test MP4 unit suite, 12 cloud
+transport tests, selected-payload/clipboard tests, CI-mode workspace tests, fresh-cache changed-
+crate Clippy, and workspace Clippy all pass with warnings denied. Computer Use verified the rebuilt
+app opens with all nine local clips, Local/Cloud controls, and 6.4 MB idle RAM. No real cloud upload
+or multi-gigabyte user-file operation was performed; those remain on the manual acceptance list.
+
+## Checkpoint (2026-07-18): remove unsafe full-application elevation
+
+The combined audit's H-01 is fixed by removing the privilege boundary rather than partially
+filtering subprocess paths. Clipline no longer exposes a `restart_as_administrator` command,
+invokes `ShellExecuteW("runas")`, accepts a privileged handoff argument, waits for an unelevated
+parent, or offers a UAC action in the renderer. This also closes L-23: there is no elevated restart
+that can discard the original command-line behavior overrides.
+
+Elevated-game detection remains read-only and preserves process-instance identity, so Clipline can
+still explain once per game process why Windows blocks focused hotkeys. The dialog now recommends
+running the game without administrator privileges and has only a dismiss action. Building a
+protected signed broker remains a possible future product feature, but the current per-user app
+does not cross the administrator boundary.
+
+Plan commit `65d1bb1`; implementation commit `5d06c21`. All 68 UI contracts, focused elevation and
+Windows identity tests, CI-mode workspace tests, fresh-cache app clippy, and workspace clippy pass
+with warnings denied. Manual acceptance still needs an actually elevated game process to verify
+the final warning copy and absence of any UAC/restart action.
+
+## Checkpoint (2026-07-18): cloud upload durability boundary
+
+The combined audit's H-03 is fixed. Post-upload polling no longer treats the first successful
+metadata response as proof that the clip is usable. It continues through `processing`, accepts
+only explicit `ready`, treats explicit `failed` as terminal, and preserves the local clip on poll
+timeout, HTTP error, visibility-update error, or any unknown state. Every such outcome persists the
+remote id/link plus a reconcilable status and error instead of escaping through IPC while leaving
+the saved upload record stuck at `processing`.
+
+When delete-local-after-upload is enabled, a ready metadata response is still insufficient:
+Clipline makes a no-redirect, authenticated `Range: bytes=0-0` request with five-second connect and
+15-second total deadlines and requires at least one returned media byte. Local cleanup runs only
+after that probe. It deletes the MP4 first, never touches sidecars if primary deletion fails, and
+returns/persists primary or sidecar cleanup errors rather than silently discarding them.
+
+Plan commit `876a778`; implementation commit `5323174`. The focused cloud suite passes with 32
+tests covering processing/ready/failed outcomes, bounded media success/empty/missing responses,
+reconcilable state, and primary-first cleanup failures. CI-mode `cargo test --workspace` and both
+fresh-cache app clippy and workspace clippy pass with warnings denied. Computer Use verified the
+rebuilt native app opens with all nine local clips and the Local/Cloud library controls intact; no
+real upload was attempted because that would transmit user media.
+
+## Checkpoint (2026-07-18): full-session writer backpressure
+
+The combined audit's M-10 is fixed. Full-session output no longer receives deep-cloned GOPs through
+an unbounded channel. Sealed segments are immutable `Arc<Segment>` values shared with the memory
+replay ring; disk replay serializes the same value by reference. The writer channel holds at most
+eight messages and reserves at most 128 MiB of exact video-plus-audio payload, including the
+segment currently blocked in the writer. Capture uses `try_send`, so a slow or stalled output can
+never block the capture loop.
+
+If either queue limit is reached, Clipline stops accepting only full-session segments, continues
+replay capture, finalizes the segments already accepted when Stop arrives, and returns a clear
+full-session error to the app. Failed sends release their byte reservation. Writer-thread spawn
+failure now propagates from `start_full_session` instead of panicking.
+
+Plan commit `350db09`; implementation commit `5c3b810`. Focused tests cover exact byte reservation,
+shared allocation identity, an over-budget segment, and a deliberately stalled writer filling a
+one-slot queue while all replay GOPs continue buffering. CI-mode `cargo test --workspace` and
+fresh-cache changed-crate plus workspace clippy pass with warnings denied. The live primary-monitor
+WGC smoke timed out twice waiting for a desktop frame in this automation session; the other live
+WGC/DXGI/MFT/WASAPI device tests passed on the first non-CI workspace run. Computer Use verified
+the rebuilt native app opens with the nine-item library, hotkey rail, and 6.8 MB idle RAM; this VM
+still cannot start a recording because no video encoder can be opened.
+
+## Checkpoint (2026-07-18): recorder control and hotkey readiness
+
+The combined audit's H-04 and M-19 are fixed. Runtime state now records the user's desired
+recording state independently from the currently installed service sender. Game-detection restarts
+reserve a monotonically increasing generation, spawn outside the runtime mutex, and install only
+when both desired state and generation still match. Stop advances the generation even during the
+sender-less restart gap, so it cannot be undone by a late replacement. A manual Start or newer
+game/settings restart supersedes older work, and every rejected service receives an immediate
+non-announcing Stop. Option errors still preserve an installed working recorder while invalidating
+an older replacement when no sender is installed.
+
+The low-level keyboard hook now creates its Windows message queue, calls `SetWindowsHookExW`, and
+reports the real thread id or installation error before global hook state is published. The hook
+waits for installer acknowledgement, unhooks if startup is abandoned, and has stored thread
+identity for partial-install teardown. Mouse-hook or singleton-publication failure also tears down
+the ready keyboard hook. Later settings updates now fail explicitly if the singleton is absent
+instead of silently accepting a nonfunctional fallback.
+
+Plan commit `d3b2183`; implementation commit `820c68f`. Focused coverage passes with 52 runtime
+state tests and 12 hotkey tests, including deterministic Stop/Start/newer-restart races plus hook
+success, failure, disconnect, and timeout. CI-mode `cargo test --workspace` passes and fresh-cache
+workspace clippy passes with warnings denied. Computer Use verified the native hook starts without
+an error, the live UI shows `Alt+F10`, and saving unchanged settings reports `saved`, exercising the
+new hook-required update path against the installed singleton.
+
+## Checkpoint (2026-07-18): destructive storage ownership boundary
+
+The combined codebase audit's H-02 is fixed. Storage status, quota GC, and abandoned-recording
+recovery no longer adopt every MP4 merely because it is in the configured media directory or one
+of its direct children. A `<clip>.clipline.json` metadata document is now the per-file ownership
+proof for newly authored replays and full sessions. Clipline creates it atomically before writing,
+keeps it with recoverable recordings, carries it through collision recovery, skips stale marker
+names during reservation, and removes it when a save fails or a session is deliberately discarded.
+
+Quota and recovery ignore ambiguous unmarked MP4 and `.mp4.recording` files, including files in
+custom-folder child directories. Existing finalized clips with Clipline marker or osu! enrichment
+sidecars remain conservatively recognized for legacy compatibility; poster caches alone are not
+ownership proof. Recording recovery requires the explicit ownership document, handles mixed-case
+`.MP4.RECORDING` suffixes, and moves the document when a recovered filename needs a collision
+suffix. The library continues to display unmarked MP4s for compatibility, but background storage
+maintenance cannot delete them.
+
+This also closes combined finding L-04: recovery detects and removes the `.recording` suffix with
+the same case-insensitive comparison while preserving the original MP4 stem. The dedicated
+`recovery_handles_mixed_case_recording_suffixes` fixture proves `Session.MP4.RECORDING` recovers as
+`Session.MP4` rather than aborting the pass.
+
+Plan commit `7dfc10a`; implementation commit `234f6af`. The focused storage suite passes with 23
+tests, focused service coverage passes with 37 tests, CI-mode `cargo test --workspace` passes, and
+fresh-cache workspace clippy passes with warnings denied. Computer Use opened the rebuilt app and
+confirmed the existing nine-clip library and quota status render normally. A new replay could not
+be recorded on this VM because no video encoder can be opened; marker creation and unrelated-file
+preservation are covered through controlled filesystem tests.
+
+## Checkpoint (2026-07-18): MP4 untrusted-input hardening
+
+The first `CODEBASE_AUDIT.md` remediation batch fixes H1, M19, and M20 in `clipline-mp4`.
+Malformed extended-size boxes now stop the tolerant walker through checked offset arithmetic,
+including forged parent ranges and trim-side box-end conversion. Sample-table entry counts are
+validated against their containing boxes before allocation; per-track metadata is capped at four
+million samples (more than 18 hours at 60 FPS); and compressed `stts` durations expand only to the
+already-validated `stsz` count.
+
+Fragment construction is now fallible when sample sizes, payload totals, sample counts, or signed
+`trun` data offsets cannot be represented. In-memory fragments use the same 8/16-byte `mdat`
+header selection as streaming writers, large-header offsets are included in `trun`, and ordinary
+box construction rejects sizes that would previously truncate through `as u32`. The in-memory
+builder also writes directly into the final allocation instead of creating a second `mdat` payload
+copy.
+
+Plan commit `5d2fdf6`; implementation commit `14d1f90`. The focused MP4 suite passes with 100
+unit/integration tests, CI-mode `cargo test --workspace` passes, fresh-cache MP4 clippy and full
+workspace clippy pass with warnings denied, formatting and diff checks pass. No multi-gigabyte
+fixture is required: boundary tests use forged metadata and synthetic sample-size records.
+
+Computer Use acceptance opened the known three-audio-track `clip_1784329112.mp4`, confirmed video
+playback advanced past ten seconds with the expected `2/3 selected` audio state, exported the
+default keyframe-aligned range, and reopened the resulting 33.4-second / 2,591,953-byte trim. The
+trim exposed all three audio tracks and playback advanced past ten seconds. The acceptance artifact
+is `2026-07-17 15-52/clip_1784329112_trim_001797_035204.mp4`. A fresh Save Replay could not be
+exercised in this VM: the running app reports that no video encoder can be opened, and neither a
+system nor local packaged FFmpeg binary is present to activate the software H.264 fallback.
+
 ## Checkpoint (2026-07-18): elevated-game Save Replay hotkeys
 
 An Arknights: Endfield report said Save Replay worked only after tabbing out. The reporter's UAC
@@ -307,7 +1893,7 @@ completed task-by-task with strict TDD; read any of them to see the conventions 
 
 1. **WGC capture** — monitor + window, GPU-side frames, QPC-anchored pts
 2. **MFT H.264 encoder** — async hardware MFT (AMF on the dev box), GPU NV12 path, AVCC out
-3. **WASAPI loopback audio** — system audio → real Opus (audiopus), silence gap fill
+3. **WASAPI loopback audio** — system audio → real Opus (`shiguredo_opus`), silence gap fill
 4. **A/V sync hardening** — stamp-derived MP4 timeline, one shared clock, `avsync` validator
    (real-engine test: −8.3 ms total drift)
 5. **Tauri shell** — `apps/clipline-app`: tray app, replay-buffer service thread, **Alt+F10**
@@ -829,7 +2415,7 @@ Recent fixes (2026-06-25):
   silent uploads or missing mic audio. Cloud uploads now replace two-or-more selected audio tracks
   with one native mixed Opus track while stream-copying video, and clipboard copy uses the same
   selected-audio compatibility export under `%APPDATA%\Clipline\share-exports` before setting
-  CF_HDROP. This is native `audiopus` decode/mix/re-encode inside `clipline-mp4`; users do not
+  CF_HDROP. This is native `shiguredo_opus` decode/mix/re-encode inside `clipline-mp4`; users do not
   need FFmpeg installed for multi-track upload/share audio. The mixer preserves the source Opus
   pre-skip, averages overlapping tracks to avoid hard clipping, and streams slot-by-slot instead of
   buffering all decoded PCM. Share-preview/export cache writes use unique sibling temp files and
@@ -1037,10 +2623,12 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   repeated relative seeks on the queued target rather than stale `video.currentTime`.
 - **Long finalized MP4s need version-1 duration boxes:** `mvhd`, `tkhd`, and each `mdhd` must switch
   independently when its duration exceeds `u32::MAX`; use a `u128` intermediate when rescaling.
-- The MP4 timeline is **duration-cumulative**: video durations are re-derived from capture
-  stamps at GOP seal; audio gaps become silence (`pcm.rs`); audio recorded before the first
-  video packet is dropped (engine-init lead-in shifted video ~63 ms early before the fix —
-  `avsync::validate_timeline` caught it on its first real run).
+- MP4 sample tables keep encoded media contiguous, while per-track presentation gaps are explicit:
+  fragments carry absolute `tfdt` values and finalized tracks use `elst` empty/media runs. The
+  720 kHz movie clock exactly covers the 90 kHz video and 48 kHz Opus clocks. Video durations are
+  re-derived from capture stamps and quantized by cumulative endpoints; each audio segment retains
+  its first packet PTS. Audio before the first video packet remains engine-init lead-in and is
+  dropped.
 - WASAPI loopback requires a **48 kHz float mix format** (resampler is a follow-up); loopback
   goes quiet when nothing renders — that's why the gap fill exists.
 - One D3D device and one `RelativeClock` must be shared across capture/encode/audio —
@@ -1059,20 +2647,20 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   `ffmpeg::probe()` returns empty and the live encoder test (`tests/ffmpeg_encode.rs`) self-skips;
   everything stays MFT-only there. The neutral bits (probe parsing, `framing.rs`, codec boxes)
   are fully unit-tested on both CI OSes.
-- Ship an **lgpl-shared** build (BtbN) under `%APPDATA%\Clipline\ffmpeg` — it has SVT-AV1 + GPU
-  encoders but **no libx264/libx265**, so no software H.264/HEVC. The dev box has it installed
-  there; release builds stage that bundle into `apps/clipline-app/ffmpeg/` so the installer ships
-  it as a Tauri resource for gallery poster generation and the optional encoder tier. The search
+- Ship the pinned **lgpl-shared** BtbN archive through `scripts/stage-ffmpeg-resource.ps1`; it has
+  SVT-AV1 + GPU encoders but **no libx264/libx265**, so no software H.264/HEVC. The script verifies
+  archive and per-file hashes, stages only the manifest allowlist into
+  `apps/clipline-app/ffmpeg/`, and preserves license/provenance in the installer resource. The search
   order (`CLIPLINE_FFMPEG` override → bundled resource → exe dir → `%APPDATA%\Clipline\ffmpeg` →
   PATH) means the packaged LGPL build wins over any GPL PATH ffmpeg. Attribution:
   `THIRD-PARTY-NOTICES.md`.
 - AMF **rejects tiny resolutions** (`Init() failed with error 5` at 128×72) — the probe
   test-encodes at 640×360. SVT-AV1 **errors on `-maxrate`/`-bufsize`** (exit -22): CBR capping is
   hardware-only; SVT-AV1 gets `-b:v` + `-preset 8` (VBR-ish; the ring evicts by bytes anyway).
-- Access-unit framing assumes **one slice per picture** (the hardware-encoder default at our
-  resolutions). H.264/HEVC keyframes are detected from the bitstream (IDR / IRAP); **AV1 keyframes
-  are positional** (`frame_index % gop_frames == 0`) because IVF carries no keyframe flag — so
-  scene-cut keyframes must stay disabled (they are: fixed `-g`, no scenecut flags).
+- Access-unit framing recognizes first-slice and AUD boundaries so multi-slice H.264/HEVC pictures
+  remain one sample; keyframes come from IDR/IRAP NALs. AV1 keyframe state comes from the encoded
+  frame header rather than output position. Input/output timestamp cardinality is strict for every
+  codec.
 - `EncoderBackend::MfSoftware` is modeled by the probe but **not instantiable** — `MftH264Encoder`
   only enumerates hardware MFTs. The candidate walk skips it; wiring the sync software MFT (CPU
   input, no D3D manager) is a follow-up. With no hardware H.264 and no ffmpeg, recording errors

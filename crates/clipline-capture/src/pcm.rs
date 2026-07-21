@@ -2,22 +2,150 @@
 //! Loopback goes quiet when nothing renders; the MP4 audio timeline is
 //! duration-cumulative, so gaps MUST become silence or A/V desyncs.
 
-use crate::opus::{FRAME_DURATION_S, FRAME_LEN};
+use std::collections::VecDeque;
+
+#[cfg(any(windows, test))]
+use crate::opus::FRAME_DURATION_S;
+use crate::opus::FRAME_LEN;
 
 const SAMPLE_RATE: f64 = 48_000.0;
 /// Gaps shorter than half a frame are treated as device jitter.
+#[cfg(any(windows, test))]
 const GAP_TOLERANCE_S: f64 = FRAME_DURATION_S / 2.0;
 /// A bogus device timestamp must not allocate unbounded silence.
 const MAX_GAP_FILL_S: f64 = 5.0;
+const FRAME_PAIRS: u64 = (FRAME_LEN / 2) as u64;
+#[cfg(any(windows, test))]
+const DISCONTINUITY_FADE_PAIRS: usize = 1_920; // 40 ms at 48 kHz.
+const LATE_RECOVERY_FADE_PAIRS: usize = 240; // 5 ms at 48 kHz.
+#[cfg(any(windows, test))]
+const DEVICE_PACKET_QUIET_GRACE_S: f64 = 0.1;
 
 pub type PcmFrame = (f64, Vec<f32>);
 
+/// Selects how each WASAPI device packet joins the shared recording timeline.
+/// QPC establishes the initial anchor and re-anchors after genuine quiet;
+/// continuously arriving PCM keeps its authoritative sample-count cadence.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg(any(windows, test))]
+pub(crate) enum DevicePacketPlacement {
+    Timestamped(f64),
+    Contiguous,
+}
+
+#[cfg(any(windows, test))]
+pub(crate) struct DevicePacketTimeline {
+    needs_timestamp_anchor: bool,
+}
+
+#[cfg(any(windows, test))]
+impl DevicePacketTimeline {
+    pub(crate) fn new() -> Self {
+        Self {
+            needs_timestamp_anchor: true,
+        }
+    }
+
+    pub(crate) fn placement(&mut self, pts_s: Option<f64>) -> DevicePacketPlacement {
+        if !self.needs_timestamp_anchor {
+            return DevicePacketPlacement::Contiguous;
+        }
+        let Some(pts_s) = pts_s.filter(|pts_s| pts_s.is_finite()) else {
+            return DevicePacketPlacement::Contiguous;
+        };
+        self.needs_timestamp_anchor = false;
+        DevicePacketPlacement::Timestamped(pts_s)
+    }
+
+    pub(crate) fn require_timestamp_anchor(&mut self) {
+        self.needs_timestamp_anchor = true;
+    }
+
+    /// Packet timestamps from some drivers drift relative to the shared video
+    /// clock and cannot identify quiet. Only host-observed delivery idleness
+    /// permits the next packet to establish a fresh QPC anchor.
+    pub(crate) fn note_synthesized_silence(&mut self, idle_s: f64) -> bool {
+        if !idle_s.is_finite() || idle_s + f64::EPSILON < DEVICE_PACKET_QUIET_GRACE_S {
+            return false;
+        }
+        self.needs_timestamp_anchor = true;
+        true
+    }
+}
+
+#[cfg(any(windows, test))]
+pub(crate) struct DiscontinuityFade {
+    remaining_pairs: usize,
+}
+
+#[cfg(any(windows, test))]
+impl DiscontinuityFade {
+    pub(crate) fn new() -> Self {
+        Self {
+            remaining_pairs: DISCONTINUITY_FADE_PAIRS,
+        }
+    }
+
+    pub(crate) fn restart(&mut self) {
+        self.remaining_pairs = DISCONTINUITY_FADE_PAIRS;
+    }
+
+    pub(crate) fn apply(&mut self, interleaved: &mut [f32]) {
+        if self.remaining_pairs == 0
+            || !interleaved
+                .chunks_exact(2)
+                .any(|pair| pair[0] != 0.0 || pair[1] != 0.0)
+        {
+            return;
+        }
+
+        let mut fade_started = self.remaining_pairs < DISCONTINUITY_FADE_PAIRS;
+        for pair in interleaved.chunks_exact_mut(2) {
+            if self.remaining_pairs == 0 {
+                break;
+            }
+            if !fade_started && pair[0] == 0.0 && pair[1] == 0.0 {
+                continue;
+            }
+            fade_started = true;
+            let completed = DISCONTINUITY_FADE_PAIRS - self.remaining_pairs;
+            let gain = completed as f32 / (DISCONTINUITY_FADE_PAIRS - 1) as f32;
+            pair[0] *= gain;
+            pair[1] *= gain;
+            self.remaining_pairs -= 1;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg(any(windows, test))]
+pub(crate) struct PcmPushOutcome {
+    pub late_reanchor_s: Option<f64>,
+    pub total_correction_s: f64,
+    pub chunk_duration_s: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimelineAnchor {
+    pair_index: u64,
+    pts_s: f64,
+}
+
 #[derive(Default)]
 pub struct LoopbackAssembler {
-    /// pts of the first sample ever pushed; frame N pops at base + N*0.02.
-    base_pts_s: Option<f64>,
+    /// Timestamp anchors at absolute stereo-pair positions. Ordinary input
+    /// needs only the initial anchor; a capped clock discontinuity appends a
+    /// new one without allocating the entire missing interval as silence.
+    anchors: VecDeque<TimelineAnchor>,
     /// Expected WASAPI timestamp for the next finite chunk.
     next_chunk_pts_s: Option<f64>,
+    /// Persistent correction established when synthesized silence overtakes
+    /// delayed source timestamps. Following chunks keep their cadence rather
+    /// than falling behind the synthetic frontier again.
+    #[cfg(any(windows, test))]
+    source_pts_correction_s: f64,
+    synthesized_since_real: bool,
+    late_recovery_fade_remaining_pairs: usize,
     buffered: Vec<f32>, // interleaved stereo
     frames_popped: u64,
 }
@@ -28,33 +156,60 @@ impl LoopbackAssembler {
     }
 
     /// `pts_s` stamps the first sample of `interleaved` (stereo pairs).
-    pub fn push_chunk(&mut self, pts_s: f64, interleaved: &[f32]) {
+    #[cfg(any(windows, test))]
+    pub(crate) fn push_chunk(&mut self, pts_s: f64, interleaved: &[f32]) -> PcmPushOutcome {
         if !pts_s.is_finite() {
             self.push_contiguous_chunk(interleaved);
-            return;
+            return PcmPushOutcome::default();
         }
-        self.base_pts_s.get_or_insert(pts_s);
-        let expected = self.next_chunk_pts_s.unwrap_or(pts_s);
-        let gap = pts_s - expected;
+        let mut corrected_pts_s = pts_s + self.source_pts_correction_s;
+        self.ensure_initial_anchor(corrected_pts_s);
+        let expected = self.next_chunk_pts_s.unwrap_or(corrected_pts_s);
+        let mut gap = corrected_pts_s - expected;
+        let correction = if gap < -GAP_TOLERANCE_S && self.synthesized_since_real {
+            let correction_s = expected - corrected_pts_s;
+            self.source_pts_correction_s += correction_s;
+            corrected_pts_s = expected;
+            gap = 0.0;
+            self.late_recovery_fade_remaining_pairs = LATE_RECOVERY_FADE_PAIRS;
+            Some(correction_s)
+        } else {
+            None
+        };
         let mut samples = interleaved;
         if gap > GAP_TOLERANCE_S {
-            let missing_pairs = (gap.min(MAX_GAP_FILL_S) * SAMPLE_RATE).round() as usize;
+            let mut missing_pairs = (gap.min(MAX_GAP_FILL_S) * SAMPLE_RATE).round() as u64;
+            if gap > MAX_GAP_FILL_S {
+                // End the bounded silence on a packet boundary so no Opus
+                // frame straddles the old and re-anchored clocks.
+                let end_remainder = (self.written_pairs() + missing_pairs) % FRAME_PAIRS;
+                missing_pairs = missing_pairs.saturating_sub(end_remainder);
+            }
             self.buffered
-                .extend(std::iter::repeat_n(0.0, missing_pairs * 2));
+                .extend(std::iter::repeat_n(0.0, missing_pairs as usize * 2));
+            if gap > MAX_GAP_FILL_S {
+                self.reanchor_next_pair(corrected_pts_s);
+            }
         } else if gap < -GAP_TOLERANCE_S {
-            let overlap_pairs = ((expected - pts_s) * SAMPLE_RATE).round() as usize;
+            let overlap_pairs = ((expected - corrected_pts_s) * SAMPLE_RATE).round() as usize;
             if overlap_pairs >= interleaved.len() / 2 {
-                return;
+                return PcmPushOutcome::default();
             }
             samples = &interleaved[overlap_pairs * 2..];
         }
-        self.buffered.extend_from_slice(samples);
+        self.append_live_samples(samples);
         let chunk_duration_s = (samples.len() / 2) as f64 / SAMPLE_RATE;
         self.next_chunk_pts_s = Some(if gap > GAP_TOLERANCE_S {
-            pts_s + chunk_duration_s
+            corrected_pts_s + chunk_duration_s
         } else {
             expected + chunk_duration_s
         });
+        self.synthesized_since_real = false;
+        PcmPushOutcome {
+            late_reanchor_s: correction,
+            total_correction_s: self.source_pts_correction_s,
+            chunk_duration_s,
+        }
     }
 
     /// Extend an anchored timeline with stereo silence up to an absolute PTS.
@@ -75,15 +230,17 @@ impl LoopbackAssembler {
         self.buffered
             .extend(std::iter::repeat_n(0.0, missing_pairs * 2));
         self.next_chunk_pts_s = Some(expected_pts_s + missing_pairs as f64 / SAMPLE_RATE);
+        self.synthesized_since_real |= missing_pairs > 0;
     }
 
     /// Append a chunk when the device explicitly marked its timestamp invalid.
     pub fn push_contiguous_chunk(&mut self, interleaved: &[f32]) {
-        self.base_pts_s.get_or_insert(0.0);
-        self.buffered.extend_from_slice(interleaved);
+        self.ensure_initial_anchor(0.0);
+        self.append_live_samples(interleaved);
         if let Some(next_chunk_pts_s) = &mut self.next_chunk_pts_s {
             *next_chunk_pts_s += (interleaved.len() / 2) as f64 / SAMPLE_RATE;
         }
+        self.synthesized_since_real = false;
     }
 
     /// One 20 ms frame once enough samples are buffered.
@@ -91,10 +248,66 @@ impl LoopbackAssembler {
         if self.buffered.len() < FRAME_LEN {
             return None;
         }
-        let pts = self.base_pts_s? + self.frames_popped as f64 * FRAME_DURATION_S;
+        let pair_index = self.frames_popped * FRAME_PAIRS;
+        while self
+            .anchors
+            .get(1)
+            .is_some_and(|anchor| anchor.pair_index <= pair_index)
+        {
+            self.anchors.pop_front();
+        }
+        let anchor = self.anchors.front()?;
+        let pts = anchor.pts_s + (pair_index - anchor.pair_index) as f64 / SAMPLE_RATE;
         let frame: Vec<f32> = self.buffered.drain(..FRAME_LEN).collect();
         self.frames_popped += 1;
         Some((pts, frame))
+    }
+
+    fn written_pairs(&self) -> u64 {
+        self.frames_popped * FRAME_PAIRS + (self.buffered.len() / 2) as u64
+    }
+
+    fn append_live_samples(&mut self, interleaved: &[f32]) {
+        let fade_pairs = self
+            .late_recovery_fade_remaining_pairs
+            .min(interleaved.len() / 2);
+        self.buffered.reserve(interleaved.len());
+        for pair in interleaved[..fade_pairs * 2].chunks_exact(2) {
+            let completed = LATE_RECOVERY_FADE_PAIRS - self.late_recovery_fade_remaining_pairs;
+            let gain = completed as f32 / (LATE_RECOVERY_FADE_PAIRS - 1) as f32;
+            self.buffered.push(pair[0] * gain);
+            self.buffered.push(pair[1] * gain);
+            self.late_recovery_fade_remaining_pairs -= 1;
+        }
+        self.buffered
+            .extend_from_slice(&interleaved[fade_pairs * 2..]);
+    }
+
+    fn ensure_initial_anchor(&mut self, pts_s: f64) {
+        if self.anchors.is_empty() {
+            self.anchors.push_back(TimelineAnchor {
+                pair_index: self.written_pairs(),
+                pts_s,
+            });
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    fn reanchor_next_pair(&mut self, source_pts_s: f64) {
+        let pair_index = self.written_pairs();
+        let prior_grid_pts = self.anchors.back().map_or(source_pts_s, |anchor| {
+            anchor.pts_s + (pair_index - anchor.pair_index) as f64 / SAMPLE_RATE
+        });
+        let pts_s = source_pts_s.max(prior_grid_pts);
+        if let Some(last) = self
+            .anchors
+            .back_mut()
+            .filter(|a| a.pair_index == pair_index)
+        {
+            last.pts_s = last.pts_s.max(pts_s);
+        } else {
+            self.anchors.push_back(TimelineAnchor { pair_index, pts_s });
+        }
     }
 }
 
@@ -322,6 +535,21 @@ mod tests {
             asm.buffered.len(),
             (960 + max_missing_pairs + 960 + 960) * 2
         );
+        let frames: Vec<_> = std::iter::from_fn(|| asm.pop_frame()).collect();
+        assert!((frames[frames.len() - 2].0 - 3600.0).abs() < 1e-9);
+        assert!((frames[frames.len() - 1].0 - 3600.02).abs() < 1e-9);
+    }
+
+    #[test]
+    fn discontinuity_anchor_starts_on_a_complete_frame_after_partial_pcm() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &pairs(480, 1.0));
+        asm.push_chunk(3600.0, &pairs(960, 0.5));
+
+        let frames: Vec<_> = std::iter::from_fn(|| asm.pop_frame()).collect();
+        let resumed = frames.last().expect("resumed source frame");
+        assert!((resumed.0 - 3600.0).abs() < 1e-9);
+        assert!(resumed.1.iter().all(|&sample| sample == 0.5));
     }
 
     #[test]
@@ -351,34 +579,89 @@ mod tests {
     }
 
     #[test]
-    fn late_chunk_keeps_only_suffix_after_synthesized_silence() {
+    fn partially_overlapped_live_chunk_is_reanchored_without_stuttering() {
         let mut asm = LoopbackAssembler::new();
         asm.push_chunk(0.0, &[]);
         asm.advance_with_silence(0.10);
 
-        asm.push_chunk(0.08, &pairs(1_920, 0.75));
+        let outcome = asm.push_chunk(0.08, &pairs(1_920, 0.75));
 
         let mut frames = Vec::new();
         while let Some(frame) = asm.pop_frame() {
             frames.push(frame);
         }
-        assert_eq!(frames.len(), 6);
+        assert!((outcome.late_reanchor_s.unwrap() - 0.02).abs() < 1e-9);
+        assert!((outcome.total_correction_s - 0.02).abs() < 1e-9);
+        assert!((outcome.chunk_duration_s - 0.04).abs() < 1e-9);
+        assert_eq!(frames.len(), 7);
         assert!(frames[..5]
             .iter()
             .all(|(_, frame)| frame.iter().all(|&sample| sample == 0.0)));
         assert!((frames[5].0 - 0.10).abs() < 1e-9);
-        assert!(frames[5].1.iter().all(|&sample| sample == 0.75));
+        assert_eq!(&frames[5].1[..2], &[0.0, 0.0]);
+        assert!(frames[5].1[480..].iter().all(|&sample| sample == 0.75));
+        assert!((frames[6].0 - 0.12).abs() < 1e-9);
+        assert!(frames[6].1.iter().all(|&sample| sample == 0.75));
     }
 
     #[test]
-    fn fully_overlapped_late_chunk_does_not_extend_timeline() {
+    fn late_live_recovery_fades_in_without_dropping_samples() {
         let mut asm = LoopbackAssembler::new();
         asm.push_chunk(0.0, &[]);
         asm.advance_with_silence(0.10);
 
-        asm.push_chunk(0.04, &pairs(960, 0.75));
+        let outcome = asm.push_chunk(0.08, &pairs(960, 1.0));
+        let frames: Vec<_> = std::iter::from_fn(|| asm.pop_frame()).collect();
 
-        assert_eq!(std::iter::from_fn(|| asm.pop_frame()).count(), 5);
+        assert!(outcome.late_reanchor_s.is_some());
+        assert_eq!(frames.len(), 6, "no live sample may be discarded");
+        let recovered = &frames[5].1;
+        assert_eq!(&recovered[..2], &[0.0, 0.0]);
+        assert!(recovered[240] > 0.49 && recovered[240] < 0.52);
+        assert_eq!(&recovered[478..482], &[1.0, 1.0, 1.0, 1.0]);
+        assert!(recovered[482..].iter().all(|&sample| sample == 1.0));
+    }
+
+    #[test]
+    fn synthesized_silence_does_not_permanently_discard_late_live_audio() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &[]);
+        asm.advance_with_silence(0.10);
+        assert_eq!(
+            std::iter::from_fn(|| asm.pop_frame()).count(),
+            5,
+            "silence has already been committed before the source catches up"
+        );
+
+        let first = asm.push_chunk(0.04, &pairs(960, 0.75));
+        let second = asm.push_chunk(0.06, &pairs(960, 0.50));
+
+        let resumed: Vec<_> = std::iter::from_fn(|| asm.pop_frame()).collect();
+        assert!((first.late_reanchor_s.unwrap() - 0.06).abs() < 1e-9);
+        assert_eq!(second.late_reanchor_s, None);
+        assert_eq!(
+            resumed.len(),
+            2,
+            "late audio must resume instead of locking out"
+        );
+        assert!((resumed[0].0 - 0.10).abs() < 1e-9);
+        assert_eq!(&resumed[0].1[..2], &[0.0, 0.0]);
+        assert!(resumed[0].1[480..].iter().all(|&sample| sample == 0.75));
+        assert!((resumed[1].0 - 0.12).abs() < 1e-9);
+        assert!(resumed[1].1.iter().all(|&sample| sample == 0.50));
+    }
+
+    #[test]
+    fn duplicate_late_chunk_without_synthetic_advance_is_still_discarded() {
+        let mut asm = LoopbackAssembler::new();
+        asm.push_chunk(0.0, &pairs(960, 0.75));
+
+        let duplicate = asm.push_chunk(0.0, &pairs(960, 0.50));
+
+        assert_eq!(duplicate.late_reanchor_s, None);
+        let frames: Vec<_> = std::iter::from_fn(|| asm.pop_frame()).collect();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].1.iter().all(|&sample| sample == 0.75));
     }
 
     #[test]
@@ -431,6 +714,47 @@ mod tests {
     }
 
     #[test]
+    fn discontinuity_fade_crosses_buffers_and_waits_through_digital_silence() {
+        let mut fade = DiscontinuityFade::new();
+        let mut silence = pairs(960, 0.0);
+        fade.apply(&mut silence);
+        assert_eq!(fade.remaining_pairs, DISCONTINUITY_FADE_PAIRS);
+
+        let mut first = pairs(960, 1.0);
+        fade.apply(&mut first);
+        assert_eq!(&first[..2], &[0.0, 0.0]);
+        assert!((first[first.len() - 1] - 959.0 / 1_919.0).abs() < 1e-6);
+
+        let mut second = pairs(960, 1.0);
+        fade.apply(&mut second);
+        assert!((second[0] - 960.0 / 1_919.0).abs() < 1e-6);
+        assert_eq!(&second[second.len() - 2..], &[1.0, 1.0]);
+        assert_eq!(fade.remaining_pairs, 0);
+
+        let mut steady = pairs(4, 0.75);
+        fade.apply(&mut steady);
+        assert!(steady.iter().all(|sample| *sample == 0.75));
+
+        fade.restart();
+        fade.apply(&mut steady);
+        assert_eq!(&steady[..2], &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn discontinuity_fade_waits_through_leading_silence_inside_a_live_buffer() {
+        let mut fade = DiscontinuityFade::new();
+        let mut mixed = pairs(480, 0.0);
+        mixed.extend(pairs(480, 1.0));
+
+        fade.apply(&mut mixed);
+
+        assert_eq!(fade.remaining_pairs, DISCONTINUITY_FADE_PAIRS - 480);
+        assert!(mixed[..960].iter().all(|sample| *sample == 0.0));
+        assert_eq!(&mixed[960..962], &[0.0, 0.0]);
+        assert!((mixed[mixed.len() - 1] - 479.0 / 1_919.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn resample_stereo_linear_preserves_stereo_pairs() {
         let samples = vec![0.0, 1.0, 0.5, 0.5, 1.0, 0.0, 0.5, -0.5];
         assert_eq!(resample_stereo_linear(&samples, 48_000, 48_000), samples);
@@ -455,5 +779,65 @@ mod tests {
         let input_frames = 100_000f64;
         let expected = (input_frames * 48_000.0 / 44_100.0).ceil() as usize;
         assert_eq!(output_frames, expected);
+    }
+
+    #[test]
+    fn continuous_device_packets_preserve_nominal_sample_cadence() {
+        let mut timeline = DevicePacketTimeline::new();
+        let mut assembler = LoopbackAssembler::new();
+        assembler.push_chunk(0.0, &[]);
+
+        for index in 0..300 {
+            let pts_s = index as f64 * 510.0 / SAMPLE_RATE;
+            let chunk = pairs(512, 0.5);
+            match timeline.placement(Some(pts_s)) {
+                DevicePacketPlacement::Timestamped(anchor_pts_s) => {
+                    let outcome = assembler.push_chunk(anchor_pts_s, &chunk);
+                    assert_eq!(outcome.late_reanchor_s, None);
+                }
+                DevicePacketPlacement::Contiguous => assembler.push_contiguous_chunk(&chunk),
+            }
+        }
+
+        assert_eq!(assembler.written_pairs(), 300 * 512);
+        let actual_end = assembler
+            .next_chunk_pts_s
+            .expect("timeline remains anchored");
+        let expected_end = 300.0 * 512.0 / SAMPLE_RATE;
+        assert!((actual_end - expected_end).abs() < 1e-9);
+    }
+
+    #[test]
+    fn synthesized_idle_requires_the_next_packet_to_reanchor() {
+        let mut timeline = DevicePacketTimeline::new();
+        assert_eq!(
+            timeline.placement(Some(1.0)),
+            DevicePacketPlacement::Timestamped(1.0)
+        );
+        assert_eq!(
+            timeline.placement(Some(1.01)),
+            DevicePacketPlacement::Contiguous
+        );
+        assert!(!timeline.note_synthesized_silence(0.1 - 1e-6));
+        assert_eq!(
+            timeline.placement(Some(1.02)),
+            DevicePacketPlacement::Contiguous
+        );
+        assert!(timeline.note_synthesized_silence(0.1));
+        assert_eq!(
+            timeline.placement(Some(1.03)),
+            DevicePacketPlacement::Timestamped(1.03)
+        );
+        assert_eq!(
+            timeline.placement(Some(1.04)),
+            DevicePacketPlacement::Contiguous
+        );
+
+        timeline.require_timestamp_anchor();
+        assert_eq!(timeline.placement(None), DevicePacketPlacement::Contiguous);
+        assert_eq!(
+            timeline.placement(Some(1.05)),
+            DevicePacketPlacement::Timestamped(1.05)
+        );
     }
 }

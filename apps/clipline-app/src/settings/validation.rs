@@ -138,11 +138,17 @@ impl AppSettings {
         let mut ids = HashSet::new();
         for game in &self.games.custom_games {
             let id = game.id.trim();
-            if id.is_empty() {
-                return Err("custom game id is required".into());
-            }
+            crate::game_identity::validate_custom_game_id(id)?;
             if !ids.insert(id.to_ascii_lowercase()) {
                 return Err(format!("custom game id {id:?} is duplicated"));
+            }
+            if game.legacy_ids.len() > 8
+                || game
+                    .legacy_ids
+                    .iter()
+                    .any(|legacy| legacy.is_empty() || legacy.len() > 256)
+            {
+                return Err(format!("custom game {id:?} has invalid legacy ids"));
             }
             if game.name.trim().is_empty() {
                 return Err("custom game name is required".into());

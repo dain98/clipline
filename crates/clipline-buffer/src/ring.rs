@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::segment::Segment;
 
@@ -8,7 +9,7 @@ use crate::segment::Segment;
 #[derive(Debug)]
 pub struct ReplayRing {
     max_bytes: usize,
-    segments: VecDeque<Segment>,
+    segments: VecDeque<Arc<Segment>>,
     bytes: usize,
 }
 
@@ -22,13 +23,25 @@ impl ReplayRing {
     }
 
     pub fn push(&mut self, seg: Segment) {
-        self.bytes += seg.byte_len();
-        self.segments.push_back(seg);
-        while self.bytes > self.max_bytes && self.segments.len() > 1 {
+        self.push_shared(Arc::new(seg));
+    }
+
+    /// Insert a segment already shared with another immutable consumer.
+    pub fn push_shared(&mut self, seg: Arc<Segment>) {
+        let incoming_bytes = seg.byte_len();
+        let evict = crate::planning::eviction_count(
+            self.segments.iter().map(|segment| segment.byte_len()),
+            self.bytes,
+            incoming_bytes,
+            self.max_bytes,
+        );
+        for _ in 0..evict {
             if let Some(front) = self.segments.pop_front() {
-                self.bytes -= front.byte_len();
+                self.bytes = self.bytes.saturating_sub(front.byte_len());
             }
         }
+        self.bytes = self.bytes.saturating_add(incoming_bytes);
+        self.segments.push_back(seg);
     }
 
     pub fn len(&self) -> usize {
@@ -44,7 +57,7 @@ impl ReplayRing {
     }
 
     pub fn segments(&self) -> impl Iterator<Item = &Segment> {
-        self.segments.iter()
+        self.segments.iter().map(Arc::as_ref)
     }
 
     /// Segments for a Save Replay of the trailing `window_s` seconds
@@ -54,42 +67,12 @@ impl ReplayRing {
     /// `exclude_before_s` is the smart no-overlap mode: footage at or
     /// before that point (the previous save's end) is never re-included.
     pub fn save_window(&self, window_s: f64, exclude_before_s: Option<f64>) -> Vec<&Segment> {
-        let Some(last) = self.segments.back() else {
+        let Some(idx) =
+            crate::planning::replay_window_start_index(&self.segments, window_s, exclude_before_s)
+        else {
             return Vec::new();
         };
-        let mut start_target = last.pts_end_s() - window_s;
-        if let Some(x) = exclude_before_s {
-            start_target = start_target.max(x);
-        }
-
-        // Latest keyframe segment starting at or before the target…
-        let mut start_idx = self
-            .segments
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.starts_with_keyframe && s.pts_start_s <= start_target)
-            .map(|(i, _)| i)
-            .next_back();
-        // …or, if the buffer is shorter than the window, the first keyframe.
-        if start_idx.is_none() {
-            start_idx = self.segments.iter().position(|s| s.starts_with_keyframe);
-        }
-        let Some(mut idx) = start_idx else {
-            return Vec::new();
-        };
-
-        // Smart mode: drop segments wholly at/before the exclusion point,
-        // then re-align to the next keyframe.
-        if let Some(x) = exclude_before_s {
-            while idx < self.segments.len() && self.segments[idx].pts_end_s() <= x {
-                idx += 1;
-            }
-            while idx < self.segments.len() && !self.segments[idx].starts_with_keyframe {
-                idx += 1;
-            }
-        }
-
-        self.segments.iter().skip(idx).collect()
+        self.segments.iter().skip(idx).map(Arc::as_ref).collect()
     }
 }
 
@@ -128,20 +111,35 @@ mod tests {
     }
 
     #[test]
+    fn shared_insert_keeps_the_original_segment_allocation() {
+        let mut ring = ReplayRing::new(100);
+        let shared = Arc::new(seg(0.0, 2.0, 10, true));
+        let original = Arc::as_ptr(&shared);
+
+        ring.push_shared(Arc::clone(&shared));
+
+        assert_eq!(ring.segments().next().unwrap() as *const Segment, original);
+        assert_eq!(Arc::strong_count(&shared), 2);
+    }
+
+    #[test]
     fn eviction_counts_audio_bytes() {
         let mut ring = ReplayRing::new(250);
         let mut s1 = seg(0.0, 2.0, 50, true);
         s1.audio.push(crate::segment::TrackSamples {
+            pts_start_s: Some(0.0),
             data: vec![0; 60],
             samples: vec![],
         });
         let mut s2 = seg(2.0, 2.0, 50, true);
         s2.audio.push(crate::segment::TrackSamples {
+            pts_start_s: Some(2.0),
             data: vec![0; 60],
             samples: vec![],
         });
         let mut s3 = seg(4.0, 2.0, 50, true);
         s3.audio.push(crate::segment::TrackSamples {
+            pts_start_s: Some(4.0),
             data: vec![0; 60],
             samples: vec![],
         });
