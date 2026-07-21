@@ -30,7 +30,7 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 chrono = "0.4.45"
-rfd = "0.15"
+rfd = "0.17"
 png = "0.17"
 base64 = "0.22"
 rodio = { version = "0.17", default-features = false, features = ["vorbis"] }
