@@ -45,10 +45,35 @@ const PlayerCore = (() => {
     return text.split(/[\\/]/).filter(Boolean).pop() || text;
   };
 
+  const windowsClipPathKey = (path) => {
+    const text = String(path || "").trim();
+    if (!text) return null;
+    let normalized = text.replace(/\//g, "\\");
+    const lower = normalized.toLowerCase();
+    if (lower.startsWith("\\\\?\\unc\\")) {
+      normalized = "\\\\" + normalized.slice(8);
+    } else if (lower.startsWith("\\\\?\\")) {
+      normalized = normalized.slice(4);
+    }
+    if (!/^[a-z]:\\/i.test(normalized) && !normalized.startsWith("\\\\")) return null;
+    return normalized.toLowerCase();
+  };
+
+  const sameClipPath = (left, right) => {
+    const leftText = String(left || "").trim();
+    const rightText = String(right || "").trim();
+    if (!leftText || !rightText) return false;
+    if (leftText === rightText) return true;
+    const leftKey = windowsClipPathKey(leftText);
+    const rightKey = windowsClipPathKey(rightText);
+    return leftKey !== null && rightKey !== null && leftKey === rightKey;
+  };
+
   const clipNameStem = PresentationCore.clipNameStem;
 
   const cloudLibraryEntries = (uploads, localClips = [], cloudClips = []) => {
-    const localPaths = new Set((localClips || []).map((clip) => String(clip && clip.path || "")));
+    const localPaths = (localClips || []).map((clip) => String(clip && clip.path || ""));
+    const localPathAvailable = (path) => localPaths.some((localPath) => sameClipPath(localPath, path));
     const uploadRecords = Object.values(uploads || {});
     const uploadsByLocalId = new Map(
       uploadRecords
@@ -77,7 +102,7 @@ const PlayerCore = (() => {
           : "private",
         upload_status: String(clip.upload_status || "uploaded_processing"),
         updated_at_unix: Number(clip.updated_at_unix) || 0,
-        local_available: Boolean(path && localPaths.has(path)),
+        local_available: Boolean(path && localPathAvailable(path)),
         remote_clip_id: remoteId,
       };
       const durationMs = Number(clip.duration_ms);
@@ -109,7 +134,7 @@ const PlayerCore = (() => {
           visibility,
           upload_status: status,
           updated_at_unix: Number(record.updated_at_unix) || 0,
-          local_available: localPaths.has(path),
+          local_available: localPathAvailable(path),
         };
         const remoteId = String(record.remote_clip_id || "");
         if (remoteId) entry.remote_clip_id = remoteId;
@@ -2022,6 +2047,7 @@ const PlayerCore = (() => {
     encoderCodecCaveat,
     fmtBytes,
     fmtLibraryStorageUsage,
+    sameClipPath,
     cloudLibraryEntries,
     fmtDur,
     fmtTenths,

@@ -113,6 +113,32 @@ fn video_decode_probes_cover_hevc_and_av1_mp4_profiles() {
 }
 
 #[test]
+fn clip_paths_match_legacy_windows_canonical_forms() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            r#"PlayerCore.sameClipPath('D:\\Videos\\Clipline\\clip.mp4', '\\\\?\\D:\\Videos\\Clipline\\clip.mp4')"#,
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            r#"PlayerCore.sameClipPath('d:/videos/clipline/CLIP.mp4', 'D:\\Videos\\Clipline\\clip.mp4')"#,
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.sameClipPath('/Clips/clip.mp4', '/clips/clip.mp4')",
+        ),
+        "false"
+    );
+}
+
+#[test]
 fn cloud_library_entries_filter_sort_and_mark_local_availability() {
     let mut ctx = player_core_context();
     let entries = eval_json(
@@ -164,6 +190,27 @@ fn cloud_library_entries_filter_sort_and_mark_local_availability() {
     assert_eq!(
         entries,
         r#"[{"local_clip_id":"pending","path":"C:/Clips/pending clip.mp4","title":"pending clip","remote_url":"https://clips.example.com/pending","visibility":"private","upload_status":"processing","updated_at_unix":30,"local_available":true},{"local_clip_id":"gone","path":"C:/Clips/gone clip.mp4","title":"gone clip","remote_url":"https://clips.example.com/gone","visibility":"unlisted","upload_status":"uploaded_processing","updated_at_unix":20,"local_available":false},{"local_clip_id":"old","path":"C:/Clips/old clip.mp4","title":"old clip","remote_url":"https://clips.example.com/old","visibility":"public","upload_status":"uploaded_public","updated_at_unix":10,"local_available":true}]"#
+    );
+}
+
+#[test]
+fn cloud_library_entries_match_legacy_windows_canonical_paths() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            r#"PlayerCore.cloudLibraryEntries({
+              legacy: {
+                local_clip_id: 'legacy',
+                path: '\\\\?\\D:\\Videos\\Clipline\\clip.mp4',
+                remote_url: 'https://clips.example.com/legacy',
+                visibility: 'public',
+                upload_status: 'uploaded_public',
+                updated_at_unix: 10
+              }
+            }, [{ path: 'D:\\Videos\\Clipline\\clip.mp4' }])[0].local_available"#,
+        ),
+        "true"
     );
 }
 

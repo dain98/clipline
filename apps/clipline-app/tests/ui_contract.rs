@@ -3047,6 +3047,22 @@ fn library_has_cloud_source_tab() {
 }
 
 #[test]
+fn cloud_upload_state_matches_legacy_windows_canonical_paths() {
+    let js = main_js();
+    for required in [
+        "function cloudUploadRecordForPath(path)",
+        "PlayerCore.sameClipPath(record.path, path)",
+        "PlayerCore.sameClipPath(clip.path, entry.path)",
+        "PlayerCore.sameClipPath(record.path, oldPath)",
+    ] {
+        assert!(
+            js.contains(required),
+            "cloud UI path pairing must use equivalent Windows paths through `{required}`"
+        );
+    }
+}
+
+#[test]
 fn cloud_library_loader_guards_every_async_result_and_force_supersedes() {
     let cloud = read_ui_js("cloud.js");
     let loader = js_function_body(&cloud, "loadCloudClips");

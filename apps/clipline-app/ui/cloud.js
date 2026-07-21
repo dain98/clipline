@@ -178,7 +178,9 @@ function cloudConnected() {
 
 function cloudUploadRecordForPath(path) {
   const uploads = cloudSettings().uploads || {};
-  return Object.values(uploads).find((record) => record && record.path === path) || null;
+  return Object.values(uploads).find(
+    (record) => record && PlayerCore.sameClipPath(record.path, path)
+  ) || null;
 }
 
 function clipCloudRecord(clip) {
@@ -198,14 +200,18 @@ function cloudLibraryRecords() {
 
 function cloudLocalClipForEntry(entry) {
   if (!entry || !entry.local_available || !entry.path) return null;
-  return clipsCache.find((clip) => clip && clip.path === entry.path) || null;
+  return clipsCache.find(
+    (clip) => clip && PlayerCore.sameClipPath(clip.path, entry.path)
+  ) || null;
 }
 
 function isCloudOnlyReviewClip(clip = currentClip) {
   return !!(
     clip
     && clip.cloud_remote_clip_id
-    && !clipsCache.some((localClip) => localClip && localClip.path === clip.path)
+    && !clipsCache.some(
+      (localClip) => localClip && PlayerCore.sameClipPath(localClip.path, clip.path)
+    )
   );
 }
 
@@ -399,7 +405,7 @@ function replaceCloudRecordPath(oldPath, newPath) {
   let changed = false;
   const nextUploads = {};
   for (const [key, record] of Object.entries(uploads)) {
-    if (record && record.path === oldPath) {
+    if (record && PlayerCore.sameClipPath(record.path, oldPath)) {
       nextUploads[key] = { ...record, path: newPath };
       changed = true;
     } else {
@@ -417,7 +423,7 @@ function removeCloudUploadRecordForPath(path) {
   const nextUploads = {};
   let changed = false;
   for (const [key, record] of Object.entries(uploads)) {
-    if (record && record.path === path) {
+    if (record && PlayerCore.sameClipPath(record.path, path)) {
       changed = true;
       continue;
     }

@@ -4,6 +4,20 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-20): legacy cloud upload path identity
+
+Completed cloud records created by older builds can contain canonical Windows paths such as
+`\\?\D:\Videos\...`, while the local library reports the same clip as `D:\Videos\...`. Exact
+frontend path comparison hid the uploaded visibility badge, made cloud entries appear local-only,
+and exposed the upload action again. Local/cloud pairing now uses a shared Windows-aware path
+comparison that strips the verbatim prefix, normalizes separators, and compares Windows paths
+case-insensitively without changing POSIX semantics.
+
+The backend applies the same identity rule when finding, replacing, and removing upload records.
+An upload request for a completed record now returns that existing record before any media transfer,
+with a second local-clip-ID check after hashing as defense in depth. Regression coverage includes
+legacy verbatim paths, cloud-library availability, frontend wiring, and duplicate-upload prevention.
+
 ## Checkpoint (2026-07-20): semi-static capture inflated video PTS
 
 Direct frontier measurement overturned the audio-clock diagnosis below. Two replay saves taken

@@ -1409,6 +1409,9 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     let target = validate_clip_path(&storage, &request.path)?;
     let settings = state.settings();
     let cloud = settings.cloud.clone();
+    if let Some(record) = existing_uploaded_record(&cloud, None, &request.path) {
+        return Ok(CloudUploadResult { record, clip: None });
+    }
     let token_target = cloud
         .credential_target
         .clone()
@@ -1441,6 +1444,9 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         .await
         .map_err(cloud_error)?;
     let local_clip_id = local_clip_id(&target, &meta, &checksum)?;
+    if let Some(record) = existing_uploaded_record(&cloud, Some(&local_clip_id), &request.path) {
+        return Ok(CloudUploadResult { record, clip: None });
+    }
     let mut record = CloudUploadRecord {
         local_clip_id: local_clip_id.clone(),
         // Store the path exactly as `list_clips` emits it (non-canonical), so the
@@ -2022,7 +2028,7 @@ fn existing_retry_status(cloud: &CloudSettings, local_clip_id: &str, path: &str)
         cloud
             .uploads
             .values()
-            .filter(|record| record.path == path)
+            .filter(|record| clip_paths_equal(&record.path, path))
             .max_by_key(|record| record.updated_at_unix)
     });
     match existing.map(|record| record.upload_status.as_str()) {
@@ -2032,26 +2038,78 @@ fn existing_retry_status(cloud: &CloudSettings, local_clip_id: &str, path: &str)
     }
 }
 
+fn windows_clip_path_key(path: &str) -> Option<String> {
+    let mut normalized = path.trim().replace('/', "\\");
+    let lower = normalized.to_ascii_lowercase();
+    if lower.starts_with(r"\\?\unc\") {
+        normalized = format!(r"\\{}", &normalized[8..]);
+    } else if lower.starts_with(r"\\?\") {
+        normalized = normalized[4..].to_string();
+    }
+    let bytes = normalized.as_bytes();
+    let drive_path =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    if !drive_path && !normalized.starts_with(r"\\") {
+        return None;
+    }
+    Some(normalized.to_ascii_lowercase())
+}
+
+fn clip_paths_equal(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    matches!(
+        (windows_clip_path_key(left), windows_clip_path_key(right)),
+        (Some(left), Some(right)) if left == right
+    )
+}
+
+fn existing_uploaded_record(
+    cloud: &CloudSettings,
+    local_clip_id: Option<&str>,
+    path: &str,
+) -> Option<CloudUploadRecord> {
+    let uploaded = |record: &&CloudUploadRecord| {
+        record.remote_clip_id.is_some()
+            && record.remote_url.is_some()
+            && record.upload_status.starts_with("uploaded_")
+    };
+    if let Some(record) = local_clip_id
+        .and_then(|local_clip_id| cloud.uploads.get(local_clip_id))
+        .filter(uploaded)
+    {
+        return Some(record.clone());
+    }
+    cloud
+        .uploads
+        .values()
+        .filter(uploaded)
+        .filter(|record| clip_paths_equal(&record.path, path))
+        .max_by_key(|record| record.updated_at_unix)
+        .cloned()
+}
+
 fn cloud_record_for_path(cloud: &CloudSettings, path: &str) -> Option<CloudUploadRecord> {
     cloud
         .uploads
         .values()
-        .filter(|record| record.path == path)
+        .filter(|record| clip_paths_equal(&record.path, path))
         .max_by_key(|record| record.updated_at_unix)
         .cloned()
 }
 
 fn replace_upload_record(cloud: &mut CloudSettings, record: CloudUploadRecord) {
-    cloud
-        .uploads
-        .retain(|key, existing| key == &record.local_clip_id || existing.path != record.path);
+    cloud.uploads.retain(|key, existing| {
+        key == &record.local_clip_id || !clip_paths_equal(&existing.path, &record.path)
+    });
     cloud.uploads.insert(record.local_clip_id.clone(), record);
 }
 
 fn remove_upload_record(cloud: &mut CloudSettings, record: &CloudUploadRecord) {
-    cloud
-        .uploads
-        .retain(|key, existing| key != &record.local_clip_id && existing.path != record.path);
+    cloud.uploads.retain(|key, existing| {
+        key != &record.local_clip_id && !clip_paths_equal(&existing.path, &record.path)
+    });
 }
 
 fn persist_record(state: &RuntimeState, record: &CloudUploadRecord) -> Result<(), String> {
@@ -2541,6 +2599,38 @@ mod tests {
         assert_eq!(
             existing_retry_status(&cloud, "new", "D:\\Videos\\other.mp4"),
             "queued"
+        );
+    }
+
+    #[test]
+    fn legacy_windows_canonical_paths_match_library_paths() {
+        assert!(clip_paths_equal(
+            r"\\?\D:\Videos\Clipline\clip.mp4",
+            r"D:\Videos\Clipline\clip.mp4"
+        ));
+        assert!(clip_paths_equal(
+            r"d:/videos/clipline/CLIP.mp4",
+            r"D:\Videos\Clipline\clip.mp4"
+        ));
+        assert!(!clip_paths_equal("/Clips/clip.mp4", "/clips/clip.mp4"));
+    }
+
+    #[test]
+    fn uploaded_record_lookup_blocks_legacy_path_reupload() {
+        let mut cloud = CloudSettings::default();
+        let mut record = upload_record(
+            "legacy",
+            r"\\?\D:\Videos\Clipline\clip.mp4",
+            "uploaded_public",
+            10,
+        );
+        record.remote_clip_id = Some("remote-1".into());
+        record.remote_url = Some("https://clips.example.com/clip/remote-1".into());
+        cloud.uploads.insert("legacy".into(), record.clone());
+
+        assert_eq!(
+            existing_uploaded_record(&cloud, None, r"D:\Videos\Clipline\clip.mp4"),
+            Some(record)
         );
     }
 
