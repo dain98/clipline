@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-21): second PR 89 review pass
+
+The presigned object-upload client now refuses every redirect, matching the authenticated/control
+clients. A 307 regression proves a reusable PUT body is not forwarded to the redirect target; the
+direct-upload path falls back normally on the returned non-success response.
+
+WASAPI's discontinuity fade no longer spends its 40 ms ramp on digital-silence pairs before the
+first live sample in a mixed packet. Fully silent buffers and cross-buffer fades retain their
+existing behavior. The native media-folder picker keeps the canonical path for authorization but
+returns a user-facing path without Windows `\\?\` / `\\?\UNC\` prefixes. Local Library refreshes
+canonicalize their unchanging media root once, while every individual asset remains independently
+canonicalized and checked beneath that root before exact WebView scoping.
+
+The review's proposed audio-sidecar rate nudge remains intentionally rejected: commit `e7ca91e`
+implemented it and `a85ceae` removed it after audible rate oscillation. Mid-session settings saves
+also continue refusing to overwrite an externally corrupted file; startup quarantine/recovery is
+the deliberate data-preserving boundary. The three retry backoffs remain separate because their
+jitter, caps, and status semantics differ.
+
+Focused regressions, the full workspace test suite, and fresh-cache warning-denied workspace Clippy
+pass.
+
 ## Checkpoint (2026-07-21): PR 89 review regressions
 
 Seven actionable PR review findings are fixed. Settings saves continue when the optional low-level
