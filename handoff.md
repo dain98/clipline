@@ -4,6 +4,21 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-22): sub-millisecond full-session GOP boundary
+
+A Nightly 0.1.38 full-session recording failed at stop with video track 0 attempting to move from
+decode tick 4,051,257 back to 4,051,255. The earlier one-tick boundary fix correctly covers
+independent quantization ties, but the pipeline also floored every adjacent video interval at
+100 us. A valid interval between one 90 kHz tick and that floor was lengthened within its GOP; the
+next GOP retained its absolute start stamp and could therefore appear several ticks earlier.
+
+Sealed video samples now use one configured video-timescale tick as their minimum positive
+duration, matching the MP4 format's actual representable floor. The MP4 writer remains strict, and
+the capture-side tolerance still accepts only a one-tick rounding tie, so real regressions of two
+ticks or more are not hidden. A deterministic full-session fixture reproduces the reported
+two-tick failure with adjacent frames seven ticks apart, verifies the stored interval remains seven
+ticks, finalizes the file, and retains the existing larger-regression guard coverage.
+
 ## Checkpoint (2026-07-21): Nightly 0.1.38
 
 Nightly 0.1.38 contains PR #100's recorder and review quality-of-life release. It adds an optional
