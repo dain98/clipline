@@ -504,10 +504,19 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         self.pending_bytes = 0;
         let pts_start_s = packets[0].pts_s;
         let starts_with_keyframe = packets[0].is_keyframe;
+        let video_timescale = self.encoder.track_config().timescale;
+        let minimum_duration_s = if video_timescale == 0 {
+            f64::EPSILON
+        } else {
+            1.0 / f64::from(video_timescale)
+        };
         // ddoc §6: the timeline follows capture stamps, not encoder cadence
         // claims. Each sample lasts until the next pts; the sealing
         // keyframe's pts closes the GOP exactly; only the final seal
-        // (boundary = ∞) trusts the encoder's own duration.
+        // (boundary = ∞) trusts the encoder's own duration. One video
+        // timescale tick is the smallest positive duration MP4 can store;
+        // a larger floor would inflate tightly spaced frames past the next
+        // GOP's absolute start timestamp.
         let durations: Vec<f64> = (0..packets.len())
             .map(|i| {
                 let next_pts = packets
@@ -515,7 +524,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
                     .map(|p| p.pts_s)
                     .unwrap_or(boundary_pts_s);
                 if next_pts.is_finite() {
-                    (next_pts - packets[i].pts_s).max(1e-4)
+                    (next_pts - packets[i].pts_s).max(minimum_duration_s)
                 } else {
                     packets[i].duration_s
                 }
@@ -1086,6 +1095,34 @@ mod tests {
         fps: u32,
     }
 
+    struct CloselySpacedEncoder {
+        inner: MockEncoder,
+    }
+
+    impl Encoder for CloselySpacedEncoder {
+        fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
+            let mut packets = self.inner.encode(frame)?;
+            for packet in &mut packets {
+                let index = (packet.pts_s * 30.0).round() as u64;
+                packet.pts_s = match index {
+                    0 => 0.0,
+                    1 => 900.0 / 90_000.0,
+                    // Seven ticks after the preceding frame: a valid positive
+                    // interval that the old 100 us floor inflated to 9 ticks.
+                    2 => 907.0 / 90_000.0,
+                    3 => 2_700.0 / 90_000.0,
+                    4 => 3_600.0 / 90_000.0,
+                    _ => 3_600.0 / 90_000.0 + (index - 4) as f64 / 30.0,
+                };
+            }
+            Ok(packets)
+        }
+
+        fn track_config(&self) -> VideoTrackConfig {
+            self.inner.track_config()
+        }
+    }
+
     impl NeverKeyframeEncoder {
         fn new(fps: u32) -> Self {
             Self { fps }
@@ -1543,6 +1580,32 @@ mod tests {
         )
         .expect("a one-tick quantization overlap must clamp to the written frontier");
         writer.unwrap().finalize().unwrap();
+    }
+
+    #[test]
+    fn sub_hundred_microsecond_frame_gap_does_not_break_full_session_finalization() {
+        let dir = TestDir::new("clipline-pipeline", "sub-millisecond-gop-boundary");
+        let path = dir.path().join("session.mp4");
+        let mut recorder = Recorder::new(
+            MockCapture::new(8, 30),
+            CloselySpacedEncoder {
+                inner: MockEncoder::new(4, 30),
+            },
+            usize::MAX,
+        );
+        recorder
+            .start_full_session(std::fs::File::create(&path).unwrap())
+            .unwrap();
+
+        recorder.run_to_end().unwrap();
+        recorder
+            .finish_full_session()
+            .expect("a valid seven-tick frame interval must not inflate past the next GOP start")
+            .expect("session summary");
+
+        let first = recorder.ring().unwrap().segments().next().unwrap();
+        assert_eq!((first.samples[1].duration_s * 90_000.0).round(), 7.0);
+        assert!(clipline_mp4::walker::movie_duration_s(&std::fs::read(path).unwrap()).is_some());
     }
 
     #[test]
