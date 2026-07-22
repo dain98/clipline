@@ -4,6 +4,14 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-22): Nightly 0.1.39
+
+Nightly 0.1.39 contains PR #101's full-session finalization fix. Encoded video intervals shorter
+than 100 us now retain their representable timing down to one configured MP4 timescale tick, so a
+valid tightly spaced or variable-refresh-rate frame no longer creates an artificial two-tick
+overlap at the next GOP boundary. The MP4 writer remains strict, the capture-side tolerance still
+accepts only a one-tick rounding tie, and larger timestamp regressions continue to fail safely.
+
 ## Checkpoint (2026-07-22): sub-millisecond full-session GOP boundary
 
 A Nightly 0.1.38 full-session recording failed at stop with video track 0 attempting to move from
