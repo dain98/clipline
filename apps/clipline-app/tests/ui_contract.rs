@@ -13,6 +13,7 @@ fn index_html() -> String {
 const APP_UI_JS: &[&str] = &[
     "presentation-core.js",
     "cloud-core.js",
+    "support-core.js",
     "app-core.js",
     "settings.js",
     "library.js",
@@ -3785,11 +3786,14 @@ fn cloud_byte_progress_does_not_unconditionally_rebuild_the_gallery() {
 fn support_reports_require_preview_before_private_submission() {
     let html = index_html();
     let support = read_ui_js("support.js");
+    let core = read_ui_js("support-core.js");
+    let css = styles_css();
 
     for required in [
         "data-tab=\"support\"",
         "id=\"support-description\"",
         "id=\"support-prepare\"",
+        "id=\"support-preparing\"",
         "id=\"support-preview\"",
         "id=\"support-send\"",
         "id=\"support-save-copy\"",
@@ -3805,6 +3809,29 @@ fn support_reports_require_preview_before_private_submission() {
             "Support UI must disclose and expose {required}"
         );
     }
+    assert_eq!(
+        css_decl_value(css_rule_body(&css, ".support-section"), "display"),
+        Some("grid"),
+        "Support content must be a real grid so its spacing applies"
+    );
+    for selector in [
+        ".support-preparing[hidden]",
+        ".support-preview[hidden]",
+        ".support-progress[hidden]",
+        ".support-success[hidden]",
+    ] {
+        assert_eq!(
+            css_decl_value(css_rule_body(&css, selector), "display"),
+            Some("none"),
+            "{selector} must override the visible Support panel display rule"
+        );
+    }
+    assert!(
+        core.contains("globalThis.SupportCore")
+            && core.contains("function transitionSupportPhase")
+            && core.contains("function supportView"),
+        "Support workflow visibility must come from a DOM-free phase model"
+    );
     let prepare = support
         .find("invoke(\"prepare_bug_report\"")
         .expect("support preparation command");
@@ -3824,8 +3851,20 @@ fn support_reports_require_preview_before_private_submission() {
         support.contains("invoke(\"save_prepared_bug_report\"")
             && support.contains("invoke(\"discard_bug_report\"")
             && support.contains("invoke(\"cancel_bug_report\"")
-            && support.contains("invoke(\"diagnostics_location\""),
+            && support.contains("invoke(\"diagnostics_location\"")
+            && support.contains("invoke(\"support_capabilities\""),
         "prepared reports must support offline save, discard, and upload cancellation"
+    );
+    assert!(
+        support.contains("renderSupportState(")
+            && support.contains("upload_available")
+            && support.contains("support-description-count"),
+        "Support UI must render phases centrally and disclose development upload availability"
+    );
+    assert!(
+        main_js().contains("function syncSettingsFooterForTab")
+            && main_js().contains("Save Other Changes"),
+        "the Support tab must not present an irrelevant Save Settings action"
     );
 }
 
