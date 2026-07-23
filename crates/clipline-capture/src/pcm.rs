@@ -5,6 +5,9 @@
 use std::collections::VecDeque;
 
 #[cfg(any(windows, test))]
+use std::time::{Duration, Instant};
+
+#[cfg(any(windows, test))]
 use crate::opus::FRAME_DURATION_S;
 use crate::opus::FRAME_LEN;
 
@@ -70,6 +73,50 @@ impl DevicePacketTimeline {
         }
         self.needs_timestamp_anchor = true;
         true
+    }
+}
+
+/// Throttled re-activation state for a lost WASAPI endpoint. The first
+/// failure opens the outage; retries are spaced by `retry_interval` while
+/// the outage keeps measuring from that first failure so diagnostics can
+/// report how long the track has been silent.
+#[cfg(any(windows, test))]
+pub(crate) struct DeviceReactivation {
+    retry_interval: Duration,
+    dead_since: Option<Instant>,
+    next_retry_at: Option<Instant>,
+}
+
+#[cfg(any(windows, test))]
+impl DeviceReactivation {
+    pub(crate) fn new(retry_interval: Duration) -> Self {
+        Self {
+            retry_interval,
+            dead_since: None,
+            next_retry_at: None,
+        }
+    }
+
+    pub(crate) fn is_live(&self) -> bool {
+        self.dead_since.is_none()
+    }
+
+    pub(crate) fn note_failure(&mut self, now: Instant) {
+        self.dead_since.get_or_insert(now);
+        self.next_retry_at = Some(now + self.retry_interval);
+    }
+
+    pub(crate) fn retry_due(&self, now: Instant) -> bool {
+        !self.is_live() && self.next_retry_at.is_some_and(|at| now >= at)
+    }
+
+    pub(crate) fn note_recovered(&mut self, now: Instant) -> Option<Duration> {
+        let outage = self
+            .dead_since
+            .map(|since| now.saturating_duration_since(since));
+        self.dead_since = None;
+        self.next_retry_at = None;
+        outage
     }
 }
 
@@ -839,5 +886,44 @@ mod tests {
             timeline.placement(Some(1.05)),
             DevicePacketPlacement::Timestamped(1.05)
         );
+    }
+
+    #[test]
+    fn reactivation_waits_for_the_retry_interval_after_a_failure() {
+        let start = Instant::now();
+        let mut reactivation = DeviceReactivation::new(Duration::from_secs(1));
+        assert!(reactivation.is_live());
+        assert!(!reactivation.retry_due(start));
+
+        reactivation.note_failure(start);
+        assert!(!reactivation.is_live());
+        assert!(!reactivation.retry_due(start));
+        assert!(!reactivation.retry_due(start + Duration::from_millis(999)));
+        assert!(reactivation.retry_due(start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn repeated_failures_extend_retry_without_resetting_the_outage() {
+        let start = Instant::now();
+        let mut reactivation = DeviceReactivation::new(Duration::from_secs(1));
+        reactivation.note_failure(start);
+        // A failing retry at t+1s schedules the next attempt but the outage
+        // still measures from the first failure.
+        reactivation.note_failure(start + Duration::from_secs(1));
+        assert!(!reactivation.retry_due(start + Duration::from_millis(1999)));
+        assert!(reactivation.retry_due(start + Duration::from_secs(2)));
+        let outage = reactivation
+            .note_recovered(start + Duration::from_millis(2500))
+            .expect("an outage was in progress");
+        assert_eq!(outage, Duration::from_millis(2500));
+        assert!(reactivation.is_live());
+        assert!(!reactivation.retry_due(start + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn recovery_without_an_outage_reports_nothing() {
+        let start = Instant::now();
+        let mut reactivation = DeviceReactivation::new(Duration::from_secs(1));
+        assert_eq!(reactivation.note_recovered(start), None);
     }
 }

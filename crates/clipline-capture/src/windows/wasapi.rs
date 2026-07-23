@@ -16,7 +16,8 @@ use windows::Win32::Media::Audio::{
     IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
     IAudioSessionControl2, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
     MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
-    AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_E_DEVICE_INVALIDATED,
+    AUDCLNT_E_RESOURCES_INVALIDATED, AUDCLNT_E_SERVICE_NOT_RUNNING, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_LOOPBACK,
     AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
     AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
@@ -48,7 +49,7 @@ use crate::diagnostics::{emit_diagnostic, CaptureDiagnostic, DiagnosticRateLimit
 use crate::opus::{OpusFrameEncoder, FRAME_DURATION_S};
 use crate::pcm::{
     apply_gain, extract_mono_centered, extract_stereo, DevicePacketPlacement, DevicePacketTimeline,
-    DiscontinuityFade, LoopbackAssembler, PcmFrame, StereoResampler,
+    DeviceReactivation, DiscontinuityFade, LoopbackAssembler, PcmFrame, StereoResampler,
 };
 use crate::traits::{AudioPacket, AudioSource, CaptureError};
 
@@ -57,6 +58,7 @@ const POLLING_BUFFER_DURATION_100NS: i64 = 10_000_000; // One second.
 const PROCESS_LOOPBACK_ACTIVATION_TIMEOUT: Duration = Duration::from_millis(1500);
 const AUDIO_DELIVERY_HEADROOM_S: f64 = FRAME_DURATION_S + 0.010;
 const TERMINAL_AUDIO_DRAIN_S: f64 = FRAME_DURATION_S * 3.0;
+const DEVICE_REACTIVATION_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct AudioDeviceInfo {
@@ -117,6 +119,144 @@ impl EndpointMode {
             Self::InputCapture(_) => "microphone",
         }
     }
+}
+
+/// Everything needed to (re-)create the capture client for one endpoint.
+/// Stored on the capture so a lost device can be re-activated mid-recording.
+#[derive(Debug, Clone)]
+enum EndpointTarget {
+    OutputLoopback { device_id: Option<String> },
+    ProcessOutput { pid: u32 },
+    Microphone {
+        device_id: Option<String>,
+        channels: WasapiChannelMode,
+    },
+}
+
+impl EndpointTarget {
+    fn mode(&self) -> EndpointMode {
+        match self {
+            Self::OutputLoopback { .. } | Self::ProcessOutput { .. } => {
+                EndpointMode::OutputLoopback
+            }
+            Self::Microphone { channels, .. } => EndpointMode::InputCapture(*channels),
+        }
+    }
+
+    fn activate(&self) -> Result<ActivatedDevice, CaptureError> {
+        match self {
+            Self::OutputLoopback { device_id } => activate_endpoint(
+                eRender,
+                AUDCLNT_STREAMFLAGS_LOOPBACK,
+                device_id.as_deref(),
+            ),
+            Self::Microphone { device_id, .. } => {
+                activate_endpoint(eCapture, 0, device_id.as_deref())
+            }
+            Self::ProcessOutput { pid } => {
+                init_com()?;
+                let client = activate_process_loopback_client(*pid)?;
+                let (streamflags, buffer_duration_100ns) = process_loopback_stream_config();
+                initialize_client(
+                    client,
+                    streamflags,
+                    buffer_duration_100ns,
+                    Some(process_loopback_format()),
+                )
+            }
+        }
+    }
+}
+
+/// A freshly activated and started WASAPI endpoint.
+struct ActivatedDevice {
+    client: IAudioClient,
+    capture: IAudioCaptureClient,
+    mix: MixFormat,
+}
+
+fn activate_endpoint(
+    dataflow: EDataFlow,
+    streamflags: u32,
+    device_id: Option<&str>,
+) -> Result<ActivatedDevice, CaptureError> {
+    init_com()?;
+    // SAFETY: standard MMDevice activation chain; all results checked.
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(init)?;
+        let device = endpoint_device(&enumerator, dataflow, device_id).map_err(init)?;
+        let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(init)?;
+        initialize_client(client, streamflags, POLLING_BUFFER_DURATION_100NS, None)
+    }
+}
+
+fn initialize_client(
+    client: IAudioClient,
+    streamflags: u32,
+    buffer_duration_100ns: i64,
+    fixed_mix_format: Option<WAVEFORMATEX>,
+) -> Result<ActivatedDevice, CaptureError> {
+    // SAFETY: IAudioClient initialization follows the WASAPI contract and
+    // releases the mix-format allocation after Initialize consumes it.
+    unsafe {
+        let mut fixed_mix_format = fixed_mix_format;
+        let mut format_storage = if let Some(format) = fixed_mix_format.as_mut() {
+            WaveFormatStorage::borrowed(format)
+        } else {
+            let format = client.GetMixFormat().map_err(init)?;
+            WaveFormatStorage::co_task_mem(format).ok_or_else(|| {
+                CaptureError::Init("WASAPI GetMixFormat returned a null format".into())
+            })?
+        };
+        let format_ptr = format_storage.as_mut_ptr();
+        let format = &*format_ptr;
+        // Copy packed fields to locals (references into packed structs are UB).
+        let tag = format.wFormatTag;
+        let ch = format.nChannels;
+        let rate = format.nSamplesPerSec;
+        let bits = format.wBitsPerSample;
+        let Some(mix) = parse_mix_format(format) else {
+            return Err(CaptureError::Init(format!(
+                "unsupported mix format: tag {tag} ch {ch} rate {rate} bits {bits} \
+                 (need float32 or signed PCM)"
+            )));
+        };
+        // 1 s device buffer: poll_packets runs per video frame, this
+        // gives ~60 polls of headroom.
+        client
+            .Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                streamflags,
+                buffer_duration_100ns,
+                0,
+                format_ptr,
+                None,
+            )
+            .map_err(|e| CaptureError::Init(format!("WASAPI Initialize: {e}")))?;
+
+        let capture: IAudioCaptureClient = client
+            .GetService()
+            .map_err(|e| CaptureError::Init(format!("WASAPI GetService: {e}")))?;
+        client
+            .Start()
+            .map_err(|e| CaptureError::Init(format!("WASAPI Start: {e}")))?;
+
+        Ok(ActivatedDevice {
+            client,
+            capture,
+            mix,
+        })
+    }
+}
+
+/// WASAPI client states recoverable by re-activating the endpoint: the
+/// device (or audio service) went away and a fresh client reattaches when
+/// it returns. Everything else keeps the existing fatal semantics.
+fn wasapi_error_recoverable(code: HRESULT) -> bool {
+    code == AUDCLNT_E_DEVICE_INVALIDATED
+        || code == AUDCLNT_E_SERVICE_NOT_RUNNING
+        || code == AUDCLNT_E_RESOURCES_INVALIDATED
 }
 
 enum WaveFormatStorage<'a> {
@@ -255,6 +395,23 @@ impl Drop for WasapiPacket {
     }
 }
 
+/// `drain_device` distinguishes a dead endpoint (recover by re-activation)
+/// from genuine capture-contract failures (stay fatal).
+enum DrainFailure {
+    Recoverable(HRESULT),
+    Fatal(CaptureError),
+}
+
+impl From<windows::core::Error> for DrainFailure {
+    fn from(error: windows::core::Error) -> Self {
+        if wasapi_error_recoverable(error.code()) {
+            Self::Recoverable(error.code())
+        } else {
+            Self::Fatal(CaptureError::DeviceLost(format!("WASAPI: {error}")))
+        }
+    }
+}
+
 struct WasapiPcmCapture {
     client: IAudioClient,
     capture: IAudioCaptureClient,
@@ -262,16 +419,20 @@ struct WasapiPcmCapture {
     channels: u16,
     sample_format: SampleFormat,
     mode: EndpointMode,
+    target: EndpointTarget,
     volume: f32,
     level: AudioLevelAccumulator,
     resampler: Option<StereoResampler>,
     discontinuity_fade: DiscontinuityFade,
     packet_timeline: DevicePacketTimeline,
+    reactivation: DeviceReactivation,
+    last_device_hresult: i32,
     last_device_packet_at: Instant,
     assembler: LoopbackAssembler,
     queue: std::collections::VecDeque<PcmFrame>,
     discontinuity_diagnostics: DiagnosticRateLimiter,
     late_audio_diagnostics: DiagnosticRateLimiter,
+    device_diagnostics: DiagnosticRateLimiter,
 }
 
 pub struct WasapiLoopback {
@@ -290,13 +451,12 @@ impl WasapiPcmCapture {
         device_id: Option<&str>,
         volume: f64,
     ) -> Result<Self, CaptureError> {
-        Self::start_endpoint(
+        Self::start(
+            EndpointTarget::OutputLoopback {
+                device_id: device_id.map(str::to_owned),
+            },
             clock,
-            eRender,
-            AUDCLNT_STREAMFLAGS_LOOPBACK,
-            device_id,
             volume,
-            EndpointMode::OutputLoopback,
         )
     }
 
@@ -305,18 +465,7 @@ impl WasapiPcmCapture {
         pid: u32,
         volume: f64,
     ) -> Result<Self, CaptureError> {
-        init_com()?;
-        let client = activate_process_loopback_client(pid)?;
-        let (streamflags, buffer_duration_100ns) = process_loopback_stream_config();
-        Self::start_client(
-            clock,
-            client,
-            streamflags,
-            volume,
-            EndpointMode::OutputLoopback,
-            buffer_duration_100ns,
-            Some(process_loopback_format()),
-        )
+        Self::start(EndpointTarget::ProcessOutput { pid }, clock, volume)
     }
 
     fn start_microphone(
@@ -325,123 +474,123 @@ impl WasapiPcmCapture {
         volume: f64,
         channels: WasapiChannelMode,
     ) -> Result<Self, CaptureError> {
-        Self::start_endpoint(
+        Self::start(
+            EndpointTarget::Microphone {
+                device_id: device_id.map(str::to_owned),
+                channels,
+            },
             clock,
-            eCapture,
-            0,
-            device_id,
             volume,
-            EndpointMode::InputCapture(channels),
         )
     }
 
-    fn start_endpoint(
-        clock: RelativeClock,
-        dataflow: EDataFlow,
-        streamflags: u32,
-        device_id: Option<&str>,
-        volume: f64,
-        mode: EndpointMode,
-    ) -> Result<Self, CaptureError> {
-        init_com()?;
-        // SAFETY: standard MMDevice activation chain; all results checked.
-        unsafe {
-            let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(init)?;
-            let device = endpoint_device(&enumerator, dataflow, device_id).map_err(init)?;
-            let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(init)?;
+    fn start(target: EndpointTarget, clock: RelativeClock, volume: f64) -> Result<Self, CaptureError> {
+        let device = target.activate()?;
+        // Anchor the audio timeline at the clock origin (recording
+        // start): the gap fill turns any lead-in before the first
+        // device buffer into silence, keeping the muxed track aligned
+        // with video (both tracks start at t=0 in the file).
+        let mut assembler = LoopbackAssembler::new();
+        assembler.push_chunk(0.0, &[]);
+        let mode = target.mode();
+        Ok(Self {
+            client: device.client,
+            capture: device.capture,
+            clock,
+            channels: device.mix.channels,
+            sample_format: device.mix.sample_format,
+            mode,
+            target,
+            volume: (volume.clamp(0.0, 2.0)) as f32,
+            level: AudioLevelAccumulator::default(),
+            resampler: (device.mix.sample_rate != OPUS_SAMPLE_RATE)
+                .then(|| StereoResampler::new(device.mix.sample_rate, OPUS_SAMPLE_RATE)),
+            discontinuity_fade: DiscontinuityFade::new(),
+            packet_timeline: DevicePacketTimeline::new(),
+            reactivation: DeviceReactivation::new(DEVICE_REACTIVATION_RETRY_INTERVAL),
+            last_device_hresult: 0,
+            last_device_packet_at: Instant::now(),
+            assembler,
+            queue: std::collections::VecDeque::new(),
+            discontinuity_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
+            late_audio_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
+            device_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
+        })
+    }
 
-            Self::start_client(
-                clock,
-                client,
-                streamflags,
-                volume,
-                mode,
-                POLLING_BUFFER_DURATION_100NS,
-                None,
-            )
+    /// Swap in a freshly activated endpoint after device loss. The
+    /// assembler and queues survive: synthesized silence covered the
+    /// outage, and the next live packet re-anchors on its QPC timestamp.
+    fn install_device(&mut self, device: ActivatedDevice) {
+        // SAFETY: Stop on the invalidated client is a no-op error and the
+        // fresh device is already started by `initialize_client`.
+        let _ = unsafe { self.client.Stop() };
+        self.client = device.client;
+        self.capture = device.capture;
+        self.channels = device.mix.channels;
+        self.sample_format = device.mix.sample_format;
+        self.resampler = (device.mix.sample_rate != OPUS_SAMPLE_RATE)
+            .then(|| StereoResampler::new(device.mix.sample_rate, OPUS_SAMPLE_RATE));
+        self.discontinuity_fade.restart();
+        self.packet_timeline.require_timestamp_anchor();
+        self.last_device_packet_at = Instant::now();
+    }
+
+    /// Mark the endpoint dead after a recoverable WASAPI failure. The poll
+    /// loop keeps running on synthesized silence until re-activation works.
+    fn note_device_lost(&mut self, code: HRESULT) {
+        let now = Instant::now();
+        let first_failure = self.reactivation.is_live();
+        self.reactivation.note_failure(now);
+        self.last_device_hresult = code.0;
+        if first_failure {
+            // Prime the limiter so the immediate report is not duplicated.
+            let _ = self.device_diagnostics.observe(now);
+            emit_diagnostic(CaptureDiagnostic::WasapiDeviceLost {
+                source: self.mode.diagnostic_label(),
+                hresult: code.0,
+                suppressed_since_last: 0,
+            });
+        } else if let Some(suppressed_since_last) = self.device_diagnostics.observe(now) {
+            emit_diagnostic(CaptureDiagnostic::WasapiDeviceLost {
+                source: self.mode.diagnostic_label(),
+                hresult: code.0,
+                suppressed_since_last,
+            });
         }
     }
 
-    fn start_client(
-        clock: RelativeClock,
-        client: IAudioClient,
-        streamflags: u32,
-        volume: f64,
-        mode: EndpointMode,
-        buffer_duration_100ns: i64,
-        fixed_mix_format: Option<WAVEFORMATEX>,
-    ) -> Result<Self, CaptureError> {
-        // SAFETY: IAudioClient initialization follows the WASAPI contract and
-        // releases the mix-format allocation after Initialize consumes it.
-        unsafe {
-            let mut fixed_mix_format = fixed_mix_format;
-            let mut format_storage = if let Some(format) = fixed_mix_format.as_mut() {
-                WaveFormatStorage::borrowed(format)
-            } else {
-                let format = client.GetMixFormat().map_err(init)?;
-                WaveFormatStorage::co_task_mem(format).ok_or_else(|| {
-                    CaptureError::Init("WASAPI GetMixFormat returned a null format".into())
-                })?
-            };
-            let format_ptr = format_storage.as_mut_ptr();
-            let format = &*format_ptr;
-            // Copy packed fields to locals (references into packed structs are UB).
-            let tag = format.wFormatTag;
-            let ch = format.nChannels;
-            let rate = format.nSamplesPerSec;
-            let bits = format.wBitsPerSample;
-            let Some(mix) = parse_mix_format(format) else {
-                return Err(CaptureError::Init(format!(
-                    "unsupported mix format: tag {tag} ch {ch} rate {rate} bits {bits} \
-                     (need float32 or signed PCM)"
-                )));
-            };
-            // 1 s device buffer: poll_packets runs per video frame, this
-            // gives ~60 polls of headroom.
-            let r = client.Initialize(
-                AUDCLNT_SHAREMODE_SHARED,
-                streamflags,
-                buffer_duration_100ns,
-                0,
-                format_ptr,
-                None,
-            );
-            r.map_err(|e| CaptureError::Init(format!("WASAPI Initialize: {e}")))?;
-
-            let capture: IAudioCaptureClient = client
-                .GetService()
-                .map_err(|e| CaptureError::Init(format!("WASAPI GetService: {e}")))?;
-            client
-                .Start()
-                .map_err(|e| CaptureError::Init(format!("WASAPI Start: {e}")))?;
-
-            // Anchor the audio timeline at the clock origin (recording
-            // start): the gap fill turns any lead-in before the first
-            // device buffer into silence, keeping the muxed track aligned
-            // with video (both tracks start at t=0 in the file).
-            let mut assembler = LoopbackAssembler::new();
-            assembler.push_chunk(0.0, &[]);
-
-            Ok(Self {
-                client,
-                capture,
-                clock,
-                channels: mix.channels,
-                sample_format: mix.sample_format,
-                mode,
-                volume: (volume.clamp(0.0, 2.0)) as f32,
-                level: AudioLevelAccumulator::default(),
-                resampler: (mix.sample_rate != OPUS_SAMPLE_RATE)
-                    .then(|| StereoResampler::new(mix.sample_rate, OPUS_SAMPLE_RATE)),
-                discontinuity_fade: DiscontinuityFade::new(),
-                packet_timeline: DevicePacketTimeline::new(),
-                last_device_packet_at: Instant::now(),
-                assembler,
-                queue: std::collections::VecDeque::new(),
-                discontinuity_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
-                late_audio_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
-            })
+    fn retry_device_if_due(&mut self, now: Instant) {
+        if !self.reactivation.retry_due(now) {
+            return;
+        }
+        // A dead pid cannot be re-activated; check cheaply before paying
+        // for a COM activation that can block up to its timeout.
+        if let EndpointTarget::ProcessOutput { pid } = &self.target {
+            if process_image_path(*pid).is_none() {
+                self.reactivation.note_failure(now);
+                return;
+            }
+        }
+        match self.target.activate() {
+            Ok(device) => {
+                let outage = self.reactivation.note_recovered(now);
+                self.install_device(device);
+                emit_diagnostic(CaptureDiagnostic::WasapiDeviceRecovered {
+                    source: self.mode.diagnostic_label(),
+                    outage_ms: outage.map_or(0, |outage| outage.as_millis() as u64),
+                });
+            }
+            Err(_) => {
+                self.reactivation.note_failure(now);
+                if let Some(suppressed_since_last) = self.device_diagnostics.observe(now) {
+                    emit_diagnostic(CaptureDiagnostic::WasapiDeviceLost {
+                        source: self.mode.diagnostic_label(),
+                        hresult: self.last_device_hresult,
+                        suppressed_since_last,
+                    });
+                }
+            }
         }
     }
 
@@ -505,14 +654,26 @@ impl WasapiPcmCapture {
         }
     }
 
-    /// Drain everything the device has buffered into the assembler.
+    /// Drain everything the device has buffered into the assembler. A
+    /// recoverable endpoint loss marks the device dead and returns `Ok`:
+    /// the caller's silence fill covers the outage until re-activation.
     fn drain_device(&mut self) -> Result<(), CaptureError> {
-        let lost = |e: windows::core::Error| CaptureError::DeviceLost(format!("WASAPI: {e}"));
+        match self.drain_available_packets() {
+            Ok(()) => Ok(()),
+            Err(DrainFailure::Recoverable(code)) => {
+                self.note_device_lost(code);
+                Ok(())
+            }
+            Err(DrainFailure::Fatal(error)) => Err(error),
+        }
+    }
+
+    fn drain_available_packets(&mut self) -> Result<(), DrainFailure> {
         // SAFETY: GetBuffer/ReleaseBuffer pairs per the capture-client
         // contract; the data pointer is valid for `frames` frames until
         // ReleaseBuffer.
         unsafe {
-            while self.capture.GetNextPacketSize().map_err(lost)? > 0 {
+            while self.capture.GetNextPacketSize()? > 0 {
                 self.last_device_packet_at = Instant::now();
                 let mut data = std::ptr::null_mut();
                 let mut frames = 0u32;
@@ -525,8 +686,7 @@ impl WasapiPcmCapture {
                         &mut flags,
                         None,
                         Some(&mut qpc_100ns),
-                    )
-                    .map_err(lost)?;
+                    )?;
                 let packet = WasapiPacket::new(&self.capture, frames);
                 let timestamp_valid = wasapi_timestamp_valid(flags);
                 let data_discontinuous = wasapi_data_discontinuous(flags);
@@ -539,8 +699,8 @@ impl WasapiPcmCapture {
                 } else {
                     self.decode_samples(data as *const u8, frames)
                 };
-                packet.release().map_err(lost)?;
-                let samples = samples?;
+                packet.release()?;
+                let samples = samples.map_err(DrainFailure::Fatal)?;
                 let mut stereo = self.stereo_samples(&samples);
                 if data_discontinuous {
                     self.discontinuity_fade.restart();
@@ -575,6 +735,7 @@ impl WasapiPcmCapture {
         until_pts_s: f64,
         synthesize_silence: bool,
     ) -> Result<Vec<PcmFrame>, CaptureError> {
+        self.retry_device_if_due(Instant::now());
         self.drain_device()?;
         if synthesize_silence {
             if let Some(horizon_pts_s) = audio_poll_silence_horizon(until_pts_s) {
@@ -1438,6 +1599,28 @@ mod tests {
     use super::*;
     use crate::clock::RelativeClock;
     use crate::traits::AudioSource;
+    use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG};
+    use windows::Win32::Media::Audio::AUDCLNT_E_NOT_INITIALIZED;
+
+    #[test]
+    fn recoverable_audclnt_errors_are_classified_by_hresult() {
+        for code in [
+            AUDCLNT_E_DEVICE_INVALIDATED,
+            AUDCLNT_E_SERVICE_NOT_RUNNING,
+            AUDCLNT_E_RESOURCES_INVALIDATED,
+        ] {
+            assert!(
+                wasapi_error_recoverable(code),
+                "{code:?} must trigger reactivation"
+            );
+        }
+        for fatal in [HRESULT(0), E_FAIL, E_INVALIDARG, AUDCLNT_E_NOT_INITIALIZED] {
+            assert!(
+                !wasapi_error_recoverable(fatal),
+                "{fatal:?} must stay fatal"
+            );
+        }
+    }
 
     #[test]
     fn sample_decoder_accepts_misaligned_little_endian_buffers() {
@@ -1780,6 +1963,59 @@ mod tests {
             assert!(!p.data.is_empty());
         }
         eprintln!("captured {} opus packets in 300 ms", packets.len());
+    }
+
+    #[test]
+    fn drain_failure_maps_recoverable_hresults() {
+        let recoverable = DrainFailure::from(windows::core::Error::from_hresult(
+            AUDCLNT_E_DEVICE_INVALIDATED,
+        ));
+        assert!(matches!(
+            recoverable,
+            DrainFailure::Recoverable(code) if code == AUDCLNT_E_DEVICE_INVALIDATED
+        ));
+        let fatal = DrainFailure::from(windows::core::Error::from_hresult(E_FAIL));
+        assert!(matches!(fatal, DrainFailure::Fatal(_)));
+    }
+
+    /// Simulated endpoint invalidation: polls must keep succeeding (the
+    /// outage rides on the silence-fill path) and the retry must swap in a
+    /// freshly activated endpoint once the retry interval elapses.
+    #[test]
+    fn device_loss_recovers_via_reactivation() {
+        if std::env::var_os("CI").is_some() {
+            eprintln!("SKIP: audio endpoint test");
+            return;
+        }
+        let clock = RelativeClock::new(crate::windows::qpc_now_ticks_100ns().unwrap());
+        let mut pcm = match WasapiPcmCapture::start_output(clock, None, 1.0) {
+            Ok(pcm) => pcm,
+            Err(e) => {
+                eprintln!("SKIP: loopback unavailable: {e}");
+                return;
+            }
+        };
+        pcm.poll_frames(f64::MAX).expect("baseline poll");
+        assert!(pcm.reactivation.is_live());
+
+        pcm.note_device_lost(AUDCLNT_E_DEVICE_INVALIDATED);
+        assert!(!pcm.reactivation.is_live());
+        pcm.poll_frames(1.0).expect("poll during outage must not error");
+        assert!(
+            !pcm.reactivation.is_live(),
+            "retry interval has not elapsed"
+        );
+
+        std::thread::sleep(DEVICE_REACTIVATION_RETRY_INTERVAL + Duration::from_millis(200));
+        pcm.poll_frames(2.0).expect("retry poll");
+        assert!(
+            pcm.reactivation.is_live(),
+            "retry must re-activate the endpoint"
+        );
+
+        // The fresh endpoint keeps draining without error.
+        std::thread::sleep(Duration::from_millis(300));
+        pcm.poll_frames(f64::MAX).expect("post-recovery poll");
     }
 
     #[test]
