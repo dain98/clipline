@@ -314,6 +314,7 @@
           <button class="tab" data-tab="storage">Storage</button>
           <button class="tab" data-tab="cloud">Cloud</button>
           <button class="tab" data-tab="hotkeys">Hotkeys</button>
+          <button class="tab" data-tab="support">Support</button>
         </nav>
 
         <div class="settings-body">
@@ -786,6 +787,53 @@
               </div>
             </div>
           </div>
+
+          <div class="settings-section support-section" data-section="support" hidden>
+            <div class="support-intro">
+              <strong>Report a Clipline problem privately</strong>
+              <span>Describe what happened, review the diagnostic package, then explicitly send it to the Clipline developer.</span>
+            </div>
+            <label class="support-description-label" for="support-description">What went wrong?</label>
+            <textarea
+              id="support-description"
+              minlength="10"
+              maxlength="4000"
+              rows="6"
+              spellcheck="true"
+              placeholder="Tell me what you were doing, what you expected, and what happened instead."
+            ></textarea>
+            <div class="support-disclosure">
+              <strong>Included</strong>
+              <span>Bounded app and frontend logs, panic backtraces, app version, Windows/WebView2 and capture hardware information, and settings with paths, device IDs, account details, and credentials removed.</span>
+              <strong>Never included</strong>
+              <span>Recordings, clips, media filenames, screenshots, raw settings.json, directory listings, credentials, account identities, or automatic telemetry.</span>
+              <span>Your description is sent exactly as entered. The private report expires and is deleted after 30 days.</span>
+            </div>
+            <div class="support-actions">
+              <button id="support-prepare" type="button" class="primary">Prepare Report</button>
+              <button id="support-open-logs" type="button">Open Diagnostics Folder</button>
+            </div>
+            <div id="support-preview" class="support-preview" hidden>
+              <strong>Ready to send</strong>
+              <span id="support-preview-summary"></span>
+              <ul id="support-preview-files"></ul>
+              <div class="support-actions">
+                <button id="support-send" type="button" class="primary">Send Private Report</button>
+                <button id="support-save-copy" type="button">Save a Copy</button>
+                <button id="support-discard" type="button">Discard</button>
+              </div>
+            </div>
+            <div id="support-progress" class="support-progress" hidden>
+              <span>Uploading the private report...</span>
+              <button id="support-cancel" type="button">Cancel</button>
+            </div>
+            <div id="support-success" class="support-success" hidden>
+              <strong>Report sent</strong>
+              <span id="support-success-detail"></span>
+              <button id="support-copy-id" type="button">Copy Report ID</button>
+            </div>
+            <span id="support-status" class="hint" role="status"></span>
+          </div>
         </div>
 
         <footer class="settings-actions">
@@ -999,6 +1047,7 @@
   <script src="library.js"></script>
   <script src="cloud.js"></script>
   <script src="review-player.js"></script>
+  <script src="support.js"></script>
   <script type="module" src="bootstrap.mjs"></script>
 </body>
 </html>

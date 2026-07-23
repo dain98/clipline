@@ -18,6 +18,7 @@ const APP_UI_JS: &[&str] = &[
     "library.js",
     "cloud.js",
     "review-player.js",
+    "support.js",
     "main.js",
 ];
 
@@ -3777,5 +3778,57 @@ fn cloud_byte_progress_does_not_unconditionally_rebuild_the_gallery() {
         handler.matches("renderClips()").count(),
         1,
         "the progress handler must not keep an unconditional gallery rebuild"
+    );
+}
+
+#[test]
+fn support_reports_require_preview_before_private_submission() {
+    let html = index_html();
+    let support = read_ui_js("support.js");
+
+    for required in [
+        "data-tab=\"support\"",
+        "id=\"support-description\"",
+        "id=\"support-prepare\"",
+        "id=\"support-preview\"",
+        "id=\"support-send\"",
+        "id=\"support-save-copy\"",
+        "id=\"support-discard\"",
+        "id=\"support-cancel\"",
+        "id=\"support-copy-id\"",
+        "private report expires and is deleted after 30 days",
+        "Recordings, clips, media filenames, screenshots, raw settings.json",
+    ] {
+        assert!(
+            html.contains(required),
+            "Support UI must disclose and expose {required}"
+        );
+    }
+    let prepare = support
+        .find("invoke(\"prepare_bug_report\"")
+        .expect("support preparation command");
+    let submit = support
+        .find("invoke(\"submit_bug_report\"")
+        .expect("support submission command");
+    assert!(
+        prepare < submit && support.contains("Review the included file list"),
+        "submission must be a distinct action after preparing and previewing the bundle"
+    );
+    assert!(
+        support.contains("invoke(\"save_prepared_bug_report\"")
+            && support.contains("invoke(\"discard_bug_report\"")
+            && support.contains("invoke(\"cancel_bug_report\""),
+        "prepared reports must support offline save, discard, and upload cancellation"
+    );
+}
+
+#[test]
+fn frontend_failures_are_forwarded_to_bounded_native_diagnostics() {
+    let core = read_ui_js("app-core.js");
+    assert!(
+        core.contains("window.addEventListener(\"error\"")
+            && core.contains("window.addEventListener(\"unhandledrejection\"")
+            && core.contains("invoke(\"log_frontend_event\""),
+        "global JavaScript failures must be sent to the validated native diagnostic command"
     );
 }

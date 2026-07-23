@@ -12,7 +12,8 @@
 # SignPath org/project/policy + artifact configuration and add these to the repo:
 #   secrets:  SIGNPATH_API_TOKEN, TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 #   vars:     SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG,
-#             SIGNPATH_SIGNING_POLICY_SLUG, SIGNPATH_ARTIFACT_CONFIG_SLUG
+#             SIGNPATH_SIGNING_POLICY_SLUG, SIGNPATH_ARTIFACT_CONFIG_SLUG,
+#             CLIPLINE_BUG_REPORT_ENDPOINT
 
 name: Release
 
@@ -60,7 +61,18 @@ jobs:
           # is on.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Official, operator-owned support service. The release build script
+          # rejects a missing value or any non-HTTPS URL.
+          CLIPLINE_BUG_REPORT_ENDPOINT: ${{ vars.CLIPLINE_BUG_REPORT_ENDPOINT }}
         run: cargo tauri build
+
+      - name: Retain private release symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: clipline-windows-symbols-${{ github.ref_name }}
+          path: target/release/clipline-app.pdb
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Locate the unsigned installer
         id: artifact

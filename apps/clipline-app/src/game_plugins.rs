@@ -369,12 +369,12 @@ pub fn ensure_plugin_icon_cached(profile_id: &str, exe_path: &str) {
     if let Some(png) = crate::game_icon::extract_exe_icon_png(exe_path) {
         if let Some(parent) = cache.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("create icon cache dir {parent:?}: {e}");
+                tracing::warn!(event = "icon_cache_directory_failed", error = %e);
                 return;
             }
         }
         if let Err(e) = std::fs::write(&cache, &png) {
-            eprintln!("write icon cache {cache:?}: {e}");
+            tracing::warn!(event = "icon_cache_write_failed", error = %e);
         }
     }
 }

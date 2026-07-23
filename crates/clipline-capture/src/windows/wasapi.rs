@@ -813,7 +813,7 @@ pub fn process_loopback_available() -> bool {
 
 /// The OS build number via `RtlGetVersion` (the manifest-independent source of
 /// truth). `None` if the query somehow fails.
-fn windows_build_number() -> Option<u32> {
+pub fn windows_build_number() -> Option<u32> {
     use windows::Wdk::System::SystemServices::RtlGetVersion;
     use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
     let mut info = OSVERSIONINFOW {

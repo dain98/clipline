@@ -588,7 +588,8 @@ fn large_application_surfaces_delegate_to_named_domain_owners() {
         fs::read_to_string(root.join("apps/clipline-app/src/cloud.rs")).expect("read cloud shell");
 
     for relative in [
-        "apps/clipline-app/src/app/diagnostic_log.rs",
+        "apps/clipline-app/src/app/diagnostics.rs",
+        "apps/clipline-app/src/app/support.rs",
         "apps/clipline-app/src/service/media_root.rs",
         "apps/clipline-app/src/library/naming.rs",
         "apps/clipline-app/src/cloud/cache_identity.rs",
@@ -598,7 +599,11 @@ fn large_application_surfaces_delegate_to_named_domain_owners() {
             "missing domain owner {relative}"
         );
     }
-    assert!(app.contains("mod diagnostic_log;") && !app.contains("struct DiagnosticLogWriter"));
+    assert!(
+        app.contains("mod diagnostics;")
+            && app.contains("mod support;")
+            && !app.contains("struct RollingFileWriter")
+    );
     assert!(
         service.contains("mod media_root;") && !service.contains("static MEDIA_ROOT_PROBE_COUNTER")
     );

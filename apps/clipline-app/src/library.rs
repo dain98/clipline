@@ -54,7 +54,7 @@ impl StorageSettings {
         match self.quota_bytes.lock() {
             Ok(q) => *q,
             Err(e) => {
-                eprintln!("quota_bytes lock poisoned: {e}");
+                tracing::error!(event = "storage_quota_lock_poisoned", error = %e);
                 None
             }
         }
@@ -63,7 +63,7 @@ impl StorageSettings {
     pub fn set_quota_bytes(&self, quota_bytes: Option<u64>) {
         match self.quota_bytes.lock() {
             Ok(mut q) => *q = quota_bytes,
-            Err(e) => eprintln!("set_quota_bytes lock poisoned: {e}"),
+            Err(e) => tracing::error!(event = "storage_quota_set_lock_poisoned", error = %e),
         }
     }
 
@@ -71,7 +71,7 @@ impl StorageSettings {
         match self.media_dir.lock() {
             Ok(dir) => dir.clone(),
             Err(e) => {
-                eprintln!("media_dir lock poisoned: {e}");
+                tracing::error!(event = "media_directory_lock_poisoned", error = %e);
                 default_clips_dir()
             }
         }
@@ -80,7 +80,7 @@ impl StorageSettings {
     pub fn set_media_dir(&self, media_dir: PathBuf) {
         match self.media_dir.lock() {
             Ok(mut dir) => *dir = media_dir,
-            Err(e) => eprintln!("set_media_dir lock poisoned: {e}"),
+            Err(e) => tracing::error!(event = "media_directory_set_lock_poisoned", error = %e),
         }
     }
 
@@ -246,7 +246,7 @@ pub async fn list_clips<R: Runtime>(
     tauri::async_runtime::spawn(async move {
         if let Err(e) = crate::osu_api::retry_pending_enrichment(&enrichment_app, retry_root).await
         {
-            eprintln!("retry osu! enrichment on library refresh: {e}");
+            tracing::warn!(event = "library_osu_enrichment_retry_failed", error = %e);
         }
     });
     let scope_root = dir.clone();
@@ -302,7 +302,7 @@ fn list_clips_from_dir_with_child_reader(
         }
     }
     for warning in &warnings {
-        eprintln!("partial Library scan: {warning}");
+        tracing::warn!(event = "library_scan_partial", message = %warning);
     }
     clips.sort_by_key(|c| std::cmp::Reverse(c.modified_unix));
     Ok(LocalClipScan { clips, warnings })
@@ -992,7 +992,7 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
             match validate_audio_sidecar_file(final_path) {
                 Ok(()) => {
                     if let Err(error) = touch_audio_preview(final_path) {
-                        eprintln!("{error}");
+                        tracing::warn!(event = "audio_sidecar_cleanup_failed", error = %error);
                     }
                     ordered.push(Some(PreparedClipAudioSidecar {
                         audio_track_id: track.audio_track_id.clone(),
@@ -1001,7 +1001,7 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
                     continue;
                 }
                 Err(error) => {
-                    eprintln!("{error}");
+                    tracing::warn!(event = "audio_sidecar_cleanup_failed", error = %error);
                     let _ = std::fs::remove_file(final_path);
                 }
             }
@@ -1078,7 +1078,7 @@ fn prune_audio_preview_cache_logged_with_limit(
     max_cache_bytes: u64,
 ) {
     if let Err(error) = prune_audio_preview_cache(preview_dir, protected, max_cache_bytes) {
-        eprintln!("could not prune audio preview cache {preview_dir:?}: {error}");
+        tracing::warn!(event = "audio_preview_cache_prune_failed", error = %error);
     }
 }
 
@@ -1771,7 +1771,7 @@ fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, n
             }
         }
     }) {
-        eprintln!("update cloud records after rename: {error}");
+        tracing::warn!(event = "renamed_clip_cloud_record_update_failed", error = %error);
     }
 }
 

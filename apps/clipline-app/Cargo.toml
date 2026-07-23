@@ -16,8 +16,9 @@ clipline-storage = { path = "../../crates/clipline-storage" }
 # Pinned to an immutable rev (not a branch): a branch ref isn't reproducible —
 # a force-push or rename silently breaks every build. Bump the rev deliberately.
 clipline-cloud-api = { git = "https://github.com/dain98/clipline-cloud", rev = "304f7f6490bd1f6078f4d703fdc33dcd1ecdafcf" }
-reqwest = { workspace = true, features = ["stream"] }
+reqwest = { workspace = true, features = ["stream", "multipart"] }
 bytes = "1"
+regex = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
@@ -33,6 +34,11 @@ chrono = "0.4.45"
 rfd = "0.15"
 png = "0.17"
 base64 = "0.22"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
 rodio = { version = "0.17", default-features = false, features = ["vorbis"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

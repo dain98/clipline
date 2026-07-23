@@ -29,3 +29,8 @@ httpmock = "0.7"
 # wayland-scanner 0.31.10's published quick-xml 0.39 dependency is affected by
 # RUSTSEC-2026-0194/0195. Upstream has the 0.41 fix but has not released it yet.
 wayland-scanner = { git = "https://github.com/Smithay/wayland-rs", rev = "a55c54b4e138e29181d63908ece06fd2a13550a0" }
+
+[profile.release]
+# Keep private symbols so release panic backtraces can be resolved from the
+# access-controlled CI artifact. Symbols are not bundled with the installer.
+debug = 1

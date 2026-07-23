@@ -162,7 +162,7 @@ impl HookHotkey {
 impl MouseHookThread {
     fn stop(self) {
         if unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) } == 0 {
-            eprintln!("low-level save mouse hotkey hook could not be stopped");
+            tracing::warn!(event = "mouse_hotkey_hook_stop_failed");
         }
     }
 }
@@ -170,7 +170,7 @@ impl MouseHookThread {
 impl KeyboardHookThread {
     fn stop(self) {
         if unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) } == 0 {
-            eprintln!("low-level save keyboard hotkey hook could not be stopped");
+            tracing::warn!(event = "keyboard_hotkey_hook_stop_failed");
         }
     }
 }

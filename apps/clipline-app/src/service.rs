@@ -682,9 +682,10 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build the capture engine and pull its first frame (which fixes the capture
 /// size). DXGI Desktop Duplication is attempted only when the user explicitly
-/// selected it for a display/region source; any DXGI failure — at construction
-/// or on the first frame — is logged to stderr and silently falls back to WGC,
-/// so recording always starts (the user chose silent fallback over a warning).
+/// selected it for a display/region source; any DXGI failure at construction
+/// or on the first frame is logged as a diagnostic and silently falls back to
+/// WGC, so recording always starts (the user chose silent fallback over a
+/// warning).
 fn open_screen_capture(
     device: &ID3D11Device,
     clock: RelativeClock,
@@ -700,8 +701,10 @@ fn open_screen_capture(
     {
         match open_dxgi(device, clock, source, events) {
             Ok(pair) => return Ok(pair),
-            Err(e) => eprintln!(
-                "clipline: Desktop Duplication unavailable ({e}); using Windows Graphics Capture"
+            Err(e) => tracing::warn!(
+                event = "desktop_duplication_unavailable",
+                error = %e,
+                fallback = "windows_graphics_capture"
             ),
         }
     }
@@ -1757,10 +1760,10 @@ fn write_session_game_meta(session_dir: &Path, active_game: Option<&ActiveGame>)
     match serde_json::to_string(&doc) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&meta_path, json) {
-                eprintln!("write session game meta {meta_path:?}: {e}");
+                tracing::warn!(event = "session_game_metadata_write_failed", error = %e);
             }
         }
-        Err(e) => eprintln!("serialize session game meta: {e}"),
+        Err(e) => tracing::warn!(event = "session_game_metadata_serialize_failed", error = %e),
     }
 }
 
@@ -2358,7 +2361,7 @@ fn warn_capture_display_recovery(
     if let Some(message) =
         capture_display_recovery_warning(region, display, recovered_display, recovered_crop)
     {
-        eprintln!("clipline: {message}");
+        tracing::warn!(event = "capture_display_recovered", message = %message);
         warn_user(events, message);
     }
 }

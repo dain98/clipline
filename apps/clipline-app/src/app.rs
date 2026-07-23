@@ -32,13 +32,11 @@ use crate::settings::{
 use crate::updates::UpdateChannel;
 use crate::util::unix_now_i64;
 
-#[path = "app/diagnostic_log.rs"]
-mod diagnostic_log;
-use diagnostic_log::{diagnostic_log_path, log_diagnostic};
-#[cfg(test)]
-use diagnostic_log::{
-    diagnostic_log_path_from_appdata, format_diagnostic_log_line, DiagnosticLogWriter,
-};
+#[path = "app/diagnostics.rs"]
+mod diagnostics;
+#[path = "app/support.rs"]
+mod support;
+use diagnostics::{diagnostic_log_path, log_diagnostic};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -574,7 +572,7 @@ impl MicTestState {
                     let _ = session.stop.send(());
                 }
             }
-            Err(e) => eprintln!("mic test state lock poisoned: {e}"),
+            Err(e) => tracing::error!(event = "mic_test_state_lock_poisoned", error = %e),
         }
     }
 }
@@ -697,7 +695,7 @@ impl RuntimeState {
         }
         match self.0.lock() {
             Ok(mut inner) => inner.decodable_codecs = codecs,
-            Err(e) => eprintln!("set_decodable_codecs lock poisoned: {e}"),
+            Err(e) => tracing::error!(event = "decode_codec_state_lock_poisoned", error = %e),
         }
     }
 
@@ -1965,7 +1963,7 @@ fn save_settings<R: Runtime>(
     }
     drop(cloud_save_guard);
     for message in warnings {
-        eprintln!("{message}");
+        tracing::warn!(event = "settings_apply_warning", message = %message);
         let _ = app.emit("error", message);
     }
     storage_settings.set_quota_bytes(quota_bytes);
@@ -1975,6 +1973,7 @@ fn save_settings<R: Runtime>(
 }
 
 pub fn run() {
+    let _diagnostics_guard = diagnostics::init().ok();
     if let Err(error) = install_diagnostic_handler(|event| log_diagnostic(event.to_string())) {
         log_diagnostic(format!("capture diagnostic setup: {error}"));
     }
@@ -1983,7 +1982,7 @@ pub fn run() {
     let mut startup_warnings = startup_load.warnings;
     for warning in &startup_warnings {
         log_diagnostic(format!("settings recovery: {warning}"));
-        eprintln!("{warning}");
+        tracing::warn!(event = "settings_recovery_warning", message = %warning);
     }
     let args: Vec<String> = std::env::args().collect();
     log_diagnostic(format!(
@@ -2013,7 +2012,7 @@ pub fn run() {
                     settings.disk_quota_gb = gb;
                 }
             }
-            Err(e) => eprintln!("invalid disk quota: {e}"),
+            Err(e) => tracing::warn!(event = "command_line_quota_invalid", error = %e),
         }
     }
     if let Err(e) = settings.validate() {
@@ -2021,7 +2020,7 @@ pub fn run() {
             "Clipline started with safe defaults because command-line settings were invalid: {e}"
         );
         log_diagnostic(&warning);
-        eprintln!("{warning}");
+        tracing::warn!(event = "command_line_settings_invalid", message = %warning);
         startup_warnings.push(warning);
         settings = AppSettings::default();
     }
@@ -2039,6 +2038,7 @@ pub fn run() {
         .manage(RuntimeState::new(settings.clone(), lol_url))
         .manage(StartupWarnings::new(startup_warnings))
         .manage(MicTestState::default())
+        .manage(support::SupportState::default())
         .manage(crate::memory::MemorySampler::default())
         .manage(NativeMediaFolderAuthorization::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
@@ -2050,7 +2050,7 @@ pub fn run() {
             if !launched_by_autostart {
                 if let Err(e) = open_main_window(app) {
                     log_diagnostic(format!("single-instance open existing failed: {e}"));
-                    eprintln!("open existing window: {e}");
+                    tracing::error!(event = "single_instance_window_open_failed", error = %e);
                 }
             }
         }))
@@ -2094,6 +2094,13 @@ pub fn run() {
             check_for_updates,
             install_update,
             save_settings,
+            support::prepare_bug_report,
+            support::submit_bug_report,
+            support::cancel_bug_report,
+            support::discard_bug_report,
+            support::save_prepared_bug_report,
+            support::open_diagnostics_folder,
+            support::log_frontend_event,
             crate::cloud::cloud_status,
             crate::cloud::cloud_connect,
             crate::cloud::cloud_disconnect,
@@ -2130,14 +2137,14 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = crate::osu_api::retry_pending_enrichment(&osu_app, osu_media_root).await
                 {
-                    eprintln!("retry osu! enrichment on launch: {e}");
+                    tracing::warn!(event = "startup_osu_enrichment_retry_failed", error = %e);
                 }
             });
             for hotkey in &startup_global_hotkeys {
                 if let Err(e) = app.global_shortcut().register(*hotkey) {
                     let message =
                         format!("global save hotkey unavailable; continuing without it: {e}");
-                    eprintln!("{message}");
+                    tracing::warn!(event = "global_hotkey_registration_failed", message = %message);
                     let _ = app.handle().emit("error", message);
                 }
             }
@@ -2148,11 +2155,11 @@ pub fn run() {
                 }
             }) {
                 let message = format!("low-level save hotkey unavailable: {e}");
-                eprintln!("{message}");
+                tracing::warn!(event = "save_hook_install_failed", message = %message);
                 let _ = app.handle().emit("error", message);
             }
             if let Err(e) = crate::library::prune_audio_preview_cache_on_startup() {
-                eprintln!("could not prune audio preview cache on startup: {e}");
+                tracing::warn!(event = "audio_preview_startup_prune_failed", error = %e);
             }
 
             // Keep release builds in sync with the user's setting. Debug builds
@@ -2183,8 +2190,16 @@ pub fn run() {
                 None::<&str>,
             )?;
             let open_item = MenuItem::with_id(app, "open", "Open Clipline", true, None::<&str>)?;
+            let diagnostics_item = MenuItem::with_id(
+                app,
+                "diagnostics",
+                "Open Diagnostics Folder",
+                true,
+                None::<&str>,
+            )?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open_item, &save_item, &quit_item])?;
+            let menu =
+                Menu::with_items(app, &[&open_item, &save_item, &diagnostics_item, &quit_item])?;
             app.manage(TrayItems {
                 save_item: save_item.clone(),
             });
@@ -2197,12 +2212,21 @@ pub fn run() {
                         log_diagnostic("tray menu event: open");
                         if let Err(e) = open_main_window(app) {
                             log_diagnostic(format!("tray menu open failed: {e}"));
-                            eprintln!("open window: {e}");
+                            tracing::error!(event = "tray_window_open_failed", error = %e);
                         }
                     }
                     "save" => {
                         log_diagnostic("tray menu event: save");
                         app.state::<RuntimeState>().request_save();
+                    }
+                    "diagnostics" => {
+                        log_diagnostic("tray menu event: diagnostics");
+                        if let Err(error) = support::open_diagnostics_folder() {
+                            tracing::error!(
+                                event = "open_diagnostics_folder_failed",
+                                error = %error
+                            );
+                        }
                     }
                     "quit" => {
                         log_diagnostic("tray menu event: quit");
@@ -2220,7 +2244,7 @@ pub fn run() {
                         log_diagnostic("tray icon event requests open");
                         if let Err(e) = open_main_window(tray.app_handle()) {
                             log_diagnostic(format!("tray icon open failed: {e}"));
-                            eprintln!("open window: {e}");
+                            tracing::error!(event = "tray_icon_window_open_failed", error = %e);
                         }
                     }
                 })
@@ -2232,7 +2256,7 @@ pub fn run() {
                 .start_recording(app.handle().clone())
             {
                 let message = format!("recorder startup failed: {e}");
-                eprintln!("{message}");
+                tracing::error!(event = "recorder_startup_failed", message = %message);
                 let _ = app.handle().emit("error", message);
             }
             spawn_game_detector(app.handle().clone());
@@ -2243,7 +2267,7 @@ pub fn run() {
                 log_diagnostic("normal launch opening main window");
                 if let Err(e) = open_main_window(app.handle()) {
                     log_diagnostic(format!("normal launch open failed: {e}"));
-                    eprintln!("show main window on launch: {e}");
+                    tracing::error!(event = "startup_window_show_failed", error = %e);
                 }
             }
 
@@ -2264,7 +2288,7 @@ pub fn run() {
                         log_diagnostic("close request action: tray");
                         if let Err(e) = send_main_window_to_tray(app) {
                             log_diagnostic(format!("close to tray failed: {e}"));
-                            eprintln!("close to tray: {e}");
+                            tracing::error!(event = "close_to_tray_failed", error = %e);
                         }
                     }
                     CloseRequestAction::Quit => {
@@ -2469,13 +2493,13 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
                             if let Err(e) =
                                 crate::osu_api::retry_pending_enrichment(&app, media_root).await
                             {
-                                eprintln!("retry osu! enrichment after save: {e}");
+                                tracing::warn!(event = "save_osu_enrichment_retry_failed", error = %e);
                             }
                         });
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        eprintln!("queue osu! enrichment: {e}");
+                        tracing::warn!(event = "osu_enrichment_queue_failed", error = %e);
                     }
                 }
             }
@@ -2528,7 +2552,6 @@ mod tests {
     use crate::settings::{
         CloudUploadRecord, GameRecordingMode, ReplayStorageMode, ReplayStorageSettings,
     };
-    use clipline_test_utils::TestDir;
 
     #[test]
     fn quota_parser_converts_gib_to_bytes() {
@@ -3876,79 +3899,6 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         .unwrap();
 
         assert_eq!(*calls.borrow(), ["show", "unminimize", "focus"]);
-    }
-
-    #[test]
-    fn diagnostic_log_path_uses_clipline_appdata_file() {
-        let path = diagnostic_log_path_from_appdata(std::path::Path::new(
-            r"C:\Users\friend\AppData\Roaming",
-        ));
-
-        assert_eq!(
-            path,
-            std::path::PathBuf::from(r"C:\Users\friend\AppData\Roaming\Clipline\clipline.log")
-        );
-    }
-
-    #[test]
-    fn diagnostic_log_line_is_timestamped_and_single_line() {
-        let timestamp = chrono::DateTime::parse_from_rfc3339("2026-06-24T12:34:56.789Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-
-        assert_eq!(
-            format_diagnostic_log_line(timestamp, 42, "tray open\nshow: ok"),
-            "2026-06-24T12:34:56.789Z pid=42 tray open show: ok"
-        );
-    }
-
-    #[test]
-    fn diagnostic_log_rotates_repeatedly_and_keeps_both_generations_bounded() {
-        let dir = TestDir::new("clipline-app", "diagnostic-log-rotation");
-        let path = dir.path().join("clipline.log");
-        let mut log = DiagnosticLogWriter::open_at(path.clone(), 128).unwrap();
-
-        for index in 0..20 {
-            log.write_line(&format!("entry-{index:02}-{}", "x".repeat(48)))
-                .unwrap();
-        }
-        drop(log);
-
-        let rotated = path.with_file_name("clipline.old.log");
-        assert!(std::fs::metadata(&path).unwrap().len() <= 128);
-        assert!(std::fs::metadata(&rotated).unwrap().len() <= 128);
-        assert!(std::fs::read_to_string(path).unwrap().contains("entry-19"));
-    }
-
-    #[test]
-    fn diagnostic_log_truncates_one_oversized_line_to_its_generation_cap() {
-        let dir = TestDir::new("clipline-app", "diagnostic-log-long-line");
-        let path = dir.path().join("clipline.log");
-        let mut log = DiagnosticLogWriter::open_at(path.clone(), 96).unwrap();
-
-        log.write_line(&"é".repeat(100)).unwrap();
-        drop(log);
-
-        let bytes = std::fs::read(path).unwrap();
-        assert!(bytes.len() <= 96);
-        assert_eq!(bytes.last(), Some(&b'\n'));
-        assert!(std::str::from_utf8(&bytes).is_ok());
-    }
-
-    #[test]
-    fn diagnostic_log_open_bounds_an_oversized_legacy_generation() {
-        let dir = TestDir::new("clipline-app", "diagnostic-log-legacy");
-        let path = dir.path().join("clipline.log");
-        let mut legacy = vec![b'a'; 512];
-        legacy[511] = b'z';
-        std::fs::write(&path, legacy).unwrap();
-
-        drop(DiagnosticLogWriter::open_at(path.clone(), 96).unwrap());
-
-        let rotated = path.with_file_name("clipline.old.log");
-        let retained = std::fs::read(rotated).unwrap();
-        assert!(retained.len() <= 96);
-        assert_eq!(retained.last(), Some(&b'z'));
     }
 
     #[test]
