@@ -13,11 +13,19 @@ GOP retained its absolute start. The existing writer tolerance correctly rejecte
 `3600` backward movement.
 
 Finite GOP seals now quantize cumulative sample boundaries within the configured video timescale.
-Every MP4 sample keeps a nonzero duration, ticks are reserved for every remaining sample, and the
-final sample lands on the sealing keyframe boundary by construction. The unbounded trailing seal
-and one-tick inter-segment rounding tolerance are unchanged, and timestamp regressions larger than
-one tick remain errors. A deterministic full-session regression with two adjacent 100 ns gaps
-reproduces the exact two-tick failure before the fix and finalizes normally afterward.
+Every MP4 sample keeps a nonzero duration, ticks are reserved for every remaining sample, and a
+normally spaced final sample lands on the sealing keyframe boundary by construction. Crowded or
+slightly backward finite timestamps retain every encoded dependency and minimally extend the span
+instead of terminating capture or the replay ring.
+
+PR #102 review found that independent per-GOP rounding could still accumulate across many
+boundaries: accepting a one-tick overlap left the writer frontier stale, and a later boundary could
+eventually be two ticks behind. Fragment samples are now quantized against their requested absolute
+endpoint while allocating from the writer's actual frontier, so each representable GOP absorbs
+earlier rounding drift. The capture timeline never asks the strict MP4 writer to move backward.
+Seal validation also runs before pending video is taken or audio is drained, preventing a failed
+seal from silently losing a GOP. Regressions cover repeated cross-GOP ties, two adjacent 100 ns
+gaps, crowded timestamps, independent sub-tick jitter, and preservation of pending A/V state.
 
 ## Checkpoint (2026-07-22): Nightly 0.1.39
 

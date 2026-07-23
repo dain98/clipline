@@ -473,8 +473,14 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         drop_segment_audio_before_replay_origin(&mut segments, timeline_origin_s)?;
         let mut writer = HybridMp4Writer::new_multi(w, track_cfgs)?;
         for seg in &segments {
-            set_segment_decode_times(&mut writer, seg, &video_cfg, &audio_cfgs, timeline_origin_s)?;
-            let per_track = segment_fragment_refs(seg, &video_cfg, &audio_cfgs, timeline_origin_s)?;
+            let timelines = set_segment_decode_times(
+                &mut writer,
+                seg,
+                &video_cfg,
+                &audio_cfgs,
+                timeline_origin_s,
+            )?;
+            let per_track = segment_fragment_refs(seg, &video_cfg, &audio_cfgs, &timelines)?;
             let slices: Vec<&[FragSampleRef<'_>]> =
                 per_track.iter().map(|v| v.as_slice()).collect();
             writer.write_fragment_multi_borrowed(&slices)?;
@@ -500,10 +506,8 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
     }
 
     fn seal_pending(&mut self, boundary_pts_s: f64) -> Result<(), PipelineError> {
-        let packets = std::mem::take(&mut self.pending);
-        self.pending_bytes = 0;
-        let pts_start_s = packets[0].pts_s;
-        let starts_with_keyframe = packets[0].is_keyframe;
+        let pts_start_s = self.pending[0].pts_s;
+        let starts_with_keyframe = self.pending[0].is_keyframe;
         let video_timescale = self.encoder.track_config().timescale;
         // ddoc §6: the timeline follows capture stamps, not encoder cadence
         // claims. Each sample lasts until the next pts; the sealing
@@ -511,7 +515,11 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         // (boundary = ∞) trusts the encoder's own duration. Finite GOPs are
         // quantized against that closing keyframe as one timeline so
         // multiple sub-tick intervals cannot accumulate past it.
-        let durations = sealed_video_durations(&packets, boundary_pts_s, video_timescale)?;
+        // Compute before taking pending state: a validation failure must not
+        // silently discard video while leaving its audio behind.
+        let durations = sealed_video_durations(&self.pending, boundary_pts_s, video_timescale)?;
+        let packets = std::mem::take(&mut self.pending);
+        self.pending_bytes = 0;
         let duration_s: f64 = durations.iter().sum();
         let mut data = Vec::new();
         let mut samples = Vec::with_capacity(packets.len());
@@ -748,15 +756,17 @@ fn sealed_video_durations(
     boundary_pts_s: f64,
     timescale: u32,
 ) -> io::Result<Vec<f64>> {
+    if timescale == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "video timescale must be nonzero",
+        ));
+    }
     let Some(first) = packets.first() else {
         return Ok(Vec::new());
     };
-    let minimum_duration_s = if timescale == 0 {
-        f64::EPSILON
-    } else {
-        1.0 / f64::from(timescale)
-    };
     if !boundary_pts_s.is_finite() {
+        let minimum_duration_s = 1.0 / f64::from(timescale);
         return Ok((0..packets.len())
             .map(|index| {
                 let next_pts_s = packets
@@ -771,37 +781,28 @@ fn sealed_video_durations(
             })
             .collect());
     }
-    if timescale == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "video timescale must be nonzero",
-        ));
-    }
 
     let scale = f64::from(timescale);
     let total_ticks_f = (boundary_pts_s - first.pts_s) * scale;
-    if !total_ticks_f.is_finite() || total_ticks_f < 0.0 || total_ticks_f > u64::MAX as f64 {
+    if !total_ticks_f.is_finite() || total_ticks_f > u64::MAX as f64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid sealed video GOP boundary",
         ));
     }
-    let total_ticks = total_ticks_f.round() as u64;
     let sample_count = u64::try_from(packets.len()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "video GOP sample count exceeds timeline capacity",
         )
     })?;
-    if total_ticks < sample_count {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "sealed video GOP is too short for nonzero sample durations",
-        ));
-    }
+    // Encoded inter frames cannot be dropped safely: later frames may depend
+    // on them. If pathological finite stamps provide fewer ticks than
+    // samples, retain every packet and extend only enough to assign the
+    // positive durations required by the MP4 writer.
+    let total_ticks = (total_ticks_f.max(0.0).round() as u64).max(sample_count);
 
     let mut previous_end = 0_u64;
-    let mut backward_ticks = 0.0_f64;
     let mut durations = Vec::with_capacity(packets.len());
     for (index, packet) in packets.iter().enumerate() {
         let next_pts_s = packets
@@ -815,16 +816,9 @@ fn sealed_video_durations(
                 "invalid video sample interval",
             ));
         }
-        backward_ticks += (-interval_ticks).max(0.0);
-        if backward_ticks > 1.0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "video sample timestamps moved backward by more than one tick",
-            ));
-        }
 
         let desired_end_f = (next_pts_s - first.pts_s) * scale;
-        if !desired_end_f.is_finite() || desired_end_f < -1.0 || desired_end_f > u64::MAX as f64 {
+        if !desired_end_f.is_finite() || desired_end_f > u64::MAX as f64 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid video sample timestamp",
@@ -1012,8 +1006,8 @@ fn write_full_session_segment(
         *writer = Some(HybridMp4Writer::new_multi(target, track_cfgs)?);
     }
     let writer = writer.as_mut().expect("writer initialized");
-    set_segment_decode_times(writer, &seg, &video_cfg, &audio_cfgs, origin_s)?;
-    let per_track = segment_fragment_refs(&seg, &video_cfg, &audio_cfgs, origin_s)?;
+    let timelines = set_segment_decode_times(writer, &seg, &video_cfg, &audio_cfgs, origin_s)?;
+    let per_track = segment_fragment_refs(&seg, &video_cfg, &audio_cfgs, &timelines)?;
     let slices: Vec<&[FragSampleRef<'_>]> = per_track.iter().map(|v| v.as_slice()).collect();
     writer.write_fragment_multi_borrowed(&slices)
 }
@@ -1032,31 +1026,43 @@ fn release_message_reservation(queued: &AtomicUsize, msg: &FullSessionWriteMsg) 
     }
 }
 
+#[derive(Clone, Copy)]
+struct FragmentTimeline {
+    requested_start: u64,
+    write_start: u64,
+}
+
 fn segment_fragment_refs<'a>(
     seg: &'a Segment,
     video_cfg: &clipline_mp4::VideoTrackConfig,
     audio_cfgs: &[clipline_mp4::AudioTrackConfig],
-    timeline_origin_s: f64,
+    timelines: &[FragmentTimeline],
 ) -> io::Result<Vec<Vec<FragSampleRef<'a>>>> {
-    let video_start = relative_pts_ticks(seg.pts_start_s, timeline_origin_s, video_cfg.timescale)?;
+    let video_timeline = timelines.first().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "video fragment timeline is missing",
+        )
+    })?;
     let video = quantized_fragment_refs(
         seg.sample_slices(),
         &seg.samples,
         video_cfg.timescale,
-        video_start,
+        *video_timeline,
     )?;
     let mut per_track: Vec<Vec<FragSampleRef<'a>>> = vec![video];
-    for (track, cfg) in seg.audio.iter().zip(audio_cfgs) {
-        let start = track
-            .pts_start_s
-            .map(|pts| relative_pts_ticks(pts, timeline_origin_s, cfg.sample_rate))
-            .transpose()?
-            .unwrap_or(0);
+    for (index, (track, cfg)) in seg.audio.iter().zip(audio_cfgs).enumerate() {
+        let timeline = timelines.get(index + 1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "audio fragment timeline is missing",
+            )
+        })?;
         per_track.push(quantized_fragment_refs(
             track.sample_slices(),
             &track.samples,
             cfg.sample_rate,
-            start,
+            *timeline,
         )?);
     }
     // Segments recorded before an audio source was attached have fewer audio
@@ -1069,32 +1075,69 @@ fn quantized_fragment_refs<'a>(
     slices: impl Iterator<Item = io::Result<&'a [u8]>>,
     samples: &[SampleInfo],
     timescale: u32,
-    start_ticks: u64,
+    timeline: FragmentTimeline,
 ) -> io::Result<Vec<FragSampleRef<'a>>> {
+    let scale = f64::from(timescale);
+    let total_s = samples.iter().try_fold(0.0_f64, |total, sample| {
+        let next = total + sample.duration_s;
+        if next.is_finite() && next >= 0.0 {
+            Ok(next)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid media sample duration",
+            ))
+        }
+    })?;
+    let relative_total_ticks = total_s * scale;
+    if !relative_total_ticks.is_finite() || relative_total_ticks > u64::MAX as f64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "media duration overflow",
+        ));
+    }
+    let requested_end = timeline
+        .requested_start
+        .checked_add(relative_total_ticks.round() as u64)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "media duration overflow"))?;
+    let sample_count = u64::try_from(samples.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "media sample count overflow"))?;
+    let minimum_end = timeline
+        .write_start
+        .checked_add(sample_count)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "media duration overflow"))?;
+    let target_end = requested_end.max(minimum_end);
+
     let mut elapsed_s = 0.0_f64;
-    let mut previous_end = start_ticks;
+    let mut previous_end = timeline.write_start;
     slices
         .zip(samples)
-        .map(|(slice, info)| {
+        .enumerate()
+        .map(|(index, (slice, info))| {
             elapsed_s += info.duration_s;
-            let relative_end = elapsed_s * f64::from(timescale);
+            let relative_end = elapsed_s * scale;
             if !relative_end.is_finite() || relative_end < 0.0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid media sample duration",
                 ));
             }
-            let end_ticks = start_ticks
+            // Quantize against the requested absolute timeline, but allocate
+            // from the writer's actual frontier. A prior rounded overlap is
+            // therefore absorbed by this run instead of becoming permanent
+            // drift. Per-segment accumulation keeps the f64 error far below
+            // half a timescale tick before this rounding step.
+            let desired_end = timeline
+                .requested_start
                 .checked_add(relative_end.round() as u64)
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidData, "media duration overflow")
                 })?;
-            let duration = end_ticks.checked_sub(previous_end).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "media sample timeline moved backward",
-                )
-            })?;
+            let remaining = sample_count - index as u64 - 1;
+            let earliest_end = previous_end + 1;
+            let latest_end = target_end - remaining;
+            let end_ticks = desired_end.clamp(earliest_end, latest_end);
+            let duration = end_ticks - previous_end;
             previous_end = end_ticks;
             Ok(FragSampleRef {
                 data: slice?,
@@ -1116,34 +1159,46 @@ fn set_segment_decode_times<W: Write + Seek>(
     video_cfg: &clipline_mp4::VideoTrackConfig,
     audio_cfgs: &[clipline_mp4::AudioTrackConfig],
     timeline_origin_s: f64,
-) -> io::Result<()> {
-    set_track_decode_time_with_rounding_tolerance(
+) -> io::Result<Vec<FragmentTimeline>> {
+    let mut timelines = vec![advance_track_decode_time(
         writer,
         0,
         relative_pts_ticks(seg.pts_start_s, timeline_origin_s, video_cfg.timescale)?,
-    )?;
-    for (index, (track, cfg)) in seg.audio.iter().zip(audio_cfgs).enumerate() {
-        if let Some(start_s) = track.pts_start_s {
-            set_track_decode_time_with_rounding_tolerance(
-                writer,
-                index + 1,
-                relative_pts_ticks(start_s, timeline_origin_s, cfg.sample_rate)?,
-            )?;
-        }
+    )?];
+    for (index, cfg) in audio_cfgs.iter().enumerate() {
+        let requested = seg
+            .audio
+            .get(index)
+            .and_then(|track| track.pts_start_s)
+            .map(|start_s| relative_pts_ticks(start_s, timeline_origin_s, cfg.sample_rate))
+            .transpose()?;
+        let timeline = if let Some(requested) = requested {
+            advance_track_decode_time(writer, index + 1, requested)?
+        } else {
+            let current = writer.track_decode_time(index + 1)?;
+            FragmentTimeline {
+                requested_start: current,
+                write_start: current,
+            }
+        };
+        timelines.push(timeline);
     }
-    Ok(())
+    Ok(timelines)
 }
 
-fn set_track_decode_time_with_rounding_tolerance<W: Write + Seek>(
+fn advance_track_decode_time<W: Write + Seek>(
     writer: &mut HybridMp4Writer<W>,
     track_index: usize,
     requested: u64,
-) -> io::Result<()> {
+) -> io::Result<FragmentTimeline> {
     let current = writer.track_decode_time(track_index)?;
-    if requested < current && current - requested == 1 {
-        return Ok(());
+    if requested > current {
+        writer.set_track_decode_time(track_index, requested)?;
     }
-    writer.set_track_decode_time(track_index, requested)
+    Ok(FragmentTimeline {
+        requested_start: requested,
+        write_start: current.max(requested),
+    })
 }
 
 fn relative_pts_ticks(pts_s: f64, origin_s: f64, timescale: u32) -> io::Result<u64> {
@@ -1176,55 +1231,23 @@ mod tests {
         fps: u32,
     }
 
-    struct CloselySpacedEncoder {
+    struct PtsRemapEncoder {
         inner: MockEncoder,
+        ticks: &'static [f64],
     }
 
-    struct RepeatedSubTickEncoder {
-        inner: MockEncoder,
-    }
+    const CLOSELY_SPACED_TICKS: &[f64] = &[0.0, 900.0, 907.0, 2_700.0, 3_600.0];
+    const REPEATED_SUB_TICK_TICKS: &[f64] = &[0.0, 900.0, 900.009, 900.018, 3_600.0];
 
-    impl Encoder for CloselySpacedEncoder {
+    impl Encoder for PtsRemapEncoder {
         fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
             let mut packets = self.inner.encode(frame)?;
             for packet in &mut packets {
                 let index = (packet.pts_s * 30.0).round() as u64;
-                packet.pts_s = match index {
-                    0 => 0.0,
-                    1 => 900.0 / 90_000.0,
-                    // Seven ticks after the preceding frame: a valid positive
-                    // interval that the old 100 us floor inflated to 9 ticks.
-                    2 => 907.0 / 90_000.0,
-                    3 => 2_700.0 / 90_000.0,
-                    4 => 3_600.0 / 90_000.0,
-                    _ => 3_600.0 / 90_000.0 + (index - 4) as f64 / 30.0,
-                };
-            }
-            Ok(packets)
-        }
-
-        fn track_config(&self) -> VideoTrackConfig {
-            self.inner.track_config()
-        }
-    }
-
-    impl Encoder for RepeatedSubTickEncoder {
-        fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
-            let mut packets = self.inner.encode(frame)?;
-            for packet in &mut packets {
-                let index = (packet.pts_s * 30.0).round() as u64;
-                let ticks = match index {
-                    0 => 0.0,
-                    1 => 900.0,
-                    // WGC and MFT carry 100 ns timestamps. At a 90 kHz MP4
-                    // timescale, one 100 ns step is 0.009 tick, so two
-                    // adjacent steps must not become two permanent ticks of
-                    // GOP-boundary inflation.
-                    2 => 900.009,
-                    3 => 900.018,
-                    4 => 3_600.0,
-                    _ => 3_600.0 + (index - 4) as f64 * 3_000.0,
-                };
+                let ticks = self.ticks.get(index as usize).copied().unwrap_or_else(|| {
+                    let last_index = self.ticks.len() - 1;
+                    self.ticks[last_index] + (index as usize - last_index) as f64 * 3_000.0
+                });
                 packet.pts_s = ticks / 90_000.0;
             }
             Ok(packets)
@@ -1695,13 +1718,62 @@ mod tests {
     }
 
     #[test]
+    fn repeated_segment_rounding_ties_do_not_accumulate_writer_drift() {
+        let video_cfg = MockEncoder::new(30, 30).track_config();
+        let timescale = f64::from(video_cfg.timescale);
+        let segment = |index: u64| {
+            let duration_ticks = if index == 4 { 100.0 } else { 1_000.6 };
+            Arc::new(Segment {
+                starts_with_keyframe: true,
+                pts_start_s: index as f64 * 1_000.6 / timescale,
+                duration_s: duration_ticks / timescale,
+                data: vec![0, 0, 0, index as u8],
+                samples: vec![SampleInfo {
+                    size: 4,
+                    duration_s: duration_ticks / timescale,
+                    is_sync: true,
+                }],
+                audio: Vec::new(),
+            })
+        };
+        let mut target: Option<Box<dyn WriteSeek>> =
+            Some(Box::new(std::io::Cursor::new(Vec::new())));
+        let mut writer = None;
+        let mut origin = None;
+
+        let expected_frontiers = [1_001, 2_002, 3_002, 4_003, 4_102];
+        for (index, expected_frontier) in expected_frontiers.into_iter().enumerate() {
+            write_full_session_segment(
+                &mut target,
+                &mut writer,
+                &mut origin,
+                video_cfg.clone(),
+                Vec::new(),
+                segment(index as u64),
+            )
+            .unwrap_or_else(|error| {
+                panic!("segment {index} must absorb prior rounding drift: {error}")
+            });
+            assert_eq!(
+                writer.as_ref().unwrap().track_decode_time(0).unwrap(),
+                expected_frontier,
+                "segment {index} must land on its global endpoint"
+            );
+        }
+        writer.unwrap().finalize().unwrap();
+    }
+
+    #[test]
     fn sub_hundred_microsecond_frame_gap_does_not_break_full_session_finalization() {
         let dir = TestDir::new("clipline-pipeline", "sub-millisecond-gop-boundary");
         let path = dir.path().join("session.mp4");
         let mut recorder = Recorder::new(
             MockCapture::new(8, 30),
-            CloselySpacedEncoder {
+            PtsRemapEncoder {
                 inner: MockEncoder::new(4, 30),
+                // Seven ticks after the preceding frame: a valid positive
+                // interval that the old 100 us floor inflated to 9 ticks.
+                ticks: CLOSELY_SPACED_TICKS,
             },
             usize::MAX,
         );
@@ -1726,8 +1798,12 @@ mod tests {
         let path = dir.path().join("session.mp4");
         let mut recorder = Recorder::new(
             MockCapture::new(8, 30),
-            RepeatedSubTickEncoder {
+            PtsRemapEncoder {
                 inner: MockEncoder::new(4, 30),
+                // WGC and MFT carry 100 ns timestamps. At a 90 kHz MP4
+                // timescale, one 100 ns step is 0.009 tick, so two adjacent
+                // steps must not become two permanent ticks of inflation.
+                ticks: REPEATED_SUB_TICK_TICKS,
             },
             usize::MAX,
         );
@@ -1751,7 +1827,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_gop_rejects_accumulated_timestamp_regression_over_one_tick() {
+    fn bounded_gop_absorbs_independent_sub_tick_timestamp_jitter() {
         let packets: Vec<_> = [0.0, 100.0, 99.4, 200.0, 199.4]
             .into_iter()
             .enumerate()
@@ -1763,9 +1839,79 @@ mod tests {
             })
             .collect();
 
-        let error = sealed_video_durations(&packets, 300.0 / 90_000.0, 90_000)
-            .expect_err("two 0.6-tick regressions must not be hidden by boundary clamping");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let durations = sealed_video_durations(&packets, 300.0 / 90_000.0, 90_000)
+            .expect("local timestamp jitter must not terminate capture");
+        assert_eq!(durations.len(), packets.len());
+        assert!(durations.iter().all(|duration| duration * 90_000.0 >= 1.0));
+        assert_eq!((durations.iter().sum::<f64>() * 90_000.0).round(), 300.0);
+    }
+
+    #[test]
+    fn crowded_bounded_gop_extends_only_enough_for_positive_durations() {
+        let packets: Vec<_> = [0.0, 0.2, 0.4]
+            .into_iter()
+            .enumerate()
+            .map(|(index, ticks)| EncodedPacket {
+                data: vec![index as u8],
+                pts_s: ticks / 90_000.0,
+                duration_s: 1.0 / 90_000.0,
+                is_keyframe: index == 0,
+            })
+            .collect();
+
+        let durations = sealed_video_durations(&packets, 2.0 / 90_000.0, 90_000)
+            .expect("crowded finite timestamps must degrade without ending the session");
+        assert_eq!(durations.len(), 3);
+        assert!(durations
+            .iter()
+            .all(|duration| (duration * 90_000.0 - 1.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn slightly_backward_single_packet_boundary_gets_one_tick() {
+        let packets = vec![EncodedPacket {
+            data: vec![0],
+            pts_s: 0.0,
+            duration_s: 1.0 / 90_000.0,
+            is_keyframe: true,
+        }];
+
+        let durations = sealed_video_durations(&packets, -0.4 / 90_000.0, 90_000)
+            .expect("a sub-tick boundary regression must not terminate capture");
+        assert_eq!(durations, vec![1.0 / 90_000.0]);
+    }
+
+    #[test]
+    fn failed_seal_preserves_pending_video_and_audio() {
+        let mut recorder = Recorder::new(
+            MockCapture::new(1, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        );
+        recorder.pending = vec![EncodedPacket {
+            data: vec![1, 2, 3],
+            pts_s: f64::NAN,
+            duration_s: 1.0 / 30.0,
+            is_keyframe: true,
+        }];
+        recorder.pending_bytes = 3;
+        recorder.pending_audio = vec![vec![AudioPacket {
+            data: vec![4, 5],
+            pts_s: 0.0,
+            duration_s: 0.02,
+        }]];
+        recorder.pending_audio_bytes = 2;
+
+        recorder
+            .seal_pending(1.0)
+            .expect_err("non-finite pending timestamps must still be rejected");
+
+        assert_eq!(recorder.pending.len(), 1);
+        assert_eq!(recorder.pending[0].data, vec![1, 2, 3]);
+        assert_eq!(recorder.pending_bytes, 3);
+        assert_eq!(recorder.pending_audio.len(), 1);
+        assert_eq!(recorder.pending_audio[0][0].data, vec![4, 5]);
+        assert_eq!(recorder.pending_audio_bytes, 2);
     }
 
     #[test]
@@ -1792,16 +1938,34 @@ mod tests {
     }
 
     #[test]
-    fn segment_boundary_tolerance_still_rejects_real_timestamp_regressions() {
+    fn zero_video_timescale_is_rejected_for_unbounded_gop() {
+        let packets = vec![EncodedPacket {
+            data: vec![0],
+            pts_s: 0.0,
+            duration_s: 0.25,
+            is_keyframe: true,
+        }];
+
+        let error = sealed_video_durations(&packets, f64::INFINITY, 0)
+            .expect_err("all seals require a valid MP4 video timescale");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn capture_timeline_never_moves_strict_writer_backward() {
         let cfg = MockEncoder::new(30, 30).track_config();
         let mut writer = HybridMp4Writer::new(std::io::Cursor::new(Vec::new()), cfg).unwrap();
         writer.set_track_decode_time(0, 100).unwrap();
 
-        set_track_decode_time_with_rounding_tolerance(&mut writer, 0, 99).unwrap();
+        let one_tick = advance_track_decode_time(&mut writer, 0, 99).unwrap();
         assert_eq!(writer.track_decode_time(0).unwrap(), 100);
-        let error = set_track_decode_time_with_rounding_tolerance(&mut writer, 0, 98)
-            .expect_err("a two-tick regression is not a rounding tie");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(one_tick.requested_start, 99);
+        assert_eq!(one_tick.write_start, 100);
+
+        let larger_regression = advance_track_decode_time(&mut writer, 0, 98).unwrap();
+        assert_eq!(writer.track_decode_time(0).unwrap(), 100);
+        assert_eq!(larger_regression.requested_start, 98);
+        assert_eq!(larger_regression.write_start, 100);
     }
 
     #[test]
