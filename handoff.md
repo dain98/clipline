@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-22): boundary-constrained GOP quantization
+
+Nightly 0.1.39 narrowed but did not eliminate the full-session decode-time failure. Two positive
+100 ns-style intervals in one GOP each remained shorter than one 90 kHz tick, so independently
+flooring both intervals advanced the locally accumulated GOP frontier by two ticks while the next
+GOP retained its absolute start. The existing writer tolerance correctly rejected that `3602` to
+`3600` backward movement.
+
+Finite GOP seals now quantize cumulative sample boundaries within the configured video timescale.
+Every MP4 sample keeps a nonzero duration, ticks are reserved for every remaining sample, and a
+normally spaced final sample lands on the sealing keyframe boundary by construction. Crowded or
+slightly backward finite timestamps retain every encoded dependency and minimally extend the span
+instead of terminating capture or the replay ring.
+
+PR #102 review found that independent per-GOP rounding could still accumulate across many
+boundaries: accepting a one-tick overlap left the writer frontier stale, and a later boundary could
+eventually be two ticks behind. Fragment samples are now quantized against their requested absolute
+endpoint while allocating from the writer's actual frontier, so each representable GOP absorbs
+earlier rounding drift. The capture timeline never asks the strict MP4 writer to move backward.
+Seal validation also runs before pending video is taken or audio is drained, preventing a failed
+seal from silently losing a GOP. Regressions cover repeated cross-GOP ties, two adjacent 100 ns
+gaps, crowded timestamps, independent sub-tick jitter, and preservation of pending A/V state.
+
 ## Checkpoint (2026-07-22): Nightly 0.1.39
 
 Nightly 0.1.39 contains PR #101's full-session finalization fix. Encoded video intervals shorter
