@@ -4,6 +4,21 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-23): Nightly 0.1.40
+
+Nightly 0.1.40 contains PR #102's complete full-session GOP-timing fix. Finite GOP samples are
+quantized cumulatively, and each fragment now allocates from the MP4 writer's actual monotonic
+frontier toward its requested absolute endpoint. Repeated same-sign rounding ties therefore get
+absorbed by later representable samples instead of accumulating into another two-tick backward
+decode-time request.
+
+Crowded, duplicate, and locally jittering finite timestamps retain every encoded dependency and
+degrade to positive MP4 durations without terminating capture or the replay ring. Seal validation
+also completes before pending video is taken or audio is drained, so an invalid seal cannot silently
+drop a GOP. Deterministic regressions cover repeated cross-GOP ties, multiple 100 ns gaps, crowded
+timestamps, local regressions, and failed-seal A/V preservation. The independent final review
+approved the remediation with no blocking findings.
+
 ## Checkpoint (2026-07-22): boundary-constrained GOP quantization
 
 Nightly 0.1.39 narrowed but did not eliminate the full-session decode-time failure. Two positive
