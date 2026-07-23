@@ -35,7 +35,6 @@ rfd = "0.15"
 png = "0.17"
 base64 = "0.22"
 tracing = "0.1"
-tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 zip = { version = "4", default-features = false, features = ["deflate"] }

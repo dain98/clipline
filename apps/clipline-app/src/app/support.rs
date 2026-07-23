@@ -20,7 +20,7 @@ use crate::settings::AppSettings;
 const DESCRIPTION_MIN_CHARS: usize = 10;
 const DESCRIPTION_MAX_CHARS: usize = 4_000;
 const PREPARED_LIFETIME: Duration = Duration::from_secs(30 * 60);
-const ABANDONED_STAGE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const ABANDONED_STAGE_AGE: Duration = PREPARED_LIFETIME;
 const MAX_BUNDLE_BYTES: u64 = 25 * 1024 * 1024;
 const FRONTEND_MESSAGE_BYTES: usize = 8 * 1024;
 const FRONTEND_STACK_BYTES: usize = 16 * 1024;
@@ -134,7 +134,6 @@ pub(super) async fn prepare_bug_report(
     remove_expired_prepared(&state);
     let settings = runtime.settings();
     let runtime_snapshot = runtime_snapshot(&runtime);
-    let description = description.trim().to_string();
     let token = Uuid::new_v4().to_string();
     let submission_id = Uuid::new_v4();
     let directory = staging_root().join(&token);
@@ -320,6 +319,13 @@ pub(super) fn open_diagnostics_folder() -> Result<(), String> {
 }
 
 #[tauri::command]
+pub(super) fn diagnostics_location() -> Result<String, String> {
+    diagnostics::diagnostics_directory()
+        .map(|directory| directory.to_string_lossy().into_owned())
+        .ok_or_else(|| "diagnostics are not initialized".to_string())
+}
+
+#[tauri::command]
 pub(super) fn log_frontend_event(
     state: State<'_, SupportState>,
     input: FrontendDiagnosticInput,
@@ -480,6 +486,7 @@ fn build_support_bundle(
         },
         "logger": {
             "dropped_lines": diagnostics::dropped_lines(),
+            "write_errors": diagnostics::write_errors(),
             "max_local_bytes": 5 * 4 * 1024 * 1024,
         },
         "redactions": [
@@ -621,6 +628,28 @@ fn runtime_snapshot(runtime: &RuntimeState) -> serde_json::Value {
                 "recorder_connected": inner.tx.is_some(),
                 "recording_generation": inner.recording_generation,
                 "active_game": inner.active_game.is_some(),
+                "configured_capture_backend": inner.settings.capture_backend,
+                "configured_video_encoder": inner.settings.video_encoder,
+                "configured_replay_storage_mode": inner.settings.replay_storage.mode,
+                "last_recorder_status": inner.last_recorder_status.as_ref().map(|status| {
+                    serde_json::json!({
+                        "recording": status.recording,
+                        "segments": status.segments,
+                        "buffered_s": status.buffered_s,
+                        "buffered_mb": status.buffered_mb,
+                        "full_session": status.full_session,
+                        "actual_encoder": status.encoder,
+                        "actual_capture_backend": status.capture_backend,
+                    })
+                }),
+                "last_storage_status": inner.last_storage_status.as_ref().map(|status| {
+                    serde_json::json!({
+                        "total_bytes": status.total_bytes,
+                        "quota_bytes": status.quota_bytes,
+                        "over_quota": status.over_quota,
+                    })
+                }),
+                "recent_recorder_error": inner.recent_recorder_error,
                 "decodable_codecs": inner
                     .decodable_codecs
                     .iter()
@@ -727,6 +756,7 @@ struct BundleRedactor {
 impl BundleRedactor {
     fn from_settings(settings: &AppSettings) -> Self {
         let user_profile = std::env::var("USERPROFILE").ok();
+        let username = std::env::var("USERNAME").ok();
         let appdata = std::env::var("APPDATA").ok();
         let local_appdata = std::env::var("LOCALAPPDATA").ok();
         let mut values: Vec<(String, &str)> = vec![
@@ -749,11 +779,24 @@ impl BundleRedactor {
             user_profile.as_deref(),
             appdata.as_deref(),
             local_appdata.as_deref(),
+            username.as_deref(),
         ]
         .into_iter()
         .flatten()
         {
             values.push(("private".into(), value));
+        }
+        for value in [
+            settings.audio.output_device_id.as_deref(),
+            settings.audio.mic_device_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            values.push(("audio_device".into(), value));
+        }
+        if let Some(display_id) = settings.capture_region.display_id.as_deref() {
+            values.push(("display_device".into(), display_id));
         }
         for game in &settings.games.custom_games {
             for value in [
@@ -832,7 +875,7 @@ mod tests {
     use clipline_test_utils::TestDir;
 
     #[test]
-    fn descriptions_are_trimmed_and_bounded_by_characters() {
+    fn descriptions_are_validated_by_trimmed_character_count() {
         assert!(validate_description("too short").is_err());
         assert!(validate_description("capture stopped after I changed displays").is_ok());
         assert!(validate_description(&"é".repeat(DESCRIPTION_MAX_CHARS + 1)).is_err());
@@ -864,14 +907,17 @@ mod tests {
             ..AppSettings::default()
         };
         settings.cloud.connected_username = Some("alice99".into());
+        settings.audio.mic_device_id = Some("private-microphone-id".into());
         let redactor = BundleRedactor::from_settings(&settings);
         let redacted = redactor.redact(
-            r#"C:\Users\Alice\Videos\Clipline alice99 Alice's ranked game user@example.com https://example.com/a?token=abc password=hunter2"#,
+            r#"C:\Users\Alice\Videos\Clipline alice99 Alice's ranked game private-microphone-id user@example.com https://example.com/a?token=abc password=hunter2"#,
         );
         assert!(!redacted.contains("Alice"));
         assert!(!redacted.contains("alice99"));
         assert!(!redacted.contains("example.com/a?token=abc"));
         assert!(!redacted.contains("hunter2"));
+        assert!(!redacted.contains("private-microphone-id"));
+        assert!(redacted.contains("<audio_device:1>"));
         assert!(redacted.contains("<email>"));
     }
 

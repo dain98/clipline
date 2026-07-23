@@ -23,7 +23,7 @@ function resetSupportPreview() {
 }
 
 async function prepareSupportReport() {
-  const description = $("support-description").value.trim();
+  const description = $("support-description").value;
   supportSetStatus("");
   supportSetBusy(true);
   $("support-success").hidden = true;
@@ -134,3 +134,11 @@ $("support-copy-id").addEventListener("click", async () => {
     supportSetStatus(`Could not copy automatically. Report ID: ${submittedSupportReportId}`, true);
   }
 });
+
+invoke("diagnostics_location")
+  .then((path) => {
+    $("support-diagnostics-location").textContent = `Diagnostics folder: ${path}`;
+  })
+  .catch((error) => {
+    $("support-diagnostics-location").textContent = `Diagnostics folder unavailable: ${error}`;
+  });

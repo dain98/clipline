@@ -2,12 +2,15 @@ use std::backtrace::Backtrace;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, Once, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
-use tracing_appender::non_blocking::{ErrorCounter, NonBlocking, WorkerGuard};
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::prelude::*;
 use uuid::Uuid;
 
@@ -19,8 +22,9 @@ const GENERATIONS: usize = 5;
 const MAX_RECORD_BYTES: usize = 16 * 1024;
 const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const PANIC_BYTES: u64 = 512 * 1024;
+const MAX_PANIC_RECORD_BYTES: usize = 128 * 1024;
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
-const SNAPSHOT_PREFIX: &[u8] = b"\0CLIPLINE-SNAPSHOT:";
+const QUEUE_LINES: usize = 2_048;
 
 static DIAGNOSTICS: OnceLock<DiagnosticsHandle> = OnceLock::new();
 static PANIC_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
@@ -28,38 +32,39 @@ static PANIC_HOOK: Once = Once::new();
 static PANIC_LOCK: Mutex<()> = Mutex::new(());
 
 pub(super) struct DiagnosticsGuard {
-    _worker: WorkerGuard,
+    sender: SyncSender<WriterCommand>,
+    worker: Option<JoinHandle<()>>,
 }
 
 #[derive(Clone)]
 struct DiagnosticsHandle {
-    writer: NonBlocking,
-    errors: ErrorCounter,
-    shared: Arc<SharedWriter>,
+    sender: SyncSender<WriterCommand>,
+    dropped: Arc<AtomicUsize>,
+    write_errors: Arc<AtomicUsize>,
     directory: PathBuf,
     active_path: PathBuf,
 }
 
-struct SharedWriter {
-    state: Mutex<WriterState>,
-    changed: Condvar,
+enum WriterCommand {
+    Record(Vec<u8>),
+    Snapshot {
+        destination: PathBuf,
+        result: mpsc::Sender<Result<Vec<PathBuf>, String>>,
+    },
+    Shutdown,
 }
 
-struct WriterState {
-    rolling: RollingFileWriter,
-    snapshot: Option<SnapshotRequest>,
+#[derive(Clone)]
+struct DiagnosticMakeWriter {
+    sender: SyncSender<WriterCommand>,
+    dropped: Arc<AtomicUsize>,
 }
 
-struct SnapshotRequest {
-    id: Uuid,
-    destination: PathBuf,
-    result: Option<Result<Vec<PathBuf>, String>>,
-}
-
-struct StructuredWriter {
-    shared: Arc<SharedWriter>,
-    session_id: Uuid,
-    pid: u32,
+struct EventBuffer {
+    sender: SyncSender<WriterCommand>,
+    dropped: Arc<AtomicUsize>,
+    bytes: Vec<u8>,
+    sent: bool,
 }
 
 pub(super) struct RollingFileWriter {
@@ -160,43 +165,63 @@ impl RollingFileWriter {
     }
 }
 
-impl Write for StructuredWriter {
+impl Write for EventBuffer {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        if let Some(id) = snapshot_id(buffer) {
-            let mut state = self.shared.state.lock().map_err(|_| {
-                io::Error::other("diagnostic writer state lock was poisoned")
-            })?;
-            let request = state.snapshot.as_ref().and_then(|request| {
-                (request.id == id).then(|| request.destination.clone())
-            });
-            if let Some(destination) = request {
-                let result = state.rolling.snapshot(&destination);
-                if let Some(request) = state.snapshot.as_mut() {
-                    request.result = Some(result);
-                }
-                self.shared.changed.notify_all();
-            }
-            return Ok(buffer.len());
-        }
-
-        let record = structured_record(buffer, self.session_id, self.pid);
-        self.shared
-            .state
-            .lock()
-            .map_err(|_| io::Error::other("diagnostic writer state lock was poisoned"))?
-            .rolling
-            .write_record(&record)?;
+        let remaining = (MAX_RECORD_BYTES + 1).saturating_sub(self.bytes.len());
+        self.bytes
+            .extend_from_slice(&buffer[..buffer.len().min(remaining)]);
         Ok(buffer.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.shared
-            .state
-            .lock()
-            .map_err(|_| io::Error::other("diagnostic writer state lock was poisoned"))?
-            .rolling
-            .file
-            .flush()
+        self.send();
+        Ok(())
+    }
+}
+
+impl EventBuffer {
+    fn send(&mut self) {
+        if self.sent || self.bytes.is_empty() {
+            return;
+        }
+        self.sent = true;
+        match self
+            .sender
+            .try_send(WriterCommand::Record(std::mem::take(&mut self.bytes)))
+        {
+            Ok(()) => {}
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+impl Drop for EventBuffer {
+    fn drop(&mut self) {
+        self.send();
+    }
+}
+
+impl<'writer> MakeWriter<'writer> for DiagnosticMakeWriter {
+    type Writer = EventBuffer;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        EventBuffer {
+            sender: self.sender.clone(),
+            dropped: self.dropped.clone(),
+            bytes: Vec::with_capacity(1024),
+            sent: false,
+        }
+    }
+}
+
+impl Drop for DiagnosticsGuard {
+    fn drop(&mut self) {
+        let _ = self.sender.send(WriterCommand::Shutdown);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -207,25 +232,32 @@ pub(super) fn init() -> Result<DiagnosticsGuard, String> {
     let rolling = RollingFileWriter::open(directory.clone(), GENERATION_BYTES, GENERATIONS)
         .map_err(|error| format!("open structured diagnostic log: {error}"))?;
     let active_path = rolling.active_path.clone();
-    let shared = Arc::new(SharedWriter {
-        state: Mutex::new(WriterState {
-            rolling,
-            snapshot: None,
-        }),
-        changed: Condvar::new(),
-    });
     let session_id = Uuid::new_v4();
-    let structured = StructuredWriter {
-        shared: shared.clone(),
-        session_id,
-        pid: std::process::id(),
+    let pid = std::process::id();
+    let (sender, receiver) = mpsc::sync_channel(QUEUE_LINES);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let write_errors = Arc::new(AtomicUsize::new(0));
+    let worker_write_errors = write_errors.clone();
+    let worker = std::thread::Builder::new()
+        .name("clipline-diagnostics".into())
+        .spawn(move || {
+            writer_thread(
+                receiver,
+                rolling,
+                session_id,
+                pid,
+                &worker_write_errors,
+            );
+        })
+        .map_err(|error| format!("start diagnostic writer thread: {error}"))?;
+    let guard = DiagnosticsGuard {
+        sender: sender.clone(),
+        worker: Some(worker),
     };
-    let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
-        .buffered_lines_limit(2_048)
-        .lossy(true)
-        .thread_name("clipline-diagnostics")
-        .finish(structured);
-    let errors = writer.error_counter();
+    let writer = DiagnosticMakeWriter {
+        sender: sender.clone(),
+        dropped: dropped.clone(),
+    };
     let filter = Targets::new()
         .with_default(LevelFilter::WARN)
         .with_target("clipline_app", LevelFilter::DEBUG)
@@ -250,9 +282,9 @@ pub(super) fn init() -> Result<DiagnosticsGuard, String> {
         .map_err(|error| format!("install diagnostic subscriber: {error}"))?;
     DIAGNOSTICS
         .set(DiagnosticsHandle {
-            writer,
-            errors,
-            shared,
+            sender,
+            dropped,
+            write_errors,
             directory,
             active_path,
         })
@@ -262,9 +294,42 @@ pub(super) fn init() -> Result<DiagnosticsGuard, String> {
         session_id = %session_id,
         generation_bytes = GENERATION_BYTES,
         generations = GENERATIONS,
-        queue_lines = 2_048_u64
+        queue_lines = QUEUE_LINES
     );
-    Ok(DiagnosticsGuard { _worker: guard })
+    Ok(guard)
+}
+
+fn writer_thread(
+    receiver: Receiver<WriterCommand>,
+    mut rolling: RollingFileWriter,
+    session_id: Uuid,
+    pid: u32,
+    write_errors: &AtomicUsize,
+) {
+    while let Ok(command) = receiver.recv() {
+        match command {
+            WriterCommand::Record(buffer) => {
+                let record = structured_record(&buffer, session_id, pid);
+                if rolling.write_record(&record).is_err() {
+                    write_errors.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            WriterCommand::Snapshot {
+                destination,
+                result,
+            } => {
+                let snapshot = rolling.snapshot(&destination);
+                if snapshot.is_err() {
+                    write_errors.fetch_add(1, Ordering::Relaxed);
+                }
+                let _ = result.send(snapshot);
+            }
+            WriterCommand::Shutdown => {
+                let _ = rolling.file.flush();
+                break;
+            }
+        }
+    }
 }
 
 pub(super) fn diagnostics_directory() -> Option<PathBuf> {
@@ -278,72 +343,35 @@ pub(super) fn diagnostic_log_path() -> Option<PathBuf> {
 pub(super) fn dropped_lines() -> usize {
     DIAGNOSTICS
         .get()
-        .map_or(0, |handle| handle.errors.dropped_lines())
+        .map_or(0, |handle| handle.dropped.load(Ordering::Relaxed))
+}
+
+pub(super) fn write_errors() -> usize {
+    DIAGNOSTICS
+        .get()
+        .map_or(0, |handle| handle.write_errors.load(Ordering::Relaxed))
 }
 
 pub(super) fn snapshot_to(destination: &Path) -> Result<Vec<PathBuf>, String> {
     let handle = DIAGNOSTICS
         .get()
         .ok_or_else(|| "diagnostics are not initialized".to_string())?;
-    let id = Uuid::new_v4();
-    {
-        let mut state = handle
-            .shared
-            .state
-            .lock()
-            .map_err(|_| "diagnostic writer state lock was poisoned".to_string())?;
-        if state.snapshot.is_some() {
-            return Err("another diagnostic snapshot is already running".into());
-        }
-        state.snapshot = Some(SnapshotRequest {
-            id,
+    let dropped_lines = dropped_lines();
+    tracing::info!(
+        event = "diagnostics_snapshot_requested",
+        dropped_lines
+    );
+    let (result_tx, result_rx) = mpsc::channel();
+    handle
+        .sender
+        .send(WriterCommand::Snapshot {
             destination: destination.to_path_buf(),
-            result: None,
-        });
-    }
-
-    let mut marker = Vec::with_capacity(SNAPSHOT_PREFIX.len() + 36);
-    marker.extend_from_slice(SNAPSHOT_PREFIX);
-    marker.extend_from_slice(id.to_string().as_bytes());
-    let mut writer = handle.writer.clone();
-    if let Err(error) = writer.write_all(&marker) {
-        clear_snapshot(handle);
-        return Err(format!("queue diagnostic snapshot barrier: {error}"));
-    }
-
-    let deadline = std::time::Instant::now() + SNAPSHOT_TIMEOUT;
-    let mut state = handle
-        .shared
-        .state
-        .lock()
-        .map_err(|_| "diagnostic writer state lock was poisoned".to_string())?;
-    loop {
-        if let Some(result) = state
-            .snapshot
-            .as_mut()
-            .and_then(|request| request.result.take())
-        {
-            state.snapshot = None;
-            return result;
-        }
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            state.snapshot = None;
-            return Err("timed out waiting for diagnostic snapshot barrier".into());
-        }
-        let waited = handle
-            .shared
-            .changed
-            .wait_timeout(state, remaining)
-            .map_err(|_| "diagnostic snapshot wait lock was poisoned".to_string())?;
-        state = waited.0;
-    }
-}
-
-fn clear_snapshot(handle: &DiagnosticsHandle) {
-    if let Ok(mut state) = handle.shared.state.lock() {
-        state.snapshot = None;
-    }
+            result: result_tx,
+        })
+        .map_err(|_| "diagnostic writer stopped before snapshot".to_string())?;
+    result_rx
+        .recv_timeout(SNAPSHOT_TIMEOUT)
+        .map_err(|_| "timed out waiting for diagnostic snapshot barrier".to_string())?
 }
 
 pub(super) fn log_diagnostic(message: impl AsRef<str>) {
@@ -388,6 +416,17 @@ fn structured_record(buffer: &[u8], session_id: Uuid, pid: u32) -> Vec<u8> {
         object
             .entry("event")
             .or_insert_with(|| serde_json::Value::String("diagnostic".into()));
+        let severity = object
+            .get("level")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::String("WARN".into()));
+        object.entry("severity").or_insert(severity);
+        object
+            .entry("outcome")
+            .or_insert_with(|| serde_json::Value::String("observed".into()));
+        object
+            .entry("duration_ms")
+            .or_insert(serde_json::Value::Null);
     }
     let mut record = serde_json::to_vec(&value).unwrap_or_else(|_| {
         br#"{"level":"ERROR","event":"diagnostic_serialization_failed"}"#.to_vec()
@@ -414,13 +453,6 @@ fn bound_record(record: &[u8]) -> Vec<u8> {
         return record.to_vec();
     }
     br#"{"level":"WARN","event":"diagnostic_record_too_large","record_truncated":true}"#.to_vec()
-}
-
-fn snapshot_id(buffer: &[u8]) -> Option<Uuid> {
-    buffer
-        .strip_prefix(SNAPSHOT_PREFIX)
-        .and_then(|value| std::str::from_utf8(value).ok())
-        .and_then(|value| Uuid::parse_str(value.trim()).ok())
 }
 
 fn single_line(value: &str) -> String {
@@ -509,11 +541,6 @@ fn write_panic_record(info: &std::panic::PanicHookInfo<'_>) {
         return;
     };
     let path = directory.join("panic.log");
-    if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() >= PANIC_BYTES) {
-        let old = directory.join("panic.old.log");
-        let _ = std::fs::remove_file(&old);
-        let _ = std::fs::rename(&path, old);
-    }
     let payload = info
         .payload()
         .downcast_ref::<&str>()
@@ -525,7 +552,7 @@ fn write_panic_record(info: &std::panic::PanicHookInfo<'_>) {
         .map_or_else(|| "<unknown>".to_string(), ToString::to_string);
     let thread = std::thread::current();
     let thread_name = thread.name().unwrap_or("<unnamed>");
-    let record = format!(
+    let mut record = format!(
         "{} version={} pid={} thread={thread_name:?} location={location:?} payload={:?}\n{}\n",
         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         env!("CARGO_PKG_VERSION"),
@@ -533,10 +560,33 @@ fn write_panic_record(info: &std::panic::PanicHookInfo<'_>) {
         single_line(payload),
         Backtrace::force_capture()
     );
+    if record.len() > MAX_PANIC_RECORD_BYTES {
+        record.truncate(floor_char_boundary(&record, MAX_PANIC_RECORD_BYTES - 32));
+        record.push_str("\n<panic record truncated>\n");
+    }
+    let rotate = std::fs::metadata(&path).is_ok_and(|metadata| {
+        metadata
+            .len()
+            .saturating_add(u64::try_from(record.len()).unwrap_or(u64::MAX))
+            > PANIC_BYTES
+    });
+    if rotate {
+        let old = directory.join("panic.old.log");
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::rename(&path, old);
+    }
     if let Ok(mut file) = open_append(&path) {
         let _ = file.write_all(record.as_bytes());
         let _ = file.flush();
     }
+}
+
+fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 #[cfg(test)]
@@ -596,14 +646,69 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&record).unwrap();
         assert_eq!(parsed["session_id"], session.to_string());
         assert_eq!(parsed["pid"], 42);
+        assert_eq!(parsed["severity"], "INFO");
+        assert_eq!(parsed["outcome"], "observed");
+        assert!(parsed["duration_ms"].is_null());
     }
 
     #[test]
-    fn snapshot_barrier_marker_is_not_a_normal_record() {
-        let id = Uuid::new_v4();
-        let marker = [SNAPSHOT_PREFIX, id.to_string().as_bytes()].concat();
-        assert_eq!(snapshot_id(&marker), Some(id));
-        assert_eq!(snapshot_id(br#"{"event":"normal"}"#), None);
+    fn lossy_queue_overflow_is_counted_without_blocking() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let writer = DiagnosticMakeWriter {
+            sender,
+            dropped: dropped.clone(),
+        };
+        {
+            let mut first = writer.make_writer();
+            first.write_all(br#"{"event":"first"}"#).unwrap();
+        }
+        {
+            let mut second = writer.make_writer();
+            second.write_all(br#"{"event":"second"}"#).unwrap();
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn snapshot_barrier_excludes_records_queued_after_it() {
+        let source = TestDir::new("clipline-app", "structured-log-barrier-source");
+        let target = TestDir::new("clipline-app", "structured-log-barrier-target");
+        let rolling =
+            RollingFileWriter::open(source.path().to_path_buf(), 4096, GENERATIONS).unwrap();
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let write_errors = Arc::new(AtomicUsize::new(0));
+        let worker_errors = write_errors.clone();
+        let worker = std::thread::spawn(move || {
+            writer_thread(receiver, rolling, Uuid::nil(), 42, &worker_errors);
+        });
+        sender
+            .send(WriterCommand::Record(
+                br#"{"level":"INFO","event":"before_barrier"}"#.to_vec(),
+            ))
+            .unwrap();
+        let (result_tx, result_rx) = mpsc::channel();
+        sender
+            .send(WriterCommand::Snapshot {
+                destination: target.path().to_path_buf(),
+                result: result_tx,
+            })
+            .unwrap();
+        sender
+            .send(WriterCommand::Record(
+                br#"{"level":"INFO","event":"after_barrier"}"#.to_vec(),
+            ))
+            .unwrap();
+        result_rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        sender.send(WriterCommand::Shutdown).unwrap();
+        worker.join().unwrap();
+        assert_eq!(write_errors.load(Ordering::Relaxed), 0);
+
+        let snapshot = std::fs::read_to_string(target.path().join("clipline.jsonl")).unwrap();
+        assert!(snapshot.contains("before_barrier"));
+        assert!(!snapshot.contains("after_barrier"));
+        let live = std::fs::read_to_string(source.path().join("clipline.jsonl")).unwrap();
+        assert!(live.contains("after_barrier"));
     }
 
     #[test]

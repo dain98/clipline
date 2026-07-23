@@ -59,14 +59,16 @@ reading — so any game that renders to a normal window is capturable.
 
 ## Help us fill this in
 
-If you run Clipline on hardware or a Windows build not listed above, a quick
-[bug report](https://github.com/dain98/clipline/issues/new?template=bug_report.yml)
-(even just "it works") helps grow this matrix. The most useful reports include:
+If you run Clipline on hardware or a Windows build not listed above, use
+**Settings > Support** to prepare and explicitly send a private diagnostic report
+(even just "it works"). General Clipline reports are not posted to a public issue
+tracker and are not sent to Clipline Cloud. The most useful descriptions mention:
 
 - **GPU** model and **driver version**
 - **Encoder** Clipline selected (shown in Settings)
 - **Windows** edition + build number (`winver`)
 - **Game** and **capture mode** (replay buffer vs. full session, per‑window vs. monitor)
-- Relevant **logs**
+- What failed and the approximate time; the prepared package already previews the
+  relevant sanitized logs and system details before you confirm sending it.
 
 Verified by maintainers; community reports are tracked in issues until confirmed.

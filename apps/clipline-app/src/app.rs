@@ -612,6 +612,27 @@ struct RuntimeInner {
     /// Codecs WebView2 can decode, reported by the frontend. Drives the
     /// recorder's Automatic selection; H.264 is the always-safe default.
     decodable_codecs: Vec<service::Codec>,
+    last_recorder_status: Option<RecorderDiagnosticStatus>,
+    last_storage_status: Option<StorageDiagnosticStatus>,
+    recent_recorder_error: bool,
+}
+
+#[derive(Clone)]
+struct RecorderDiagnosticStatus {
+    recording: bool,
+    segments: usize,
+    buffered_s: f64,
+    buffered_mb: f64,
+    full_session: bool,
+    encoder: String,
+    capture_backend: String,
+}
+
+#[derive(Clone)]
+struct StorageDiagnosticStatus {
+    total_bytes: u64,
+    quota_bytes: Option<u64>,
+    over_quota: bool,
 }
 
 struct PreparedRuntimeRestart {
@@ -651,6 +672,9 @@ impl RuntimeState {
             osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
+            last_recorder_status: None,
+            last_storage_status: None,
+            recent_recorder_error: false,
         };
         if let Some(tx) = tx {
             Self::install_recording_sender(&mut inner, tx);
@@ -678,6 +702,50 @@ impl RuntimeState {
         inner.recording_generation = inner.recording_generation.wrapping_add(1);
         inner.last_save_request = None;
         true
+    }
+
+    fn observe_runtime_event(&self, event: &Event) {
+        let Ok(mut inner) = self.0.lock() else {
+            return;
+        };
+        match event {
+            Event::Status {
+                recording,
+                segments,
+                buffered_s,
+                buffered_mb,
+                full_session,
+                encoder,
+                capture_backend,
+            } => {
+                inner.last_recorder_status = Some(RecorderDiagnosticStatus {
+                    recording: *recording,
+                    segments: *segments,
+                    buffered_s: *buffered_s,
+                    buffered_mb: *buffered_mb,
+                    full_session: *full_session,
+                    encoder: encoder.clone(),
+                    capture_backend: capture_backend.clone(),
+                });
+                if *recording {
+                    inner.recent_recorder_error = false;
+                }
+            }
+            Event::Saved {
+                storage_total_bytes,
+                storage_quota_bytes,
+                storage_over_quota,
+                ..
+            } => {
+                inner.last_storage_status = Some(StorageDiagnosticStatus {
+                    total_bytes: *storage_total_bytes,
+                    quota_bytes: *storage_quota_bytes,
+                    over_quota: *storage_over_quota,
+                });
+            }
+            Event::Error { .. } => inner.recent_recorder_error = true,
+            Event::MediaRootResolved { .. } => {}
+        }
     }
 
     /// Replace the decodable-codec set from the frontend's canPlayType probe.
@@ -2100,6 +2168,7 @@ pub fn run() {
             support::discard_bug_report,
             support::save_prepared_bug_report,
             support::open_diagnostics_folder,
+            support::diagnostics_location,
             support::log_frontend_event,
             crate::cloud::cloud_status,
             crate::cloud::cloud_connect,
@@ -2436,6 +2505,9 @@ where
 fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, generation: u64) {
     std::thread::spawn(move || {
         for event in event_rx {
+            handle
+                .state::<RuntimeState>()
+                .observe_runtime_event(&event);
             if let Event::MediaRootResolved { path, .. } = &event {
                 let media_root = PathBuf::from(path);
                 handle
@@ -3228,6 +3300,9 @@ mod tests {
             osu_title_events: Vec::new(),
             last_save_request: Some(Instant::now()),
             decodable_codecs: vec![service::Codec::H264],
+            last_recorder_status: None,
+            last_storage_status: None,
+            recent_recorder_error: false,
         };
 
         let err = match RuntimeState::prepare_service_restart(&mut inner) {
@@ -3258,6 +3333,9 @@ mod tests {
             osu_title_events: Vec::new(),
             last_save_request: Some(Instant::now()),
             decodable_codecs: vec![service::Codec::H264],
+            last_recorder_status: None,
+            last_storage_status: None,
+            recent_recorder_error: false,
         };
 
         let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
@@ -3397,6 +3475,9 @@ mod tests {
             osu_title_events: Vec::new(),
             last_save_request: Some(Instant::now()),
             decodable_codecs: vec![service::Codec::H264],
+            last_recorder_status: None,
+            last_storage_status: None,
+            recent_recorder_error: false,
         };
 
         let err = match RuntimeState::prepare_service_restart(&mut inner) {
@@ -3424,6 +3505,9 @@ mod tests {
             osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
+            last_recorder_status: None,
+            last_storage_status: None,
+            recent_recorder_error: false,
         };
 
         assert!(RuntimeState::prepare_service_restart(&mut inner).is_err());
@@ -3596,6 +3680,9 @@ mod tests {
             osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
+            last_recorder_status: None,
+            last_storage_status: None,
+            recent_recorder_error: false,
         };
         let osu = DetectedGame {
             identity: crate::game_identity::GameIdentity::built_in_plugin(
@@ -3949,6 +4036,9 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
+            last_recorder_status: None,
+            last_storage_status: None,
+            recent_recorder_error: false,
         };
 
         let opts = RuntimeState::options(&inner).unwrap();
@@ -3992,6 +4082,9 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             osu_title_events: Vec::new(),
             last_save_request: None,
             decodable_codecs: vec![service::Codec::H264],
+            last_recorder_status: None,
+            last_storage_status: None,
+            recent_recorder_error: false,
         };
 
         let opts = RuntimeState::options(&inner).unwrap();

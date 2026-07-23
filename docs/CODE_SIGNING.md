@@ -72,6 +72,7 @@ Variables:
 | `SIGNPATH_ORGANIZATION_ID` | `00000000-0000-0000-0000-000000000000` |
 | `SIGNPATH_PROJECT_SLUG` | `clipline` |
 | `SIGNPATH_SIGNING_POLICY_SLUG` | `release-signing` |
+| `CLIPLINE_BUG_REPORT_ENDPOINT` | Official HTTPS origin of the private `clipline-support` service |
 | `SIGNPATH_ARTIFACT_CONFIG_SLUG` | `nsis-installer` |
 
 ## Activating the workflow

@@ -3796,6 +3796,7 @@ fn support_reports_require_preview_before_private_submission() {
         "id=\"support-discard\"",
         "id=\"support-cancel\"",
         "id=\"support-copy-id\"",
+        "id=\"support-diagnostics-location\"",
         "private report expires and is deleted after 30 days",
         "Recordings, clips, media filenames, screenshots, raw settings.json",
     ] {
@@ -3815,9 +3816,15 @@ fn support_reports_require_preview_before_private_submission() {
         "submission must be a distinct action after preparing and previewing the bundle"
     );
     assert!(
+        support.contains("const description = $(\"support-description\").value;")
+            && !support.contains("$(\"support-description\").value.trim()"),
+        "the problem description must be transmitted exactly as entered"
+    );
+    assert!(
         support.contains("invoke(\"save_prepared_bug_report\"")
             && support.contains("invoke(\"discard_bug_report\"")
-            && support.contains("invoke(\"cancel_bug_report\""),
+            && support.contains("invoke(\"cancel_bug_report\"")
+            && support.contains("invoke(\"diagnostics_location\""),
         "prepared reports must support offline save, discard, and upload cancellation"
     );
 }

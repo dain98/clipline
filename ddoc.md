@@ -205,7 +205,11 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
 - Document clearly for users that Clipline uses no kernel driver, no injection, and no memory reading — and sign all binaries to reduce AV false-positives (the OBS hook DLL is routinely flagged because injection mimics malware).
 
 ### 9. Security & Privacy Stance
-- **No telemetry by default.** Any diagnostics are strictly opt-in and local-first.
+- **No telemetry.** Bounded first-party debug logs are always written locally so failures remain
+  diagnosable, but nothing is exported automatically. A user may prepare, inspect, and explicitly
+  confirm a sanitized private report from Settings > Support. Reports go only to the official
+  operator-owned `clipline-support` intake, never Clipline Cloud or a self-hosted Cloud instance,
+  and expire after 30 days.
 - **No account required**; Riot RSO is used only if a user opts into VALORANT post-match enrichment.
 - Event data is fetched only from local `127.0.0.1` endpoints; nothing leaves the machine without an explicit user action (e.g., manual upload/share).
 - **Capture hygiene:** display capture records the whole monitor, so the UI warns when it is active, offers pause-on-focus-loss, and prefers per-window capture wherever the game allows it. Accidentally recording a password manager or DM popup into a clip is treated as a privacy bug, not a cosmetic one.
