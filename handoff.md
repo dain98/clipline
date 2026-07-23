@@ -4,6 +4,21 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-22): boundary-constrained GOP quantization
+
+Nightly 0.1.39 narrowed but did not eliminate the full-session decode-time failure. Two positive
+100 ns-style intervals in one GOP each remained shorter than one 90 kHz tick, so independently
+flooring both intervals advanced the locally accumulated GOP frontier by two ticks while the next
+GOP retained its absolute start. The existing writer tolerance correctly rejected that `3602` to
+`3600` backward movement.
+
+Finite GOP seals now quantize cumulative sample boundaries within the configured video timescale.
+Every MP4 sample keeps a nonzero duration, ticks are reserved for every remaining sample, and the
+final sample lands on the sealing keyframe boundary by construction. The unbounded trailing seal
+and one-tick inter-segment rounding tolerance are unchanged, and timestamp regressions larger than
+one tick remain errors. A deterministic full-session regression with two adjacent 100 ns gaps
+reproduces the exact two-tick failure before the fix and finalizes normally afterward.
+
 ## Checkpoint (2026-07-22): Nightly 0.1.39
 
 Nightly 0.1.39 contains PR #101's full-session finalization fix. Encoded video intervals shorter

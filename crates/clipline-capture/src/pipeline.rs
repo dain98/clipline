@@ -505,31 +505,13 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         let pts_start_s = packets[0].pts_s;
         let starts_with_keyframe = packets[0].is_keyframe;
         let video_timescale = self.encoder.track_config().timescale;
-        let minimum_duration_s = if video_timescale == 0 {
-            f64::EPSILON
-        } else {
-            1.0 / f64::from(video_timescale)
-        };
         // ddoc §6: the timeline follows capture stamps, not encoder cadence
         // claims. Each sample lasts until the next pts; the sealing
         // keyframe's pts closes the GOP exactly; only the final seal
-        // (boundary = ∞) trusts the encoder's own duration. One video
-        // timescale tick is the smallest positive duration MP4 can store;
-        // a larger floor would inflate tightly spaced frames past the next
-        // GOP's absolute start timestamp.
-        let durations: Vec<f64> = (0..packets.len())
-            .map(|i| {
-                let next_pts = packets
-                    .get(i + 1)
-                    .map(|p| p.pts_s)
-                    .unwrap_or(boundary_pts_s);
-                if next_pts.is_finite() {
-                    (next_pts - packets[i].pts_s).max(minimum_duration_s)
-                } else {
-                    packets[i].duration_s
-                }
-            })
-            .collect();
+        // (boundary = ∞) trusts the encoder's own duration. Finite GOPs are
+        // quantized against that closing keyframe as one timeline so
+        // multiple sub-tick intervals cannot accumulate past it.
+        let durations = sealed_video_durations(&packets, boundary_pts_s, video_timescale)?;
         let duration_s: f64 = durations.iter().sum();
         let mut data = Vec::new();
         let mut samples = Vec::with_capacity(packets.len());
@@ -759,6 +741,105 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             }
         }
     }
+}
+
+fn sealed_video_durations(
+    packets: &[EncodedPacket],
+    boundary_pts_s: f64,
+    timescale: u32,
+) -> io::Result<Vec<f64>> {
+    let Some(first) = packets.first() else {
+        return Ok(Vec::new());
+    };
+    let minimum_duration_s = if timescale == 0 {
+        f64::EPSILON
+    } else {
+        1.0 / f64::from(timescale)
+    };
+    if !boundary_pts_s.is_finite() {
+        return Ok((0..packets.len())
+            .map(|index| {
+                let next_pts_s = packets
+                    .get(index + 1)
+                    .map(|next| next.pts_s)
+                    .unwrap_or(boundary_pts_s);
+                if next_pts_s.is_finite() {
+                    (next_pts_s - packets[index].pts_s).max(minimum_duration_s)
+                } else {
+                    packets[index].duration_s
+                }
+            })
+            .collect());
+    }
+    if timescale == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "video timescale must be nonzero",
+        ));
+    }
+
+    let scale = f64::from(timescale);
+    let total_ticks_f = (boundary_pts_s - first.pts_s) * scale;
+    if !total_ticks_f.is_finite() || total_ticks_f < 0.0 || total_ticks_f > u64::MAX as f64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid sealed video GOP boundary",
+        ));
+    }
+    let total_ticks = total_ticks_f.round() as u64;
+    let sample_count = u64::try_from(packets.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "video GOP sample count exceeds timeline capacity",
+        )
+    })?;
+    if total_ticks < sample_count {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sealed video GOP is too short for nonzero sample durations",
+        ));
+    }
+
+    let mut previous_end = 0_u64;
+    let mut backward_ticks = 0.0_f64;
+    let mut durations = Vec::with_capacity(packets.len());
+    for (index, packet) in packets.iter().enumerate() {
+        let next_pts_s = packets
+            .get(index + 1)
+            .map(|next| next.pts_s)
+            .unwrap_or(boundary_pts_s);
+        let interval_ticks = (next_pts_s - packet.pts_s) * scale;
+        if !interval_ticks.is_finite() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid video sample interval",
+            ));
+        }
+        backward_ticks += (-interval_ticks).max(0.0);
+        if backward_ticks > 1.0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "video sample timestamps moved backward by more than one tick",
+            ));
+        }
+
+        let desired_end_f = (next_pts_s - first.pts_s) * scale;
+        if !desired_end_f.is_finite() || desired_end_f < -1.0 || desired_end_f > u64::MAX as f64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid video sample timestamp",
+            ));
+        }
+        let desired_end = desired_end_f.max(0.0).round() as u64;
+        let remaining = sample_count - index as u64 - 1;
+        let earliest_end = previous_end + 1;
+        let latest_end = total_ticks - remaining;
+        let end = desired_end.clamp(earliest_end, latest_end);
+        durations.push((end - previous_end) as f64 / scale);
+        previous_end = end;
+    }
+    debug_assert_eq!(previous_end, total_ticks);
+    Ok(durations)
 }
 
 fn drop_audio_before_timeline(pending_audio: &mut [Vec<AudioPacket>], timeline_start_s: f64) {
@@ -1099,6 +1180,10 @@ mod tests {
         inner: MockEncoder,
     }
 
+    struct RepeatedSubTickEncoder {
+        inner: MockEncoder,
+    }
+
     impl Encoder for CloselySpacedEncoder {
         fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
             let mut packets = self.inner.encode(frame)?;
@@ -1114,6 +1199,33 @@ mod tests {
                     4 => 3_600.0 / 90_000.0,
                     _ => 3_600.0 / 90_000.0 + (index - 4) as f64 / 30.0,
                 };
+            }
+            Ok(packets)
+        }
+
+        fn track_config(&self) -> VideoTrackConfig {
+            self.inner.track_config()
+        }
+    }
+
+    impl Encoder for RepeatedSubTickEncoder {
+        fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
+            let mut packets = self.inner.encode(frame)?;
+            for packet in &mut packets {
+                let index = (packet.pts_s * 30.0).round() as u64;
+                let ticks = match index {
+                    0 => 0.0,
+                    1 => 900.0,
+                    // WGC and MFT carry 100 ns timestamps. At a 90 kHz MP4
+                    // timescale, one 100 ns step is 0.009 tick, so two
+                    // adjacent steps must not become two permanent ticks of
+                    // GOP-boundary inflation.
+                    2 => 900.009,
+                    3 => 900.018,
+                    4 => 3_600.0,
+                    _ => 3_600.0 + (index - 4) as f64 * 3_000.0,
+                };
+                packet.pts_s = ticks / 90_000.0;
             }
             Ok(packets)
         }
@@ -1606,6 +1718,77 @@ mod tests {
         let first = recorder.ring().unwrap().segments().next().unwrap();
         assert_eq!((first.samples[1].duration_s * 90_000.0).round(), 7.0);
         assert!(clipline_mp4::walker::movie_duration_s(&std::fs::read(path).unwrap()).is_some());
+    }
+
+    #[test]
+    fn repeated_sub_tick_gaps_do_not_accumulate_past_the_next_gop() {
+        let dir = TestDir::new("clipline-pipeline", "repeated-sub-tick-gaps");
+        let path = dir.path().join("session.mp4");
+        let mut recorder = Recorder::new(
+            MockCapture::new(8, 30),
+            RepeatedSubTickEncoder {
+                inner: MockEncoder::new(4, 30),
+            },
+            usize::MAX,
+        );
+        recorder
+            .start_full_session(std::fs::File::create(&path).unwrap())
+            .unwrap();
+
+        recorder.run_to_end().unwrap();
+        recorder
+            .finish_full_session()
+            .expect("two sub-tick gaps must not move the next GOP backward")
+            .expect("session summary");
+
+        let segments: Vec<_> = recorder.ring().unwrap().segments().collect();
+        assert!((segments[0].pts_end_s() - segments[1].pts_start_s).abs() < 1e-12);
+        assert!(segments[0]
+            .samples
+            .iter()
+            .all(|sample| sample.duration_s * 90_000.0 >= 1.0));
+        assert!(clipline_mp4::walker::movie_duration_s(&std::fs::read(path).unwrap()).is_some());
+    }
+
+    #[test]
+    fn bounded_gop_rejects_accumulated_timestamp_regression_over_one_tick() {
+        let packets: Vec<_> = [0.0, 100.0, 99.4, 200.0, 199.4]
+            .into_iter()
+            .enumerate()
+            .map(|(index, ticks)| EncodedPacket {
+                data: vec![index as u8],
+                pts_s: ticks / 90_000.0,
+                duration_s: 1.0 / 90_000.0,
+                is_keyframe: index == 0,
+            })
+            .collect();
+
+        let error = sealed_video_durations(&packets, 300.0 / 90_000.0, 90_000)
+            .expect_err("two 0.6-tick regressions must not be hidden by boundary clamping");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn unbounded_gop_keeps_encoder_duration_for_non_finite_next_timestamp() {
+        let packets = vec![
+            EncodedPacket {
+                data: vec![0],
+                pts_s: 0.0,
+                duration_s: 0.25,
+                is_keyframe: true,
+            },
+            EncodedPacket {
+                data: vec![1],
+                pts_s: f64::INFINITY,
+                duration_s: 0.5,
+                is_keyframe: false,
+            },
+        ];
+
+        assert_eq!(
+            sealed_video_durations(&packets, f64::INFINITY, 90_000).unwrap(),
+            vec![0.25, 0.5]
+        );
     }
 
     #[test]
