@@ -2743,6 +2743,14 @@ export redactor exclude paths, account/device identity, credentials, emails, and
 Recordings, screenshots, filenames, directory listings, raw settings, and Cloud/osu! secrets are
 never bundled. The tray can open the actual diagnostics folder without the WebView.
 
+The Support workflow now renders from one explicit `idle`/`preparing`/`prepared`/`uploading`/
+`success` phase model. Its transient panels must keep explicit `[hidden] { display: none; }`
+overrides because their grid display rules otherwise defeat WebView2's `hidden` presentation.
+The description locks after preparation, upload failure/cancellation returns to the same preview,
+and debug builds without an injected intake endpoint disclose that limitation while preserving
+local prepare/save/discard. On Support, the settings footer hides Save unless another tab is dirty.
+DOM-free phase tests plus CSS contracts guard the state and visibility invariants.
+
 The official intake lives in the separate sibling `clipline-support` repository. It streams
 anonymous multipart uploads into bounded temporary files, validates ZIP central-directory and
 manifest/hash constraints without filesystem extraction, uses SQLite/WAL plus private
