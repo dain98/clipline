@@ -916,11 +916,13 @@ label span { white-space: nowrap; }
 .settings-page[hidden] { display: none; }
 
 .support-section {
+  display: grid;
   gap: 16px;
 }
 
 .support-intro,
 .support-disclosure,
+.support-preparing,
 .support-preview,
 .support-progress,
 .support-success {
@@ -930,6 +932,22 @@ label span { white-space: nowrap; }
   border: 1px solid var(--line);
   border-radius: 10px;
   background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+.support-preparing[hidden],
+.support-preview[hidden],
+.support-progress[hidden],
+.support-success[hidden],
+#support-upload-availability[hidden],
+#settings-save[hidden] {
+  display: none;
+}
+
+.support-description-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .support-description-label {

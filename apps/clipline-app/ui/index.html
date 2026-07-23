@@ -793,7 +793,10 @@
               <strong>Report a Clipline problem privately</strong>
               <span>Describe what happened, review the diagnostic package, then explicitly send it to the Clipline developer.</span>
             </div>
-            <label class="support-description-label" for="support-description">What went wrong?</label>
+            <div class="support-description-heading">
+              <label class="support-description-label" for="support-description">What went wrong?</label>
+              <span id="support-description-count" class="hint">0 / 4,000</span>
+            </div>
             <textarea
               id="support-description"
               minlength="10"
@@ -814,6 +817,10 @@
               <button id="support-open-logs" type="button">Open Diagnostics Folder</button>
             </div>
             <span id="support-diagnostics-location" class="hint">Diagnostics folder: loading...</span>
+            <span id="support-upload-availability" class="hint" hidden></span>
+            <div id="support-preparing" class="support-preparing" hidden>
+              <span>Preparing the sanitized diagnostic package...</span>
+            </div>
             <div id="support-preview" class="support-preview" hidden>
               <strong>Ready to send</strong>
               <span id="support-preview-summary"></span>
@@ -1043,6 +1050,7 @@
   <script src="presentation-core.js"></script>
   <script src="player-core.js"></script>
   <script src="cloud-core.js"></script>
+  <script src="support-core.js"></script>
   <script src="app-core.js"></script>
   <script src="settings.js"></script>
   <script src="library.js"></script>

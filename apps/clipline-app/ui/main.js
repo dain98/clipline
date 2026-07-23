@@ -478,6 +478,7 @@ document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
     document
       .querySelectorAll("#settings-tabs .tab")
       .forEach((t) => t.classList.toggle("active", t === tab));
+    syncSettingsFooterForTab();
     document.querySelectorAll(".settings-section").forEach((s) => {
       s.hidden = s.dataset.section !== tab.dataset.tab;
     });

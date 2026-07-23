@@ -2169,6 +2169,7 @@ pub fn run() {
             support::save_prepared_bug_report,
             support::open_diagnostics_folder,
             support::diagnostics_location,
+            support::support_capabilities,
             support::log_frontend_event,
             crate::cloud::cloud_status,
             crate::cloud::cloud_connect,

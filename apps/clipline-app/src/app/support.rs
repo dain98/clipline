@@ -96,6 +96,11 @@ pub(super) struct PreparedBugReport {
     expires_at: String,
 }
 
+#[derive(Debug, Serialize)]
+pub(super) struct SupportCapabilities {
+    upload_available: bool,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub(super) struct SubmittedBugReport {
     report_id: String,
@@ -323,6 +328,13 @@ pub(super) fn diagnostics_location() -> Result<String, String> {
     diagnostics::diagnostics_directory()
         .map(|directory| directory.to_string_lossy().into_owned())
         .ok_or_else(|| "diagnostics are not initialized".to_string())
+}
+
+#[tauri::command]
+pub(super) fn support_capabilities() -> SupportCapabilities {
+    SupportCapabilities {
+        upload_available: support_report_url().is_ok(),
+    }
 }
 
 #[tauri::command]
