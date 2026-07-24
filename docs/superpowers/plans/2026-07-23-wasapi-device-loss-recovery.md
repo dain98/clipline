@@ -26,7 +26,8 @@ the outage is preserved without new timeline code.
 
 - [ ] Add `DeviceReactivation` state-machine tests in `pcm.rs`: first failure schedules a retry
       after the configured interval without resetting the outage start; repeated failures keep
-      the original outage start; `note_recovered` reports the outage and returns to live.
+      the original outage start and cannot postpone the first deadline; failed attempts reschedule
+      from their completion time; `note_recovered` reports the outage and returns to live.
 - [ ] Add `wasapi_error_recoverable` classification tests in `wasapi.rs` (Windows-only):
       0x88890004/0x88890010/0x88890026 recoverable, `E_FAIL` and other codes fatal.
 - [ ] Add `WasapiDeviceLost` / `WasapiDeviceRecovered` display tests in `diagnostics.rs`
@@ -52,9 +53,11 @@ the outage is preserved without new timeline code.
       rate-limited `WasapiDeviceLost` diagnostic, and return `Ok(())` so the silence-fill path
       runs; contract violations (null buffer, sample overflow, decode failure) stay fatal.
 - [ ] `collect_frames`: before draining, retry activation when due (1 s cadence). Process-output
-      targets skip the attempt while the pid is dead. Success swaps the client/capture/mix in
-      place, restarts the discontinuity fade, requires a fresh timestamp anchor, resets the
-      resampler for the new mix format, and emits `WasapiDeviceRecovered`.
+      targets skip the attempt unless PID and creation-time identity still match. Explicit device
+      targets recover strictly on the endpoint that actually activated at startup; default targets
+      follow the current default. Success swaps the client/capture/mix in place, restarts the
+      discontinuity fade, requires a fresh timestamp anchor, resets the resampler for the new mix
+      format, and emits `WasapiDeviceRecovered`.
 - [ ] `finish_frames` inherits the same path, so shutdown never errors on a dead endpoint.
 - [ ] Keep `DeviceLost` fatal for non-recoverable HRESULTs and for the DXGI/video path.
 
