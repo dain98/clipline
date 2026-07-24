@@ -992,4 +992,12 @@ mod tests {
             "ba236189ece3d0fae04a9a2770472ac2c7b0820d21d20e793077dc89d679cde3"
         );
     }
+
+    #[test]
+    fn configured_report_url_is_the_exact_official_intake_route() {
+        assert_eq!(
+            support_report_url().unwrap().as_str(),
+            "https://support.dain.cafe/api/v1/reports"
+        );
+    }
 }
