@@ -31,6 +31,10 @@ static PANIC_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 static PANIC_HOOK: Once = Once::new();
 static PANIC_LOCK: Mutex<()> = Mutex::new(());
 
+pub(super) const fn max_local_bytes() -> u64 {
+    GENERATION_BYTES * GENERATIONS as u64
+}
+
 pub(super) struct DiagnosticsGuard {
     sender: SyncSender<WriterCommand>,
     worker: Option<JoinHandle<()>>,
@@ -241,13 +245,7 @@ pub(super) fn init() -> Result<DiagnosticsGuard, String> {
     let worker = std::thread::Builder::new()
         .name("clipline-diagnostics".into())
         .spawn(move || {
-            writer_thread(
-                receiver,
-                rolling,
-                session_id,
-                pid,
-                &worker_write_errors,
-            );
+            writer_thread(receiver, rolling, session_id, pid, &worker_write_errors);
         })
         .map_err(|error| format!("start diagnostic writer thread: {error}"))?;
     let guard = DiagnosticsGuard {
@@ -357,10 +355,7 @@ pub(super) fn snapshot_to(destination: &Path) -> Result<Vec<PathBuf>, String> {
         .get()
         .ok_or_else(|| "diagnostics are not initialized".to_string())?;
     let dropped_lines = dropped_lines();
-    tracing::info!(
-        event = "diagnostics_snapshot_requested",
-        dropped_lines
-    );
+    tracing::info!(event = "diagnostics_snapshot_requested", dropped_lines);
     let (result_tx, result_rx) = mpsc::channel();
     handle
         .sender
@@ -560,16 +555,9 @@ fn write_panic_record(info: &std::panic::PanicHookInfo<'_>) {
         single_line(payload),
         Backtrace::force_capture()
     );
-    if record.len() > MAX_PANIC_RECORD_BYTES {
-        record.truncate(floor_char_boundary(&record, MAX_PANIC_RECORD_BYTES - 32));
-        record.push_str("\n<panic record truncated>\n");
-    }
-    let rotate = std::fs::metadata(&path).is_ok_and(|metadata| {
-        metadata
-            .len()
-            .saturating_add(u64::try_from(record.len()).unwrap_or(u64::MAX))
-            > PANIC_BYTES
-    });
+    record = bound_panic_record(record);
+    let rotate = std::fs::metadata(&path)
+        .is_ok_and(|metadata| panic_record_requires_rotation(metadata.len(), record.len()));
     if rotate {
         let old = directory.join("panic.old.log");
         let _ = std::fs::remove_file(&old);
@@ -579,6 +567,18 @@ fn write_panic_record(info: &std::panic::PanicHookInfo<'_>) {
         let _ = file.write_all(record.as_bytes());
         let _ = file.flush();
     }
+}
+
+fn bound_panic_record(mut record: String) -> String {
+    if record.len() > MAX_PANIC_RECORD_BYTES {
+        record.truncate(floor_char_boundary(&record, MAX_PANIC_RECORD_BYTES - 32));
+        record.push_str("\n<panic record truncated>\n");
+    }
+    record
+}
+
+fn panic_record_requires_rotation(current_bytes: u64, record_bytes: usize) -> bool {
+    current_bytes.saturating_add(u64::try_from(record_bytes).unwrap_or(u64::MAX)) > PANIC_BYTES
 }
 
 fn floor_char_boundary(value: &str, mut index: usize) -> usize {
@@ -699,7 +699,10 @@ mod tests {
                 br#"{"level":"INFO","event":"after_barrier"}"#.to_vec(),
             ))
             .unwrap();
-        result_rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
         sender.send(WriterCommand::Shutdown).unwrap();
         worker.join().unwrap();
         assert_eq!(write_errors.load(Ordering::Relaxed), 0);
@@ -731,5 +734,19 @@ mod tests {
         std::fs::write(&path, "αβγδε").unwrap();
         retain_file_tail(&path, 5).unwrap();
         assert!(std::fs::read_to_string(path).is_ok());
+    }
+
+    #[test]
+    fn panic_records_are_utf8_safe_and_bounded() {
+        let record = bound_panic_record("é".repeat(MAX_PANIC_RECORD_BYTES));
+        assert!(record.len() <= MAX_PANIC_RECORD_BYTES);
+        assert!(record.ends_with("<panic record truncated>\n"));
+        assert!(std::str::from_utf8(record.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn panic_rotation_includes_the_incoming_record_size() {
+        assert!(!panic_record_requires_rotation(PANIC_BYTES - 10, 10));
+        assert!(panic_record_requires_rotation(PANIC_BYTES - 10, 11));
     }
 }

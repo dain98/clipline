@@ -477,7 +477,11 @@ document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
     syncSettingsDraftFromForm();
     document
       .querySelectorAll("#settings-tabs .tab")
-      .forEach((t) => t.classList.toggle("active", t === tab));
+      .forEach((t) => {
+        t.classList.toggle("active", t === tab);
+        t.setAttribute("aria-selected", String(t === tab));
+        t.setAttribute("tabindex", t === tab ? "0" : "-1");
+      });
     syncSettingsFooterForTab();
     document.querySelectorAll(".settings-section").forEach((s) => {
       s.hidden = s.dataset.section !== tab.dataset.tab;

@@ -9,8 +9,8 @@ use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::State;
-use tokio::sync::Notify;
 use tokio_util::io::ReaderStream;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 
@@ -29,9 +29,13 @@ const SUPPORT_ENDPOINT: &str = env!("CLIPLINE_BUG_REPORT_ENDPOINT");
 
 static SECRET_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"(?i)\b(authorization|bearer|token|secret|password|api[_-]?key)\b\s*[:=]?\s*["']?[^\s"',;]+"#,
+        r#"(?i)\b(authorization|(?:[a-z0-9]+[_-])*(?:token|secret|password|api[_-]?key))\b["']?\s*[:=]\s*["']?(?:(?:bearer|basic)\s+)?[^\s"',;}]+"#,
     )
     .expect("secret redaction regex")
+});
+static AUTH_SCHEME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\b(bearer|basic)\s+[^\s"',;}]+"#)
+        .expect("authorization scheme redaction regex")
 });
 static EMAIL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b").expect("email redaction regex")
@@ -39,9 +43,8 @@ static EMAIL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 static PATH_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)\b[A-Z]:\\(?:[^\\\r\n"]+\\)*[^\\\r\n"]*"#).expect("path redaction regex")
 });
-static URL_QUERY_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(https?://[^\s?"']+)\?[^\s"']*"#).expect("URL redaction regex")
-});
+static URL_QUERY_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(https?://[^\s?"']+)\?[^\s"']*"#).expect("URL redaction regex"));
 
 pub(super) struct SupportState {
     prepared: Mutex<HashMap<String, PreparedReport>>,
@@ -68,7 +71,35 @@ struct PreparedReport {
     compressed_bytes: u64,
     created_at: chrono::DateTime<chrono::Utc>,
     expires_at: SystemTime,
-    cancel: Arc<Notify>,
+    cancel: UploadCancellation,
+}
+
+#[derive(Clone, Default)]
+struct UploadCancellation {
+    token: Arc<Mutex<CancellationToken>>,
+}
+
+impl UploadCancellation {
+    fn token(&self) -> Result<CancellationToken, String> {
+        self.token
+            .lock()
+            .map(|token| token.clone())
+            .map_err(|_| "bug report cancellation lock was poisoned".to_string())
+    }
+
+    fn cancel(&self) -> Result<(), String> {
+        self.token
+            .lock()
+            .map_err(|_| "bug report cancellation lock was poisoned".to_string())?
+            .cancel();
+        Ok(())
+    }
+
+    fn reset(&self) {
+        if let Ok(mut token) = self.token.lock() {
+            *token = CancellationToken::new();
+        }
+    }
 }
 
 struct FrontendRate {
@@ -167,7 +198,7 @@ pub(super) async fn prepare_bug_report(
         compressed_bytes: build.compressed_bytes,
         created_at,
         expires_at,
-        cancel: Arc::new(Notify::new()),
+        cancel: UploadCancellation::default(),
     };
     state
         .prepared
@@ -195,6 +226,11 @@ pub(super) async fn submit_bug_report(
     token: String,
 ) -> Result<SubmittedBugReport, String> {
     let prepared = prepared_report(&state, &token)?;
+    let cancel = prepared.cancel.token()?;
+    if cancel.is_cancelled() {
+        prepared.cancel.reset();
+        return Err("bug report upload cancelled".into());
+    }
     let endpoint = support_report_url()?;
     let file = tokio::fs::File::open(&prepared.bundle)
         .await
@@ -236,7 +272,10 @@ pub(super) async fn submit_bug_report(
         .send();
     let response = tokio::select! {
         response = request => response.map_err(|error| format!("send private bug report: {error}"))?,
-        () = prepared.cancel.notified() => return Err("bug report upload cancelled".into()),
+        () = cancel.cancelled() => {
+            prepared.cancel.reset();
+            return Err("bug report upload cancelled".into());
+        },
     };
     let status = response.status();
     if !status.is_success() {
@@ -276,7 +315,7 @@ pub(super) fn cancel_bug_report(
     token: String,
 ) -> Result<(), String> {
     let prepared = prepared_report(&state, &token)?;
-    prepared.cancel.notify_waiters();
+    prepared.cancel.cancel()?;
     tracing::info!(
         event = "bug_report_cancel_requested",
         submission_id = %prepared.submission_id
@@ -442,6 +481,32 @@ struct BundleBuild {
     sha256: String,
 }
 
+struct StagingBuildGuard {
+    directory: PathBuf,
+    preserve: bool,
+}
+
+impl StagingBuildGuard {
+    fn new(directory: &Path) -> Self {
+        Self {
+            directory: directory.to_path_buf(),
+            preserve: false,
+        }
+    }
+
+    fn preserve(&mut self) {
+        self.preserve = true;
+    }
+}
+
+impl Drop for StagingBuildGuard {
+    fn drop(&mut self) {
+        if !self.preserve {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+}
+
 fn build_support_bundle(
     directory: &Path,
     bundle: &Path,
@@ -451,6 +516,7 @@ fn build_support_bundle(
 ) -> Result<BundleBuild, String> {
     std::fs::create_dir_all(directory)
         .map_err(|error| format!("create support staging directory: {error}"))?;
+    let mut staging_guard = StagingBuildGuard::new(directory);
     let snapshot = directory.join("snapshot");
     let log_files = diagnostics::snapshot_to(&snapshot)?;
     let redactor = BundleRedactor::from_settings(settings);
@@ -461,15 +527,9 @@ fn build_support_bundle(
         };
         let text = std::fs::read_to_string(&path)
             .map_err(|error| format!("read diagnostic snapshot {path:?}: {error}"))?;
-        entries.push((
-            format!("logs/{name}"),
-            redactor.redact(&text).into_bytes(),
-        ));
+        entries.push((format!("logs/{name}"), redactor.redact(&text).into_bytes()));
     }
-    entries.push((
-        "system.json".into(),
-        json_bytes(&system_snapshot())?,
-    ));
+    entries.push(("system.json".into(), json_bytes(&system_snapshot())?));
     entries.push((
         "settings.redacted.json".into(),
         json_bytes(&safe_settings(settings))?,
@@ -499,7 +559,7 @@ fn build_support_bundle(
         "logger": {
             "dropped_lines": diagnostics::dropped_lines(),
             "write_errors": diagnostics::write_errors(),
-            "max_local_bytes": 5 * 4 * 1024 * 1024,
+            "max_local_bytes": diagnostics::max_local_bytes(),
         },
         "redactions": [
             "paths", "window_titles", "device_ids", "account_fields",
@@ -541,6 +601,7 @@ fn build_support_bundle(
         std::fs::read(bundle).map_err(|error| format!("hash support bundle: {error}"))?;
     let files = entries.into_iter().map(|(name, _)| name).collect();
     let _ = std::fs::remove_dir_all(snapshot);
+    staging_guard.preserve();
     Ok(BundleBuild {
         files,
         compressed_bytes,
@@ -549,8 +610,24 @@ fn build_support_bundle(
 }
 
 fn json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
-    serde_json::to_vec_pretty(value)
+    serde_json::to_vec_pretty(&redact_json_strings(value))
         .map_err(|error| format!("serialize support bundle JSON: {error}"))
+}
+
+fn redact_json_strings(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(value) => serde_json::Value::String(redact_generic(value)),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(redact_json_strings).collect())
+        }
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), redact_json_strings(value)))
+                .collect(),
+        ),
+        value => value.clone(),
+    }
 }
 
 fn safe_settings(settings: &AppSettings) -> serde_json::Value {
@@ -613,10 +690,11 @@ fn system_snapshot() -> serde_json::Value {
         })
         .collect::<Vec<_>>();
     let display_count = super::list_displays().map_or(0, |displays| displays.len());
-    let AudioDeviceLists { outputs, inputs } = super::list_audio_devices().unwrap_or(AudioDeviceLists {
-        outputs: Vec::new(),
-        inputs: Vec::new(),
-    });
+    let AudioDeviceLists { outputs, inputs } =
+        super::list_audio_devices().unwrap_or(AudioDeviceLists {
+            outputs: Vec::new(),
+            inputs: Vec::new(),
+        });
     serde_json::json!({
         "windows_build": clipline_capture::windows::wasapi::windows_build_number(),
         "architecture": std::env::consts::ARCH,
@@ -842,6 +920,7 @@ impl BundleRedactor {
 
 fn redact_generic(text: &str) -> String {
     let text = SECRET_PATTERN.replace_all(text, "$1=<redacted>");
+    let text = AUTH_SCHEME_PATTERN.replace_all(&text, "$1 <redacted>");
     let text = EMAIL_PATTERN.replace_all(&text, "<email>");
     let text = URL_QUERY_PATTERN.replace_all(&text, "$1?<query-redacted>");
     PATH_PATTERN.replace_all(&text, "<path>").into_owned()
@@ -937,15 +1016,15 @@ mod tests {
                 "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.private.signature",
                 "eyJhbGciOiJIUzI1NiJ9.private.signature",
             ),
-            (
-                r#""token": "abc123secretvalue""#,
-                "abc123secretvalue",
-            ),
+            (r#""token": "abc123secretvalue""#, "abc123secretvalue"),
             (
                 r#"{"client_secret":"oauth-client-secret"}"#,
                 "oauth-client-secret",
             ),
-            ("request failed with Bearer raw-standalone-token", "raw-standalone-token"),
+            (
+                "request failed with Bearer raw-standalone-token",
+                "raw-standalone-token",
+            ),
         ] {
             let redacted = redact_generic(input);
             assert!(
@@ -976,13 +1055,19 @@ mod tests {
 
     #[tokio::test]
     async fn upload_cancellation_requested_before_wait_registration_is_sticky() {
-        let cancel = Arc::new(Notify::new());
-        cancel.notify_waiters();
+        let cancel = UploadCancellation::default();
+        cancel.cancel().unwrap();
+        let token = cancel.token().unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), cancel.notified())
+            tokio::time::timeout(Duration::from_millis(20), token.cancelled())
                 .await
                 .is_ok(),
             "a cancellation requested during upload setup must still stop the later request"
+        );
+        cancel.reset();
+        assert!(
+            !cancel.token().unwrap().is_cancelled(),
+            "a completed cancelled attempt must leave the prepared report retryable"
         );
     }
 
@@ -998,7 +1083,10 @@ mod tests {
             serde_json::json!({}),
             Uuid::new_v4(),
         );
-        assert!(result.is_err(), "diagnostics are intentionally uninitialized");
+        assert!(
+            result.is_err(),
+            "diagnostics are intentionally uninitialized"
+        );
         assert!(
             !directory.exists(),
             "failed preparation must not retain copied diagnostic data"

@@ -48,13 +48,27 @@ function renderSupportState() {
 function transitionSupport(event) {
   supportPhase = SupportCore.transition(supportPhase, event);
   renderSupportState();
+  focusSupportPhase();
+}
+
+function focusSupportPhase() {
+  const targetId = {
+    preparing: "support-preparing",
+    prepared: "support-preview",
+    uploading: "support-progress",
+    success: "support-success",
+  }[supportPhase];
+  const target = targetId ? $(targetId) : null;
+  if (target && !target.hidden) {
+    target.focus({ preventScroll: true });
+  }
 }
 
 function resetSupportPreview() {
   preparedSupportReport = null;
   submittedSupportReportId = "";
   $("support-preview-files").replaceChildren();
-  if (supportPhase !== "idle") transitionSupport("discarded");
+  if (supportPhase === "prepared") transitionSupport("discarded");
   else renderSupportState();
 }
 

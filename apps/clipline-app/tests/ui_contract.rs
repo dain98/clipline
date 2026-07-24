@@ -3895,13 +3895,19 @@ fn settings_tabs_and_support_phases_are_accessible() {
             )),
             "settings tab {name} must identify and control its panel"
         );
-        assert!(
-            html.contains(&format!(
-                r#"id="settings-panel-{name}" class="settings-section"#
-            )) || html.contains(&format!(
-                r#"id="settings-panel-{name}" class="settings-section support-section"#
-            )),
-            "settings panel {name} must have a stable id"
+        let panel_id = format!(r#"id="settings-panel-{name}""#);
+        let panel_start = html.find(&panel_id).expect("settings panel id");
+        let panel_tag_start = html[..panel_start].rfind("<div").expect("settings panel tag");
+        let panel_tag_end = html[panel_start..]
+            .find('>')
+            .map(|offset| panel_start + offset)
+            .expect("settings panel tag close");
+        let panel_tag = &html[panel_tag_start..=panel_tag_end];
+        assert_eq!(tag_attr(panel_tag, "role"), Some("tabpanel"));
+        let labelled_by = format!("settings-tab-{name}");
+        assert_eq!(
+            tag_attr(panel_tag, "aria-labelledby"),
+            Some(labelled_by.as_str())
         );
     }
     assert!(
