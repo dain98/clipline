@@ -3869,6 +3869,54 @@ fn support_reports_require_preview_before_private_submission() {
 }
 
 #[test]
+fn settings_tabs_and_support_phases_are_accessible() {
+    let html = index_html();
+    let main = main_js();
+    let support = read_ui_js("support.js");
+
+    assert!(
+        html.contains(r#"id="settings-tabs" class="settings-tabs" role="tablist""#),
+        "settings navigation must expose tablist semantics"
+    );
+    for (name, selected) in [
+        ("general", "true"),
+        ("capture", "false"),
+        ("recording", "false"),
+        ("games", "false"),
+        ("storage", "false"),
+        ("cloud", "false"),
+        ("hotkeys", "false"),
+        ("support", "false"),
+    ] {
+        assert!(
+            html.contains(&format!(
+                r#"id="settings-tab-{name}" class="tab{}" role="tab" aria-selected="{selected}" aria-controls="settings-panel-{name}" data-tab="{name}""#,
+                if name == "general" { " active" } else { "" }
+            )),
+            "settings tab {name} must identify and control its panel"
+        );
+        assert!(
+            html.contains(&format!(
+                r#"id="settings-panel-{name}" class="settings-section"#
+            )) || html.contains(&format!(
+                r#"id="settings-panel-{name}" class="settings-section support-section"#
+            )),
+            "settings panel {name} must have a stable id"
+        );
+    }
+    assert!(
+        main.contains(r#"setAttribute("aria-selected", String(t === tab))"#)
+            && main.contains(r#"setAttribute("tabindex", t === tab ? "0" : "-1")"#),
+        "tab activation must synchronize keyboard and selected state"
+    );
+    assert!(
+        support.contains("focusSupportPhase")
+            && support.contains(r#"target.focus({ preventScroll: true })"#),
+        "Support phase changes must move focus to the newly visible result"
+    );
+}
+
+#[test]
 fn frontend_failures_are_forwarded_to_bounded_native_diagnostics() {
     let core = read_ui_js("app-core.js");
     assert!(

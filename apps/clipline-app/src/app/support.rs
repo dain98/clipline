@@ -931,6 +931,50 @@ mod tests {
     }
 
     #[test]
+    fn export_redaction_consumes_authorization_schemes_and_quoted_json_values() {
+        for (input, forbidden) in [
+            (
+                "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.private.signature",
+                "eyJhbGciOiJIUzI1NiJ9.private.signature",
+            ),
+            (
+                r#""token": "abc123secretvalue""#,
+                "abc123secretvalue",
+            ),
+            (
+                r#"{"client_secret":"oauth-client-secret"}"#,
+                "oauth-client-secret",
+            ),
+            ("request failed with Bearer raw-standalone-token", "raw-standalone-token"),
+        ] {
+            let redacted = redact_generic(input);
+            assert!(
+                !redacted.contains(forbidden),
+                "secret value remained in redacted output: {redacted}"
+            );
+            assert!(
+                redacted.contains("<redacted>"),
+                "redaction marker was missing from: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_json_redacts_nested_string_values() {
+        let bytes = json_bytes(&serde_json::json!({
+            "nested": {
+                "message": "Authorization: Bearer should-not-ship",
+                "items": ["user@example.com", "safe"]
+            }
+        }))
+        .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("should-not-ship"));
+        assert!(!text.contains("user@example.com"));
+        assert!(serde_json::from_str::<serde_json::Value>(&text).is_ok());
+    }
+
+    #[test]
     fn safe_settings_never_contains_raw_private_fields() {
         let mut settings = AppSettings {
             media_dir: r"C:\private\clips".into(),
