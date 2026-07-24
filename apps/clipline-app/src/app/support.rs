@@ -34,7 +34,7 @@ static SECRET_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     .expect("secret redaction regex")
 });
 static AUTH_SCHEME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b(bearer|basic)\s+[^\s"',;}]+"#)
+    Regex::new(r#"(?i)\b(bearer)\s+[^\s"',;}]+"#)
         .expect("authorization scheme redaction regex")
 });
 static EMAIL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
