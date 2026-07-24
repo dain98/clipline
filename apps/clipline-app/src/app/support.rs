@@ -974,6 +974,37 @@ mod tests {
         assert!(serde_json::from_str::<serde_json::Value>(&text).is_ok());
     }
 
+    #[tokio::test]
+    async fn upload_cancellation_requested_before_wait_registration_is_sticky() {
+        let cancel = Arc::new(Notify::new());
+        cancel.notify_waiters();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), cancel.notified())
+                .await
+                .is_ok(),
+            "a cancellation requested during upload setup must still stop the later request"
+        );
+    }
+
+    #[test]
+    fn failed_bundle_build_removes_staging_directory() {
+        let root = TestDir::new("clipline-app", "support-bundle-failure-cleanup");
+        let directory = root.path().join("prepared");
+        let bundle = directory.join("clipline-support.zip");
+        let result = build_support_bundle(
+            &directory,
+            &bundle,
+            &AppSettings::default(),
+            serde_json::json!({}),
+            Uuid::new_v4(),
+        );
+        assert!(result.is_err(), "diagnostics are intentionally uninitialized");
+        assert!(
+            !directory.exists(),
+            "failed preparation must not retain copied diagnostic data"
+        );
+    }
+
     #[test]
     fn safe_settings_never_contains_raw_private_fields() {
         let mut settings = AppSettings {
