@@ -4,6 +4,184 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-23): WASAPI device-loss recovery
+
+A mid-recording endpoint invalidation no longer aborts the recorder. Previously a single
+`AUDCLNT_E_DEVICE_INVALIDATED` (0x88890004) from `GetNextPacketSize`/`GetBuffer` propagated as
+`CaptureError::DeviceLost`, killed the service loop ("recording: capture device lost…"), and
+failed a second time when shutdown drained the same dead client ("…additionally, finish: …").
+Typical trigger: the default render endpoint re-enumerating (headphone/USB/Bluetooth
+disconnect, monitor audio power-cycle, default-device switch). An invalidated `IAudioClient` is
+permanently dead; only re-activation recovers it.
+
+`WasapiPcmCapture` now stores an `EndpointTarget` (output/process/microphone plus device id) and
+re-activates it on a 1 s retry cadence after a recoverable HRESULT (0x88890004, 0x88890010
+service-not-running, 0x88890026 resources-invalidated). While the endpoint is dead, the existing
+idle-desktop silence machinery covers the outage: delivery idleness exceeds the quiet grace, the
+assembler advances with capped silence, and the first packet from the re-activated endpoint
+re-anchors on its QPC timestamp — A/V sync survives the gap with no new timeline code. A dead
+client is no longer drained while it waits, so repeated poll failures cannot slide the retry
+deadline forward. Failed activation attempts schedule from their completion time, preserving the
+full 1 s cadence even after a 1.5 s process-loopback timeout.
+
+Process-loopback targets store the process creation time as an instance identity and will only
+re-activate while both PID and creation time still match, preventing PID reuse from redirecting a
+track to another process. Explicit output and microphone targets recover strictly on the endpoint
+that actually activated at startup; default-device targets continue to follow the current default.
+Contract violations (null buffer, sample overflow, decode failure) and non-recoverable HRESULTs
+stay fatal; startup activation failures remain loud `Init` errors. `finish_packets` inherits the
+same path, so shutdown never fails on a dead endpoint.
+
+New diagnostics land in the log: `wasapi_device_lost` (source, hresult, rate-limited at 30 s)
+and `wasapi_device_recovered` (outage_ms). Neutral tests cover the `DeviceReactivation` state
+machine, HRESULT classification, `DrainFailure` mapping, and diagnostic display; a live device
+test (CI-skipped on runners) simulates invalidation and proves the endpoint swap mid-capture.
+Review regressions additionally cover non-sliding deadlines, post-attempt retry scheduling,
+process identity, strict recovery selection, and startup fallback target resolution. Workspace
+tests, live-device capture tests, and fresh-cache warning-denied Clippy are green.
+Plan: `docs/superpowers/plans/2026-07-23-wasapi-device-loss-recovery.md`.
+
+## Checkpoint (2026-07-23): Nightly 0.1.40
+
+Nightly 0.1.40 contains PR #102's complete full-session GOP-timing fix. Finite GOP samples are
+quantized cumulatively, and each fragment now allocates from the MP4 writer's actual monotonic
+frontier toward its requested absolute endpoint. Repeated same-sign rounding ties therefore get
+absorbed by later representable samples instead of accumulating into another two-tick backward
+decode-time request.
+
+Crowded, duplicate, and locally jittering finite timestamps retain every encoded dependency and
+degrade to positive MP4 durations without terminating capture or the replay ring. Seal validation
+also completes before pending video is taken or audio is drained, so an invalid seal cannot silently
+drop a GOP. Deterministic regressions cover repeated cross-GOP ties, multiple 100 ns gaps, crowded
+timestamps, local regressions, and failed-seal A/V preservation. The independent final review
+approved the remediation with no blocking findings.
+
+## Checkpoint (2026-07-22): boundary-constrained GOP quantization
+
+Nightly 0.1.39 narrowed but did not eliminate the full-session decode-time failure. Two positive
+100 ns-style intervals in one GOP each remained shorter than one 90 kHz tick, so independently
+flooring both intervals advanced the locally accumulated GOP frontier by two ticks while the next
+GOP retained its absolute start. The existing writer tolerance correctly rejected that `3602` to
+`3600` backward movement.
+
+Finite GOP seals now quantize cumulative sample boundaries within the configured video timescale.
+Every MP4 sample keeps a nonzero duration, ticks are reserved for every remaining sample, and a
+normally spaced final sample lands on the sealing keyframe boundary by construction. Crowded or
+slightly backward finite timestamps retain every encoded dependency and minimally extend the span
+instead of terminating capture or the replay ring.
+
+PR #102 review found that independent per-GOP rounding could still accumulate across many
+boundaries: accepting a one-tick overlap left the writer frontier stale, and a later boundary could
+eventually be two ticks behind. Fragment samples are now quantized against their requested absolute
+endpoint while allocating from the writer's actual frontier, so each representable GOP absorbs
+earlier rounding drift. The capture timeline never asks the strict MP4 writer to move backward.
+Seal validation also runs before pending video is taken or audio is drained, preventing a failed
+seal from silently losing a GOP. Regressions cover repeated cross-GOP ties, two adjacent 100 ns
+gaps, crowded timestamps, independent sub-tick jitter, and preservation of pending A/V state.
+
+## Checkpoint (2026-07-22): Nightly 0.1.39
+
+Nightly 0.1.39 contains PR #101's full-session finalization fix. Encoded video intervals shorter
+than 100 us now retain their representable timing down to one configured MP4 timescale tick, so a
+valid tightly spaced or variable-refresh-rate frame no longer creates an artificial two-tick
+overlap at the next GOP boundary. The MP4 writer remains strict, the capture-side tolerance still
+accepts only a one-tick rounding tie, and larger timestamp regressions continue to fail safely.
+
+## Checkpoint (2026-07-22): sub-millisecond full-session GOP boundary
+
+A Nightly 0.1.38 full-session recording failed at stop with video track 0 attempting to move from
+decode tick 4,051,257 back to 4,051,255. The earlier one-tick boundary fix correctly covers
+independent quantization ties, but the pipeline also floored every adjacent video interval at
+100 us. A valid interval between one 90 kHz tick and that floor was lengthened within its GOP; the
+next GOP retained its absolute start stamp and could therefore appear several ticks earlier.
+
+Sealed video samples now use one configured video-timescale tick as their minimum positive
+duration, matching the MP4 format's actual representable floor. The MP4 writer remains strict, and
+the capture-side tolerance still accepts only a one-tick rounding tie, so real regressions of two
+ticks or more are not hidden. A deterministic full-session fixture reproduces the reported
+two-tick failure with adjacent frames seven ticks apart, verifies the stored interval remains seven
+ticks, finalizes the file, and retains the existing larger-regression guard coverage.
+
+## Checkpoint (2026-07-21): Nightly 0.1.38
+
+Nightly 0.1.38 contains PR #100's recorder and review quality-of-life release. It adds an optional
+games-only recorder pause with a durable Waiting state, explicit restart-as-administrator handling
+for elevated games, immediate opening of newly exported clips, and fullscreen review playback. The
+follow-up review remediation makes recorder transitions generation-safe, replays startup Waiting
+state after frontend readiness, and preserves accurate private-working-set RAM sampling across
+normal/elevated launches and older supported Windows builds.
+
+## Checkpoint (2026-07-21): PR 100 review remediation
+
+All five unresolved PR 100 findings are addressed. Recorder status events are now accepted only
+from the currently installed service generation, so late stopped/recording events cannot overwrite
+the intentional games-only `Waiting` state after either game detection or a settings restart.
+Committing a waiting settings transition always advances the generation, including the no-sender
+race where a detector restart is already spawning. The frontend readiness handshake also replays
+the durable waiting status after its listeners exist, eliminating the startup-only lost event.
+
+The RAM sampler keeps the low-privilege `PROCESS_MEMORY_COUNTERS_EX2` fast path but falls back to
+the prior `VirtualQueryEx` / `QueryWorkingSetEx` resident-private-page walk when EX2 is unavailable
+on older supported Windows builds. Child processes request `PROCESS_VM_READ` only for that fallback.
+New runtime race, readiness replay, UI contract, and memory fallback regressions pass; the full
+workspace test suite and a fresh-cache warning-denied workspace Clippy pass are green.
+
+An independent follow-up review found one remaining non-blocking race in manual recorder start:
+the Waiting notification was emitted after releasing the runtime lock without re-checking state.
+`start_recording` now queries the durable Waiting state immediately before emitting, so a game that
+starts a service in that gap prevents the stale Waiting update. A structural regression protects
+the guard; workspace tests and fresh-cache warning-denied Clippy remain green.
+
+## Checkpoint (2026-07-21): elevation decision and privilege-invariant RAM meter
+
+The elevated-game warning now requires an explicit button choice. Backdrop clicks and Escape no
+longer dismiss it; `Restart as Administrator` and `Not Now` remain available, while the dialog can
+still disappear when the elevated game itself is no longer active.
+
+The apparent administrator-mode RAM jump was a measurement-permission bug rather than evidence of
+a duplicate Clipline process. The old sampler requested `PROCESS_VM_READ` and silently omitted
+sandboxed WebView2 children during a normal launch, then counted them once elevation granted the
+read. It now uses `K32GetProcessMemoryInfo`'s `PROCESS_MEMORY_COUNTERS_EX2.PrivateWorkingSetSize`
+through `PROCESS_QUERY_LIMITED_INFORMATION`. A live normal-integrity probe succeeded against the
+WebView2 renderer, so the same process-tree private working set is visible before and after an
+administrator restart. Focused memory and elevation-dialog regressions pass. The workspace suite
+passes apart from the VM-only live WGC frame test timing out twice, and a fresh-cache workspace
+Clippy pass is clean. That WGC timeout is unchanged capture-device behavior and does not exercise
+the modal or memory sampler.
+
+## Checkpoint (2026-07-20): recorder and review quality-of-life bundle
+
+Four requested workflow features are implemented. Settings > Games now has an opt-in `Pause
+recorder when no game is open` toggle, defaulting off for legacy and new settings. With automatic
+game detection enabled, the recorder remains armed in a distinct `Waiting` state without owning a
+capture/encode service; Save Replay is disabled until an enabled game appears, game entry starts a
+fresh buffer, and game exit stops the active run instead of falling back to desktop capture. The
+service generation guard also owns waiting notifications, so a concurrent manual stop cannot be
+overwritten by a stale policy transition.
+
+The elevated-game warning again offers an explicit `Restart as Administrator` action. Ordinary
+launches remain `asInvoker`, UAC cancellation keeps the normal process and retry UI alive, and a
+successful launch uses only the current executable plus an exact parent PID/creation-time handoff
+before the elevated child enters Tauri. This is a per-launch choice and the dialog warns that the
+rolling replay buffer resets.
+
+Successful trim/play exports now show an `Open clip` action next to the transient export status;
+the action opens the exact result already inserted into the library cache. The review transport
+also has fullscreen enter/exit controls backed by the WebView fullscreen API, with `F` toggling and
+Escape reserved for leaving fullscreen before the existing close-review shortcut.
+
+Focused settings, runtime-state, Windows handoff, player-core, and 82 UI-contract tests pass. The
+full workspace test suite passes, including the native device-aware suites, and fresh-cache app
+Clippy plus workspace Clippy pass with warnings denied. Native interaction acceptance remains for
+the four user-facing flows.
+
+## Checkpoint (2026-07-21): Nightly 0.1.37
+
+Nightly 0.1.37 is the first updater build containing PR #89's combined audit remediation and the
+follow-up capture, replay, cloud, and review fixes. The release is built from the synchronized
+`main` / `develop` promotion point after workspace tests, warning-denied Clippy, Windows and Ubuntu
+CI, RustSec, and manual replay/audio verification passed.
+
 ## Checkpoint (2026-07-21): second PR 89 review pass
 
 The presigned object-upload client now refuses every redirect, matching the authenticated/control

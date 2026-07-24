@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "clipline-app"
-version = "0.1.36"
+version = "0.1.40"
 dependencies = [
  "base64 0.22.1",
  "boa_engine",

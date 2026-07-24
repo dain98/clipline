@@ -14,6 +14,15 @@ pub enum CaptureDiagnostic {
         chunk_ms: u64,
         suppressed_since_last: u64,
     },
+    WasapiDeviceLost {
+        source: &'static str,
+        hresult: i32,
+        suppressed_since_last: u64,
+    },
+    WasapiDeviceRecovered {
+        source: &'static str,
+        outage_ms: u64,
+    },
 }
 
 impl fmt::Display for CaptureDiagnostic {
@@ -34,6 +43,18 @@ impl fmt::Display for CaptureDiagnostic {
             } => write!(
                 formatter,
                 "capture event=wasapi_late_audio_reanchored source={source} correction_ms={correction_ms} total_correction_ms={total_correction_ms} chunk_ms={chunk_ms} suppressed_since_last={suppressed_since_last} action=preserve_live_audio"
+            ),
+            Self::WasapiDeviceLost {
+                source,
+                hresult,
+                suppressed_since_last,
+            } => write!(
+                formatter,
+                "capture event=wasapi_device_lost source={source} hresult=0x{hresult:08x} suppressed_since_last={suppressed_since_last} action=silence_until_device_returns"
+            ),
+            Self::WasapiDeviceRecovered { source, outage_ms } => write!(
+                formatter,
+                "capture event=wasapi_device_recovered source={source} outage_ms={outage_ms} action=resume_live_capture"
             ),
         }
     }
@@ -82,5 +103,38 @@ impl DiagnosticRateLimiter {
         }
         self.suppressed = self.suppressed.saturating_add(1);
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_loss_display_reports_source_hresult_and_action() {
+        let event = CaptureDiagnostic::WasapiDeviceLost {
+            source: "output",
+            hresult: 0x88890004u32 as i32,
+            suppressed_since_last: 2,
+        };
+        let text = event.to_string();
+        assert!(text.contains("event=wasapi_device_lost"));
+        assert!(text.contains("source=output"));
+        assert!(text.contains("hresult=0x88890004"));
+        assert!(text.contains("suppressed_since_last=2"));
+        assert!(text.contains("action="));
+    }
+
+    #[test]
+    fn device_recovery_display_reports_outage_and_action() {
+        let event = CaptureDiagnostic::WasapiDeviceRecovered {
+            source: "microphone",
+            outage_ms: 12_500,
+        };
+        let text = event.to_string();
+        assert!(text.contains("event=wasapi_device_recovered"));
+        assert!(text.contains("source=microphone"));
+        assert!(text.contains("outage_ms=12500"));
+        assert!(text.contains("action="));
     }
 }

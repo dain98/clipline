@@ -34,8 +34,7 @@ static SECRET_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     .expect("secret redaction regex")
 });
 static AUTH_SCHEME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b(bearer)\s+[^\s"',;}]+"#)
-        .expect("authorization scheme redaction regex")
+    Regex::new(r#"(?i)\b(bearer)\s+[^\s"',;}]+"#).expect("authorization scheme redaction regex")
 });
 static EMAIL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b").expect("email redaction regex")
@@ -724,6 +723,7 @@ fn runtime_snapshot(runtime: &RuntimeState) -> serde_json::Value {
                 "last_recorder_status": inner.last_recorder_status.as_ref().map(|status| {
                     serde_json::json!({
                         "recording": status.recording,
+                        "waiting_for_game": status.waiting_for_game,
                         "segments": status.segments,
                         "buffered_s": status.buffered_s,
                         "buffered_mb": status.buffered_mb,

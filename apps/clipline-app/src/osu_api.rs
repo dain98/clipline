@@ -364,7 +364,7 @@ async fn fetch_recent_scores(
                     );
                     scores.push(score);
                 }
-            Err(e) => tracing::warn!(event = "osu_recent_score_skipped", error = %e),
+                Err(e) => tracing::warn!(event = "osu_recent_score_skipped", error = %e),
             }
         }
         offset += RECENT_LIMIT;

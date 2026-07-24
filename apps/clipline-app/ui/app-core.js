@@ -123,6 +123,8 @@ var POSTER_UNAVAILABLE = Symbol("poster unavailable");
 var currentSettings = null;
 var settingsDraft = null;
 var recordingActive = false;
+var recordingRequested = false;
+var recorderWaitingForGame = false;
 var fullSessionRecordingActive = false;
 var displays = [];
 var displaysLoaded = false;
@@ -142,6 +144,7 @@ var selectedDetectedGameIds = new Set();
 var detectedGamesScanId = 0;
 var activeDetectedGame = null;
 var warnedElevatedGameProcesses = new Set();
+var elevationRestartInFlight = false;
 var captureTargetDirty = false;
 // Codecs WebView2 can decode in the review player (H.264 always; HEVC/AV1
 // probed at startup). Drives the playback caveat and the recorder's
@@ -169,6 +172,7 @@ var reviewAudioDriftTimer = 0;
 var renamePending = false;
 var DECK_STATUS_TOAST_MS = 3200;
 var deckStatusToastTimer = 0;
+var deckStatusActionHandler = null;
 var NOTICE_TOAST_MS = 2600;
 var noticeToastTimer = 0;
 var micTestRunning = false;
@@ -200,15 +204,31 @@ var MARKER_LEAD_S = 1;
 function setDeckStatus(message, { transient = false } = {}) {
   window.clearTimeout(deckStatusToastTimer);
   deckStatusToastTimer = 0;
+  setDeckStatusAction("", null);
   $("deck-status").textContent = message;
   if (!transient || !message) return;
 
   deckStatusToastTimer = window.setTimeout(() => {
     if ($("deck-status").textContent === message) {
       $("deck-status").textContent = "";
+      setDeckStatusAction("", null);
     }
     deckStatusToastTimer = 0;
   }, DECK_STATUS_TOAST_MS);
+}
+
+function setDeckStatusAction(label, handler) {
+  deckStatusActionHandler = typeof handler === "function" ? handler : null;
+  const button = $("deck-status-action");
+  button.textContent = deckStatusActionHandler ? label : "";
+  button.hidden = !deckStatusActionHandler;
+}
+
+function runDeckStatusAction() {
+  const action = deckStatusActionHandler;
+  if (!action) return;
+  setDeckStatus("");
+  action();
 }
 
 function setNotice(message, { transient = false } = {}) {

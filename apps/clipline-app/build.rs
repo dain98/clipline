@@ -8,9 +8,7 @@ fn main() {
         configured_endpoint, OFFICIAL_BUG_REPORT_ENDPOINT,
         "CLIPLINE_BUG_REPORT_ENDPOINT must use Clipline's official private intake"
     );
-    println!(
-        "cargo:rustc-env=CLIPLINE_BUG_REPORT_ENDPOINT={OFFICIAL_BUG_REPORT_ENDPOINT}"
-    );
+    println!("cargo:rustc-env=CLIPLINE_BUG_REPORT_ENDPOINT={OFFICIAL_BUG_REPORT_ENDPOINT}");
 
     // The Tauri context only exists for Windows builds (see Cargo.toml).
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {

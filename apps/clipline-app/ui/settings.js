@@ -185,6 +185,7 @@ function fillSettings(s) {
   captureTargetDirty = false;
   renderCaptureTargetSelect();
   $("set-games-auto-detect").checked = !!games.auto_detect;
+  $("set-games-pause-when-empty").checked = !!games.pause_when_no_game;
   $("set-output-enabled").checked = !!audio.output_enabled;
   $("set-audio-split-output").checked = audio.split_output_by_process === true;
   $("set-output-volume").value = String(Number.isFinite(audio.output_volume) ? audio.output_volume : 1);
@@ -261,6 +262,7 @@ function readSettings() {
       : capture.capture_region,
     games: {
       auto_detect: $("set-games-auto-detect").checked,
+      pause_when_no_game: $("set-games-pause-when-empty").checked,
       plugins: readGamePluginSettings(),
       custom_games: customGames.map((game) => ({ ...game })),
     },
@@ -397,6 +399,7 @@ function defaultReplayStorageSettings() {
 function defaultGameSettings() {
   return {
     auto_detect: true,
+    pause_when_no_game: false,
     plugins: {},
     custom_games: [],
   };
@@ -1600,10 +1603,19 @@ function updateCaptureStatus() {
   const recordingTitle = activeEncoderLabel
     ? `Stop recording · ${activeEncoderLabel}`
     : "Stop recording";
-  $("rail-status").classList.toggle("stopped", !recordingActive);
-  $("rail-status").setAttribute("aria-pressed", String(recordingActive));
-  $("rail-status").title = recordingActive ? recordingTitle : `Start ${source} recording`;
-  $("rail-status-text").textContent = recordingActive ? "Rec" : "Off";
+  $("rail-status").classList.toggle("stopped", !recordingRequested);
+  $("rail-status").classList.toggle("waiting", recorderWaitingForGame);
+  $("rail-status").setAttribute("aria-pressed", String(recordingRequested));
+  $("rail-status").title = recordingActive
+    ? recordingTitle
+    : recorderWaitingForGame
+      ? "Stop waiting for a game"
+      : `Start ${source} recording`;
+  $("rail-status-text").textContent = recordingActive
+    ? "Rec"
+    : recorderWaitingForGame
+      ? "Waiting"
+      : "Off";
   $("rail-save").disabled = !recordingActive;
   renderRailGame();
 }
@@ -1635,10 +1647,14 @@ function fallbackCaptureSourceLabel(settings) {
 
 
 async function toggleRecording() {
-  const next = !recordingActive;
+  const next = !recordingRequested;
   $("rail-status").disabled = true;
   try {
-    recordingActive = await invoke("set_recording", { recording: next });
+    recordingRequested = await invoke("set_recording", { recording: next });
+    if (!recordingRequested) {
+      recordingActive = false;
+      recorderWaitingForGame = false;
+    }
     updateCaptureStatus();
   } catch (e) {
     $("error").textContent = e;
@@ -2209,11 +2225,13 @@ async function addCustomGameFromWindow(win) {
 }
 
 function updateGameDetectionStatus() {
+  const detectionEnabled = $("set-games-auto-detect").checked;
+  $("set-games-pause-when-empty").disabled = !detectionEnabled;
   if (activeDetectedGame && activeDetectedGame.active) {
     $("game-detection-status").textContent =
       `Active: ${activeDetectedGame.name} · ${activeDetectedGame.window_title}`;
   } else {
-    if (!$("set-games-auto-detect").checked) {
+    if (!detectionEnabled) {
       $("game-detection-status").textContent = "Game detection is off.";
       return;
     }

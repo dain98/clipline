@@ -618,6 +618,10 @@ label span { white-space: nowrap; }
   color: var(--muted);
 }
 
+#rail-status.waiting {
+  color: var(--accent);
+}
+
 .rail-label {
   max-width: 100%;
   overflow: hidden;
@@ -715,6 +719,10 @@ label span { white-space: nowrap; }
 .dot.on {
   background: var(--rec);
   box-shadow: 0 0 0 2px rgba(229, 72, 77, 0.18);
+}
+.dot.waiting {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.18);
 }
 
 #notice { color: var(--ok); font-size: 12px; min-height: 17px; margin-top: 6px; }
@@ -3113,12 +3121,22 @@ button.primary.settings-save-glow {
   overflow: hidden;
   background: #000;
 }
+#stage-frame:fullscreen {
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none;
+  max-height: none;
+}
+#stage-frame:fullscreen::backdrop { background: #000; }
 #video {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: contain;
 }
+#fullscreen-toggle .i-fullscreen-exit { display: none; }
+#fullscreen-toggle.active .i-fullscreen-enter { display: none; }
+#fullscreen-toggle.active .i-fullscreen-exit { display: block; }
 .stage-note {
   position: absolute;
   left: 10px;
@@ -3772,6 +3790,16 @@ button.primary.settings-save-glow {
   margin-left: auto;
   align-self: center;
 }
+.deck-status-action {
+  flex: none;
+  min-height: 26px;
+  padding: 4px 9px;
+  border-color: rgba(var(--ok-rgb), 0.5);
+  color: var(--ok);
+  background: rgba(var(--ok-rgb), 0.08);
+  font-size: 11px;
+}
+.deck-status-action[hidden] { display: none; }
 
 /* ---- keyboard shortcuts guide ---- */
 .keys-dialog {
