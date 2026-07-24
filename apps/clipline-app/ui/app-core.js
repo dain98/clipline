@@ -4,6 +4,23 @@ var { invoke, convertFileSrc } = window.__TAURI__.core;
 var { listen } = window.__TAURI__.event;
 var appWindow = window.__TAURI__.window.getCurrentWindow();
 var $ = (id) => document.getElementById(id);
+function reportFrontendDiagnostic(level, event, error) {
+  const value = error instanceof Error ? error : new Error(String(error ?? "unknown frontend error"));
+  invoke("log_frontend_event", {
+    input: {
+      level,
+      event,
+      message: String(value.message || value).slice(0, 8192),
+      stack: String(value.stack || "").slice(0, 16384),
+    },
+  }).catch(() => {});
+}
+window.addEventListener("error", (event) => {
+  reportFrontendDiagnostic("error", "window_error", event.error || event.message);
+});
+window.addEventListener("unhandledrejection", (event) => {
+  reportFrontendDiagnostic("error", "unhandled_rejection", event.reason);
+});
 var afterNextPaint = () => new Promise((resolve) => {
   requestAnimationFrame(() => requestAnimationFrame(resolve));
 });

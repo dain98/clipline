@@ -74,6 +74,9 @@ Variables:
 | `SIGNPATH_SIGNING_POLICY_SLUG` | `release-signing` |
 | `SIGNPATH_ARTIFACT_CONFIG_SLUG` | `nsis-installer` |
 
+The private diagnostic destination is not a repository variable. Every build is pinned to
+`https://support.dain.cafe/api/v1/reports`, and the build rejects attempts to replace it.
+
 ## Activating the workflow
 
 The pipeline ships as **`docs/release.workflow.yml`** rather than under

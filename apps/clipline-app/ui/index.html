@@ -311,18 +311,19 @@
           <h1 id="settings-title">Settings</h1>
         </header>
 
-        <nav id="settings-tabs" class="settings-tabs">
-          <button class="tab active" data-tab="general">General</button>
-          <button class="tab" data-tab="capture">Capture</button>
-          <button class="tab" data-tab="recording">Recording</button>
-          <button class="tab" data-tab="games">Games</button>
-          <button class="tab" data-tab="storage">Storage</button>
-          <button class="tab" data-tab="cloud">Cloud</button>
-          <button class="tab" data-tab="hotkeys">Hotkeys</button>
+        <nav id="settings-tabs" class="settings-tabs" role="tablist" aria-label="Settings sections">
+          <button id="settings-tab-general" class="tab active" role="tab" aria-selected="true" aria-controls="settings-panel-general" data-tab="general" tabindex="0">General</button>
+          <button id="settings-tab-capture" class="tab" role="tab" aria-selected="false" aria-controls="settings-panel-capture" data-tab="capture" tabindex="-1">Capture</button>
+          <button id="settings-tab-recording" class="tab" role="tab" aria-selected="false" aria-controls="settings-panel-recording" data-tab="recording" tabindex="-1">Recording</button>
+          <button id="settings-tab-games" class="tab" role="tab" aria-selected="false" aria-controls="settings-panel-games" data-tab="games" tabindex="-1">Games</button>
+          <button id="settings-tab-storage" class="tab" role="tab" aria-selected="false" aria-controls="settings-panel-storage" data-tab="storage" tabindex="-1">Storage</button>
+          <button id="settings-tab-cloud" class="tab" role="tab" aria-selected="false" aria-controls="settings-panel-cloud" data-tab="cloud" tabindex="-1">Cloud</button>
+          <button id="settings-tab-hotkeys" class="tab" role="tab" aria-selected="false" aria-controls="settings-panel-hotkeys" data-tab="hotkeys" tabindex="-1">Hotkeys</button>
+          <button id="settings-tab-support" class="tab" role="tab" aria-selected="false" aria-controls="settings-panel-support" data-tab="support" tabindex="-1">Support</button>
         </nav>
 
         <div class="settings-body">
-          <div class="settings-section" data-section="general">
+          <div class="settings-section" id="settings-panel-general" data-section="general" role="tabpanel" aria-labelledby="settings-tab-general">
             <div class="setting-row" data-settings-key="open_on_startup">
               <div class="setting-info">
                 <strong>Open on startup</strong>
@@ -389,7 +390,7 @@
             </div>
           </div>
 
-          <div class="settings-section" data-section="capture" hidden>
+          <div class="settings-section" id="settings-panel-capture" data-section="capture" role="tabpanel" aria-labelledby="settings-tab-capture" hidden>
             <div class="setting-row" data-settings-key="capture_mode capture_region window_title">
               <div class="setting-info">
                 <strong>Capture target</strong>
@@ -505,7 +506,7 @@
             </div>
           </div>
 
-          <div class="settings-section" data-section="games" hidden>
+          <div class="settings-section" id="settings-panel-games" data-section="games" role="tabpanel" aria-labelledby="settings-tab-games" hidden>
             <div class="setting-row" data-settings-key="games.auto_detect">
               <div class="setting-info">
                 <strong>Game detection</strong>
@@ -550,7 +551,7 @@
             </div>
           </div>
 
-          <div class="settings-section" data-section="recording" hidden>
+          <div class="settings-section" id="settings-panel-recording" data-section="recording" role="tabpanel" aria-labelledby="settings-tab-recording" hidden>
             <input id="set-buffer" type="hidden" value="75" />
             <div class="recording-mode-bar">
               <div class="segmented-control recording-mode-control" role="radiogroup" aria-label="Recording settings mode">
@@ -673,7 +674,7 @@
             </div>
           </div>
 
-          <div class="settings-section" data-section="storage" hidden>
+          <div class="settings-section" id="settings-panel-storage" data-section="storage" role="tabpanel" aria-labelledby="settings-tab-storage" hidden>
             <div class="setting-row" data-settings-key="media_dir">
               <div class="setting-info">
                 <strong>Media folder</strong>
@@ -727,7 +728,7 @@
             </div>
           </div>
 
-          <div class="settings-section" data-section="cloud" hidden>
+          <div class="settings-section" id="settings-panel-cloud" data-section="cloud" role="tabpanel" aria-labelledby="settings-tab-cloud" hidden>
             <div class="setting-row" data-settings-key="cloud.credential_target cloud.connected_user_id">
               <div class="setting-info">
                 <strong>Connection</strong>
@@ -786,7 +787,7 @@
             </div>
           </div>
 
-          <div class="settings-section" data-section="hotkeys" hidden>
+          <div class="settings-section" id="settings-panel-hotkeys" data-section="hotkeys" role="tabpanel" aria-labelledby="settings-tab-hotkeys" hidden>
             <div class="setting-row" data-settings-key="hotkey hotkey_secondary">
               <div class="setting-info">
                 <strong>Save Replay</strong>
@@ -800,6 +801,61 @@
                 <span id="hotkey-status" class="hint">Click a field, then press F1-F11/F13-F24, middle mouse, Mouse4, Mouse5, or a modified keyboard key. Esc clears the keybind.</span>
               </div>
             </div>
+          </div>
+
+          <div class="settings-section support-section" id="settings-panel-support" data-section="support" role="tabpanel" aria-labelledby="settings-tab-support" hidden>
+            <div class="support-intro">
+              <strong>Report a Clipline problem privately</strong>
+              <span>Describe what happened, review the diagnostic package, then explicitly send it to the Clipline developer.</span>
+            </div>
+            <div class="support-description-heading">
+              <label class="support-description-label" for="support-description">What went wrong?</label>
+              <span id="support-description-count" class="hint">0 / 4,000</span>
+            </div>
+            <textarea
+              id="support-description"
+              minlength="10"
+              maxlength="4000"
+              rows="6"
+              spellcheck="true"
+              placeholder="Tell me what you were doing, what you expected, and what happened instead."
+            ></textarea>
+            <div class="support-disclosure">
+              <strong>Included</strong>
+              <span>Bounded app and frontend logs, panic backtraces, app version, Windows/WebView2 and capture hardware information, and settings with paths, device IDs, account details, and credentials removed.</span>
+              <strong>Never included</strong>
+              <span>Recordings, clips, media filenames, screenshots, raw settings.json, directory listings, credentials, account identities, or automatic telemetry.</span>
+              <span>Your description is sent exactly as entered. The private report expires and is deleted after 30 days.</span>
+            </div>
+            <div class="support-actions">
+              <button id="support-prepare" type="button" class="primary">Prepare Report</button>
+              <button id="support-open-logs" type="button">Open Diagnostics Folder</button>
+            </div>
+            <span id="support-diagnostics-location" class="hint">Diagnostics folder: loading...</span>
+            <span id="support-upload-availability" class="hint" hidden></span>
+            <div id="support-preparing" class="support-preparing" tabindex="-1" hidden>
+              <span>Preparing the sanitized diagnostic package...</span>
+            </div>
+            <div id="support-preview" class="support-preview" tabindex="-1" hidden>
+              <strong>Ready to send</strong>
+              <span id="support-preview-summary"></span>
+              <ul id="support-preview-files"></ul>
+              <div class="support-actions">
+                <button id="support-send" type="button" class="primary">Send Private Report</button>
+                <button id="support-save-copy" type="button">Save a Copy</button>
+                <button id="support-discard" type="button">Discard</button>
+              </div>
+            </div>
+            <div id="support-progress" class="support-progress" tabindex="-1" hidden>
+              <span>Uploading the private report...</span>
+              <button id="support-cancel" type="button">Cancel</button>
+            </div>
+            <div id="support-success" class="support-success" tabindex="-1" hidden>
+              <strong>Report sent</strong>
+              <span id="support-success-detail"></span>
+              <button id="support-copy-id" type="button">Copy Report ID</button>
+            </div>
+            <span id="support-status" class="hint" role="status"></span>
           </div>
         </div>
 
@@ -1011,11 +1067,13 @@
   <script src="presentation-core.js"></script>
   <script src="player-core.js"></script>
   <script src="cloud-core.js"></script>
+  <script src="support-core.js"></script>
   <script src="app-core.js"></script>
   <script src="settings.js"></script>
   <script src="library.js"></script>
   <script src="cloud.js"></script>
   <script src="review-player.js"></script>
+  <script src="support.js"></script>
   <script type="module" src="bootstrap.mjs"></script>
 </body>
 </html>

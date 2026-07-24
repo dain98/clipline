@@ -76,6 +76,15 @@ enum LiveBackend {
     Dxgi(DxgiDuplicationCapture),
 }
 
+impl LiveBackend {
+    fn diagnostic_label(&self) -> &'static str {
+        match self {
+            Self::Wgc(_) => "windows_graphics_capture",
+            Self::Dxgi(_) => "desktop_duplication",
+        }
+    }
+}
+
 impl TimedFrameSource for LiveBackend {
     fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
         match self {
@@ -497,6 +506,9 @@ pub enum Event {
         /// Active encoder label (e.g. "AMD AMF · H.264"); empty when stopped.
         #[serde(default)]
         encoder: String,
+        /// Actual capture backend after any automatic selection or fallback.
+        #[serde(default)]
+        capture_backend: String,
     },
     Saved {
         path: String,
@@ -686,9 +698,10 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build the capture engine and pull its first frame (which fixes the capture
 /// size). DXGI Desktop Duplication is attempted only when the user explicitly
-/// selected it for a display/region source; any DXGI failure — at construction
-/// or on the first frame — is logged to stderr and silently falls back to WGC,
-/// so recording always starts (the user chose silent fallback over a warning).
+/// selected it for a display/region source; any DXGI failure at construction
+/// or on the first frame is logged as a diagnostic and silently falls back to
+/// WGC, so recording always starts (the user chose silent fallback over a
+/// warning).
 fn open_screen_capture(
     device: &ID3D11Device,
     clock: RelativeClock,
@@ -704,8 +717,10 @@ fn open_screen_capture(
     {
         match open_dxgi(device, clock, source, events) {
             Ok(pair) => return Ok(pair),
-            Err(e) => eprintln!(
-                "clipline: Desktop Duplication unavailable ({e}); using Windows Graphics Capture"
+            Err(e) => tracing::warn!(
+                event = "desktop_duplication_unavailable",
+                error = %e,
+                fallback = "windows_graphics_capture"
             ),
         }
     }
@@ -819,6 +834,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         opts.capture_backend,
         events,
     )?;
+    let capture_backend_status = cap.diagnostic_label();
     // Output resolution caps scale down while preserving the captured aspect ratio.
     let FrameData::Gpu(tex) = &first.data else {
         return Err("expected a GPU frame".into());
@@ -899,7 +915,13 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         opts.active_game.as_ref(),
         events,
     );
-    send_recording_status(events, &rec, &full_session, &encoder_status);
+    send_recording_status(
+        events,
+        &rec,
+        &full_session,
+        &encoder_status,
+        capture_backend_status,
+    );
 
     loop {
         match rec.step_with_frame(|_frame| {}) {
@@ -954,7 +976,13 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
 
         if last_status.elapsed() >= Duration::from_secs(1) {
             last_status = Instant::now();
-            send_recording_status(events, &rec, &full_session, &encoder_status);
+            send_recording_status(
+                events,
+                &rec,
+                &full_session,
+                &encoder_status,
+                capture_backend_status,
+            );
             if replay_cache_dir.is_some() {
                 if let Err(primary) = ensure_replay_cache_free_space(&opts) {
                     return Err(finalize_runtime_failure(primary, || {
@@ -1658,6 +1686,7 @@ fn send_stopped(events: &Sender<Event>) {
         buffered_mb: 0.0,
         full_session: false,
         encoder: String::new(),
+        capture_backend: String::new(),
     });
 }
 
@@ -1666,6 +1695,7 @@ fn send_recording_status(
     rec: &LiveRecorder,
     full_session: &Option<FullSessionRecording>,
     encoder_status: &str,
+    capture_backend_status: &str,
 ) {
     let _ = events.send(Event::Status {
         recording: true,
@@ -1675,6 +1705,7 @@ fn send_recording_status(
         buffered_mb: rec.ring_bytes() as f64 / (1024.0 * 1024.0),
         full_session: full_session.is_some(),
         encoder: encoder_status.to_string(),
+        capture_backend: capture_backend_status.to_string(),
     });
 }
 
@@ -1763,10 +1794,10 @@ fn write_session_game_meta(session_dir: &Path, active_game: Option<&ActiveGame>)
     match serde_json::to_string(&doc) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&meta_path, json) {
-                eprintln!("write session game meta {meta_path:?}: {e}");
+                tracing::warn!(event = "session_game_metadata_write_failed", error = %e);
             }
         }
-        Err(e) => eprintln!("serialize session game meta: {e}"),
+        Err(e) => tracing::warn!(event = "session_game_metadata_serialize_failed", error = %e),
     }
 }
 
@@ -2364,7 +2395,7 @@ fn warn_capture_display_recovery(
     if let Some(message) =
         capture_display_recovery_warning(region, display, recovered_display, recovered_crop)
     {
-        eprintln!("clipline: {message}");
+        tracing::warn!(event = "capture_display_recovered", message = %message);
         warn_user(events, message);
     }
 }

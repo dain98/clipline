@@ -13,11 +13,13 @@ fn index_html() -> String {
 const APP_UI_JS: &[&str] = &[
     "presentation-core.js",
     "cloud-core.js",
+    "support-core.js",
     "app-core.js",
     "settings.js",
     "library.js",
     "cloud.js",
     "review-player.js",
+    "support.js",
     "main.js",
 ];
 
@@ -3857,5 +3859,167 @@ fn cloud_byte_progress_does_not_unconditionally_rebuild_the_gallery() {
         handler.matches("renderClips()").count(),
         1,
         "the progress handler must not keep an unconditional gallery rebuild"
+    );
+}
+
+#[test]
+fn support_reports_require_preview_before_private_submission() {
+    let html = index_html();
+    let support = read_ui_js("support.js");
+    let core = read_ui_js("support-core.js");
+    let css = styles_css();
+
+    for required in [
+        "data-tab=\"support\"",
+        "id=\"support-description\"",
+        "id=\"support-prepare\"",
+        "id=\"support-preparing\"",
+        "id=\"support-preview\"",
+        "id=\"support-send\"",
+        "id=\"support-save-copy\"",
+        "id=\"support-discard\"",
+        "id=\"support-cancel\"",
+        "id=\"support-copy-id\"",
+        "id=\"support-diagnostics-location\"",
+        "private report expires and is deleted after 30 days",
+        "Recordings, clips, media filenames, screenshots, raw settings.json",
+    ] {
+        assert!(
+            html.contains(required),
+            "Support UI must disclose and expose {required}"
+        );
+    }
+    assert_eq!(
+        css_decl_value(css_rule_body(&css, ".support-section"), "display"),
+        Some("grid"),
+        "Support content must be a real grid so its spacing applies"
+    );
+    for selector in [
+        ".support-preparing[hidden]",
+        ".support-preview[hidden]",
+        ".support-progress[hidden]",
+        ".support-success[hidden]",
+    ] {
+        assert_eq!(
+            css_decl_value(css_rule_body(&css, selector), "display"),
+            Some("none"),
+            "{selector} must override the visible Support panel display rule"
+        );
+    }
+    assert!(
+        core.contains("globalThis.SupportCore")
+            && core.contains("function transitionSupportPhase")
+            && core.contains("function supportView"),
+        "Support workflow visibility must come from a DOM-free phase model"
+    );
+    let prepare = support
+        .find("invoke(\"prepare_bug_report\"")
+        .expect("support preparation command");
+    let submit = support
+        .find("invoke(\"submit_bug_report\"")
+        .expect("support submission command");
+    assert!(
+        prepare < submit && support.contains("Review the included file list"),
+        "submission must be a distinct action after preparing and previewing the bundle"
+    );
+    assert!(
+        support.contains("const description = $(\"support-description\").value;")
+            && !support.contains("$(\"support-description\").value.trim()"),
+        "the problem description must be transmitted exactly as entered"
+    );
+    assert!(
+        support.contains("invoke(\"save_prepared_bug_report\"")
+            && support.contains("invoke(\"discard_bug_report\"")
+            && support.contains("invoke(\"cancel_bug_report\"")
+            && support.contains("invoke(\"diagnostics_location\"")
+            && support.contains("invoke(\"support_capabilities\""),
+        "prepared reports must support offline save, discard, and upload cancellation"
+    );
+    assert!(
+        support.contains("renderSupportState(")
+            && support.contains("upload_available")
+            && support.contains("support-description-count"),
+        "Support UI must render phases centrally and disclose development upload availability"
+    );
+    assert!(
+        main_js().contains("function syncSettingsFooterForTab")
+            && main_js().contains("Save Other Changes"),
+        "the Support tab must not present an irrelevant Save Settings action"
+    );
+}
+
+#[test]
+fn settings_tabs_and_support_phases_are_accessible() {
+    let html = index_html();
+    let main = main_js();
+    let support = read_ui_js("support.js");
+
+    assert!(
+        html.contains(r#"id="settings-tabs" class="settings-tabs" role="tablist""#),
+        "settings navigation must expose tablist semantics"
+    );
+    for (name, selected) in [
+        ("general", "true"),
+        ("capture", "false"),
+        ("recording", "false"),
+        ("games", "false"),
+        ("storage", "false"),
+        ("cloud", "false"),
+        ("hotkeys", "false"),
+        ("support", "false"),
+    ] {
+        assert!(
+            html.contains(&format!(
+                r#"id="settings-tab-{name}" class="tab{}" role="tab" aria-selected="{selected}" aria-controls="settings-panel-{name}" data-tab="{name}""#,
+                if name == "general" { " active" } else { "" }
+            )),
+            "settings tab {name} must identify and control its panel"
+        );
+        let panel_id = format!(r#"id="settings-panel-{name}""#);
+        let panel_start = html.find(&panel_id).expect("settings panel id");
+        let panel_tag_start = html[..panel_start]
+            .rfind("<div")
+            .expect("settings panel tag");
+        let panel_tag_end = html[panel_start..]
+            .find('>')
+            .map(|offset| panel_start + offset)
+            .expect("settings panel tag close");
+        let panel_tag = &html[panel_tag_start..=panel_tag_end];
+        assert_eq!(tag_attr(panel_tag, "role"), Some("tabpanel"));
+        let labelled_by = format!("settings-tab-{name}");
+        assert_eq!(
+            tag_attr(panel_tag, "aria-labelledby"),
+            Some(labelled_by.as_str())
+        );
+    }
+    assert!(
+        main.contains(r#"setAttribute("aria-selected", String(t === tab))"#)
+            && main.contains(r#"setAttribute("tabindex", t === tab ? "0" : "-1")"#),
+        "tab activation must synchronize keyboard and selected state"
+    );
+    assert!(
+        main.contains(r#"$("settings-tabs").addEventListener("keydown""#)
+            && main.contains("\"ArrowLeft\"")
+            && main.contains("\"ArrowRight\"")
+            && main.contains("\"Home\"")
+            && main.contains("\"End\"")
+            && main.contains("activateSettingsTab(nextTab, { focus: true })"),
+        "roving settings tabs must support the ARIA keyboard navigation pattern"
+    );
+    assert!(
+        support.contains("focusSupportPhase")
+            && support.contains(r#"target.focus({ preventScroll: true })"#),
+        "Support phase changes must move focus to the newly visible result"
+    );
+}
+
+#[test]
+fn frontend_failures_are_forwarded_to_bounded_native_diagnostics() {
+    let core = read_ui_js("app-core.js");
+    assert!(
+        core.contains("window.addEventListener(\"error\"")
+            && core.contains("window.addEventListener(\"unhandledrejection\"")
+            && core.contains("invoke(\"log_frontend_event\""),
+        "global JavaScript failures must be sent to the validated native diagnostic command"
     );
 }

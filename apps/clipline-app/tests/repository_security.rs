@@ -588,7 +588,8 @@ fn large_application_surfaces_delegate_to_named_domain_owners() {
         fs::read_to_string(root.join("apps/clipline-app/src/cloud.rs")).expect("read cloud shell");
 
     for relative in [
-        "apps/clipline-app/src/app/diagnostic_log.rs",
+        "apps/clipline-app/src/app/diagnostics.rs",
+        "apps/clipline-app/src/app/support.rs",
         "apps/clipline-app/src/service/media_root.rs",
         "apps/clipline-app/src/library/naming.rs",
         "apps/clipline-app/src/cloud/cache_identity.rs",
@@ -598,7 +599,11 @@ fn large_application_surfaces_delegate_to_named_domain_owners() {
             "missing domain owner {relative}"
         );
     }
-    assert!(app.contains("mod diagnostic_log;") && !app.contains("struct DiagnosticLogWriter"));
+    assert!(
+        app.contains("mod diagnostics;")
+            && app.contains("mod support;")
+            && !app.contains("struct RollingFileWriter")
+    );
     assert!(
         service.contains("mod media_root;") && !service.contains("static MEDIA_ROOT_PROBE_COUNTER")
     );
@@ -620,4 +625,29 @@ fn large_application_surfaces_delegate_to_named_domain_owners() {
         bootstrap.contains("import { PlayerCore }") && bootstrap.contains("import { CloudCore }")
     );
     assert!(index.contains("<script type=\"module\" src=\"bootstrap.mjs\"></script>"));
+}
+
+#[test]
+fn private_reports_have_one_immutable_official_destination() {
+    let root = workspace_root();
+    let build =
+        fs::read_to_string(root.join("apps/clipline-app/build.rs")).expect("read app build script");
+    let support = fs::read_to_string(root.join("apps/clipline-app/src/app/support.rs"))
+        .expect("read Support implementation");
+    let release = fs::read_to_string(root.join("docs/release.workflow.yml"))
+        .expect("read release workflow template");
+    let endpoint = "https://support.dain.cafe/api/v1/reports";
+
+    assert!(build.contains(endpoint));
+    assert!(build.contains("OFFICIAL_BUG_REPORT_ENDPOINT"));
+    assert!(build.contains("cargo:rustc-env=CLIPLINE_BUG_REPORT_ENDPOINT"));
+    assert!(
+        !support.contains(".join(\"api/v1/reports\")"),
+        "the configured value is already the complete intake URL"
+    );
+    assert!(release.contains(&format!("CLIPLINE_BUG_REPORT_ENDPOINT: {endpoint}")));
+    assert!(
+        !release.contains("vars.CLIPLINE_BUG_REPORT_ENDPOINT"),
+        "release builds must not redirect private reports through a mutable repository variable"
+    );
 }

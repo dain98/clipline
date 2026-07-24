@@ -2902,6 +2902,44 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 - `ddoc.md` Caveats section lists every externally-verified Windows API claim with nuance —
   check it before trusting API behavior.
 
+## Checkpoint (2026-07-23): private bug reports and structured diagnostics
+
+Clipline now initializes always-on structured JSONL diagnostics before settings and recorder
+startup. First-party targets log at debug and dependencies at warn; a dedicated lossy 2,048-record
+writer queue keeps capture work off disk I/O. Records are bounded to 16 KiB, rotate through five
+4 MiB generations, expire after seven days, include session/process/thread/span identity, and
+report dropped-event counts. A non-lossy writer command provides the bundle snapshot barrier.
+Early panic capture writes a separately bounded forced backtrace, and release CI retains private
+PDB symbols for 90 days.
+
+Settings has a Support tab with a 10–4,000 character exact description, explicit disclosure,
+prepare/file-and-size preview, separate send confirmation, cancel/retry/save/discard states, and
+copyable private report ID. JavaScript errors and unhandled rejections enter the bounded native
+diagnostic route. Support bundles contain only allowlisted structured/legacy/panic logs plus
+manifest, system, safe-settings, and runtime JSON; logging-site hygiene and a second stable-alias
+export redactor exclude paths, account/device identity, credentials, emails, and URL queries.
+Recordings, screenshots, filenames, directory listings, raw settings, and Cloud/osu! secrets are
+never bundled. The tray can open the actual diagnostics folder without the WebView.
+
+The Support workflow now renders from one explicit `idle`/`preparing`/`prepared`/`uploading`/
+`success` phase model. Its transient panels must keep explicit `[hidden] { display: none; }`
+overrides because their grid display rules otherwise defeat WebView2's `hidden` presentation.
+The description locks after preparation and upload failure/cancellation returns to the same
+preview. Every build pins private submission to `https://support.dain.cafe/api/v1/reports`; build
+configuration rejects attempts to substitute another destination. On Support, the settings footer
+hides Save unless another tab is dirty. DOM-free phase tests plus CSS contracts guard the state
+and visibility invariants.
+
+The official intake lives in the separate sibling `clipline-support` repository. It streams
+anonymous multipart uploads into bounded temporary files, validates ZIP central-directory and
+manifest/hash constraints without filesystem extraction, uses SQLite/WAL plus private
+S3-compatible encrypted objects, applies rotating HMAC source/global/storage quotas, retries
+30-day cleanup in object-first order, backs up SQLite daily, and exposes only a server-rendered
+GitHub OAuth/PKCE inbox for one immutable numeric administrator ID with server sessions, CSRF,
+escaping, CSP, opaque downloads, notes/status, and immediate deletion. Clipline Cloud remains
+untouched. The desktop uses the exact official HTTPS intake route in debug and release builds;
+production health and readiness must remain green before shipping a client release.
+
 ## What's next (rough value order; each gets its own plan)
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds

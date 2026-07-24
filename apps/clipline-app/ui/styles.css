@@ -923,6 +923,84 @@ label span { white-space: nowrap; }
 }
 .settings-page[hidden] { display: none; }
 
+.support-section {
+  display: grid;
+  gap: 16px;
+}
+
+.support-intro,
+.support-disclosure,
+.support-preparing,
+.support-preview,
+.support-progress,
+.support-success {
+  display: grid;
+  gap: 7px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+.support-preparing[hidden],
+.support-preview[hidden],
+.support-progress[hidden],
+.support-success[hidden],
+#support-upload-availability[hidden],
+#settings-save[hidden] {
+  display: none;
+}
+
+.support-description-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.support-description-label {
+  font-weight: 700;
+}
+
+#support-description {
+  width: 100%;
+  min-height: 132px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.support-disclosure span,
+.support-intro span {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.support-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+}
+
+.support-preview ul {
+  max-height: 150px;
+  margin: 4px 0;
+  padding-left: 22px;
+  overflow: auto;
+  color: var(--muted);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.support-progress {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.support-success {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
 .settings-popup-shell {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;

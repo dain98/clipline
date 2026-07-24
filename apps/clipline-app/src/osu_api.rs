@@ -103,7 +103,7 @@ pub fn osu_api_status(
     state: tauri::State<'_, RuntimeState>,
 ) -> Result<OsuApiConnectionStatus, String> {
     if let Err(error) = reconcile_osu_credential_cleanup(&state) {
-        eprintln!("reconcile pending osu! credentials: {error}");
+        tracing::warn!(event = "osu_pending_credential_reconcile_failed", error = %error);
     }
     Ok(status_from_settings(&state.settings().osu))
 }
@@ -167,7 +167,7 @@ pub fn save_osu_api_settings(
         persist()?
     };
     if let Err(error) = reconcile_osu_credential_cleanup(&state) {
-        eprintln!("reconcile old osu! credentials: {error}");
+        tracing::warn!(event = "osu_old_credential_reconcile_failed", error = %error);
     }
     Ok(status_from_settings(&settings.osu))
 }
@@ -211,12 +211,12 @@ pub async fn test_osu_api_connection(
         persist()?
     };
     if let Err(error) = reconcile_osu_credential_cleanup(&state) {
-        eprintln!("reconcile migrated osu! credentials: {error}");
+        tracing::warn!(event = "osu_migrated_credential_reconcile_failed", error = %error);
     }
     let status = status_from_settings(&next.osu);
     let media_root = storage.media_dir();
     if let Err(e) = retry_pending_enrichment_with_settings(&next.osu, media_root).await {
-        eprintln!("retry osu! enrichment after connection test: {e}");
+        tracing::warn!(event = "osu_enrichment_retry_failed", error = %e);
     }
     Ok(OsuApiConnectionTestResult {
         status,
@@ -262,7 +262,7 @@ async fn retry_pending_enrichment_with_settings(
         Err(e) => {
             let pending = crate::osu_enrichment::discover_pending(&media_root)?;
             if !pending.is_empty() {
-                eprintln!("osu! enrichment pending: {e}");
+                tracing::warn!(event = "osu_enrichment_pending", error = %e);
             }
             return Ok(false);
         }
@@ -302,17 +302,13 @@ async fn retry_pending_enrichment_with_settings(
                 if !mapped.plays.is_empty() {
                     updated = true;
                 }
-                eprintln!(
-                    "osu! enrichment complete for {}: {} play(s)",
-                    job.clip_path().display(),
-                    mapped.plays.len()
+                tracing::info!(
+                    event = "osu_enrichment_complete",
+                    plays = mapped.plays.len()
                 );
             }
             Err(e) => {
-                eprintln!(
-                    "osu! enrichment failed for {}: {e}",
-                    job.clip_path().display()
-                );
+                tracing::warn!(event = "osu_enrichment_failed", error = %e);
                 let _ = crate::osu_enrichment::mark_pending_failed(&job, &e);
             }
         }
@@ -368,7 +364,7 @@ async fn fetch_recent_scores(
                     );
                     scores.push(score);
                 }
-                Err(e) => eprintln!("skip osu! recent score: {e}"),
+                Err(e) => tracing::warn!(event = "osu_recent_score_skipped", error = %e),
             }
         }
         offset += RECENT_LIMIT;

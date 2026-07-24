@@ -111,7 +111,7 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<Poller
             {
                 Ok(rt) => rt,
                 Err(error) => {
-                    eprintln!("lol poller: failed to build tokio runtime: {error}");
+                    tracing::error!(event = "lol_runtime_build_failed", error = %error);
                     return;
                 }
             };
@@ -123,7 +123,7 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<Poller
                 let client = match client {
                     Ok(client) => client,
                     Err(error) => {
-                        eprintln!("lol poller: failed to create live client: {error}");
+                        tracing::error!(event = "lol_client_create_failed", error = %error);
                         return;
                     }
                 };

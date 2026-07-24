@@ -229,7 +229,7 @@ impl Drop for OwnedCloudCacheTemp {
 #[tauri::command]
 pub fn cloud_status(state: tauri::State<RuntimeState>) -> CloudConnectionStatus {
     if let Err(error) = reconcile_cloud_credential_cleanup(&state) {
-        eprintln!("reconcile pending cloud credentials: {error}");
+        tracing::warn!(event = "cloud_pending_credential_reconcile_failed", error = %error);
     }
     let settings = state.settings();
     connection_status(&settings.cloud)
@@ -1344,7 +1344,7 @@ pub async fn cloud_connect(
         },
     )?;
     if let Err(error) = reconcile_cloud_credential_cleanup(&state) {
-        eprintln!("reconcile old cloud credentials: {error}");
+        tracing::warn!(event = "cloud_old_credential_reconcile_failed", error = %error);
     }
 
     Ok(connection_status(&settings.cloud))
@@ -1364,7 +1364,7 @@ pub fn cloud_disconnect(
         }
     })?;
     if let Err(error) = reconcile_cloud_credential_cleanup(&state) {
-        eprintln!("reconcile disconnected cloud credential: {error}");
+        tracing::warn!(event = "cloud_disconnected_credential_reconcile_failed", error = %error);
     }
     Ok(connection_status(&settings.cloud))
 }

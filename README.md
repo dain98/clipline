@@ -24,6 +24,8 @@ The maintained user and developer docs live at [dain98.github.io/clipline-docs](
 - [Review and trim](https://dain98.github.io/clipline-docs/desktop/review-and-trim)
 - [Cloud uploads](https://dain98.github.io/clipline-docs/desktop/cloud-uploads)
 - [Troubleshooting](https://dain98.github.io/clipline-docs/reference/troubleshooting)
+- [Diagnostic logs and private bug reports](docs/TROUBLESHOOTING.md)
+- [Privacy and diagnostic data](docs/PRIVACY.md)
 
 ## Status
 

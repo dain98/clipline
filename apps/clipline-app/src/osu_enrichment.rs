@@ -80,6 +80,7 @@ impl DiscoveredPendingEnrichment {
         &self.record
     }
 
+    #[cfg(test)]
     pub fn clip_path(&self) -> &Path {
         &self.clip_path
     }
@@ -618,11 +619,14 @@ fn discover_pending_in_dir(
         match discover_pending_file(media_root, &path, stem) {
             Ok(job) => out.push(job),
             Err(error) => match quarantine_pending_file(&path) {
-                Ok(quarantine) => eprintln!(
-                    "quarantined invalid osu! enrichment {path:?} as {quarantine:?}: {error}"
+                Ok(_quarantine) => tracing::warn!(
+                    event = "invalid_osu_enrichment_quarantined",
+                    error = %error
                 ),
-                Err(quarantine_error) => eprintln!(
-                    "skipping invalid osu! enrichment {path:?}: {error}; quarantine failed: {quarantine_error}"
+                Err(quarantine_error) => tracing::warn!(
+                    event = "invalid_osu_enrichment_skipped",
+                    error = %error,
+                    quarantine_error = %quarantine_error
                 ),
             },
         }

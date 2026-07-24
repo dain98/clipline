@@ -116,7 +116,19 @@ function syncSettingsDirtyState({ resetDiscard = false } = {}) {
   $("settings-close").classList.toggle("settings-discard", dirty);
   $("settings-save").classList.toggle("settings-save-glow", dirty && settingsDiscardWarningArmed);
   syncSettingsChangeIndicators();
+  syncSettingsFooterForTab(dirty);
   return dirty;
+}
+
+function syncSettingsFooterForTab(dirty = settingsHaveUnsavedChanges()) {
+  const activeTab = document.querySelector("#settings-tabs .tab.active");
+  const onSupport = activeTab && activeTab.dataset.tab === "support";
+  const view = SupportCore.view("idle", {
+    uploadAvailable: false,
+    settingsDirty: dirty,
+  });
+  $("settings-save").hidden = Boolean(onSupport && !view.settingsSaveVisible);
+  $("settings-save").textContent = onSupport ? view.settingsSaveLabel : "Save Settings";
 }
 
 function showSettingsDiscardWarning() {

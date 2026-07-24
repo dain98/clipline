@@ -479,17 +479,51 @@ for (const hotkeyFieldId of HOTKEY_FIELD_IDS) {
   });
 }
 
-document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    syncSettingsDraftFromForm();
-    document
-      .querySelectorAll("#settings-tabs .tab")
-      .forEach((t) => t.classList.toggle("active", t === tab));
-    document.querySelectorAll(".settings-section").forEach((s) => {
-      s.hidden = s.dataset.section !== tab.dataset.tab;
+function activateSettingsTab(tab, { focus = false } = {}) {
+  syncSettingsDraftFromForm();
+  document
+    .querySelectorAll("#settings-tabs .tab")
+    .forEach((t) => {
+      t.classList.toggle("active", t === tab);
+      t.setAttribute("aria-selected", String(t === tab));
+      t.setAttribute("tabindex", t === tab ? "0" : "-1");
     });
-    renderVisibleSettingsSection();
+  syncSettingsFooterForTab();
+  document.querySelectorAll(".settings-section").forEach((section) => {
+    section.hidden = section.dataset.section !== tab.dataset.tab;
   });
+  renderVisibleSettingsSection();
+  if (focus) tab.focus();
+}
+
+document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
+  tab.addEventListener("click", () => activateSettingsTab(tab));
+});
+
+$("settings-tabs").addEventListener("keydown", (event) => {
+  const tabs = [...document.querySelectorAll("#settings-tabs .tab")];
+  const currentIndex = tabs.indexOf(document.activeElement);
+  if (currentIndex < 0) return;
+  let nextIndex;
+  switch (event.key) {
+    case "ArrowLeft":
+      nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+      break;
+    case "ArrowRight":
+      nextIndex = (currentIndex + 1) % tabs.length;
+      break;
+    case "Home":
+      nextIndex = 0;
+      break;
+    case "End":
+      nextIndex = tabs.length - 1;
+      break;
+    default:
+      return;
+  }
+  event.preventDefault();
+  const nextTab = tabs[nextIndex];
+  activateSettingsTab(nextTab, { focus: true });
 });
 
 $("timeline").addEventListener("pointerdown", (ev) => {

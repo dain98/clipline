@@ -10,11 +10,11 @@ pub fn play_replay_saved() {
         .name("clipline-replay-sound".into())
         .spawn(|| {
             if let Err(e) = play_once() {
-                eprintln!("replay save sound: {e}");
+                tracing::warn!(event = "replay_save_sound_failed", error = %e);
             }
         })
     {
-        eprintln!("spawn replay sound thread: {e}");
+        tracing::warn!(event = "replay_sound_thread_spawn_failed", error = %e);
     }
 }
 

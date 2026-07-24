@@ -60,7 +60,18 @@ jobs:
           # is on.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Immutable operator-owned support route; the build rejects any
+          # attempt to substitute a different diagnostic destination.
+          CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
         run: cargo tauri build
+
+      - name: Retain private release symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: clipline-windows-symbols-${{ github.ref_name }}
+          path: target/release/clipline-app.pdb
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Locate the unsigned installer
         id: artifact
