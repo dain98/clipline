@@ -4,6 +4,21 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-23): Nightly 0.1.41
+
+Nightly 0.1.41 contains PR #103's WASAPI endpoint-loss recovery and PR #104's private diagnostic
+reporting workflow. Recoverable output, process-loopback, and microphone endpoint invalidations now
+re-activate in place without aborting the recorder, reuse process identity safely, preserve A/V
+timing through the outage, and emit bounded lost/recovered diagnostics.
+
+Clipline now keeps bounded structured desktop logs, captures panic and frontend failures, and
+provides a Settings > Support workflow for preparing, previewing, saving, discarding, and explicitly
+submitting a sanitized diagnostic bundle. Reports exclude recordings, credentials, and raw settings,
+remain local until the user confirms submission, and can only be sent to the compiled-in official
+private intake endpoint. Review follow-ups cover redaction, staging cleanup, cancellation, retries,
+upload validation, coherent UI state, and keyboard navigation. Both changes passed workspace tests,
+fresh-cache warning-denied Clippy, Windows and Ubuntu CI, dependency security, and manual acceptance.
+
 ## Checkpoint (2026-07-23): WASAPI device-loss recovery
 
 A mid-recording endpoint invalidation no longer aborts the recorder. Previously a single
