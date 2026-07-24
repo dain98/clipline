@@ -1,20 +1,19 @@
+const OFFICIAL_BUG_REPORT_ENDPOINT: &str = "https://support.dain.cafe/api/v1/reports";
+
 fn main() {
+    println!("cargo:rerun-if-env-changed=CLIPLINE_BUG_REPORT_ENDPOINT");
+    let configured_endpoint = std::env::var("CLIPLINE_BUG_REPORT_ENDPOINT")
+        .unwrap_or_else(|_| OFFICIAL_BUG_REPORT_ENDPOINT.to_string());
+    assert_eq!(
+        configured_endpoint, OFFICIAL_BUG_REPORT_ENDPOINT,
+        "CLIPLINE_BUG_REPORT_ENDPOINT must use Clipline's official private intake"
+    );
+    println!(
+        "cargo:rustc-env=CLIPLINE_BUG_REPORT_ENDPOINT={OFFICIAL_BUG_REPORT_ENDPOINT}"
+    );
+
     // The Tauri context only exists for Windows builds (see Cargo.toml).
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
-        println!("cargo:rerun-if-env-changed=CLIPLINE_BUG_REPORT_ENDPOINT");
-        let endpoint = std::env::var("CLIPLINE_BUG_REPORT_ENDPOINT").ok();
-        if std::env::var("PROFILE").as_deref() == Ok("release") {
-            let endpoint = endpoint
-                .as_deref()
-                .expect("release builds require CLIPLINE_BUG_REPORT_ENDPOINT");
-            assert!(
-                endpoint.starts_with("https://"),
-                "release CLIPLINE_BUG_REPORT_ENDPOINT must use https"
-            );
-        }
-        if let Some(endpoint) = endpoint {
-            println!("cargo:rustc-env=CLIPLINE_BUG_REPORT_ENDPOINT={endpoint}");
-        }
         tauri_build::build();
     }
 }

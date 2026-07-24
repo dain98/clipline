@@ -12,8 +12,7 @@
 # SignPath org/project/policy + artifact configuration and add these to the repo:
 #   secrets:  SIGNPATH_API_TOKEN, TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 #   vars:     SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG,
-#             SIGNPATH_SIGNING_POLICY_SLUG, SIGNPATH_ARTIFACT_CONFIG_SLUG,
-#             CLIPLINE_BUG_REPORT_ENDPOINT
+#             SIGNPATH_SIGNING_POLICY_SLUG, SIGNPATH_ARTIFACT_CONFIG_SLUG
 
 name: Release
 
@@ -61,9 +60,9 @@ jobs:
           # is on.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Official, operator-owned support service. The release build script
-          # rejects a missing value or any non-HTTPS URL.
-          CLIPLINE_BUG_REPORT_ENDPOINT: ${{ vars.CLIPLINE_BUG_REPORT_ENDPOINT }}
+          # Immutable operator-owned support route; the build rejects any
+          # attempt to substitute a different diagnostic destination.
+          CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
         run: cargo tauri build
 
       - name: Retain private release symbols

@@ -25,7 +25,7 @@ const MAX_BUNDLE_BYTES: u64 = 25 * 1024 * 1024;
 const FRONTEND_MESSAGE_BYTES: usize = 8 * 1024;
 const FRONTEND_STACK_BYTES: usize = 16 * 1024;
 const FRONTEND_EVENTS_PER_MINUTE: u32 = 60;
-const SUPPORT_ENDPOINT: Option<&str> = option_env!("CLIPLINE_BUG_REPORT_ENDPOINT");
+const SUPPORT_ENDPOINT: &str = env!("CLIPLINE_BUG_REPORT_ENDPOINT");
 
 static SECRET_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -682,15 +682,12 @@ fn total_physical_memory() -> Option<u64> {
 }
 
 fn support_report_url() -> Result<reqwest::Url, String> {
-    let endpoint = SUPPORT_ENDPOINT
-        .ok_or_else(|| "private bug report upload is not configured in this build".to_string())?;
-    let base = reqwest::Url::parse(endpoint)
+    let endpoint = reqwest::Url::parse(SUPPORT_ENDPOINT)
         .map_err(|error| format!("private bug report endpoint is invalid: {error}"))?;
-    if !cfg!(debug_assertions) && base.scheme() != "https" {
+    if endpoint.scheme() != "https" {
         return Err("private bug report endpoint must use HTTPS".into());
     }
-    base.join("api/v1/reports")
-        .map_err(|error| format!("build private bug report URL: {error}"))
+    Ok(endpoint)
 }
 
 fn prepared_report(state: &SupportState, token: &str) -> Result<PreparedReport, String> {

@@ -2746,10 +2746,11 @@ never bundled. The tray can open the actual diagnostics folder without the WebVi
 The Support workflow now renders from one explicit `idle`/`preparing`/`prepared`/`uploading`/
 `success` phase model. Its transient panels must keep explicit `[hidden] { display: none; }`
 overrides because their grid display rules otherwise defeat WebView2's `hidden` presentation.
-The description locks after preparation, upload failure/cancellation returns to the same preview,
-and debug builds without an injected intake endpoint disclose that limitation while preserving
-local prepare/save/discard. On Support, the settings footer hides Save unless another tab is dirty.
-DOM-free phase tests plus CSS contracts guard the state and visibility invariants.
+The description locks after preparation and upload failure/cancellation returns to the same
+preview. Every build pins private submission to `https://support.dain.cafe/api/v1/reports`; build
+configuration rejects attempts to substitute another destination. On Support, the settings footer
+hides Save unless another tab is dirty. DOM-free phase tests plus CSS contracts guard the state
+and visibility invariants.
 
 The official intake lives in the separate sibling `clipline-support` repository. It streams
 anonymous multipart uploads into bounded temporary files, validates ZIP central-directory and
@@ -2758,8 +2759,8 @@ S3-compatible encrypted objects, applies rotating HMAC source/global/storage quo
 30-day cleanup in object-first order, backs up SQLite daily, and exposes only a server-rendered
 GitHub OAuth/PKCE inbox for one immutable numeric administrator ID with server sessions, CSRF,
 escaping, CSP, opaque downloads, notes/status, and immediate deletion. Clipline Cloud remains
-untouched. Desktop release builds fail until the official HTTPS support endpoint is injected;
-production must deploy the service/private bucket before setting it.
+untouched. The desktop uses the exact official HTTPS intake route in debug and release builds;
+production health and readiness must remain green before shipping a client release.
 
 ## What's next (rough value order; each gets its own plan)
 
