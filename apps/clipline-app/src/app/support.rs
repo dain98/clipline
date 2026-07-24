@@ -1039,6 +1039,14 @@ mod tests {
     }
 
     #[test]
+    fn export_redaction_preserves_non_authentication_basic_prose() {
+        assert_eq!(
+            redact_generic("basic recording started with fallback settings"),
+            "basic recording started with fallback settings"
+        );
+    }
+
+    #[test]
     fn bundled_json_redacts_nested_string_values() {
         let bytes = json_bytes(&serde_json::json!({
             "nested": {

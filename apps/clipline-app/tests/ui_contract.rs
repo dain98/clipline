@@ -3916,6 +3916,15 @@ fn settings_tabs_and_support_phases_are_accessible() {
         "tab activation must synchronize keyboard and selected state"
     );
     assert!(
+        main.contains(r#"$("settings-tabs").addEventListener("keydown""#)
+            && main.contains("\"ArrowLeft\"")
+            && main.contains("\"ArrowRight\"")
+            && main.contains("\"Home\"")
+            && main.contains("\"End\"")
+            && main.contains("activateSettingsTab(nextTab, { focus: true })"),
+        "roving settings tabs must support the ARIA keyboard navigation pattern"
+    );
+    assert!(
         support.contains("focusSupportPhase")
             && support.contains(r#"target.focus({ preventScroll: true })"#),
         "Support phase changes must move focus to the newly visible result"
