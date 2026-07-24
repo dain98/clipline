@@ -4,6 +4,43 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-23): WASAPI device-loss recovery
+
+A mid-recording endpoint invalidation no longer aborts the recorder. Previously a single
+`AUDCLNT_E_DEVICE_INVALIDATED` (0x88890004) from `GetNextPacketSize`/`GetBuffer` propagated as
+`CaptureError::DeviceLost`, killed the service loop ("recording: capture device lost…"), and
+failed a second time when shutdown drained the same dead client ("…additionally, finish: …").
+Typical trigger: the default render endpoint re-enumerating (headphone/USB/Bluetooth
+disconnect, monitor audio power-cycle, default-device switch). An invalidated `IAudioClient` is
+permanently dead; only re-activation recovers it.
+
+`WasapiPcmCapture` now stores an `EndpointTarget` (output/process/microphone plus device id) and
+re-activates it on a 1 s retry cadence after a recoverable HRESULT (0x88890004, 0x88890010
+service-not-running, 0x88890026 resources-invalidated). While the endpoint is dead, the existing
+idle-desktop silence machinery covers the outage: delivery idleness exceeds the quiet grace, the
+assembler advances with capped silence, and the first packet from the re-activated endpoint
+re-anchors on its QPC timestamp — A/V sync survives the gap with no new timeline code. A dead
+client is no longer drained while it waits, so repeated poll failures cannot slide the retry
+deadline forward. Failed activation attempts schedule from their completion time, preserving the
+full 1 s cadence even after a 1.5 s process-loopback timeout.
+
+Process-loopback targets store the process creation time as an instance identity and will only
+re-activate while both PID and creation time still match, preventing PID reuse from redirecting a
+track to another process. Explicit output and microphone targets recover strictly on the endpoint
+that actually activated at startup; default-device targets continue to follow the current default.
+Contract violations (null buffer, sample overflow, decode failure) and non-recoverable HRESULTs
+stay fatal; startup activation failures remain loud `Init` errors. `finish_packets` inherits the
+same path, so shutdown never fails on a dead endpoint.
+
+New diagnostics land in the log: `wasapi_device_lost` (source, hresult, rate-limited at 30 s)
+and `wasapi_device_recovered` (outage_ms). Neutral tests cover the `DeviceReactivation` state
+machine, HRESULT classification, `DrainFailure` mapping, and diagnostic display; a live device
+test (CI-skipped on runners) simulates invalidation and proves the endpoint swap mid-capture.
+Review regressions additionally cover non-sliding deadlines, post-attempt retry scheduling,
+process identity, strict recovery selection, and startup fallback target resolution. Workspace
+tests, live-device capture tests, and fresh-cache warning-denied Clippy are green.
+Plan: `docs/superpowers/plans/2026-07-23-wasapi-device-loss-recovery.md`.
+
 ## Checkpoint (2026-07-23): Nightly 0.1.40
 
 Nightly 0.1.40 contains PR #102's complete full-session GOP-timing fix. Finite GOP samples are
