@@ -4,7 +4,7 @@ use super::*;
 pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let target = validate_clip_path(&settings, &path)?;
     let media_root = settings.clips_dir()?;
-    remove_clip_files(&target, &media_root)
+    delete_clip_file(&target, &media_root)
 }
 
 /// Marks or unmarks a clip as a favorite. Favorites are never auto-deleted by
@@ -72,14 +72,37 @@ pub struct DeletedClipsReport {
 /// its sidecars (best effort), recording any removal failures. `failed`
 /// carries inputs that already failed validation so the caller's report stays
 /// complete in one place.
+fn delete_clip_with_group_compilations_unlocked(
+    target: &Path,
+    media_root: &Path,
+) -> Result<(), String> {
+    if let Some(error) = crate::cloud_upload::active_upload_source_error(target) {
+        return Err(error);
+    }
+    if let Some(group) = read_clip_metadata(target).and_then(|metadata| metadata.group) {
+        groups::remove_group_compilations_unlocked(media_root, &group.name)?;
+    }
+    remove_clip_files_unlocked(target, media_root)
+}
+
+fn delete_clip_file(target: &Path, media_root: &Path) -> Result<(), String> {
+    let _guard = crate::gc::lock_clip_mutations();
+    delete_clip_with_group_compilations_unlocked(target, media_root)
+}
+
 pub(crate) fn delete_clips_impl(
     media_root: PathBuf,
     validated: Vec<(String, PathBuf)>,
     mut failed: Vec<(String, String)>,
 ) -> DeletedClipsReport {
+    let _guard = crate::gc::lock_clip_mutations();
     let mut deleted = Vec::new();
     for (path, target) in validated {
-        match remove_clip_files(&target, &media_root) {
+        if !target.exists() {
+            deleted.push(path);
+            continue;
+        }
+        match delete_clip_with_group_compilations_unlocked(&target, &media_root) {
             Ok(_) => deleted.push(path),
             Err(e) => failed.push((path, e.to_string())),
         }
@@ -255,4 +278,42 @@ mod tests {
                 "c.mp4 pending osu! sidecar must be left untouched"
             );
         }
+
+    #[test]
+    fn deleting_a_group_member_invalidates_its_compilation() {
+        let dir = TestDir::new("clipline-library", "delete-group-member");
+        let root = dir.path().join("media");
+        std::fs::create_dir_all(&root).unwrap();
+        let member = root.join("member.mp4");
+        let compilation = root.join("highlights-compilation.mp4");
+        touch_mp4(&member);
+        touch_mp4(&compilation);
+        write_clip_metadata(
+            &member,
+            &ClipMetadata {
+                group: Some(ClipGroup {
+                    name: "Highlights".into(),
+                    order: 0,
+                }),
+                ..ClipMetadata::default()
+            },
+        )
+        .unwrap();
+        write_clip_metadata(
+            &compilation,
+            &ClipMetadata {
+                kind: Some("compilation".into()),
+                source_group: Some("Highlights".into()),
+                source_group_fingerprint: Some("current".into()),
+                ..ClipMetadata::default()
+            },
+        )
+        .unwrap();
+
+        delete_clip_file(&member, &root).unwrap();
+
+        assert!(!member.exists());
+        assert!(!compilation.exists());
+    }
+
 }

@@ -87,9 +87,9 @@ function groupNameKey(name) {
   return String(name || "").trim().toLowerCase();
 }
 
-function localGroups() {
+function localGroups(clips = clipsCache) {
   const groups = new Map();
-  for (const clip of clipsCache) {
+  for (const clip of clips) {
     const membership = clip && clip.group;
     const name = String(membership && membership.name || "").trim();
     if (!name) continue;
@@ -114,6 +114,10 @@ function localGroups() {
       (sum, clip) => sum + (Number(clip.size_mb) || 0),
       0,
     );
+    const gameNames = new Set(group.members.map((clip) => clip.game && clip.game.name || ""));
+    group.game = gameNames.size === 1 ? group.members[0].game || null : { name: "Multiple games" };
+    const sessions = new Set(group.members.map((clip) => clip.session || ""));
+    group.session = sessions.size === 1 ? group.members[0].session || null : "Multiple sessions";
   }
   return [...groups.values()].sort((left, right) => right.modified_unix - left.modified_unix);
 }
@@ -133,10 +137,10 @@ function groupFingerprint(group) {
     : "";
 }
 
-function groupCompilationClip(group = activeGroup()) {
+function groupCompilationClip(group = activeGroup(), clips = clipsCache) {
   if (!group) return null;
   const fingerprint = groupFingerprint(group);
-  const candidates = clipsCache
+  const candidates = clips
     .filter((clip) => clipKind(clip) === "compilation"
       && groupNameKey(clip.source_group) === groupNameKey(group.name)
       && clip.source_group_fingerprint === fingerprint)
@@ -145,7 +149,22 @@ function groupCompilationClip(group = activeGroup()) {
 }
 
 function topLevelLocalClips(clips = clipsCache) {
-  return clips.filter((clip) => !clip.group);
+  const byGroup = new Map();
+  for (const clip of clips) {
+    if (!clip.source_group) continue;
+    const key = groupNameKey(clip.source_group);
+    if (!byGroup.has(key)) byGroup.set(key, []);
+    byGroup.get(key).push(clip);
+  }
+  const current = new Set(localGroups(clips).map((group) =>
+    groupCompilationClip(group, byGroup.get(groupNameKey(group.name)) || [])));
+  return clips.filter((clip) => !clip.group && !current.has(clip));
+}
+
+function forgetGroupCompilations(name) {
+  invalidateLocalClipsRefresh();
+  const key = groupNameKey(name);
+  clipsCache = clipsCache.filter((clip) => groupNameKey(clip.source_group) !== key);
 }
 
 function groupReviewMeta(group, currentDuration = NaN) {
@@ -224,19 +243,7 @@ function groupCard(group) {
   return card;
 }
 
-function renderGroupCards(root, groups) {
-  if (!groups.length) return;
-  const head = document.createElement("div");
-  head.className = "gallery-group-head group-section-head";
-  const label = document.createElement("span");
-  label.textContent = "Groups";
-  const count = document.createElement("span");
-  count.className = "gcount";
-  count.textContent = groups.length;
-  head.append(label, count);
-  root.appendChild(head);
-  for (const group of groups) root.appendChild(groupCard(group));
-}
+
 
 function syncGroupPickerMode() {
   const creating = $("group-picker-select").value === "";
@@ -414,6 +421,7 @@ async function reorderGroupMembers(group, orderedPaths) {
   setDeckStatus("reordering group…");
   try {
     const updates = await invoke("reorder_group", { name: group.name, orderedPaths });
+    forgetGroupCompilations(group.name);
     applyGroupOrderUpdates(updates);
     renderClips();
     renderGroupClipRail();
@@ -517,6 +525,7 @@ async function removeClipFromGroup(clip) {
   const wasCurrent = currentClip && PlayerCore.sameClipPath(currentClip.path, clip.path);
   try {
     await invoke("remove_from_group", { path: clip.path });
+    forgetGroupCompilations(group.name);
     clip.group = null;
     invalidateLocalClipsRefresh();
     if (wasCurrent && replacement) {

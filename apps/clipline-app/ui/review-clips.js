@@ -117,6 +117,11 @@ async function applyDeletion(removedPaths) {
   if (!removed.size) return;
   const wasCurrent = currentClip && removed.has(GalleryWindowCore.clipPathKey(currentClip.path));
   const groupBefore = activeGroup();
+  for (const clip of clipsCache) {
+    if (clip.group && removed.has(GalleryWindowCore.clipPathKey(clip.path))) {
+      forgetGroupCompilations(clip.group.name);
+    }
+  }
   let replacement = null;
   if (wasCurrent && groupBefore) {
     const index = groupBefore.members.findIndex((clip) =>
