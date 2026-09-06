@@ -340,12 +340,52 @@ fn persist_group_order_unlocked(root: &Path, members: &[GroupMember]) -> Result<
     Ok(())
 }
 
-fn remove_from_group_file(path: &Path) -> Result<(), String> {
+fn group_compilation_paths_unrecovered(root: &Path, name: &str) -> Result<Vec<PathBuf>, String> {
+    let name_key = group_name_key(name);
+    Ok(list_clips_from_dir_with_child_reader(root.to_path_buf(), push_clips_from)?
+        .clips
+        .into_iter()
+        .filter(|clip| {
+            clip.kind == "compilation"
+                && clip.source_group.as_deref()
+                    .is_some_and(|source| group_name_key(source) == name_key)
+        })
+        .map(|clip| PathBuf::from(clip.path))
+        .collect())
+}
+
+pub(super) fn remove_group_compilations_unlocked(root: &Path, name: &str) -> Result<(), String> {
+    for path in group_compilation_paths_unrecovered(root, name)? {
+        remove_clip_files_unlocked(&path, root)
+            .map_err(|error| format!("remove group compilation {path:?}: {error}"))?;
+    }
+    Ok(())
+}
+
+fn reorder_group_file(
+    root: &Path,
+    name: &str,
+    ordered_paths: &[PathBuf],
+) -> Result<Vec<GroupOrderUpdate>, String> {
+    let _guard = crate::gc::lock_clip_mutations();
+    recover_group_order_transaction_unlocked(root)?;
+    let members = reordered_members(group_members_unrecovered(root, name)?, ordered_paths)?;
+    remove_group_compilations_unlocked(root, name)?;
+    persist_group_order_unlocked(root, &members)?;
+    Ok(members
+        .into_iter()
+        .map(|member| GroupOrderUpdate {
+            path: member.path.display().to_string(),
+            order: member.group.order,
+        })
+        .collect())
+}
+
+fn remove_from_group_file(root: &Path, path: &Path) -> Result<(), String> {
     let _guard = crate::gc::lock_clip_mutations();
     let mut metadata = read_clip_metadata(path).unwrap_or_default();
-    if metadata.group.take().is_none() {
-        return Err("clip is not in a group".into());
-    }
+    let group = metadata.group.take().ok_or("clip is not in a group")?;
+    remove_group_compilations_unlocked(root, &group.name)?;
     write_clip_metadata(path, &metadata)
 }
 
@@ -361,19 +401,7 @@ pub async fn reorder_group(
         .map(|path| validate_clip_path(&settings, path))
         .collect::<Result<Vec<_>, _>>()?;
     let root = settings.clips_dir()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let _guard = crate::gc::lock_clip_mutations();
-        recover_group_order_transaction_unlocked(&root)?;
-        let members = reordered_members(group_members_unrecovered(&root, &name)?, &ordered_paths)?;
-        persist_group_order_unlocked(&root, &members)?;
-        Ok(members
-            .into_iter()
-            .map(|member| GroupOrderUpdate {
-                path: member.path.display().to_string(),
-                order: member.group.order,
-            })
-            .collect())
-    })
+    tauri::async_runtime::spawn_blocking(move || reorder_group_file(&root, &name, &ordered_paths))
     .await
     .map_err(|error| format!("reorder group task: {error}"))?
 }
@@ -384,7 +412,8 @@ pub async fn remove_from_group(
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<(), String> {
     let target = validate_clip_path(&settings, &path)?;
-    tauri::async_runtime::spawn_blocking(move || remove_from_group_file(&target))
+    let root = settings.clips_dir()?;
+    tauri::async_runtime::spawn_blocking(move || remove_from_group_file(&root, &target))
         .await
         .map_err(|error| format!("remove from group task: {error}"))?
 }
@@ -427,13 +456,36 @@ fn export_group_file(
         let _ = std::fs::remove_file(&tmp);
         return Err("group compilation cancelled".into());
     }
-    if let Err(error) = std::fs::rename(&tmp, &target) {
-        let _ = std::fs::remove_file(&tmp);
+    publish_group_compilation(root, name, &fingerprint, &inputs, &tmp, &target)
+}
+
+fn publish_group_compilation(
+    root: &Path,
+    name: &str,
+    fingerprint: &str,
+    inputs: &[CompilationInput],
+    tmp: &Path,
+    target: &Path,
+) -> Result<ClipInfo, String> {
+    let _guard = crate::gc::lock_clip_mutations();
+    let validate = (|| {
+        recover_group_order_transaction_unlocked(root)?;
+        if group_fingerprint(&group_members_unrecovered(root, name)?) != fingerprint {
+            return Err("group changed during compilation; try again".to_string());
+        }
+        Ok(())
+    })();
+    if let Err(error) = validate {
+        let _ = std::fs::remove_file(tmp);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(tmp, target) {
+        let _ = std::fs::remove_file(tmp);
         return Err(format!("publish compilation: {error}"));
     }
 
     let title = format!("{name} compilation");
-    let duration_s = compilation_duration_s(&target, &inputs);
+    let duration_s = compilation_duration_s(target, inputs);
     let markers = ClipMarkers {
         recording_start_s: 0.0,
         duration_s,
@@ -445,13 +497,13 @@ fn export_group_file(
     };
     let publish_metadata = (|| {
         write_clip_metadata(
-            &target,
+            target,
             &ClipMetadata {
                 title: Some(title.clone()),
                 kind: Some("compilation".to_string()),
                 group: None,
                 source_group: Some(name.to_string()),
-                source_group_fingerprint: Some(fingerprint.clone()),
+                source_group_fingerprint: Some(fingerprint.to_string()),
             },
         )?;
         let json = serde_json::to_vec_pretty(&markers)
@@ -460,11 +512,11 @@ fn export_group_file(
             .map_err(|error| format!("write compilation markers: {error}"))
     })();
     if let Err(error) = publish_metadata {
-        let _ = remove_clip_files(&target, root);
+        let _ = remove_clip_files_unlocked(target, root);
         return Err(error);
     }
 
-    let metadata = std::fs::metadata(&target)
+    let metadata = std::fs::metadata(target)
         .map_err(|error| format!("read compilation metadata: {error}"))?;
     let modified_unix = metadata
         .modified()
@@ -489,7 +541,7 @@ fn export_group_file(
         game: None,
         group: None,
         source_group: Some(name.to_string()),
-        source_group_fingerprint: Some(fingerprint),
+        source_group_fingerprint: Some(fingerprint.to_string()),
     })
 }
 
@@ -986,6 +1038,40 @@ mod tests {
     }
 
     #[test]
+    fn compilation_publication_rejects_changed_membership() {
+        for remove in [false, true] {
+            let dir = clipline_test_utils::TestDir::new("clipline-groups", "publish-changed");
+            let member = dir.path().join("member.mp4");
+            std::fs::write(&member, b"member").unwrap();
+            write_clip_metadata(&member, &ClipMetadata {
+                group: Some(ClipGroup { name: "G".into(), order: 0 }),
+                ..ClipMetadata::default()
+            }).unwrap();
+            let fingerprint = group_fingerprint(&group_members(dir.path(), "G").unwrap());
+            let tmp = dir.path().join("encoded.tmp");
+            let target = dir.path().join("compilation.mp4");
+            std::fs::write(&tmp, b"encoded").unwrap();
+            if remove {
+                remove_from_group_file(dir.path(), &member).unwrap();
+            } else {
+                let added = dir.path().join("added.mp4");
+                std::fs::write(&added, b"added").unwrap();
+                write_clip_metadata(&added, &ClipMetadata {
+                    group: Some(ClipGroup { name: "G".into(), order: 1 }),
+                    ..ClipMetadata::default()
+                }).unwrap();
+            }
+            let error = publish_group_compilation(
+                dir.path(), "G", &fingerprint, &[], &tmp, &target,
+            ).err().expect("changed group must reject publication");
+            assert!(error.contains("group changed"), "{error}");
+            assert!(!tmp.exists());
+            assert!(!target.exists());
+            assert!(!clip_metadata_path(&target).exists());
+        }
+    }
+
+    #[test]
     fn compilation_duration_falls_back_when_published_file_cannot_be_inspected() {
         let inputs = vec![
             CompilationInput::test("a.mp4", 1, 1.25),
@@ -998,10 +1084,12 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_member_clears_only_its_group_metadata() {
+    fn removing_a_member_clears_its_group_metadata_and_compilations() {
         let dir = clipline_test_utils::TestDir::new("clipline-groups", "ungroup");
         let clip = dir.path().join("clip.mp4");
+        let compilation = dir.path().join("highlights-compilation.mp4");
         std::fs::write(&clip, b"clip").unwrap();
+        std::fs::write(&compilation, b"compilation").unwrap();
         write_clip_metadata(
             &clip,
             &ClipMetadata {
@@ -1014,11 +1102,64 @@ mod tests {
             },
         )
         .unwrap();
+        write_clip_metadata(
+            &compilation,
+            &ClipMetadata {
+                kind: Some("compilation".into()),
+                source_group: Some("Highlights".into()),
+                source_group_fingerprint: Some("old".into()),
+                ..ClipMetadata::default()
+            },
+        )
+        .unwrap();
+        std::fs::write(compilation.with_extension("markers.json"), b"{}").unwrap();
 
-        remove_from_group_file(&clip).unwrap();
+        remove_from_group_file(dir.path(), &clip).unwrap();
         let metadata = read_clip_metadata(&clip).unwrap();
         assert_eq!(metadata.title.as_deref(), Some("Keep me"));
         assert_eq!(metadata.group, None);
+        assert!(!compilation.exists());
+        assert!(!clip_metadata_path(&compilation).exists());
+        assert!(!compilation.with_extension("markers.json").exists());
+    }
+
+    #[test]
+    fn reordering_a_group_invalidates_its_generated_compilations() {
+        let dir = clipline_test_utils::TestDir::new("clipline-groups", "reorder-compilation");
+        let a = dir.path().join("a.mp4");
+        let b = dir.path().join("b.mp4");
+        let compilation = dir.path().join("highlights-compilation.mp4");
+        for (path, order) in [(&a, 0), (&b, 1)] {
+            std::fs::write(path, b"clip").unwrap();
+            write_clip_metadata(
+                path,
+                &ClipMetadata {
+                    group: Some(ClipGroup {
+                        name: "Highlights".into(),
+                        order,
+                    }),
+                    ..ClipMetadata::default()
+                },
+            )
+            .unwrap();
+        }
+        std::fs::write(&compilation, b"compilation").unwrap();
+        write_clip_metadata(
+            &compilation,
+            &ClipMetadata {
+                kind: Some("compilation".into()),
+                source_group: Some("Highlights".into()),
+                source_group_fingerprint: Some("old".into()),
+                ..ClipMetadata::default()
+            },
+        )
+        .unwrap();
+
+        reorder_group_file(dir.path(), "Highlights", &[b.clone(), a.clone()]).unwrap();
+
+        assert!(!compilation.exists());
+        assert_eq!(read_clip_metadata(&b).unwrap().group.unwrap().order, 0);
+        assert_eq!(read_clip_metadata(&a).unwrap().group.unwrap().order, 1);
     }
 
     #[test]
