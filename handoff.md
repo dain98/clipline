@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-06): Nightly 1.0.4 published
+
+Published [Nightly 1.0.4](https://github.com/Clipline-CC/clipline/releases/tag/nightly) from
+`c455423898fc227f0a2dba8fae41b199827d871c`, with immutable tag `nightly-v1.0.4`.
+Includes PRs #191, #193, and #194: integrated Library groups and compilation lifecycle fixes,
+module decomposition, and distinct/contrasting favorites in Pink and Light.
+
+The [Nightly Release action](https://github.com/Clipline-CC/clipline/actions/runs/34014275405)
+passed tests, warning-denied Clippy, pinned runtime verification, both installer builds, and all
+seven public-download hash comparisons. Independent direct public downloads also matched every
+asset's SHA-256; both signatures embedded in the updater manifests verified against the committed
+public key. Regular installer: 10,118,799 bytes; standalone: 336,243,271 bytes. Rolling release
+target/state and the exact seven-asset set were confirmed. Release-body notes document the changes
+and release-only diff; workflow-generated asset files were left unchanged.
+
+Standalone now pins WebView2 Fixed Runtime 152.0.4191.62, reviewed through 2026-10-06. Local playback
+and metadata-only release preparation evidence is in
+`docs/superpowers/plans/2026-09-06-nightly-1.0.4.md`.
+
 ## Checkpoint (2026-09-06): PR 193 integration with develop
 
 Resolved the PR 191 overlap without restoring the monolithic files. Group-aware deletion lives in
