@@ -9,6 +9,10 @@ fn context() -> Context {
     for source in [
         include_str!("../ui/gallery-window-core.js"),
         include_str!("../ui/library.js"),
+        include_str!("../ui/library-cards.js"),
+        include_str!("../ui/library-gallery.js"),
+        include_str!("../ui/library-rails.js"),
+        include_str!("../ui/review-clips.js"),
     ] {
         ctx.eval(Source::from_bytes(source)).unwrap();
     }
@@ -24,6 +28,35 @@ fn context() -> Context {
     ))
     .unwrap();
     ctx
+}
+
+#[test]
+fn split_gallery_sorts_and_paginates_groups_with_clips() {
+    let mut ctx = context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        var galleryFilter = 'all', galleryGameType = 'all', gallerySearch = '';
+        var gallerySort = 'marks', galleryGroup = 'game';
+        function clipMarkers(c) { return c.markers || []; }
+        clipsCache = [
+            {path:'C:/a.mp4',group:{name:'G',order:0},game:{name:'Game'},session:'S',
+                modified_unix:10,size_mb:10,markers:[1,2]},
+            {path:'C:/b.mp4',group:{name:'G',order:1},game:{name:'Game'},session:'S',
+                modified_unix:11,size_mb:20,markers:[3]},
+            {path:'C:/plain.mp4',game:{name:'Game'},session:'S',
+                modified_unix:20,size_mb:1,markers:[1]}
+        ];
+        var items = [...filterGalleryClips(topLevelLocalClips()).items, ...visibleLocalGroups()];
+        var buckets = galleryGroups(sortGalleryClips(items));
+        var page = GalleryWindowCore.windowGroups(buckets, GalleryWindowCore.initialState(1));
+        var group = page.groups[0].items[0];
+        if (page.total !== 2 || page.pageCount !== 2 || group.name !== 'G'
+            || group.members.length !== 2 || group.size_mb !== 30 || group.session !== 'S') {
+            throw 'split gallery lost integrated group sorting or pagination';
+        }
+    "#,
+    ))
+    .unwrap();
 }
 
 #[test]
