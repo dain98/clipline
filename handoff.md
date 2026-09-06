@@ -4,6 +4,21 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-05): PR 191 compilation lifecycle review fixes
+
+Plan: `docs/superpowers/plans/2026-09-05-pr191-compilation-lifecycle.md`.
+
+Supersedes the unconditional hiding policy below: only a live group's selected current compilation
+is hidden. Stale, duplicate, legacy, and orphaned outputs remain visible for recovery/deletion,
+including outputs made obsolete by adding a member. Reorder, ungroup, and member deletion evict
+their deleted compilation entries from the frontend cache, so restoring an old member order cannot
+reuse a missing file. Compilation publication validates its captured fingerprint under the existing
+mutation lock and removes the temporary output if membership changed during encoding.
+
+Behavioral regressions cover visibility and reorder-back reuse in Boa, and staged native publication
+after member removal/addition. Workspace tests passed, including local device tests; JavaScript
+syntax checks and warning-denied workspace Clippy (with a fresh app cache) passed.
+
 ## Checkpoint (2026-08-30): Groups integrated into the Library
 
 Plan: `docs/superpowers/plans/2026-08-30-integrated-groups-library.md`.

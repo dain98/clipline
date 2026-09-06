@@ -5782,8 +5782,8 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         assert!(css.contains(required), "groups styling must include `{required}`");
     }
     assert!(
-        js.contains("filter((clip) => !clip.group && !clip.source_group)"),
-        "group members and every generated compilation must stay inside their group instead of rendering separate cards"
+        js.contains("filter((clip) => !clip.group && !current.has(clip))"),
+        "only group members and the selected current compilation should be hidden"
     );
     let filter_chips = html
         .split("<div class=\"gallery-filter-chips\">")
@@ -5888,8 +5888,8 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         .and_then(|rest| rest.split("fn delete_clip_file").next())
         .expect("group-aware clip deletion helper");
     assert!(
-        grouped_delete.find("active_upload_source_error(target)")
-            < grouped_delete.find("remove_group_compilations_unlocked"),
+        grouped_delete.find("active_upload_source_error(target)").expect("member upload guard")
+            < grouped_delete.find("remove_group_compilations_unlocked").expect("compilation cleanup"),
         "a blocked member upload must fail before its group compilation is invalidated"
     );
     assert!(

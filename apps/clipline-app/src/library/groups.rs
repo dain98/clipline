@@ -456,13 +456,36 @@ fn export_group_file(
         let _ = std::fs::remove_file(&tmp);
         return Err("group compilation cancelled".into());
     }
-    if let Err(error) = std::fs::rename(&tmp, &target) {
-        let _ = std::fs::remove_file(&tmp);
+    publish_group_compilation(root, name, &fingerprint, &inputs, &tmp, &target)
+}
+
+fn publish_group_compilation(
+    root: &Path,
+    name: &str,
+    fingerprint: &str,
+    inputs: &[CompilationInput],
+    tmp: &Path,
+    target: &Path,
+) -> Result<ClipInfo, String> {
+    let _guard = crate::gc::lock_clip_mutations();
+    let validate = (|| {
+        recover_group_order_transaction_unlocked(root)?;
+        if group_fingerprint(&group_members_unrecovered(root, name)?) != fingerprint {
+            return Err("group changed during compilation; try again".to_string());
+        }
+        Ok(())
+    })();
+    if let Err(error) = validate {
+        let _ = std::fs::remove_file(tmp);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(tmp, target) {
+        let _ = std::fs::remove_file(tmp);
         return Err(format!("publish compilation: {error}"));
     }
 
     let title = format!("{name} compilation");
-    let duration_s = compilation_duration_s(&target, &inputs);
+    let duration_s = compilation_duration_s(target, inputs);
     let markers = ClipMarkers {
         recording_start_s: 0.0,
         duration_s,
@@ -474,13 +497,13 @@ fn export_group_file(
     };
     let publish_metadata = (|| {
         write_clip_metadata(
-            &target,
+            target,
             &ClipMetadata {
                 title: Some(title.clone()),
                 kind: Some("compilation".to_string()),
                 group: None,
                 source_group: Some(name.to_string()),
-                source_group_fingerprint: Some(fingerprint.clone()),
+                source_group_fingerprint: Some(fingerprint.to_string()),
             },
         )?;
         let json = serde_json::to_vec_pretty(&markers)
@@ -489,11 +512,11 @@ fn export_group_file(
             .map_err(|error| format!("write compilation markers: {error}"))
     })();
     if let Err(error) = publish_metadata {
-        let _ = remove_clip_files(&target, root);
+        let _ = remove_clip_files_unlocked(target, root);
         return Err(error);
     }
 
-    let metadata = std::fs::metadata(&target)
+    let metadata = std::fs::metadata(target)
         .map_err(|error| format!("read compilation metadata: {error}"))?;
     let modified_unix = metadata
         .modified()
@@ -518,7 +541,7 @@ fn export_group_file(
         game: None,
         group: None,
         source_group: Some(name.to_string()),
-        source_group_fingerprint: Some(fingerprint),
+        source_group_fingerprint: Some(fingerprint.to_string()),
     })
 }
 
@@ -1012,6 +1035,40 @@ mod tests {
 
         assert!(persist_group_order(dir.path(), &members).is_err());
         assert_eq!(std::fs::read(clip_metadata_path(&clip)).unwrap(), b"{");
+    }
+
+    #[test]
+    fn compilation_publication_rejects_changed_membership() {
+        for remove in [false, true] {
+            let dir = clipline_test_utils::TestDir::new("clipline-groups", "publish-changed");
+            let member = dir.path().join("member.mp4");
+            std::fs::write(&member, b"member").unwrap();
+            write_clip_metadata(&member, &ClipMetadata {
+                group: Some(ClipGroup { name: "G".into(), order: 0 }),
+                ..ClipMetadata::default()
+            }).unwrap();
+            let fingerprint = group_fingerprint(&group_members(dir.path(), "G").unwrap());
+            let tmp = dir.path().join("encoded.tmp");
+            let target = dir.path().join("compilation.mp4");
+            std::fs::write(&tmp, b"encoded").unwrap();
+            if remove {
+                remove_from_group_file(dir.path(), &member).unwrap();
+            } else {
+                let added = dir.path().join("added.mp4");
+                std::fs::write(&added, b"added").unwrap();
+                write_clip_metadata(&added, &ClipMetadata {
+                    group: Some(ClipGroup { name: "G".into(), order: 1 }),
+                    ..ClipMetadata::default()
+                }).unwrap();
+            }
+            let error = publish_group_compilation(
+                dir.path(), "G", &fingerprint, &[], &tmp, &target,
+            ).err().expect("changed group must reject publication");
+            assert!(error.contains("group changed"), "{error}");
+            assert!(!tmp.exists());
+            assert!(!target.exists());
+            assert!(!clip_metadata_path(&target).exists());
+        }
     }
 
     #[test]

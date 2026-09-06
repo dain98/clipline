@@ -137,10 +137,10 @@ function groupFingerprint(group) {
     : "";
 }
 
-function groupCompilationClip(group = activeGroup()) {
+function groupCompilationClip(group = activeGroup(), clips = clipsCache) {
   if (!group) return null;
   const fingerprint = groupFingerprint(group);
-  const candidates = clipsCache
+  const candidates = clips
     .filter((clip) => clipKind(clip) === "compilation"
       && groupNameKey(clip.source_group) === groupNameKey(group.name)
       && clip.source_group_fingerprint === fingerprint)
@@ -149,7 +149,22 @@ function groupCompilationClip(group = activeGroup()) {
 }
 
 function topLevelLocalClips(clips = clipsCache) {
-  return clips.filter((clip) => !clip.group && !clip.source_group);
+  const byGroup = new Map();
+  for (const clip of clips) {
+    if (!clip.source_group) continue;
+    const key = groupNameKey(clip.source_group);
+    if (!byGroup.has(key)) byGroup.set(key, []);
+    byGroup.get(key).push(clip);
+  }
+  const current = new Set(localGroups(clips).map((group) =>
+    groupCompilationClip(group, byGroup.get(groupNameKey(group.name)) || [])));
+  return clips.filter((clip) => !clip.group && !current.has(clip));
+}
+
+function forgetGroupCompilations(name) {
+  invalidateLocalClipsRefresh();
+  const key = groupNameKey(name);
+  clipsCache = clipsCache.filter((clip) => groupNameKey(clip.source_group) !== key);
 }
 
 function groupReviewMeta(group, currentDuration = NaN) {
@@ -404,6 +419,7 @@ async function reorderGroupMembers(group, orderedPaths) {
   setDeckStatus("reordering group…");
   try {
     const updates = await invoke("reorder_group", { name: group.name, orderedPaths });
+    forgetGroupCompilations(group.name);
     applyGroupOrderUpdates(updates);
     renderClips();
     renderGroupClipRail();
@@ -507,6 +523,7 @@ async function removeClipFromGroup(clip) {
   const wasCurrent = currentClip && PlayerCore.sameClipPath(currentClip.path, clip.path);
   try {
     await invoke("remove_from_group", { path: clip.path });
+    forgetGroupCompilations(group.name);
     clip.group = null;
     invalidateLocalClipsRefresh();
     if (wasCurrent && replacement) {
