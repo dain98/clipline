@@ -23,6 +23,41 @@ Standalone now pins WebView2 Fixed Runtime 152.0.4191.62, reviewed through 2026-
 and metadata-only release preparation evidence is in
 `docs/superpowers/plans/2026-09-06-nightly-1.0.4.md`.
 
+## Checkpoint (2026-09-07): isolated DWM capture feasibility probe
+
+Branch `improve-windows-10-support` was fast-forwarded to Nightly 1.0.4 (`c4554238`) before
+building this experiment. `cargo run -p clipline-capture --example dwm_probe -- --help` exposes
+a standalone, explicit-window probe, not a selectable Clipline capture backend. See
+`docs/dwm-probe.md` for Windows 10 tester instructions and
+`docs/research/2026-09-07-windows-10-support.md` for the API/support investigation.
+
+The probe dynamically resolves `user32!DwmGetDxSharedSurface`, selects the returned adapter,
+reads a supported SDR texture into owned staging, and writes local BMP samples/CSV statistics.
+It never starts WGC or injects into a game, never closes the borrowed graphics handle, rejects
+capture affinity/unknown synchronization, and does not promise producer frame synchronization.
+All new unsafe code is confined to `examples/windows/dwm_probe.rs`; app behavior is unchanged.
+
+Initial live checks on **Windows 11 26200 / RX 6700 XT** captured an animated controlled window,
+handled resize and minimize/restore, and returned target content while a magenta test window
+covered it. 22-second development build run: 973 readable samples, 859 changed sampled hashes,
+176 minimized-window errors. An 8-second overlap run had 368 reads, 266 changed samples, and
+zero errors. These are sampling observations, not game FPS benchmarks; a compiler was running
+during the overlap check. The first fixture used unbuffered GDI paint and one snapshot showed
+partial repaint content; the fixture now double-buffers. Tearing/production suitability remains
+unproven. Windows 10, League, Valorant, HDR, hybrid GPU, and sustained-memory validation remain.
+
+Plan-first failing checks for arguments and BMP row pitch were followed by passing tests;
+workspace tests and fresh-capture-cache warning-denied workspace Clippy pass. Independent
+unsafe/lifetime review found no blocker to an experimental
+probe. Repository-wide formatting check exposes pre-existing formatting differences in the
+1.0.4 baseline; the new Rust example files pass rustfmt without touching unrelated files.
+
+Packaged release executable also passed an 8-second controlled overlap run: 467 reads, 305
+changed samples, zero errors, 58.36 reads/s, mean probe read cost 1.77 ms. Working set was about
+36 MB after startup over this short sample. Draft PR: https://github.com/Clipline-CC/clipline/pull/200.
+The optimized executable and instructions are packaged locally in
+`target/dwm-probe-windows-x64.zip`; this is an experimental tester build, not a Clipline release.
+
 ## Checkpoint (2026-09-06): PR 193 integration with develop
 
 Resolved the PR 191 overlap without restoring the monolithic files. Group-aware deletion lives in
