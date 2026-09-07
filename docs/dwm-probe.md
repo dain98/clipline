@@ -56,4 +56,13 @@ a green square with red/blue reference blocks, covers it with a magenta window a
 resizes at 12 seconds, minimizes at 15, restores at 18, and closes at 28. An 8-second probe
 started promptly exercises overlap; a 22-second run exercises resize/minimize/recovery.
 
+The ZIP also includes that fixture at its root: run
+`powershell -NoProfile -File .\dwm-probe-target.ps1` from the extracted directory.
+
+Local release smoke result (Windows 11 26200, RX 6700 XT, controlled SDR window): 467 readable
+samples in 8 seconds, 305 changed hashes, no errors, 58.36 reads/s, mean probe read cost 1.77 ms.
+The saved overlap image showed the target and excluded the magenta covering window. Working
+set after startup was about 36 MB during this short run; this is not a memory soak or game FPS
+measurement. Windows 10 and game acceptance remain pending.
+
 Research and API limitations: [Windows 10 report](research/2026-09-07-windows-10-support.md).

@@ -52,6 +52,12 @@ unsafe/lifetime review found no blocker to an experimental
 probe. Repository-wide formatting check exposes pre-existing formatting differences in the
 1.0.4 baseline; the new Rust example files pass rustfmt without touching unrelated files.
 
+Packaged release executable also passed an 8-second controlled overlap run: 467 reads, 305
+changed samples, zero errors, 58.36 reads/s, mean probe read cost 1.77 ms. Working set was about
+36 MB after startup over this short sample. Draft PR: https://github.com/Clipline-CC/clipline/pull/200.
+The optimized executable and instructions are packaged locally in
+`target/dwm-probe-windows-x64.zip`; this is an experimental tester build, not a Clipline release.
+
 ## Checkpoint (2026-09-06): PR 193 integration with develop
 
 Resolved the PR 191 overlap without restoring the monolithic files. Group-aware deletion lives in
